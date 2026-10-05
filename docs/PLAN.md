@@ -20,7 +20,7 @@ Status: Phase 0 in progress. Later phases start only after the previous phase is
 | HTTP client | `httpx` async, hand-rolled SSE parsing | Per-chunk timestamps with no client-side buffering. |
 | Mock backend | FastAPI + uvicorn | OpenAI-compatible streamer with a simulated batching GPU (queueing, prefill/decode costs, prefix cache, `/metrics`), so the whole Lab runs without a GPU. |
 | Results store | Postgres (SQLAlchemy 2 + Alembic) for provenance and aggregates; Parquet for per-request rows | Postgres is queryable and shared with the platform later; Parquet keeps millions of request rows cheap. |
-| Stats | numpy + scipy | t-intervals across repetitions, bootstrap for percentiles and paired eval deltas. |
+| Stats | numpy + scipy | Log-scale t-intervals (geometric means) for positive metrics and clipped t-intervals for fractions across repetitions; paired bootstrap for eval deltas. |
 | Quality | lm-evaluation-harness for MMLU-Pro / GSM8K / IFEval; native tasks for code exec (sandboxed), JSON-schema validity, tool calling, needle retrieval, logprob divergence | lm-eval covers the standard tasks; the native ones need control over sandboxing and per-sample scoring. |
 | AWS | boto3 (EC2, SSM, S3, Secrets Manager); Terraform for the bucket, IAM role and reaper Lambda | Least-privilege role and the reaper exist independently of any laptop. |
 | Reports / site | Jinja2 → markdown, HTML, CSV; static site published to GitHub Pages | No server to run; repo is public. |
