@@ -2,7 +2,7 @@
 
 Safety rails, in the order they act:
 1. the runner's budget guard accrues `Host.hourly_micros` (spot price x a safety
-   multiplier, rounded up) and calls `teardown`;
+   multiplier, rounded up, plus the root EBS volume) and calls `teardown`;
 2. user-data schedules `shutdown -h` at the TTL and the instance is launched with
    shutdown behaviour `terminate`, so it ends itself if the runner dies;
 3. the reaper Lambda (`aws_reaper`) terminates anything managed past its TTL;
@@ -35,7 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from loom_bench.engines import docker_run_argv
 from loom_bench.jobs import LoadJob, LoadJobResult
 from loom_bench.money import MICROS_PER_USD, Micros
-from loom_bench.prices import PriceBook, load_prices
+from loom_bench.prices import HOURS_PER_MONTH, PriceBook, load_prices
 from loom_bench.providers import aws_reaper
 from loom_bench.providers.aws_ssm import parse_markers, render_script, run_script, stage_offsets
 from loom_bench.providers.base import Endpoint, EngineLaunch, Host, HostRequest
@@ -263,69 +263,67 @@ class AwsEc2Provider:
         )
         return quote.per_hour
 
+    def _ebs_micros(self, volume_gb: int) -> Micros:
+        storage = self.prices.region("aws", self.settings.region).storage
+        if storage is None:
+            raise KeyError(f"no storage price for aws/{self.settings.region}")
+        return math.ceil(Fraction(storage.per_gb_month * volume_gb, HOURS_PER_MONTH))
+
+    def _volume_gb(self, req: HostRequest) -> int:
+        return max(req.disk_gb, self.settings.root_volume_gb)
+
     def _candidates(self, req: HostRequest, now: datetime) -> list[dict[str, Any]]:
         """Subnets to try in order, each with its AZ and accrual price.
 
-        On-demand keeps the configured order at the prices.yaml rate. Spot tries the
-        cheapest AZ first at its current spot price x multiplier; an AZ with no spot
-        price is tried last, accrued at the on-demand rate.
+        Accrual = instance rate + root EBS rate, both rounded up. On-demand keeps the
+        configured subnet order at the prices.yaml rate. Spot tries the cheapest AZ
+        first at its current spot price x multiplier; an AZ with no spot price is
+        tried last, accrued at the on-demand rate.
         """
         assert req.instance_type is not None
         on_demand = self._on_demand_micros(req.instance_type)
+        ebs = self._ebs_micros(self._volume_gb(req))
         subnets = self.ec2.describe_subnets(SubnetIds=self.settings.subnet_ids)["Subnets"]
         az_of = {s["SubnetId"]: s["AvailabilityZone"] for s in subnets}
         ordered = [sid for sid in self.settings.subnet_ids if sid in az_of]
-        if req.market is Market.ON_DEMAND:
-            return [
-                {
-                    "subnet_id": sid,
-                    "az": az_of[sid],
-                    "hourly_micros": on_demand,
-                    "price_basis": {"source": "prices.yaml", "market": "on_demand"},
-                }
-                for sid in ordered
-            ]
-        history = self.ec2.describe_spot_price_history(
-            InstanceTypes=[req.instance_type],
-            ProductDescriptions=["Linux/UNIX"],
-            StartTime=now,
-        )["SpotPriceHistory"]
         latest: dict[str, dict[str, Any]] = {}
-        for rec in history:
-            az = rec["AvailabilityZone"]
-            if az not in latest or rec["Timestamp"] > latest[az]["Timestamp"]:
-                latest[az] = rec
+        if req.market is Market.SPOT:
+            history = self.ec2.describe_spot_price_history(
+                InstanceTypes=[req.instance_type],
+                ProductDescriptions=["Linux/UNIX"],
+                StartTime=now,
+            )["SpotPriceHistory"]
+            for rec in history:
+                az = rec["AvailabilityZone"]
+                if az not in latest or rec["Timestamp"] > latest[az]["Timestamp"]:
+                    latest[az] = rec
         multiplier = self.settings.spot_price_multiplier
-        out = []
+        spot: list[dict[str, Any]] = []
+        fallback: list[dict[str, Any]] = []
         for sid in ordered:
             rec = latest.get(az_of[sid])
             if rec is None:
-                out.append(
-                    {
-                        "subnet_id": sid,
-                        "az": az_of[sid],
-                        "hourly_micros": on_demand,
-                        "price_basis": {"source": "prices.yaml", "market": "on_demand_fallback"},
-                    }
-                )
-                continue
-            out.append(
-                {
-                    "subnet_id": sid,
-                    "az": az_of[sid],
-                    "hourly_micros": spot_hourly_micros(rec["SpotPrice"], multiplier),
-                    "price_basis": {
-                        "source": "describe_spot_price_history",
-                        "market": "spot",
-                        "spot_price_usd": rec["SpotPrice"],
-                        "price_timestamp": rec["Timestamp"].isoformat(),
-                        "multiplier": str(multiplier),
-                    },
+                market = "on_demand" if req.market is Market.ON_DEMAND else "on_demand_fallback"
+                instance = on_demand
+                basis: dict[str, Any] = {"source": "prices.yaml", "market": market}
+            else:
+                instance = spot_hourly_micros(rec["SpotPrice"], multiplier)
+                basis = {
+                    "source": "describe_spot_price_history",
+                    "market": "spot",
+                    "spot_price_usd": rec["SpotPrice"],
+                    "price_timestamp": rec["Timestamp"].isoformat(),
+                    "multiplier": str(multiplier),
                 }
-            )
-        priced = [c for c in out if c["price_basis"]["market"] == "spot"]
-        unpriced = [c for c in out if c["price_basis"]["market"] != "spot"]
-        return sorted(priced, key=lambda c: c["hourly_micros"]) + unpriced
+            basis.update(instance_micros_per_hour=instance, ebs_micros_per_hour=ebs)
+            cand = {
+                "subnet_id": sid,
+                "az": az_of[sid],
+                "hourly_micros": instance + ebs,
+                "price_basis": basis,
+            }
+            (spot if rec is not None else fallback).append(cand)
+        return sorted(spot, key=lambda c: c["hourly_micros"]) + fallback
 
     def _ami(self) -> tuple[str, str]:
         ami = self.ssm.get_parameter(Name=self.settings.dlami_ssm_parameter)["Parameter"]["Value"]
@@ -379,7 +377,7 @@ class AwsEc2Provider:
                 {
                     "DeviceName": root_device,
                     "Ebs": {
-                        "VolumeSize": max(req.disk_gb, self.settings.root_volume_gb),
+                        "VolumeSize": self._volume_gb(req),
                         "VolumeType": "gp3",
                         "DeleteOnTermination": True,
                         "Encrypted": True,

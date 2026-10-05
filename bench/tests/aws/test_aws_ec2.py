@@ -29,6 +29,8 @@ from .fakes import FakeSsm, Proxy, client_error, no_sleep
 
 DLAMI_PARAM = "/loom/test/dlami"
 G6E_XLARGE_ON_DEMAND = 1_861_000
+# 200 GB gp3 at $0.08/GB-month over 730 h = 21_917.8 micros/h, rounded up.
+EBS_200GB = 21_918
 
 
 @pytest.fixture
@@ -93,8 +95,13 @@ async def test_provision_on_demand_sets_safety_rails(aws: dict[str, Any]) -> Non
     host = await provider(aws).provision(request())
     inst = describe(ec2, host.host_id)
 
-    assert host.hourly_micros == G6E_XLARGE_ON_DEMAND
-    assert host.info["price_basis"] == {"source": "prices.yaml", "market": "on_demand"}
+    assert host.hourly_micros == G6E_XLARGE_ON_DEMAND + EBS_200GB
+    assert host.info["price_basis"] == {
+        "source": "prices.yaml",
+        "market": "on_demand",
+        "instance_micros_per_hour": G6E_XLARGE_ON_DEMAND,
+        "ebs_micros_per_hour": EBS_200GB,
+    }
     assert host.info["subnet_id"] == aws["settings"].subnet_ids[0]
     assert "InstanceLifecycle" not in inst
     assert timedelta(seconds=3599) <= host.ttl_at - before <= timedelta(seconds=3601)
@@ -141,8 +148,9 @@ async def test_provision_spot_accrues_spot_price_times_multiplier(aws: dict[str,
     host = await provider(aws).provision(request(market=Market.SPOT, disk_gb=500))
     inst = describe(aws["ec2"], host.host_id)
     assert inst["InstanceLifecycle"] == "spot"
-    # moto quotes every spot price as $0.00001/h: 10 micros x 1.25 = 12.5, rounded up.
-    assert host.hourly_micros == 13
+    # moto quotes every spot price as $0.00001/h: 10 micros x 1.25 = 12.5, rounded up;
+    # 500 GB gp3 = 54_794.5 micros/h, rounded up.
+    assert host.hourly_micros == 13 + 54_795
     basis = host.info["price_basis"]
     assert basis["source"] == "describe_spot_price_history"
     assert basis["spot_price_usd"] == "0.00001"
@@ -177,11 +185,11 @@ async def test_spot_picks_cheapest_az_and_falls_back_to_on_demand_price(
     ec2 = Proxy(aws["ec2"], describe_spot_price_history=history)
     host = await provider(aws, ec2=ec2).provision(request(market=Market.SPOT))
     assert host.info["az"] == b
-    assert host.hourly_micros == 1_250_000
+    assert host.hourly_micros == 1_250_000 + EBS_200GB
 
     empty = Proxy(aws["ec2"], describe_spot_price_history=lambda **_: {"SpotPriceHistory": []})
     host = await provider(aws, ec2=empty).provision(request(market=Market.SPOT))
-    assert host.hourly_micros == G6E_XLARGE_ON_DEMAND
+    assert host.hourly_micros == G6E_XLARGE_ON_DEMAND + EBS_200GB
     assert host.info["price_basis"]["market"] == "on_demand_fallback"
 
 
