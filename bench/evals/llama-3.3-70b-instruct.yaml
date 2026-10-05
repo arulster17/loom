@@ -31,6 +31,7 @@ tasks:
   # MMLU-Pro: 150 docs per subject x 14 = 2100 items. d=5% -> ±0.96 pts.
   - name: mmlu_pro
     kind: lm_eval
+    items: 2100  # for the planner; lm_eval counts its docs at run time
     params:
       tasks: [mmlu_pro]
       limit: 150
@@ -42,6 +43,7 @@ tasks:
   # d=2% -> ±0.76 pts.
   - name: gsm8k
     kind: lm_eval
+    items: 1319  # for the planner; lm_eval counts its docs at run time
     params:
       tasks: [gsm8k_cot_llama]
       metric: exact_match
@@ -53,6 +55,7 @@ tasks:
   # IFEval: all 541 prompts; d=5% -> ±1.9 pts, decided at 2 points.
   - name: ifeval
     kind: lm_eval
+    items: 541  # for the planner; lm_eval counts its docs at run time
     threshold: 0.02
     params:
       tasks: [ifeval]
@@ -65,6 +68,7 @@ tasks:
   # context-extension change extends this list.
   - name: ruler_niah
     kind: lm_eval
+    items: 1000  # for the planner; lm_eval counts its docs at run time
     params:
       tasks: [niah_single_2]
       api: completions
@@ -118,3 +122,16 @@ sanity_limits:
   max_truncated: 0.02
   max_repetition: 0.02
   max_language_drift: 0.02
+
+# Phase 0 subset (`quality.subset: phase0` in bench/experiments/): the tasks that fit both
+# Phase 0 leaderboard runs inside their host TTL and budget (bench plan prices the eval at
+# items x EVAL_ITEM_S per task kind, plan.py). Each task keeps its full pinned items, so the
+# half-widths above hold for it and its results pair item for item with a full-suite run.
+# GSM8K (long chain-of-thought generation), IFEval (chat template and instruction
+# following), tool calling and JSON schema (the engines' tool parsers and grammar
+# backends) cover what an engine change breaks most often; divergence and the sanity
+# checks always run. Not measured in Phase 0, so their CIs are unbounded until a full-suite
+# run: mmlu_pro (~26 min per config), ruler_niah (~26 min), needle (~17 min) and code (~11
+# min; it also needs allow_code_exec).
+subsets:
+  phase0: [gsm8k, ifeval, tool_calling, json_schema]

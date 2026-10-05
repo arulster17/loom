@@ -51,6 +51,14 @@ slo:
   ttft_ms: {p95: 1000}
   tpot_ms: {p95: 50}
   max_error_rate: 0.01
+# Quality (docs/quality-gate.md): switching engine can change outputs, so SGLang is gated
+# against vLLM BF16, which also serves as the BF16 divergence reference. Both run the suite's
+# Phase 0 subset as an eval job on the host after their load runs; vLLM captures the
+# reference logprobs and SGLang is scored against them when its engine is up.
+quality:
+  suite: qwen3-8b
+  subset: phase0
+  baseline_variant: vllm
 budget:
   max_spend: "$40"
   ttl_minutes: 480

@@ -53,6 +53,9 @@ def test_real_experiments_fit_their_caps_with_margin(path):
     assert plan.ttl_worst_micros <= plan.caps.effective
     assert len(plan.hosts) == 1  # one host per experiment; warm restarts between configs
     assert plan.hosts[0].steps[0].kind == "cold_start"
+    evals = [s for s in plan.hosts[0].steps if s.kind == "eval"]
+    assert len(evals) == plan.n_cells and all(s.label.endswith("[phase0]") for s in evals)
+    assert plan.hosts[0].seconds < 0.95 * plan.hosts[0].ttl_s
 
 
 @pytest.mark.parametrize("path", [QWEN, LLAMA, SMOKE], ids=lambda p: p.stem)
@@ -199,7 +202,7 @@ def test_aws_eval_time_comes_from_the_suite(tmp_path):
     assert [s.seconds for s in evals] == [pytest.approx(expected)] * 2
     assert [s.kind for s in steps].count("eval_setup") == 1
     assert steps[1].kind == "eval_setup" and steps[1].seconds == AWS_TIMING.eval_setup_s
-    without = _plan(load_experiment(QWEN))
+    without = _plan(load_experiment(QWEN).model_copy(update={"quality": None}))
     assert plan.total_seconds - without.total_seconds == pytest.approx(
         2 * expected + AWS_TIMING.eval_setup_s
     )

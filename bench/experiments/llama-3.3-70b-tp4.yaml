@@ -33,6 +33,13 @@ slo:
   ttft_ms: {p95: 1000}
   tpot_ms: {p95: 50}
   max_error_rate: 0.01
+# Quality: one config, so nothing is gated; the suite's Phase 0 subset records the BF16
+# baseline scores, and the captured divergence reference (results/<experiment>/evals/)
+# is what later candidates of this model (FP8, other engines) are scored against.
+quality:
+  suite: llama-3.3-70b-instruct
+  subset: phase0
+  baseline_variant: vllm-tp4
 budget:
   max_spend: "$45"
   ttl_minutes: 210
