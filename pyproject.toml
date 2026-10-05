@@ -1,0 +1,49 @@
+[project]
+name = "loom"
+version = "0.0.0"
+description = "Loom: verified-quality, transparent-cost open-model inference"
+requires-python = ">=3.12"
+readme = "README.md"
+license = "Apache-2.0"
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["bench"]
+
+[tool.uv.sources]
+loom-bench = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "loom-bench[mock,aws]",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.3",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-PyYAML",
+    "moto[ec2,s3,ssm,secretsmanager]>=5.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.pytest.ini_options]
+testpaths = ["bench/tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+timeout = 120
+markers = [
+    "postgres: needs a Postgres database (LOOM_TEST_DATABASE_URL)",
+    "slow: slower integration tests",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["loom_bench"]
