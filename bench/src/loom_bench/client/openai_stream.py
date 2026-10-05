@@ -71,6 +71,7 @@ async def send(
     `base_url` includes the API prefix (e.g. ``http://host:8000/v1``). Times are
     `time.perf_counter()` seconds relative to `t0`. Failures are recorded, not
     raised; only cancellation propagates, after marking the record ABORTED.
+    A `record` from `new_record` is filled in place (its `scheduled_at_s` wins).
     """
     rec = record if record is not None else new_record(req, t0, scheduled_at_s)
     payload = dict(req.payload)
@@ -106,8 +107,9 @@ async def send(
         rec.status = RequestStatus.ERROR
         rec.error = f"{type(e).__name__}: {e}"[:_MAX_ERROR_CHARS]
     except asyncio.CancelledError:
-        rec.status = RequestStatus.ABORTED
-        rec.error = "cancelled"
+        if rec.status is not RequestStatus.OK:  # a cancel while closing a finished stream
+            rec.status = RequestStatus.ABORTED
+            rec.error = "cancelled"
         raise
     finally:
         if rec.finished_at_s is None:
