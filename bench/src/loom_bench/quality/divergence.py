@@ -15,6 +15,12 @@ Method:
    mean over prompts with a percentile-bootstrap CI that resamples prompts
    (positions within a prompt are correlated, prompts are not).
 
+The reference side of steps 1-2 (`capture_reference`) and the candidate side
+of steps 2-4 (`score_against_reference`) are separate calls, so the two
+engines never need to be up at once: the capture (`ReferenceLogprobs`) is
+plain JSON, stored with the experiment and scored against each candidate
+when its engine is up.
+
 KL approximation (servers only return the top-k): over U = union of both
 top-k token sets plus one "other" bucket. For each distribution, tokens of U
 missing from its own top-k get an equal share of its unlisted mass
@@ -39,7 +45,7 @@ from typing import Any
 
 import numpy as np
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from loom_bench.quality.client import EvalClient
 from loom_bench.stats import Interval, bootstrap_ci
@@ -180,6 +186,100 @@ async def _score(client: EvalClient, text: str, top_k: int) -> Mapping[str, Any]
     return res.logprobs
 
 
+class ReferencePosition(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    token: str
+    top: dict[str, float]  # top-k {token: logprob} at this position
+
+
+class ReferencePrompt(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    prompt: str
+    continuation: str  # empty when the reference produced none; the prompt is then skipped
+    positions: list[ReferencePosition]
+
+
+class ReferenceLogprobs(BaseModel):
+    """Steps 1-2 for the reference side: its greedy continuations and its teacher-forced
+    top-k logprobs over them. Captured once while the reference engine is up, stored as a
+    JSON artifact, and scored against each candidate later (`score_against_reference`),
+    so the two engines never need to run at the same time.
+
+    `config_hash` and `provenance` identify the reference config; the runner fills them in
+    when it stores the capture.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    model: str  # served model name the reference answered as
+    top_k: int
+    max_new_tokens: int
+    prompts: list[ReferencePrompt]
+    config_hash: str | None = None
+    provenance: dict[str, Any] = Field(default_factory=dict)
+
+
+async def capture_reference(
+    reference: EvalClient,
+    prompts: Sequence[str],
+    *,
+    top_k: int = 5,
+    max_new_tokens: int = 64,
+) -> ReferenceLogprobs:
+    """Greedy continuations and teacher-forced top-k logprobs from the reference endpoint."""
+
+    async def one(prompt: str) -> ReferencePrompt:
+        cont = await reference.complete(prompt, max_tokens=max_new_tokens)
+        if not cont.text:
+            return ReferencePrompt(prompt=prompt, continuation="", positions=[])
+        text = prompt + cont.text
+        logprobs = await _score(reference, text, top_k)
+        positions = scored_positions(logprobs, len(prompt), len(text))
+        return ReferencePrompt(
+            prompt=prompt,
+            continuation=cont.text,
+            positions=[ReferencePosition(token=p.token, top=p.top) for p in positions],
+        )
+
+    captured = await asyncio.gather(*(one(p) for p in prompts))
+    return ReferenceLogprobs(
+        model=reference.model, top_k=top_k, max_new_tokens=max_new_tokens, prompts=captured
+    )
+
+
+async def score_against_reference(
+    candidate: EvalClient,
+    reference: ReferenceLogprobs,
+    *,
+    confidence: float = 0.95,
+    n_boot: int = 10_000,
+    seed: int = 0,
+) -> DivergenceResult:
+    """Steps 2-4 for the candidate: score the reference's texts and compare position by
+    position with the captured reference logprobs."""
+
+    async def one(p: ReferencePrompt) -> PromptDivergence | None:
+        if not p.continuation:
+            return None
+        text = p.prompt + p.continuation
+        logprobs = await _score(candidate, text, reference.top_k)
+        ref = [Position(x.token, dict(x.top)) for x in p.positions]
+        return compare_positions(ref, scored_positions(logprobs, len(p.prompt), len(text)))
+
+    results = await asyncio.gather(*(one(p) for p in reference.prompts))
+    kept = [r for r in results if r is not None]
+    return aggregate(
+        kept,
+        top_k=reference.top_k,
+        n_skipped=len(results) - len(kept),
+        confidence=confidence,
+        n_boot=n_boot,
+        seed=seed,
+    )
+
+
 async def measure_divergence(
     reference: EvalClient,
     candidate: EvalClient,
@@ -191,24 +291,8 @@ async def measure_divergence(
     n_boot: int = 10_000,
     seed: int = 0,
 ) -> DivergenceResult:
-    async def one(prompt: str) -> PromptDivergence | None:
-        cont = await reference.complete(prompt, max_tokens=max_new_tokens)
-        if not cont.text:
-            return None
-        text = prompt + cont.text
-        ref_lp, cand_lp = await asyncio.gather(
-            _score(reference, text, top_k), _score(candidate, text, top_k)
-        )
-        span = (len(prompt), len(text))
-        return compare_positions(scored_positions(ref_lp, *span), scored_positions(cand_lp, *span))
-
-    results = await asyncio.gather(*(one(p) for p in prompts))
-    kept = [r for r in results if r is not None]
-    return aggregate(
-        kept,
-        top_k=top_k,
-        n_skipped=len(results) - len(kept),
-        confidence=confidence,
-        n_boot=n_boot,
-        seed=seed,
+    """Both endpoints up at once: capture the reference, then score the candidate."""
+    ref = await capture_reference(reference, prompts, top_k=top_k, max_new_tokens=max_new_tokens)
+    return await score_against_reference(
+        candidate, ref, confidence=confidence, n_boot=n_boot, seed=seed
     )

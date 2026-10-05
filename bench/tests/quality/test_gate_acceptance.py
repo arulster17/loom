@@ -6,19 +6,13 @@ JSON) and heavy logit noise; the baseline is the clean mock. Every request goes
 over HTTP through the real client, tasks, divergence measurement and gate.
 """
 
-import socket
-import threading
-import time
 from collections.abc import Iterator
-from contextlib import contextmanager
 
 import pytest
 
 pytest.importorskip("loom_bench.mock")
 uvicorn = pytest.importorskip("uvicorn")
 
-from loom_bench.mock.config import MockConfig  # noqa: E402
-from loom_bench.mock.server import create_app  # noqa: E402
 from loom_bench.provenance import build_provenance  # noqa: E402
 from loom_bench.quality.gate import Verdict  # noqa: E402
 from loom_bench.quality.runner import (  # noqa: E402
@@ -33,31 +27,10 @@ from loom_bench.store.db import session_scope, upgrade  # noqa: E402
 from loom_bench.store.models import BenchEvalRun, BenchGateDecision  # noqa: E402
 from loom_bench.store.repo import create_experiment  # noqa: E402
 
-MODEL = "mock-model"
+from .mock_serve import MODEL, serve  # noqa: E402
+
 CLEAN = {"time_scale": 0.001}
 BROKEN = {"time_scale": 0.001, "degrade": 0.3, "logprob_noise": 3.0}
-
-
-@contextmanager
-def serve(**overrides) -> Iterator[str]:
-    """Run the mock on a free port in a background thread; yields its /v1 base URL."""
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    config = MockConfig(models=[MODEL], **overrides)
-    server = uvicorn.Server(uvicorn.Config(create_app(config), log_level="critical"))
-    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 10
-    while not server.started:
-        assert time.monotonic() < deadline, "mock server did not start"
-        time.sleep(0.005)
-    try:
-        yield f"http://127.0.0.1:{port}/v1"
-    finally:
-        server.should_exit = True
-        thread.join(timeout=5)
-        sock.close()
 
 
 def suite(n: int, *, min_samples: int = 300) -> Suite:
