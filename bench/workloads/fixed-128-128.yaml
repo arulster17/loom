@@ -1,0 +1,13 @@
+name: fixed-128-128
+description: >-
+  Short prompt, short answer; matches the 128/128 shape in published engine
+  benchmarks. Random-word prompts with ignore_eos, so output length is exact and
+  comparable across engines.
+kind: synthetic
+content: synthetic
+endpoint: completions
+input_len: 128
+output_len: 128
+range_ratio: 0.0
+ignore_eos: true
+seed: 0

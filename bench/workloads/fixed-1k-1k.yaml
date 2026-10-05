@@ -1,0 +1,12 @@
+name: fixed-1k-1k
+description: >-
+  Balanced 1k/1k shape; the usual headline comparison point. Random-word prompts
+  with ignore_eos, so output length is exact and comparable across engines.
+kind: synthetic
+content: synthetic
+endpoint: completions
+input_len: 1024
+output_len: 1024
+range_ratio: 0.0
+ignore_eos: true
+seed: 0

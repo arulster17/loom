@@ -1,0 +1,12 @@
+name: fixed-8k-1k
+description: >-
+  Prefill-heavy 8k/1k shape (RAG-style long prompt). Random-word prompts with
+  ignore_eos, so output length is exact and comparable across engines.
+kind: synthetic
+content: synthetic
+endpoint: completions
+input_len: 8192
+output_len: 1024
+range_ratio: 0.0
+ignore_eos: true
+seed: 0

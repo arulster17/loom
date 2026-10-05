@@ -1,0 +1,21 @@
+name: trace-azure-code
+description: >-
+  Token lengths from the Azure LLM inference trace (code, 2023), replayed with
+  random-word text. Pair with `trace` arrivals on the same file for the real
+  arrival times. Download AzureLLMInferenceTrace_code.csv and set LOOM_DATA_DIR
+  (or override path). Prompts are clamped to fit a 32k context.
+kind: trace
+content: synthetic
+endpoint: completions
+path: ${LOOM_DATA_DIR}/azure/AzureLLMInferenceTrace_code.csv
+format: azure
+max_input_len: 30000
+max_output_len: 2048
+ignore_eos: true
+seed: 0
+dataset:
+  name: Azure LLM inference trace 2023 (AzureLLMInferenceTrace_code.csv)
+  source: https://github.com/Azure/AzurePublicDataset
+  revision: null  # pin the repo commit you downloaded before publishing results
+  license: CC-BY-4.0
+  license_url: https://github.com/Azure/AzurePublicDataset/blob/master/LICENSE

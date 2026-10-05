@@ -1,0 +1,12 @@
+name: code-completion
+description: >-
+  IDE-style completion: ~1.5k tokens of Python-like source cut mid-file and
+  32-64 token completions. Latency-sensitive; judge it on TTFT.
+kind: code_completion
+content: synthetic
+endpoint: completions
+input_len: 1536
+output_len: 48
+range_ratio: 0.33
+ignore_eos: true
+seed: 0

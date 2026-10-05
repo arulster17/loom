@@ -1,0 +1,13 @@
+name: long-context-needle
+description: >-
+  Needle retrieval: a 16k-token random-word haystack hides "The secret code for
+  the <key> is <value>." at 10%, 50% or 90% depth; the question asks for the code
+  and meta.expected_answer holds it. Long-prefill latency plus a retrieval
+  sanity check.
+kind: long_context_needle
+content: synthetic
+endpoint: chat
+context_len: 16384
+depths: [0.1, 0.5, 0.9]
+output_len: 32
+seed: 0

@@ -1,0 +1,12 @@
+name: long-generation
+description: >-
+  Decode-heavy shape: a short essay instruction with ~2k output tokens
+  (ignore_eos keeps output length exact).
+kind: long_generation
+content: synthetic
+endpoint: chat
+input_len: 256
+output_len: 2048
+range_ratio: 0.0
+ignore_eos: true
+seed: 0

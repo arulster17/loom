@@ -1,0 +1,16 @@
+name: shared-prefix
+description: >-
+  Agent-loop shape: a system prompt shared within 8 groups makes up prefix_share
+  of each 2k-token prompt; the rest is a unique user turn. Experiments sweep
+  prefix_share (0.0-0.95) to measure prefix-cache gains. Random text, so it
+  measures cache mechanics, not realistic hit rates.
+kind: shared_prefix
+content: synthetic
+endpoint: chat
+input_len: 2048
+output_len: 128
+range_ratio: 0.0
+prefix_share: 0.5
+num_prefix_groups: 8
+ignore_eos: true
+seed: 0
