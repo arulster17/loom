@@ -8,11 +8,17 @@ through JSON.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from loom_bench.records import LoadMode, RequestRecord
+
+# Whether the generator observed when each request was sent. "unavailable" (a tool
+# that reports only per-request durations): every record's `sent_at_s` is a 0.0
+# placeholder, so only latencies relative to the send are real; the measurement
+# window is the tool's own and there are no scheduled times.
+Timeline = Literal["measured", "unavailable"]
 
 
 class TokenizerSpec(BaseModel):
@@ -65,6 +71,7 @@ class LoadJobResult(BaseModel):
     load_value: float
     t_measure_start_s: float
     t_measure_end_s: float
+    timeline: Timeline = "measured"
     client_saturated_count: int = 0
     records: list[dict[str, Any]]  # RequestRecord.to_row() rows
     scrapes: list[tuple[float, str]] = Field(default_factory=list)  # (t, prometheus text)
@@ -72,6 +79,15 @@ class LoadJobResult(BaseModel):
     started_at: str  # ISO-8601 UTC wall clock
     finished_at: str
     meta: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _nothing_derived_from_placeholder_send_times(self) -> Self:
+        if self.timeline == "unavailable":
+            if self.t_measure_end_s <= self.t_measure_start_s:
+                raise ValueError("a run without send times needs the tool's measurement window")
+            if any(r.get("scheduled_at_s") is not None for r in self.records):
+                raise ValueError("a run without send times cannot have scheduled times")
+        return self
 
     def request_records(self) -> list[RequestRecord]:
         return [RequestRecord.from_row(r) for r in self.records]

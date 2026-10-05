@@ -204,7 +204,7 @@ def test_parse_last_jsonl_line_into_records(tmp_path):
         failed.error.startswith("Internal Server Error:") and "KV cache exhausted" in failed.error
     )
     assert failed.first_token_at_s is None and failed.finished_at_s is None
-    assert res.meta["send_times"] is False
+    assert res.timeline == "unavailable"
     assert res.meta["output_lens_source"] == "server_usage"
     assert res.meta["tool_summary"]["completed"] == 2
 

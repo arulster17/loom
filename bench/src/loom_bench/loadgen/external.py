@@ -311,8 +311,9 @@ def result_from_arrays(
     token counts). Optional: `start_times` (tool clock, seconds), `latencies`,
     `queue_times` (wait for a `--max-concurrency` slot), `generated_texts`.
 
-    t0 is the earliest arrival (start - queue time); without `start_times` every
-    request is placed at t=0. A request succeeded when its error is empty and,
+    t0 is the earliest arrival (start - queue time). Without `start_times` the
+    timeline is "unavailable": every request is placed at t=0 and the tool's
+    `duration` is required. A request succeeded when its error is empty and,
     if latencies are given, its latency is positive. Without latencies the end
     of a request is its last content chunk (ttft + sum of ITLs). The measurement
     window is the tool's own `duration`, so throughput uses its denominator.
@@ -389,20 +390,27 @@ def result_from_arrays(
         records.append(rec)
 
     duration = data.get("duration")
-    end = float(duration) if duration else max(r.finished_at_s or r.sent_at_s for r in records)
+    if duration:
+        end = float(duration)
+    elif starts is None:
+        raise ExternalToolError(
+            f"{tool} result has neither send times nor a duration to measure throughput over"
+        )
+    else:
+        end = max(r.finished_at_s or r.sent_at_s for r in records)
     return RunResult(
         records=records,
         mode=run.mode,
         load_value=run.load_value,
         t_measure_start_s=0.0,
         t_measure_end_s=end,
+        timeline="measured" if starts is not None else "unavailable",
         meta={
             "tool": tool,
             "prompts_source": run.prompts_source,
             "arrivals_source": "tool" if run.mode is LoadMode.OPEN_LOOP else None,
             "num_prompts": run.num_prompts,
             "tool_warmup_requests": run.warmup_requests,
-            "send_times": starts is not None,
             **(meta or {}),
         },
     )

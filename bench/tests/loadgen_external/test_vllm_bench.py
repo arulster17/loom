@@ -239,7 +239,7 @@ def test_parse_fixture_into_records(tmp_path):
     assert timed_out.first_token_at_s == pytest.approx(0.6 + 0.05)
 
     assert res.meta["prompts_source"] == "loom" and res.meta["tool"] == "vllm_bench"
-    assert res.meta["tool_warmup_requests"] == 1 and res.meta["send_times"] is True
+    assert res.meta["tool_warmup_requests"] == 1 and res.timeline == "measured"
     assert res.meta["tool_summary"]["failed"] == 2
 
 

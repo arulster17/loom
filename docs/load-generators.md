@@ -106,8 +106,14 @@ request:
 - Times: `ttfts`, `itls` and `latencies`, in seconds. vLLM also stores
   `start_times` and `queue_times`, so t0 is the earliest arrival, `sent_at_s` is
   the actual send, and open-loop `scheduled_at_s` is the send time minus the wait
-  for a concurrency slot. SGLang stores neither, so its requests sit at t=0 and
-  end at their last content chunk (`meta["send_times"] = False`).
+  for a concurrency slot. SGLang stores neither, so its `RunResult` and
+  `LoadJobResult` carry `timeline = "unavailable"`: every `sent_at_s` is a 0.0
+  placeholder and a request ends at its last content chunk. TTFT, ITL, TPOT
+  and E2E are still real (they are relative to the send); the window must come
+  from the tool's `duration`, there are no scheduled times and so no client
+  queue delay, and `LoadJobResult` rejects a result that breaks either rule.
+  Native and vLLM runs are `"measured"`. The runner stores the flag in the
+  run summary's `client.timeline`.
 - Tokens: `input_lens` and `output_lens` become `prompt_tokens` and
   `completion_tokens` for successful requests. These come from the server's
   usage block when the tool gets one. SGLang on the completions endpoint

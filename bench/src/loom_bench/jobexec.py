@@ -103,6 +103,7 @@ async def execute_load_job(job: LoadJob) -> LoadJobResult:
         load_value=result.load_value,
         t_measure_start_s=result.t_measure_start_s,
         t_measure_end_s=result.t_measure_end_s,
+        timeline=result.timeline,
         client_saturated_count=result.client_saturated_count,
         records=[r.to_row() for r in result.records],
         scrapes=scrapes,

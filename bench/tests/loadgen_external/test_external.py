@@ -120,7 +120,7 @@ def test_open_loop_records_scheduled_time_from_queue_time(tmp_path):
     assert recs[0].sent_at_s == 0.0 and recs[0].scheduled_at_s == 0.0
     assert recs[31].sent_at_s == pytest.approx(7.75)
     assert recs[31].queue_delay_s == pytest.approx(0.05)
-    assert res.meta["arrivals_source"] == "tool" and res.meta["send_times"] is True
+    assert res.meta["arrivals_source"] == "tool" and res.timeline == "measured"
 
 
 def test_without_send_times_requests_start_at_zero_and_end_at_last_chunk(tmp_path):
@@ -132,7 +132,9 @@ def test_without_send_times_requests_start_at_zero_and_end_at_last_chunk(tmp_pat
     assert a.request_id == "synthetic-t-s7-000000" and a.expected_prompt_tokens is None
     assert a.scheduled_at_s is None
     assert (res.t_measure_start_s, res.t_measure_end_s) == (0.0, 2.0)
-    assert res.meta["send_times"] is False and res.meta["arrivals_source"] is None
+    assert res.timeline == "unavailable" and res.meta["arrivals_source"] is None
+    with pytest.raises(ExternalToolError, match="neither send times nor a duration"):
+        result_from_arrays(run, _arrays(duration=None), tool="t")
 
 
 def test_parse_rejects_incomplete_or_inconsistent_results(tmp_path):

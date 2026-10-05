@@ -12,8 +12,8 @@ keeps file order and passes `messages` through unchanged. Completions-endpoint
 kinds other than `synthetic` have no order-preserving dataset and are rejected.
 Arrivals: Poisson only. The tool ignores EOS unless `--disable-ignore-eos`.
 
-Its JSONL result has no per-request start times or latencies, so records are
-placed at t=0 and end at their last content chunk (`meta["send_times"]` False).
+Its JSONL result has no per-request start times or latencies, so its timeline is
+"unavailable": records are placed at t=0 and end at their last content chunk.
 On the completions endpoint the output length is the requested `max_tokens`
 (asking for a usage chunk there crashes the tool's parser).
 """

@@ -17,7 +17,7 @@ from importlib import import_module
 from typing import Any, Protocol
 
 from loom_bench.client.openai_stream import PreparedRequest
-from loom_bench.jobs import LoadJob, TokenizerSpec
+from loom_bench.jobs import LoadJob, Timeline, TokenizerSpec
 from loom_bench.loadgen.arrivals import ArrivalSpec, parse_arrivals
 from loom_bench.records import LoadMode, RequestRecord
 from loom_bench.tokenize import HFTokenizer, SimpleTokenizer, Tokenizer
@@ -37,6 +37,7 @@ class RunResult:
     # Window (seconds from t0) over which throughput is computed; warmup excluded.
     t_measure_start_s: float
     t_measure_end_s: float
+    timeline: Timeline = "measured"  # see `jobs.Timeline`
     # Open loop: requests that found all `max_inflight` slots busy at their arrival time.
     client_saturated_count: int = 0
     meta: dict[str, Any] = field(default_factory=dict)
