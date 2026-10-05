@@ -82,8 +82,8 @@ Run through all of it before every real run.
   Check "estimated spend" and "worst case (all hosts to TTL)" against "effective cap",
   and read the notes (spot multiplier). The hourly rate per host is the budget accrual
   rate (spot x 1.25 plus EBS), not the cost reports use. Expected today:
-  `qwen3-8b-vllm-vs-sglang` $16.52 estimate, $18.56 worst case, $40 cap;
-  `llama-3.3-70b-tp4` $27.90, $35.86, $45. Exit 3 means refused: lower the load points or
+  `qwen3-8b-vllm-vs-sglang` $16.56 estimate, $18.56 worst case, $40 cap;
+  `llama-3.3-70b-tp4` $28.04, $35.86, $45. Exit 3 means refused: lower the load points or
   `budget.ttl_minutes`, never the caps.
 
 ## 2. Running an experiment

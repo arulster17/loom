@@ -3,9 +3,11 @@
 Loom never ships a cheaper config without measuring that it is as good. Any change that can
 alter model outputs (quantization, engine or engine version, speculative decoding, KV-cache
 dtype, context extension) runs the model's pinned eval suite on the current config (the
-**baseline**) and the proposed one (the **candidate**), and the gate decides PASS, FAIL or
-INCONCLUSIVE. FAIL blocks the change; INCONCLUSIVE blocks it too unless the suite says
-otherwise.
+**baseline**) and the proposed one (the **candidate**), and the gate decides PASS, REVIEW,
+FAIL or INCONCLUSIVE. FAIL blocks the change; INCONCLUSIVE blocks it too unless the suite
+says otherwise. REVIEW (every task passes, but the logprob divergence is above the limits
+calibrated on the baseline's own numerical noise) is reported everywhere the decision
+shows and does not block unless the suite says so.
 
 Code: `bench/src/loom_bench/quality/`. Suites: `bench/evals/<model>.yaml`.
 
@@ -59,25 +61,62 @@ The PASS rule is a one-sided non-inferiority test at 2.5%. The FAIL rule also fi
 point drop beyond t even when the CI is wide: a measured drop larger than the allowed margin
 is not shipped on the hope that it is noise.
 
-Independently of the tasks:
+Logprob divergence (below) is held to limits calibrated on the baseline's measured noise
+floor, with self-KL taken at the upper and self top-1 agreement at the lower bound of
+their bootstrap CIs:
 
-- divergence FAILs when mean KL(ref || cand) > `max_kl` or top-1 agreement < `min_top1`;
-- sanity FAILs when any rate exceeds its limit (defaults: empty 1%, truncated 2%,
-  repetition 2%, language drift 2%).
+- KL limit = max(`max_kl`, `noise_multiple` x self-KL);
+- top-1 limit = 1 - max(1 - `min_top1`, `noise_multiple` x (1 - self top-1)), i.e. the
+  allowed disagreement scales the same way;
+- hard ceiling: `ceiling_kl`, `ceiling_top1`, whatever the floor.
 
-The overall decision is the worst of all parts (FAIL > INCONCLUSIVE > PASS); `blocked` is
-true on FAIL, and on INCONCLUSIVE while `inconclusive_blocks` is on (the default). Every
-part carries a human-readable reason, e.g.
+| Divergence (checked in order) | Divergence verdict |
+|---|---|
+| not measured | PASS ("not measured") |
+| mean KL > `ceiling_kl` or top-1 < `ceiling_top1` | FAIL |
+| within both calibrated limits | PASS |
+| beyond a limit, and every task PASSes | REVIEW |
+| beyond a limit, and any task FAILs or is INCONCLUSIVE | FAIL |
+
+Without a self-divergence (a reference captured with plain `capture`, or older artefacts)
+the absolute `max_kl` / `min_top1` are the limits and the reason says "uncalibrated".
+
+| Suite default | Value | Why |
+|---|---|---|
+| `noise_multiple` | 5 | another engine's BF16 kernels perturb logits the way batch variance does (a different reduction order), so the gap is a small factor, not orders of magnitude |
+| `max_kl`, `min_top1` | 0.05 nats, 95% | the limits never get stricter, so a bit-exact baseline (zero floor) does not flag last-ulp differences |
+| `ceiling_kl` | 0.5 nats | the candidate gives the reference's confident token ~60% (e^-0.5) of its probability on average: a different model, not noise |
+| `ceiling_top1` | 80% | one teacher-forced token in five changes; sound quantizations stay well above it, broken templates, RoPE scaling or weights do not |
+| `review_blocks` | false | REVIEW asks a person to look; task scores already passed |
+
+Sanity FAILs when any rate exceeds its limit (defaults: empty 1%, truncated 2%,
+repetition 2%, language drift 2%).
+
+The overall decision is the worst of all parts (FAIL > INCONCLUSIVE > REVIEW > PASS).
+`blocked` is true on FAIL, on INCONCLUSIVE while `gate.inconclusive_blocks` is on (the
+default), and on REVIEW only while `gate.review_blocks` is on (default off). `bench quality
+gate` exits 7 when blocked and 0 otherwise, REVIEW included; `bench run` prints each gate
+as BLOCKED, "allowed, needs review" or allowed. Every part carries a human-readable
+reason, e.g.
 
 ```
 gate FAIL (blocked)
   arithmetic: delta -26.50 pts [-30.75 pts, -22.50 pts], n=400 is a drop of more than 1.00 pts
   json_schema: delta -23.33 pts [-35.00 pts, -13.33 pts], n=60 is a drop of more than 6.00 pts
-  divergence: mean KL 2.0022 nats exceeds 0.0500; top-1 agreement 21.71% is below 95.00%
+  divergence: mean KL 2.0022 nats is above the hard ceiling 0.5000; top-1 agreement 21.71% is below the hard ceiling 80.00%
   sanity: 460 outputs: empty 0.00%, truncated 0.00%, repetition 0.00%, language_drift 0.00%
+
+gate REVIEW (needs review, not blocking)
+  ...
+  divergence: needs review: top-1 agreement 87.70% is below 95.00% while every task passed non-inferiority; limits KL 0.0500 nats, top-1 95.00%: the looser of the absolute limits and 5x the baseline's noise floor (self-KL <= 0.0000 nats, self top-1 >= 100.00%)
 ```
 
-`GateDecision.details()` is the JSON stored in `bench_gate_decisions.details`.
+`GateDecision.details()` is the JSON stored in `bench_gate_decisions.details`; its
+`divergence` carries the candidate's result, the baseline's `self_divergence` and the
+`limits` applied (calibrated or not, the noise multiple, the self-KL and self top-1 bounds
+used, the resulting limits and the ceiling). Reports and the site rank a REVIEW config
+normally and badge it "needs review", with the divergence against its limits and the
+noise floor in its recommendation and on its model page.
 
 ## Sample sizes
 
@@ -130,8 +169,19 @@ inequality). When the sets differ it is an estimate that grows sharply when one 
 confident token is missing from the other's list, which is the failure that matters. Both
 sides must use the same tokenizer; the measurement refuses otherwise.
 
-The default limits (KL 0.05 nats, top-1 95%) are initial values; the first Phase 0 GPU
-runs measure BF16 vs BF16 across engines to confirm they sit above engine noise.
+**Noise floor.** Two healthy engines serving the same BF16 weights never agree bit for
+bit: kernels sum in different orders, and an engine's own numerics change with batch
+composition. Fixed limits would either let real damage through or block a healthy engine
+on kernel noise, so each run measures the noise and the gate scales its limits to it.
+After capturing the reference, the baseline's eval job (`divergence: capture_and_floor`)
+scores the same endpoint against its own capture once more at the suite's
+`floor_concurrency` (1, against the job's 16 at capture: every request alone, so batch
+sizes, kernel tile choices and reduction orders differ). That self-divergence is pure
+numerical noise of this model on this engine and hardware; it is stored with the
+reference (`ReferenceLogprobs.self_divergence`), in the baseline's `samples.json`, and in
+the `reference_captured` event, and the gate calibrates every candidate's limits on it.
+It costs one more echo request per prompt (48) on the baseline only. It runs on the host
+inside the eval job, so it works the same on the mock, local and aws_ec2 providers.
 
 **Reference capture.** Steps 1-2 for the reference and steps 2-4 for the candidate are
 separate calls, so the two engines never have to be up at the same time (one GPU host runs
@@ -144,10 +194,10 @@ one engine at a time):
   same texts and is compared position by position with the stored reference.
 
 `measure_divergence` (both endpoints up) is capture followed by score. In an experiment the
-baseline variant's eval job captures the reference while its engine is up; the runner
-stores it as `results/<experiment>/evals/<config hash>/reference.json` with the config hash
-and full provenance, and passes it in every candidate's eval job, which scores against it
-when that engine is up later. Prompts, top-k and the continuation length travel with the
+baseline variant's eval job captures the reference and its noise floor while its engine is
+up; the runner stores both as `results/<experiment>/evals/<config hash>/reference.json`
+with the config hash and full provenance, and passes the reference in every candidate's
+eval job, which scores against it when that engine is up later. Prompts, top-k and the continuation length travel with the
 reference, so a candidate is always scored on exactly what the reference saw.
 
 ## Sanity checks
@@ -192,12 +242,16 @@ writes the decision to `bench_gate_decisions`.
 
 Inside an experiment the same work is an `EvalJob` (`loom_bench.jobs`): the resolved suite,
 the task subset, the endpoint as seen from where the job runs, request extras, the seed,
-the code-execution opt-in, and `divergence: capture` (baseline) or `score` with the stored
-reference (candidates). `execute_eval_job` runs it in-process for the mock and local
+the code-execution opt-in, and `divergence: capture_and_floor` (baseline: capture, then the
+noise-floor pass) or `score` with the stored reference (candidates); plain `capture` skips
+the floor. `execute_eval_job` runs it in-process for the mock and local
 providers; `bench quality job --in job.json --out result.json` runs it on a GPU host. The
 `EvalJobResult` carries per-task ItemResults (scores and content hashes), task versions,
-per-task seconds, the sanity rates and the capture or the divergence; model outputs stay
-where the job ran.
+per-task seconds, the sanity rates and the capture (with its self-divergence) or the
+divergence; model outputs stay where the job ran. Each config's `samples.json` keeps its
+divergence (with the config hash of the reference it was scored on) or its self-divergence,
+so `bench quality gate` re-decides with the same calibrated limits; a divergence scored on
+another baseline's reference is not reused.
 
 **Subsets.** A suite may name subsets of its tasks (`subsets: {phase0: [...]}`); an
 experiment picks one with `quality.subset`. Tasks in a subset keep their full pinned items,
@@ -208,7 +262,10 @@ RULER, needle and code wait for a full-suite run.
 
 **Planning.** Each task reports how many items it will score (`planned_items`); lm-eval
 tasks without explicit `samples` cannot count their docs before the harness loads them,
-so the suite states `items` for them and `bench plan` refuses a suite that does not.
+so the suite states `items` for them and `bench plan` refuses a suite that does not. The
+baseline's eval step also carries the noise-floor pass: prompts x `EVAL_FLOOR_PROMPT_S`
+(1 s, one echo request alone on the engine) / `floor_concurrency`, 48 s with the pinned
+suites.
 
 - **lm-eval** is the optional `lmeval` extra of the `loom-bench` workspace package:
   `uv sync --all-packages --extra lmeval` from the repo root (plain `uv sync --extra
@@ -262,3 +319,13 @@ noise. The gate FAILs it on arithmetic, JSON validity and divergence and blocks 
 identically configured second server PASSes with 400 items; 100 identical items are
 INCONCLUSIVE (the ±3/n floor exceeds the 1-point margin), and 20 are INCONCLUSIVE by
 `min_samples`. The decision and per-task results are persisted to SQLite and read back.
+
+Two more cases run the experiment path (`capture_and_floor` on the baseline, `score` on
+the candidate) with the mock's `logprob_jitter`, per-request logit noise that stands in for
+batch-variant kernels. A jittery baseline against a candidate with the same jitter plus a
+little static `logprob_noise` (another engine's kernels): its divergence is above the old
+fixed 0.05 nats and 95% top-1 but within 5x the measured floor, and it PASSes (gated on the
+absolute limits alone it would be REVIEW). A drifted candidate against a bit-exact baseline
+(zero floor) with unchanged answers is REVIEW, not blocked.
+`bench/tests/runner/test_quality_e2e.py` runs PASS, REVIEW and FAIL candidates through a
+mock experiment, `bench quality gate` (exit 0 for REVIEW, 7 for FAIL) and the report.

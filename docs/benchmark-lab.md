@@ -158,8 +158,8 @@ it there.
    teardown. An eval job takes, per task, items x a per-kind item time / concurrency
    (`EVAL_ITEM_S`: 24 s for lm-eval, 40 s for needle, 16 s for code, 6-8 s for tool calling
    and JSON, i.e. an item's share of a full engine decoding at the 50 ms TPOT SLO), plus
-   60 s of harness start-up per lm-eval task, 4 s per divergence prompt over 16 slots, 60 s
-   per job and, once per AWS host, 300 s to install the eval harness. Spot
+   60 s of harness start-up per lm-eval task, 4 s per divergence prompt over 16 slots (and
+   on the baseline 1 s per prompt, one at a time, for the noise-floor pass), 60 s per job and, once per AWS host, 300 s to install the eval harness. Spot
    hosts are priced like the provider accrues them: price x its safety multiplier (1.25),
    plus the root EBS volume. Warm restarts reload weights from the host's cache and pull an
    image only when it changes.
@@ -227,12 +227,15 @@ With `quality:` set, every cell runs the suite (or its named `subset`) after its
 workloads, as an eval job where the engine is reachable: in-process for `mock` and `local`,
 in the client container on the GPU host for `aws_ec2` (`bench quality job`, see
 `docs/aws-setup.md`). Baseline variant cells run first. Their eval job also captures the
-divergence reference (greedy continuations and top-k logprobs of the pinned prompts),
+divergence reference (greedy continuations and top-k logprobs of the pinned prompts) and
+its noise floor (the baseline scored against its own capture one request at a time),
 stored as `evals/<config hash>/reference.json` with its config hash and provenance. Every
 other cell's job scores its engine against the reference of the baseline cell at the same
 sweep point, so the two engines never need to be up at once, and the cell is gated against
-that baseline on task scores, divergence and sanity; eval runs and gate decisions are stored
-(`bench_eval_runs`, `bench_gate_decisions`) and reports never rank gate-failed configs.
+that baseline on task scores, divergence (limits calibrated on the noise floor) and
+sanity; eval runs and gate decisions are stored (`bench_eval_runs`,
+`bench_gate_decisions`), reports never rank gate-failed configs, and configs whose gate
+needs review are ranked with that flag.
 Code-executing tasks are refused at `bench plan` unless `allow_code_exec: true`. The suite
 is a name in `bench/evals/` or a YAML path from the repo root. See `docs/quality-gate.md`
 for the method.
@@ -241,8 +244,8 @@ for the method.
 
 | Experiment | Host | Estimate | Worst case (TTL) | Cap |
 |---|---|---|---|---|
-| `qwen3-8b-vllm-vs-sglang` | 1x g6e.xlarge spot, 7.1 h of an 8 h TTL | $16.52 | $18.56 | $40 |
-| `llama-3.3-70b-tp4` | 1x g6e.12xlarge spot, 2.7 h of a 3.5 h TTL | $27.90 | $35.86 | $45 |
+| `qwen3-8b-vllm-vs-sglang` | 1x g6e.xlarge spot, 7.1 h of an 8 h TTL | $16.56 | $18.56 | $40 |
+| `llama-3.3-70b-tp4` | 1x g6e.12xlarge spot, 2.7 h of a 3.5 h TTL | $28.04 | $35.86 | $45 |
 
 Estimates include cold starts, assume every searched point waits out its drain timeout,
 and include each config's eval job (the suites' `phase0` subset: GSM8K, IFEval, tool
