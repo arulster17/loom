@@ -116,6 +116,22 @@ def test_run_round_trip_with_models(db_url):
         assert repo.get_run(s, uuid.uuid4()) is None
 
 
+def test_record_run_takes_the_callers_run_id(session):
+    exp = _experiment(session)
+    p = _prov()
+    rid = uuid.uuid4()
+    run = repo.record_run(
+        session,
+        experiment_id=exp.id,
+        config_hash=p.config_hash,
+        provenance=p,
+        status="ok",
+        run_id=rid,
+    )
+    assert run.id == rid
+    assert repo.get_run(session, rid) is run
+
+
 def test_record_run_validates(session):
     exp = _experiment(session)
     p = _prov()

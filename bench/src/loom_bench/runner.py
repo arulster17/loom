@@ -648,6 +648,7 @@ class _Executor:
     def _record(
         self,
         *,
+        run_id: uuid.UUID,
         cell: Cell,
         entry: WorkloadEntry,
         load: LoadSpec,
@@ -658,10 +659,19 @@ class _Executor:
         started_at: datetime,
         summary: dict[str, Any] | None = None,
         result: LoadJobResult | None = None,
-    ) -> uuid.UUID:
+    ) -> None:
+        run_dir = self.run_dir / "runs" / str(run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        requests_uri = (
+            write_requests(result.request_records(), run_dir / "requests.parquet")
+            if result is not None
+            else None
+        )
+        (run_dir / "provenance.json").write_text(prov.model_dump_json(indent=2))
         with session_scope(self.ctx.db_url) as s:
-            run = repo.record_run(
+            repo.record_run(
                 s,
+                run_id=run_id,
                 experiment_id=self.experiment_id,
                 config_hash=cell.config_hash,
                 provenance=prov,
@@ -672,19 +682,11 @@ class _Executor:
                 load_mode=load.mode,
                 load_value=value,
                 repetition=rep,
+                requests_uri=requests_uri,
                 started_at=started_at,
                 finished_at=_now(),
             )
-            run_dir = self.run_dir / "runs" / str(run.id)
-            run_dir.mkdir(parents=True, exist_ok=True)
-            if result is not None:
-                run.requests_uri = write_requests(
-                    result.request_records(), run_dir / "requests.parquet"
-                )
-                s.flush()
-            (run_dir / "provenance.json").write_text(prov.model_dump_json(indent=2))
-        self.run_ids.append(run.id)
-        return run.id
+        self.run_ids.append(run_id)
 
     async def _run_once(
         self,
@@ -702,7 +704,15 @@ class _Executor:
         seed = derive_seed(self.exp.seed, entry.name, value, rep)
         job = self._job(cell, endpoint, load, profile, value, seed)
         prov = self.provenance(host, cell, endpoint, entry, profile, load.mode, value, seed, rep)
-        common = dict(cell=cell, entry=entry, load=load, value=value, rep=rep, prov=prov)
+        common = dict(
+            run_id=uuid.UUID(job.run_id),
+            cell=cell,
+            entry=entry,
+            load=load,
+            value=value,
+            rep=rep,
+            prov=prov,
+        )
         started_at = _now()
         try:
             result = await self.guard.guarded(self.provider.run_job(host, job))

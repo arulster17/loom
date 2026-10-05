@@ -169,11 +169,15 @@ def record_run(
     requests_uri: str | None = None,
     started_at: datetime | None = None,
     finished_at: datetime | None = None,
+    run_id: uuid.UUID | None = None,
 ) -> BenchRun:
+    """Insert a run; `run_id` lets the caller fix the row id up front (the LoadJob's id), so
+    files named after the run can be written before the row exists."""
     prov = _doc(provenance)
     if prov.get("config_hash", config_hash) != config_hash:
         raise ValueError("config_hash disagrees with the provenance record")
     run = BenchRun(
+        id=run_id or uuid.uuid4(),
         experiment_id=experiment_id,
         cell_key=cell_key,
         config_hash=config_hash,
