@@ -89,7 +89,7 @@ async def run_suite(
             out = await task.run(ctx)
             if not out.items:
                 raise RuntimeError(f"{spec.name}: task produced no items")
-            version = str(out.provenance.get("lm_eval", {}).get("task_version") or task.version)
+            version = out.version or task.version
             runs[spec.name] = TaskRun(
                 name=spec.name,
                 kind=spec.kind,

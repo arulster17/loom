@@ -221,4 +221,4 @@ async def test_run_end_to_end_with_fake_harness(tmp_path, monkeypatch):
     assert call["argv"][call["argv"].index("--seed") + 1] == "7"
     info = out.provenance["lm_eval"]
     assert info["lm_eval_version"] == "0.4.13"
-    assert info["task_version"] == "gsm8k=3.0;ifeval=4.0;niah_single_2=1.0"
+    assert out.version == "lm_eval=0.4.13;gsm8k=3.0;ifeval=4.0;niah_single_2=1.0"

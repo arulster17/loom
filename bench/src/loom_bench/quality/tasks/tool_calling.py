@@ -230,6 +230,7 @@ class ToolCallingTask(ParamTask[ToolCallingParams]):
             )
 
         out = await score_items(items, score)
+        out.version = f"{self.version}+data.{data.version}"
         out.provenance = {
             "dataset": {
                 "name": "loom-tool-calling",

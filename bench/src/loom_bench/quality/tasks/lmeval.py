@@ -301,7 +301,12 @@ class LmEvalTask(ParamTask[LmEvalParams]):
             raise LmEvalError(f"{self.name}: lm_eval wrote no samples under {out_dir}")
         items, completions = parse_samples(sample_files, self.params)
         info = parse_results(out_dir.rglob("results_*.json"))
-        versions = info["task_versions"]
-        info["task_version"] = ";".join(f"{t}={versions[t]}" for t in sorted(versions))
         info["command"] = argv[2:]
-        return TaskOutput(items=items, completions=completions, provenance={"lm_eval": info})
+        versions = info["task_versions"]
+        version = ";".join(
+            [f"lm_eval={info.get('lm_eval_version')}"]
+            + [f"{t}={versions[t]}" for t in sorted(versions)]
+        )
+        return TaskOutput(
+            items=items, completions=completions, provenance={"lm_eval": info}, version=version
+        )

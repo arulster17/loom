@@ -53,6 +53,9 @@ class TaskOutput:
     completions: list[Completion] = field(default_factory=list)
     # Task-specific provenance: dataset source/revision/license, harness versions, ...
     provenance: dict[str, Any] = field(default_factory=dict)
+    # Version of what actually ran, when only known at run time (harness task versions,
+    # data file version); stored with the eval run instead of the task's own version.
+    version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

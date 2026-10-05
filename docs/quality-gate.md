@@ -156,12 +156,15 @@ from loom_bench.quality.runner import gate_against_baseline, run_divergence, run
 from loom_bench.quality.suite import load_suite
 
 suite = load_suite("qwen3-8b")
-base = await run_suite(suite, "http://baseline:8000/v1", "qwen3-8b",
-                       workdir=Path("runs/base"), allow_code_exec=True)
-cand = await run_suite(suite, "http://candidate:8000/v1", "qwen3-8b",
-                       workdir=Path("runs/cand"), allow_code_exec=True)
-div = await run_divergence(suite, "http://bf16-reference:8000/v1", "http://candidate:8000/v1",
-                           "qwen3-8b")
+base = await run_suite(
+    suite, "http://baseline:8000/v1", "qwen3-8b", workdir=Path("runs/base"), allow_code_exec=True
+)
+cand = await run_suite(
+    suite, "http://candidate:8000/v1", "qwen3-8b", workdir=Path("runs/cand"), allow_code_exec=True
+)
+div = await run_divergence(
+    suite, "http://bf16-reference:8000/v1", "http://candidate:8000/v1", "qwen3-8b"
+)
 decision = gate_against_baseline(base, cand, suite, div)
 print(decision.summary())
 ```

@@ -108,6 +108,7 @@ class JsonSchemaTask(ParamTask[JsonSchemaParams]):
             )
 
         out = await score_items(items, score)
+        out.version = f"{self.version}+data.{data_version}"
         out.provenance = {
             "dataset": {
                 "name": "loom-json-schema",

@@ -72,6 +72,7 @@ async def test_json_task_requests_schema_and_scores(tmp_path):
     assert [r.score for r in out.items] == [1.0, 0.0, 0.0, 0.0, 0.0]
     assert seen[0]["type"] == "json_schema" and seen[0]["json_schema"]["strict"] is True
     assert out.provenance["dataset"]["license"] == "Apache-2.0"
+    assert out.version == "1+data.1"
 
 
 # ---------------------------------------------------------------- tool_calling
