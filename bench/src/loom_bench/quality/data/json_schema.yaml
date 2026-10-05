@@ -1,0 +1,187 @@
+# Pinned JSON-schema validity set for the `json_schema` task.
+# Self-authored for Loom, Apache-2.0. Each item is an instruction plus the JSON
+# Schema (draft 2020-12) the reply must satisfy; the request sends the schema as
+# `response_format: {type: json_schema, strict: true}`. Score = 1 when the reply
+# parses as JSON and validates. Bump `version` whenever an item changes.
+version: 1
+items:
+  - id: person-basic
+    instruction: "Describe a fictional librarian named Mara Quist who is 41 years old."
+    schema: {type: object, additionalProperties: false, required: [name, age], properties: {name: {type: string}, age: {type: integer, minimum: 0, maximum: 130}}}
+  - id: book-record
+    instruction: "Give a catalogue record for an invented novel about lighthouse keepers."
+    schema: {type: object, additionalProperties: false, required: [title, author, year, genres], properties: {title: {type: string, minLength: 1}, author: {type: string}, year: {type: integer, minimum: 1450, maximum: 2030}, genres: {type: array, items: {type: string}, minItems: 1, maxItems: 4}}}
+  - id: weather-report
+    instruction: "Report plausible weather for a coastal town on a windy autumn morning."
+    schema: {type: object, additionalProperties: false, required: [temperature_c, condition, wind_kph], properties: {temperature_c: {type: number, minimum: -60, maximum: 60}, condition: {type: string, enum: [sunny, cloudy, rain, snow, fog, storm]}, wind_kph: {type: number, minimum: 0}}}
+  - id: todo-list
+    instruction: "Create a to-do list with three chores for a Saturday."
+    schema: {type: object, additionalProperties: false, required: [items], properties: {items: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [task, done], properties: {task: {type: string}, done: {type: boolean}}}}}}
+  - id: recipe-card
+    instruction: "Write a recipe card for a simple tomato soup."
+    schema: {type: object, additionalProperties: false, required: [name, servings, ingredients, steps], properties: {name: {type: string}, servings: {type: integer, minimum: 1, maximum: 12}, ingredients: {type: array, minItems: 2, items: {type: object, additionalProperties: false, required: [item, quantity], properties: {item: {type: string}, quantity: {type: string}}}}, steps: {type: array, minItems: 1, items: {type: string}}}}
+  - id: color-rgb
+    instruction: "Give the RGB components of a warm orange colour."
+    schema: {type: object, additionalProperties: false, required: [r, g, b], properties: {r: {type: integer, minimum: 0, maximum: 255}, g: {type: integer, minimum: 0, maximum: 255}, b: {type: integer, minimum: 0, maximum: 255}}}
+  - id: sentiment
+    instruction: "Classify the sentiment of: 'The delivery was late but the staff were lovely.'"
+    schema: {type: object, additionalProperties: false, required: [label, confidence], properties: {label: {type: string, enum: [positive, negative, mixed, neutral]}, confidence: {type: number, minimum: 0, maximum: 1}}}
+  - id: address
+    instruction: "Invent a postal address for a bakery in a small mountain town."
+    schema: {type: object, additionalProperties: false, required: [street, city, postal_code, country], properties: {street: {type: string}, city: {type: string}, postal_code: {type: string, minLength: 3, maxLength: 10}, country: {type: string}}}
+  - id: meeting
+    instruction: "Schedule a 30-minute design review for next Tuesday at 14:00."
+    schema: {type: object, additionalProperties: false, required: [title, day, start, duration_minutes], properties: {title: {type: string}, day: {type: string, enum: [monday, tuesday, wednesday, thursday, friday]}, start: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}, duration_minutes: {type: integer, enum: [15, 30, 45, 60]}}}
+  - id: product
+    instruction: "Describe a refillable fountain pen for an online shop listing."
+    schema: {type: object, additionalProperties: false, required: [sku, name, price, in_stock], properties: {sku: {type: string, pattern: "^[A-Z]{3}-[0-9]{4}$"}, name: {type: string}, price: {type: number, exclusiveMinimum: 0}, in_stock: {type: boolean}}}
+  - id: planet-facts
+    instruction: "Give basic facts about the planet Mars."
+    schema: {type: object, additionalProperties: false, required: [name, moons, has_rings], properties: {name: {type: string}, moons: {type: integer, minimum: 0}, has_rings: {type: boolean}}}
+  - id: flight
+    instruction: "Describe a morning flight from Lisbon to Oslo."
+    schema: {type: object, additionalProperties: false, required: [from, to, departure, seats_left], properties: {from: {type: string, pattern: "^[A-Z]{3}$"}, to: {type: string, pattern: "^[A-Z]{3}$"}, departure: {type: string, pattern: "^[0-2][0-9]:[0-5][0-9]$"}, seats_left: {type: integer, minimum: 0, maximum: 400}}}
+  - id: quiz-question
+    instruction: "Write one multiple-choice quiz question about the solar system."
+    schema: {type: object, additionalProperties: false, required: [question, options, answer_index], properties: {question: {type: string}, options: {type: array, items: {type: string}, minItems: 4, maxItems: 4}, answer_index: {type: integer, minimum: 0, maximum: 3}}}
+  - id: invoice-line
+    instruction: "Create one invoice line for 12 hours of consulting at 85 per hour."
+    schema: {type: object, additionalProperties: false, required: [description, quantity, unit_price, total], properties: {description: {type: string}, quantity: {type: number, minimum: 0}, unit_price: {type: number, minimum: 0}, total: {type: number, minimum: 0}}}
+  - id: tags
+    instruction: "Suggest tags for a blog post about growing basil indoors."
+    schema: {type: object, additionalProperties: false, required: [tags], properties: {tags: {type: array, minItems: 2, maxItems: 6, uniqueItems: true, items: {type: string, pattern: "^[a-z0-9-]+$"}}}}
+  - id: bug-report
+    instruction: "File a bug report: the export button does nothing on the settings page."
+    schema: {type: object, additionalProperties: false, required: [title, severity, steps, expected, actual], properties: {title: {type: string}, severity: {type: string, enum: [low, medium, high, critical]}, steps: {type: array, items: {type: string}, minItems: 1}, expected: {type: string}, actual: {type: string}}}
+  - id: coordinates
+    instruction: "Give approximate coordinates for a point in the middle of the Atlantic Ocean."
+    schema: {type: object, additionalProperties: false, required: [lat, lon], properties: {lat: {type: number, minimum: -90, maximum: 90}, lon: {type: number, minimum: -180, maximum: 180}}}
+  - id: movie-review
+    instruction: "Review an imaginary documentary about deep-sea creatures."
+    schema: {type: object, additionalProperties: false, required: [title, rating, summary, recommend], properties: {title: {type: string}, rating: {type: integer, minimum: 1, maximum: 5}, summary: {type: string, maxLength: 400}, recommend: {type: boolean}}}
+  - id: employee
+    instruction: "Create an employee record for a new data analyst on the finance team."
+    schema: {type: object, additionalProperties: false, required: [id, name, department, manager_id, skills], properties: {id: {type: integer, minimum: 1}, name: {type: string}, department: {type: string, enum: [finance, engineering, sales, support, legal]}, manager_id: {type: [integer, "null"]}, skills: {type: array, items: {type: string}}}}
+  - id: unit-conversion
+    instruction: "Convert 5 miles to kilometres."
+    schema: {type: object, additionalProperties: false, required: [value, from_unit, to_unit, result], properties: {value: {type: number}, from_unit: {type: string, const: mile}, to_unit: {type: string, const: kilometre}, result: {type: number}}}
+  - id: nested-company
+    instruction: "Describe a small robotics startup with two teams."
+    schema: {type: object, additionalProperties: false, required: [company, teams], properties: {company: {type: string}, teams: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [name, members], properties: {name: {type: string}, members: {type: array, minItems: 1, items: {type: object, additionalProperties: false, required: [name, role], properties: {name: {type: string}, role: {type: string}}}}}}}}}
+  - id: http-response
+    instruction: "Represent an HTTP response for a resource that was not found."
+    schema: {type: object, additionalProperties: false, required: [status, headers, body], properties: {status: {type: integer, minimum: 100, maximum: 599}, headers: {type: object, additionalProperties: {type: string}}, body: {type: string}}}
+  - id: chess-move
+    instruction: "Suggest a good opening move for white in chess."
+    schema: {type: object, additionalProperties: false, required: [piece, from, to], properties: {piece: {type: string, enum: [pawn, knight, bishop, rook, queen, king]}, from: {type: string, pattern: "^[a-h][1-8]$"}, to: {type: string, pattern: "^[a-h][1-8]$"}}}
+  - id: workout
+    instruction: "Plan a 20-minute bodyweight workout."
+    schema: {type: object, additionalProperties: false, required: [total_minutes, exercises], properties: {total_minutes: {type: integer, const: 20}, exercises: {type: array, minItems: 3, items: {type: object, additionalProperties: false, required: [name, seconds], properties: {name: {type: string}, seconds: {type: integer, minimum: 10, maximum: 600}}}}}}
+  - id: language-detect
+    instruction: "Identify the language of: 'Où se trouve la gare?'"
+    schema: {type: object, additionalProperties: false, required: [language_code, language_name], properties: {language_code: {type: string, pattern: "^[a-z]{2}$"}, language_name: {type: string}}}
+  - id: semver
+    instruction: "Describe the next minor release after version 2.7.3 of a library."
+    schema: {type: object, additionalProperties: false, required: [version, breaking], properties: {version: {type: string, pattern: "^[0-9]+\\.[0-9]+\\.[0-9]+$"}, breaking: {type: boolean}}}
+  - id: shopping-cart
+    instruction: "Build a shopping cart with two different fruits."
+    schema: {type: object, additionalProperties: false, required: [currency, lines], properties: {currency: {type: string, enum: [EUR, USD, GBP]}, lines: {type: array, minItems: 2, items: {type: object, additionalProperties: false, required: [product, qty, price], properties: {product: {type: string}, qty: {type: integer, minimum: 1}, price: {type: number, minimum: 0}}}}}}
+  - id: timezone
+    instruction: "Give the UTC offset for a city on Central European Summer Time."
+    schema: {type: object, additionalProperties: false, required: [city, utc_offset_hours], properties: {city: {type: string}, utc_offset_hours: {type: integer, minimum: -12, maximum: 14}}}
+  - id: git-commit
+    instruction: "Write metadata for a commit that fixes a typo in the README."
+    schema: {type: object, additionalProperties: false, required: [type, scope, subject], properties: {type: {type: string, enum: [feat, fix, docs, chore, refactor, test]}, scope: {type: [string, "null"]}, subject: {type: string, maxLength: 72}}}
+  - id: animal
+    instruction: "Describe the red fox."
+    schema: {type: object, additionalProperties: false, required: [common_name, diet, nocturnal, avg_weight_kg], properties: {common_name: {type: string}, diet: {type: string, enum: [herbivore, carnivore, omnivore]}, nocturnal: {type: boolean}, avg_weight_kg: {type: number, minimum: 0}}}
+  - id: matrix
+    instruction: "Return the 2x2 identity matrix."
+    schema: {type: object, additionalProperties: false, required: [rows], properties: {rows: {type: array, minItems: 2, maxItems: 2, items: {type: array, minItems: 2, maxItems: 2, items: {type: number}}}}}
+  - id: event-ticket
+    instruction: "Issue a ticket for seat 14C at an evening jazz concert."
+    schema: {type: object, additionalProperties: false, required: [event, seat, price, vip], properties: {event: {type: string}, seat: {type: string, pattern: "^[0-9]{1,2}[A-F]$"}, price: {type: number, minimum: 0}, vip: {type: boolean}}}
+  - id: country
+    instruction: "Give a few facts about Portugal."
+    schema: {type: object, additionalProperties: false, required: [name, capital, currency, neighbours], properties: {name: {type: string}, capital: {type: string}, currency: {type: string, pattern: "^[A-Z]{3}$"}, neighbours: {type: array, items: {type: string}}}}
+  - id: support-ticket
+    instruction: "Triage this message: 'I was charged twice for my subscription this month.'"
+    schema: {type: object, additionalProperties: false, required: [category, priority, needs_refund], properties: {category: {type: string, enum: [billing, technical, account, other]}, priority: {type: integer, minimum: 1, maximum: 4}, needs_refund: {type: boolean}}}
+  - id: grade-book
+    instruction: "Record quiz scores for three students."
+    schema: {type: object, additionalProperties: false, required: [scores], properties: {scores: {type: object, minProperties: 3, maxProperties: 3, additionalProperties: {type: integer, minimum: 0, maximum: 100}}}}
+  - id: rgb-palette
+    instruction: "Propose a palette of three hex colours for a calm website."
+    schema: {type: object, additionalProperties: false, required: [colors], properties: {colors: {type: array, minItems: 3, maxItems: 3, items: {type: string, pattern: "^#[0-9a-fA-F]{6}$"}}}}
+  - id: date-parts
+    instruction: "Split the date 1999-12-31 into its parts."
+    schema: {type: object, additionalProperties: false, required: [year, month, day], properties: {year: {type: integer}, month: {type: integer, minimum: 1, maximum: 12}, day: {type: integer, minimum: 1, maximum: 31}}}
+  - id: server-config
+    instruction: "Write a configuration for a web server listening on port 8080 with TLS disabled."
+    schema: {type: object, additionalProperties: false, required: [host, port, tls, workers], properties: {host: {type: string}, port: {type: integer, minimum: 1, maximum: 65535}, tls: {type: boolean}, workers: {type: integer, minimum: 1, maximum: 64}}}
+  - id: math-answer
+    instruction: "What is 17 multiplied by 23? Show the result and one sentence of working."
+    schema: {type: object, additionalProperties: false, required: [result, working], properties: {result: {type: integer}, working: {type: string}}}
+  - id: poem-meta
+    instruction: "Write a four-line poem about rain and describe it."
+    schema: {type: object, additionalProperties: false, required: [title, lines, rhymes], properties: {title: {type: string}, lines: {type: array, minItems: 4, maxItems: 4, items: {type: string}}, rhymes: {type: boolean}}}
+  - id: inventory
+    instruction: "List the stock of a hardware store aisle with screws and nails."
+    schema: {type: object, additionalProperties: false, required: [aisle, products], properties: {aisle: {type: integer, minimum: 1}, products: {type: array, minItems: 2, items: {type: object, additionalProperties: false, required: [name, count, unit], properties: {name: {type: string}, count: {type: integer, minimum: 0}, unit: {type: string, enum: [box, piece, kg]}}}}}}
+  - id: user-profile
+    instruction: "Create a user profile for someone who enjoys hiking and photography."
+    schema: {type: object, additionalProperties: false, required: [username, email, interests, newsletter], properties: {username: {type: string, pattern: "^[a-z0-9_]{3,20}$"}, email: {type: string, pattern: "^[^@\\s]+@[^@\\s]+\\.[a-z]+$"}, interests: {type: array, items: {type: string}, minItems: 1}, newsletter: {type: boolean}}}
+  - id: train-schedule
+    instruction: "Give two departures from a suburban train station."
+    schema: {type: object, additionalProperties: false, required: [station, departures], properties: {station: {type: string}, departures: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [time, destination, platform], properties: {time: {type: string, pattern: "^[0-2][0-9]:[0-5][0-9]$"}, destination: {type: string}, platform: {type: integer, minimum: 1, maximum: 20}}}}}}
+  - id: classification-multi
+    instruction: "Which topics does this headline touch: 'City council approves new bike lanes near schools'?"
+    schema: {type: object, additionalProperties: false, required: [topics], properties: {topics: {type: array, minItems: 1, maxItems: 3, uniqueItems: true, items: {type: string, enum: [politics, transport, education, health, sport, economy]}}}}
+  - id: key-value
+    instruction: "Give environment variables for a development database connection."
+    schema: {type: object, additionalProperties: false, required: [variables], properties: {variables: {type: array, minItems: 2, items: {type: object, additionalProperties: false, required: [key, value], properties: {key: {type: string, pattern: "^[A-Z][A-Z0-9_]*$"}, value: {type: string}}}}}}
+  - id: optional-fields
+    instruction: "Describe a houseplant; include its watering interval only if you know it."
+    schema: {type: object, additionalProperties: false, required: [name, light], properties: {name: {type: string}, light: {type: string, enum: [low, medium, bright]}, water_every_days: {type: integer, minimum: 1, maximum: 60}}}
+  - id: tree
+    instruction: "Represent a tiny folder tree: a root folder containing one file and one empty subfolder."
+    schema: {type: object, additionalProperties: false, required: [name, kind, children], properties: {name: {type: string}, kind: {type: string, const: folder}, children: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [name, kind], properties: {name: {type: string}, kind: {type: string, enum: [file, folder]}, children: {type: array, maxItems: 0}}}}}}
+  - id: nutrition
+    instruction: "Give nutrition facts for one medium banana."
+    schema: {type: object, additionalProperties: false, required: [calories, protein_g, carbs_g, fat_g], properties: {calories: {type: number, minimum: 0, maximum: 1000}, protein_g: {type: number, minimum: 0}, carbs_g: {type: number, minimum: 0}, fat_g: {type: number, minimum: 0}}}
+  - id: rating-breakdown
+    instruction: "Rate a hotel stay on cleanliness, location and value."
+    schema: {type: object, additionalProperties: false, required: [cleanliness, location, value, overall], properties: {cleanliness: {type: integer, minimum: 1, maximum: 10}, location: {type: integer, minimum: 1, maximum: 10}, value: {type: integer, minimum: 1, maximum: 10}, overall: {type: number, minimum: 1, maximum: 10}}}
+  - id: anyof-contact
+    instruction: "Give one way to contact a customer service desk."
+    schema: {type: object, additionalProperties: false, required: [contact], properties: {contact: {anyOf: [{type: object, additionalProperties: false, required: [email], properties: {email: {type: string}}}, {type: object, additionalProperties: false, required: [phone], properties: {phone: {type: string}}}]}}}
+  - id: boolean-flags
+    instruction: "Describe the feature flags of a beta mobile app release."
+    schema: {type: object, additionalProperties: false, required: [dark_mode, offline_sync, new_onboarding], properties: {dark_mode: {type: boolean}, offline_sync: {type: boolean}, new_onboarding: {type: boolean}}}
+  - id: sql-intent
+    instruction: "Turn 'show me the ten most recent orders' into a query description."
+    schema: {type: object, additionalProperties: false, required: [table, order_by, direction, limit], properties: {table: {type: string}, order_by: {type: string}, direction: {type: string, enum: [asc, desc]}, limit: {type: integer, minimum: 1, maximum: 1000}}}
+  - id: dice-roll
+    instruction: "Simulate rolling three six-sided dice."
+    schema: {type: object, additionalProperties: false, required: [rolls, total], properties: {rolls: {type: array, minItems: 3, maxItems: 3, items: {type: integer, minimum: 1, maximum: 6}}, total: {type: integer, minimum: 3, maximum: 18}}}
+  - id: citation
+    instruction: "Cite an invented journal article about soil microbes."
+    schema: {type: object, additionalProperties: false, required: [authors, title, journal, year, pages], properties: {authors: {type: array, minItems: 1, items: {type: string}}, title: {type: string}, journal: {type: string}, year: {type: integer, minimum: 1900, maximum: 2030}, pages: {type: string, pattern: "^[0-9]+-[0-9]+$"}}}
+  - id: parcel-status
+    instruction: "Give the status of a package that left the warehouse this morning."
+    schema: {type: object, additionalProperties: false, required: [tracking_id, status, eta_days], properties: {tracking_id: {type: string, minLength: 8, maxLength: 20}, status: {type: string, enum: [pending, shipped, in_transit, delivered]}, eta_days: {type: integer, minimum: 0, maximum: 30}}}
+  - id: geometry
+    instruction: "Describe a right triangle with legs 3 and 4."
+    schema: {type: object, additionalProperties: false, required: [a, b, hypotenuse, area], properties: {a: {type: number}, b: {type: number}, hypotenuse: {type: number}, area: {type: number}}}
+  - id: playlist
+    instruction: "Make a short playlist of three songs for a road trip (invent the songs)."
+    schema: {type: object, additionalProperties: false, required: [name, tracks], properties: {name: {type: string}, tracks: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [title, artist, seconds], properties: {title: {type: string}, artist: {type: string}, seconds: {type: integer, minimum: 30, maximum: 900}}}}}}
+  - id: thermostat
+    instruction: "Set a thermostat schedule for weekday mornings and evenings."
+    schema: {type: object, additionalProperties: false, required: [morning, evening, unit], properties: {morning: {type: number, minimum: 5, maximum: 30}, evening: {type: number, minimum: 5, maximum: 30}, unit: {type: string, const: celsius}}}
+  - id: word-stats
+    instruction: "Count the words and characters in the phrase 'open models for everyone'."
+    schema: {type: object, additionalProperties: false, required: [words, characters], properties: {words: {type: integer, minimum: 0}, characters: {type: integer, minimum: 0}}}
+  - id: access-policy
+    instruction: "Write an access policy that lets the analytics group read the reports bucket."
+    schema: {type: object, additionalProperties: false, required: [principal, actions, resource, effect], properties: {principal: {type: string}, actions: {type: array, minItems: 1, items: {type: string, enum: [read, write, delete, list]}}, resource: {type: string}, effect: {type: string, enum: [allow, deny]}}}

@@ -1,0 +1,449 @@
+# Pinned tool-calling set for the `tool_calling` task (BFCL-style AST match).
+# Self-authored for Loom, Apache-2.0.
+#
+# Categories: `simple` offers only the function to call; `multiple` offers
+# several and the model must pick the right one. Every item expects exactly one
+# call (no parallel calls).
+#
+# `expected.arguments` lists every parameter of the function with its
+# acceptable values; `null` in a list means the argument may be omitted.
+# Matching rules live in loom_bench.quality.tasks.tool_calling. Bump `version`
+# whenever a function or item changes.
+version: 1
+
+functions:
+  get_weather:
+    description: Current weather for a city.
+    parameters:
+      type: object
+      properties:
+        city: {type: string, description: City name}
+        unit: {type: string, enum: [celsius, fahrenheit], description: Temperature unit}
+      required: [city]
+  convert_currency:
+    description: Convert an amount of money between currencies.
+    parameters:
+      type: object
+      properties:
+        amount: {type: number}
+        from_currency: {type: string, description: ISO 4217 code, e.g. USD}
+        to_currency: {type: string, description: ISO 4217 code, e.g. EUR}
+      required: [amount, from_currency, to_currency]
+  set_timer:
+    description: Start a countdown timer.
+    parameters:
+      type: object
+      properties:
+        minutes: {type: integer}
+        label: {type: string}
+      required: [minutes]
+  search_books:
+    description: Search the library catalogue.
+    parameters:
+      type: object
+      properties:
+        query: {type: string}
+        max_results: {type: integer, description: Defaults to 10}
+        available_only: {type: boolean, description: Only books that can be borrowed now}
+      required: [query]
+  create_event:
+    description: Add an event to the calendar.
+    parameters:
+      type: object
+      properties:
+        title: {type: string}
+        date: {type: string, description: YYYY-MM-DD}
+        start_time: {type: string, description: 24-hour HH:MM}
+        duration_minutes: {type: integer}
+      required: [title, date, start_time, duration_minutes]
+  calculate_tip:
+    description: Work out a restaurant tip.
+    parameters:
+      type: object
+      properties:
+        bill_amount: {type: number}
+        tip_percent: {type: number}
+        split: {type: integer, description: Number of people sharing; defaults to 1}
+      required: [bill_amount, tip_percent]
+  get_stock_price:
+    description: Latest price of a listed stock.
+    parameters:
+      type: object
+      properties:
+        ticker: {type: string}
+        exchange: {type: string, enum: [NASDAQ, NYSE, LSE]}
+      required: [ticker]
+  translate_text:
+    description: Translate text into another language.
+    parameters:
+      type: object
+      properties:
+        text: {type: string}
+        target_language: {type: string, description: Language name or ISO 639-1 code}
+      required: [text, target_language]
+  book_table:
+    description: Reserve a restaurant table.
+    parameters:
+      type: object
+      properties:
+        restaurant: {type: string}
+        party_size: {type: integer}
+        time: {type: string, description: 24-hour HH:MM}
+      required: [restaurant, party_size, time]
+  find_route:
+    description: Directions between two places.
+    parameters:
+      type: object
+      properties:
+        origin: {type: string}
+        destination: {type: string}
+        mode: {type: string, enum: [driving, walking, cycling, transit]}
+      required: [origin, destination, mode]
+  set_thermostat:
+    description: Set the home thermostat.
+    parameters:
+      type: object
+      properties:
+        temperature: {type: number}
+        unit: {type: string, enum: [celsius, fahrenheit]}
+      required: [temperature, unit]
+  add_to_cart:
+    description: Add a product to the shopping cart.
+    parameters:
+      type: object
+      properties:
+        product_id: {type: string}
+        quantity: {type: integer}
+      required: [product_id, quantity]
+  compute_area:
+    description: Area of a simple shape.
+    parameters:
+      type: object
+      properties:
+        shape: {type: string, enum: [circle, rectangle, triangle]}
+        dimensions:
+          type: array
+          items: {type: number}
+          description: "circle: [radius]; rectangle: [width, height]; triangle: [base, height]"
+      required: [shape, dimensions]
+  define_word:
+    description: Dictionary definition of a word.
+    parameters:
+      type: object
+      properties:
+        word: {type: string}
+        language: {type: string, description: Dictionary language; defaults to English}
+      required: [word]
+  create_reminder:
+    description: Remind the user about something later.
+    parameters:
+      type: object
+      properties:
+        text: {type: string}
+        days_from_now: {type: integer}
+        notify: {type: boolean, description: Send a push notification}
+      required: [text, days_from_now]
+
+items:
+  # ---------------------------------------------------------------- simple
+  - id: s-weather-1
+    category: simple
+    functions: [get_weather]
+    query: "What's the weather in Porto right now? Use celsius."
+    expected: {name: get_weather, arguments: {city: [Porto, "Porto, Portugal"], unit: [celsius]}}
+  - id: s-weather-2
+    category: simple
+    functions: [get_weather]
+    query: "Is it hot in Phoenix today? Give me the temperature in fahrenheit."
+    expected: {name: get_weather, arguments: {city: [Phoenix, "Phoenix, AZ", "Phoenix, Arizona"], unit: [fahrenheit]}}
+  - id: s-weather-3
+    category: simple
+    functions: [get_weather]
+    query: "Check the weather for Reykjavik."
+    expected: {name: get_weather, arguments: {city: [Reykjavik, "Reykjavik, Iceland"], unit: [null, celsius, fahrenheit]}}
+  - id: s-currency-1
+    category: simple
+    functions: [convert_currency]
+    query: "How much is 250 US dollars in euros?"
+    expected: {name: convert_currency, arguments: {amount: [250], from_currency: [USD], to_currency: [EUR]}}
+  - id: s-currency-2
+    category: simple
+    functions: [convert_currency]
+    query: "Convert 1,200.50 Japanese yen to British pounds."
+    expected: {name: convert_currency, arguments: {amount: [1200.5], from_currency: [JPY], to_currency: [GBP]}}
+  - id: s-currency-3
+    category: simple
+    functions: [convert_currency]
+    query: "I have 75 Swiss francs. What is that in Canadian dollars?"
+    expected: {name: convert_currency, arguments: {amount: [75], from_currency: [CHF], to_currency: [CAD]}}
+  - id: s-timer-1
+    category: simple
+    functions: [set_timer]
+    query: "Set a timer for 12 minutes for the pasta."
+    expected: {name: set_timer, arguments: {minutes: [12], label: [null, pasta, the pasta, Pasta]}}
+  - id: s-timer-2
+    category: simple
+    functions: [set_timer]
+    query: "Start a 45 minute timer."
+    expected: {name: set_timer, arguments: {minutes: [45], label: [null]}}
+  - id: s-timer-3
+    category: simple
+    functions: [set_timer]
+    query: "Timer for one and a half hours, label it 'bread proofing'."
+    expected: {name: set_timer, arguments: {minutes: [90], label: [bread proofing]}}
+  - id: s-books-1
+    category: simple
+    functions: [search_books]
+    query: "Find books about beekeeping, just the first 5 results."
+    expected: {name: search_books, arguments: {query: [beekeeping], max_results: [5], available_only: [null, false]}}
+  - id: s-books-2
+    category: simple
+    functions: [search_books]
+    query: "Which books on Roman history can I borrow right now?"
+    expected: {name: search_books, arguments: {query: [Roman history], max_results: [null, 10], available_only: [true]}}
+  - id: s-books-3
+    category: simple
+    functions: [search_books]
+    query: "Search the catalogue for 'graph theory', 20 results, include ones that are checked out."
+    expected: {name: search_books, arguments: {query: [graph theory], max_results: [20], available_only: [null, false]}}
+  - id: s-event-1
+    category: simple
+    functions: [create_event]
+    query: "Put 'Dentist' in my calendar on 2026-11-03 at 09:30 for 45 minutes."
+    expected: {name: create_event, arguments: {title: [Dentist], date: ["2026-11-03"], start_time: ["09:30"], duration_minutes: [45]}}
+  - id: s-event-2
+    category: simple
+    functions: [create_event]
+    query: "Schedule a two-hour 'Quarterly planning' session on 2027-01-15 starting at 14:00."
+    expected: {name: create_event, arguments: {title: [Quarterly planning], date: ["2027-01-15"], start_time: ["14:00"], duration_minutes: [120]}}
+  - id: s-event-3
+    category: simple
+    functions: [create_event]
+    query: "Add 'Team lunch' on 2026-12-18 at 12:15, it lasts an hour."
+    expected: {name: create_event, arguments: {title: [Team lunch], date: ["2026-12-18"], start_time: ["12:15"], duration_minutes: [60]}}
+  - id: s-tip-1
+    category: simple
+    functions: [calculate_tip]
+    query: "What's an 18% tip on a bill of 64.20?"
+    expected: {name: calculate_tip, arguments: {bill_amount: [64.2], tip_percent: [18], split: [null, 1]}}
+  - id: s-tip-2
+    category: simple
+    functions: [calculate_tip]
+    query: "Four of us are splitting a 212 dollar dinner with a 20 percent tip. How much each?"
+    expected: {name: calculate_tip, arguments: {bill_amount: [212], tip_percent: [20], split: [4]}}
+  - id: s-tip-3
+    category: simple
+    functions: [calculate_tip]
+    query: "Calculate a 15% tip for 38 euros, split between 2 people."
+    expected: {name: calculate_tip, arguments: {bill_amount: [38], tip_percent: [15], split: [2]}}
+  - id: s-stock-1
+    category: simple
+    functions: [get_stock_price]
+    query: "What's the current price of ticker NVDA on NASDAQ?"
+    expected: {name: get_stock_price, arguments: {ticker: [NVDA], exchange: [NASDAQ]}}
+  - id: s-stock-2
+    category: simple
+    functions: [get_stock_price]
+    query: "Get me the latest quote for VOD on the London Stock Exchange."
+    expected: {name: get_stock_price, arguments: {ticker: [VOD], exchange: [LSE]}}
+  - id: s-stock-3
+    category: simple
+    functions: [get_stock_price]
+    query: "How is IBM trading?"
+    expected: {name: get_stock_price, arguments: {ticker: [IBM], exchange: [null, NYSE]}}
+  - id: s-translate-1
+    category: simple
+    functions: [translate_text]
+    query: "Translate 'Where is the train station?' into French."
+    expected: {name: translate_text, arguments: {text: ["Where is the train station?"], target_language: [French, fr]}}
+  - id: s-translate-2
+    category: simple
+    functions: [translate_text]
+    query: "How do you say 'good morning' in Japanese?"
+    expected: {name: translate_text, arguments: {text: [good morning], target_language: [Japanese, ja]}}
+  - id: s-translate-3
+    category: simple
+    functions: [translate_text]
+    query: "Please translate 'The meeting is cancelled' to German."
+    expected: {name: translate_text, arguments: {text: [The meeting is cancelled], target_language: [German, de]}}
+  - id: s-table-1
+    category: simple
+    functions: [book_table]
+    query: "Book a table for 4 at Casa Lume at 19:30."
+    expected: {name: book_table, arguments: {restaurant: [Casa Lume], party_size: [4], time: ["19:30"]}}
+  - id: s-table-2
+    category: simple
+    functions: [book_table]
+    query: "Reserve The Blue Fig for two people at 8pm."
+    expected: {name: book_table, arguments: {restaurant: [The Blue Fig, Blue Fig], party_size: [2], time: ["20:00"]}}
+  - id: s-table-3
+    category: simple
+    functions: [book_table]
+    query: "Can you get us a table at Nori House, party of 7, quarter past six in the evening?"
+    expected: {name: book_table, arguments: {restaurant: [Nori House], party_size: [7], time: ["18:15"]}}
+  - id: s-route-1
+    category: simple
+    functions: [find_route]
+    query: "How do I cycle from Central Park to the Brooklyn Bridge?"
+    expected: {name: find_route, arguments: {origin: [Central Park], destination: [Brooklyn Bridge, the Brooklyn Bridge], mode: [cycling]}}
+  - id: s-route-2
+    category: simple
+    functions: [find_route]
+    query: "Public transport directions from Alexanderplatz to Tegel please."
+    expected: {name: find_route, arguments: {origin: [Alexanderplatz], destination: [Tegel], mode: [transit]}}
+  - id: s-route-3
+    category: simple
+    functions: [find_route]
+    query: "I want to walk from the Louvre to the Eiffel Tower."
+    expected: {name: find_route, arguments: {origin: [Louvre, the Louvre], destination: [Eiffel Tower, the Eiffel Tower], mode: [walking]}}
+  - id: s-thermo-1
+    category: simple
+    functions: [set_thermostat]
+    query: "Set the heating to 21.5 degrees celsius."
+    expected: {name: set_thermostat, arguments: {temperature: [21.5], unit: [celsius]}}
+  - id: s-thermo-2
+    category: simple
+    functions: [set_thermostat]
+    query: "Make it 68 F in here."
+    expected: {name: set_thermostat, arguments: {temperature: [68], unit: [fahrenheit]}}
+  - id: s-cart-1
+    category: simple
+    functions: [add_to_cart]
+    query: "Add 3 of product SKU-48213 to my cart."
+    expected: {name: add_to_cart, arguments: {product_id: [SKU-48213], quantity: [3]}}
+  - id: s-cart-2
+    category: simple
+    functions: [add_to_cart]
+    query: "Put a dozen of item A77-K into the basket."
+    expected: {name: add_to_cart, arguments: {product_id: [A77-K], quantity: [12]}}
+  - id: s-area-1
+    category: simple
+    functions: [compute_area]
+    query: "What's the area of a circle with radius 2.5?"
+    expected: {name: compute_area, arguments: {shape: [circle], dimensions: [[2.5]]}}
+  - id: s-area-2
+    category: simple
+    functions: [compute_area]
+    query: "Area of a rectangle 8 wide and 3 high?"
+    expected: {name: compute_area, arguments: {shape: [rectangle], dimensions: [[8, 3]]}}
+  - id: s-area-3
+    category: simple
+    functions: [compute_area]
+    query: "Compute the area of a triangle with base 10 and height 4.2."
+    expected: {name: compute_area, arguments: {shape: [triangle], dimensions: [[10, 4.2]]}}
+  - id: s-define-1
+    category: simple
+    functions: [define_word]
+    query: "What does 'ephemeral' mean?"
+    expected: {name: define_word, arguments: {word: [ephemeral], language: [null, English, en]}}
+  - id: s-define-2
+    category: simple
+    functions: [define_word]
+    query: "Look up the Spanish word 'madrugada' in the Spanish dictionary."
+    expected: {name: define_word, arguments: {word: [madrugada], language: [Spanish, es]}}
+  - id: s-reminder-1
+    category: simple
+    functions: [create_reminder]
+    query: "Remind me to renew my passport in 30 days, and send a push notification."
+    expected: {name: create_reminder, arguments: {text: [renew my passport, Renew my passport, renew passport], days_from_now: [30], notify: [true]}}
+  # ---------------------------------------------------------------- multiple
+  - id: m-weather-1
+    category: multiple
+    functions: [get_weather, find_route, set_thermostat]
+    query: "Do I need an umbrella in Bergen today?"
+    expected: {name: get_weather, arguments: {city: [Bergen, "Bergen, Norway"], unit: [null, celsius, fahrenheit]}}
+  - id: m-thermo-1
+    category: multiple
+    functions: [get_weather, set_thermostat, set_timer]
+    query: "Turn the house temperature down to 19 celsius."
+    expected: {name: set_thermostat, arguments: {temperature: [19], unit: [celsius]}}
+  - id: m-timer-1
+    category: multiple
+    functions: [create_reminder, set_timer, create_event]
+    query: "Give me a 7 minute timer for the eggs."
+    expected: {name: set_timer, arguments: {minutes: [7], label: [null, eggs, the eggs, Eggs]}}
+  - id: m-reminder-1
+    category: multiple
+    functions: [create_reminder, set_timer, create_event]
+    query: "In 3 days remind me to water the plants. No push notification."
+    expected: {name: create_reminder, arguments: {text: [water the plants, Water the plants], days_from_now: [3], notify: [null, false]}}
+  - id: m-event-1
+    category: multiple
+    functions: [create_reminder, set_timer, create_event]
+    query: "Add 'Piano lesson' to my calendar on 2026-10-20 at 17:00 for 30 minutes."
+    expected: {name: create_event, arguments: {title: [Piano lesson], date: ["2026-10-20"], start_time: ["17:00"], duration_minutes: [30]}}
+  - id: m-currency-1
+    category: multiple
+    functions: [get_stock_price, convert_currency, calculate_tip]
+    query: "Change 500 euros into Polish zloty."
+    expected: {name: convert_currency, arguments: {amount: [500], from_currency: [EUR], to_currency: [PLN]}}
+  - id: m-stock-1
+    category: multiple
+    functions: [get_stock_price, convert_currency, calculate_tip]
+    query: "Price of KO on the NYSE?"
+    expected: {name: get_stock_price, arguments: {ticker: [KO], exchange: [NYSE]}}
+  - id: m-tip-1
+    category: multiple
+    functions: [get_stock_price, convert_currency, calculate_tip]
+    query: "Our bill is 90 and we want to leave 12 percent."
+    expected: {name: calculate_tip, arguments: {bill_amount: [90], tip_percent: [12], split: [null, 1]}}
+  - id: m-route-1
+    category: multiple
+    functions: [book_table, find_route, get_weather]
+    query: "Driving directions from Lyon to Geneva."
+    expected: {name: find_route, arguments: {origin: [Lyon], destination: [Geneva], mode: [driving]}}
+  - id: m-table-1
+    category: multiple
+    functions: [book_table, find_route, get_weather]
+    query: "Get a table for 3 at Olive & Thyme at 13:00."
+    expected: {name: book_table, arguments: {restaurant: ["Olive & Thyme", Olive and Thyme], party_size: [3], time: ["13:00"]}}
+  - id: m-translate-1
+    category: multiple
+    functions: [define_word, translate_text, search_books]
+    query: "Translate 'thank you very much' to Italian."
+    expected: {name: translate_text, arguments: {text: [thank you very much], target_language: [Italian, it]}}
+  - id: m-define-1
+    category: multiple
+    functions: [define_word, translate_text, search_books]
+    query: "Define the word 'sonder'."
+    expected: {name: define_word, arguments: {word: [sonder], language: [null, English, en]}}
+  - id: m-books-1
+    category: multiple
+    functions: [define_word, translate_text, search_books]
+    query: "Look for books on sourdough baking that are on the shelf now."
+    expected: {name: search_books, arguments: {query: [sourdough baking, sourdough], max_results: [null, 10], available_only: [true]}}
+  - id: m-cart-1
+    category: multiple
+    functions: [add_to_cart, search_books, compute_area]
+    query: "Add 2 units of product ZX-900 to my order."
+    expected: {name: add_to_cart, arguments: {product_id: [ZX-900], quantity: [2]}}
+  - id: m-area-1
+    category: multiple
+    functions: [add_to_cart, search_books, compute_area]
+    query: "I need the area of a 6 by 9 rectangle."
+    expected: {name: compute_area, arguments: {shape: [rectangle], dimensions: [[6, 9], [9, 6]]}}
+  - id: m-area-2
+    category: multiple
+    functions: [compute_area, convert_currency, set_thermostat, get_weather]
+    query: "A circular pond has a radius of 4 metres. What is its area?"
+    expected: {name: compute_area, arguments: {shape: [circle], dimensions: [[4]]}}
+  - id: m-weather-2
+    category: multiple
+    functions: [compute_area, convert_currency, set_thermostat, get_weather]
+    query: "Temperature in Cairo in fahrenheit, please."
+    expected: {name: get_weather, arguments: {city: [Cairo, "Cairo, Egypt"], unit: [fahrenheit]}}
+  - id: m-currency-2
+    category: multiple
+    functions: [compute_area, convert_currency, set_thermostat, get_weather]
+    query: "What do 40 Australian dollars come to in New Zealand dollars?"
+    expected: {name: convert_currency, arguments: {amount: [40], from_currency: [AUD], to_currency: [NZD]}}
+  - id: m-reminder-2
+    category: multiple
+    functions: [create_reminder, book_table, add_to_cart, find_route]
+    query: "Remind me tomorrow to call the bank, with a notification."
+    expected: {name: create_reminder, arguments: {text: [call the bank, Call the bank], days_from_now: [1], notify: [true]}}
+  - id: m-table-2
+    category: multiple
+    functions: [create_reminder, book_table, add_to_cart, find_route]
+    query: "Reserve Sakura Garden for a group of 10 at 20:45."
+    expected: {name: book_table, arguments: {restaurant: [Sakura Garden], party_size: [10], time: ["20:45"]}}

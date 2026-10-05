@@ -7,11 +7,17 @@ from typing import Any
 
 from loom_bench.quality.tasks.arithmetic import ArithmeticTask
 from loom_bench.quality.tasks.base import EvalTask, ItemResult, TaskOutput
+from loom_bench.quality.tasks.json_schema import JsonSchemaTask
+from loom_bench.quality.tasks.needle import NeedleTask
+from loom_bench.quality.tasks.tool_calling import ToolCallingTask
 
 TaskFactory = Callable[[str, dict[str, Any]], EvalTask]
 
 TASKS: dict[str, TaskFactory] = {
     "toy_arithmetic": ArithmeticTask.from_params,
+    "json_schema": JsonSchemaTask.from_params,
+    "tool_calling": ToolCallingTask.from_params,
+    "needle": NeedleTask.from_params,
 }
 
 
