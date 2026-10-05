@@ -144,8 +144,8 @@ image digest).
 
 | Provider | Host | Engine | Where load runs | Billed |
 |---|---|---|---|---|
-| `mock` | in-process uvicorn thread | `loom_bench.mock` (simulated GPU) | runner process | simulated (`hourly_price`), never counts toward the overall cap |
-| `local` | an endpoint you already run | not started or stopped; one cell only | runner process | no (market `local`) |
+| `mock` | in-process uvicorn thread | `loom_bench.mock` (simulated GPU) | runner process | simulated (`hourly_price`; unpriced without it), never counts toward the overall cap |
+| `local` | an endpoint you already run | not started or stopped; one cell only | runner process | no (market `local`); priced in reports only if the experiment sets `hourly_price` |
 | `aws_ec2` | one tagged EC2 GPU VM (DLAMI, Docker) driven over SSM | engine container from the registry image | `python:3.12-slim` container on the host | yes: spot × multiplier or on-demand, plus root EBS |
 
 **Registry** (`registry.py`). `config/models.yaml` is the single source of model

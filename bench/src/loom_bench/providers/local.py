@@ -1,7 +1,8 @@
 """Local provider: an OpenAI-compatible endpoint that is already running.
 
-Nothing is provisioned or billed (market `local`); the engine is never
-restarted, so a local experiment has exactly one cell.
+Nothing is provisioned or billed (market `local`, no budget accrual); the engine
+is never restarted, so a local experiment has exactly one cell. The host is priced
+only when the experiment declares `hourly_price`, recorded as its as-run price.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import httpx
 from loom_bench.experiment import LocalProviderSpec
 from loom_bench.jobexec import execute_load_job
 from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult
+from loom_bench.provenance import PriceBasis
 from loom_bench.providers.base import Endpoint, EngineLaunch, Host, HostRequest
 from loom_bench.quality.runner import execute_eval_job
 from loom_bench.records import Market
@@ -28,6 +30,7 @@ class LocalProvider:
 
     async def provision(self, req: HostRequest) -> Host:
         now = datetime.now(UTC)
+        price = self.settings.hourly_price
         return Host(
             provider=self.name,
             host_id=f"local-{uuid.uuid4().hex[:12]}",
@@ -35,6 +38,10 @@ class LocalProvider:
             hourly_micros=0,
             launched_at=now,
             ttl_at=now + timedelta(seconds=req.ttl_s),
+            as_run_micros=price,
+            price_basis=None
+            if price is None
+            else PriceBasis(market=Market.LOCAL, source="experiment"),
             info={"base_url": self.settings.base_url},
         )
 

@@ -98,11 +98,15 @@ seed: 0
 **Providers.**
 
 - `mock`: every `MockConfig` field (`time_scale`, `max_num_seqs`, `step_base_ms`,
-  `startup_delay_s`, ...) plus `hourly_price` (a USD string; simulated, so cost math and the
-  guard run end to end). Variants may carry `mock: {...}` overrides and sweeps may use
-  `mock.<field>` knobs.
+  `startup_delay_s`, ...) plus `hourly_price` (a positive USD string; simulated, so cost
+  math and the guard run end to end; without it results have no cost at SLO and are not
+  ranked). Variants may carry `mock: {...}` overrides and sweeps may use `mock.<field>`
+  knobs.
 - `local`: `base_url` (with `/v1`), `metrics_url`, `engine` (vllm | sglang | mock),
-  `served_model`, `tokenizer` (hf | simple). Nothing is provisioned or billed; one cell only.
+  `served_model`, `tokenizer` (hf | simple), and optionally `hourly_price` (what the
+  endpoint's hardware costs, as a positive USD string). Nothing is provisioned or billed;
+  one cell only. Without `hourly_price` the endpoint has no price: results show "no cost at
+  SLO" and are not ranked, never $0.
 - `aws_ec2`: `region`, `instance_type` (default: the registry's), `market` (spot |
   on_demand), `disk_gb`. Account settings come from `$LOOM_AWS_CONFIG` / `LOOM_AWS_*`.
 

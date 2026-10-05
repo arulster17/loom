@@ -311,6 +311,8 @@ def host_price(exp: Experiment, cell: Cell, prices: PriceBook) -> tuple[Micros, 
     """(hourly micros, market, notes) for the host a cell runs on."""
     p = exp.provider
     if isinstance(p, MockProviderSpec):
+        if p.hourly_price is None:
+            return 0, Market.LOCAL.value, ["unpriced mock: no hourly_price, so no cost at SLO"]
         return p.hourly_price, Market.LOCAL.value, ["simulated price (mock)"]
     if not isinstance(p, AwsEc2ProviderSpec):
         return 0, Market.LOCAL.value, ["not billed (local endpoint)"]

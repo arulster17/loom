@@ -1,20 +1,31 @@
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from loom_bench.cli import app
-from loom_bench.experiment import LocalProviderSpec, mock_launch
+from loom_bench.cost import NO_LOCAL_PRICE
+from loom_bench.experiment import Experiment, LocalProviderSpec, mock_launch
 from loom_bench.jobexec import execute_load_job
 from loom_bench.jobs import LoadJob, LoadJobResult, TokenizerSpec
 from loom_bench.mock.config import MockConfig
+from loom_bench.provenance import PriceBasis, Provenance
 from loom_bench.providers.base import HostRequest
 from loom_bench.providers.local import LocalProvider
 from loom_bench.providers.mock import MockProvider, live_host_ids
-from loom_bench.records import LoadMode
+from loom_bench.records import LoadMode, Market
 from loom_bench.registry import load_registry
+from loom_bench.report.analyze import analyze_runs, default_price_resolver
+from loom_bench.report.leaderboard import RowStatus, build_leaderboard
+from loom_bench.runner import run_experiment
+from loom_bench.store import repo
+from loom_bench.store.db import session_scope
+
+from .conftest import mock_doc, mock_experiment
 
 SPEC = load_registry().get("qwen3-8b")
 FAST = {"time_scale": 0.01, "models": [SPEC.id]}
@@ -154,11 +165,68 @@ async def test_local_provider_checks_the_served_model(mock_host):
     local = LocalProvider(settings)
     lhost = await local.provision(HostRequest(ttl_s=60))
     assert lhost.hourly_micros == 0 and lhost.request.market.value == "local"
+    assert lhost.as_run_micros is None and lhost.price_basis is None  # unpriced, not $0
     ep = await local.start_engine(lhost, mock_launch(SPEC, MockConfig(**FAST)), warm=False)
     assert ep.system["engine_version"]
     wrong = LocalProvider(settings.model_copy(update={"served_model": "nope"}))
     with pytest.raises(RuntimeError, match="does not serve"):
         await wrong.start_engine(lhost, mock_launch(SPEC, MockConfig(**FAST)), warm=False)
+
+
+def _local_doc(base_url: str, metrics_url: str | None, **over: Any) -> dict[str, Any]:
+    provider = {
+        "kind": "local",
+        "base_url": base_url,
+        "metrics_url": metrics_url,
+        "engine": "mock",
+        "served_model": SPEC.id,
+        "tokenizer": "simple",
+        **over,
+    }
+    return mock_doc(provider=provider)
+
+
+@pytest.mark.parametrize("price", ["$0", "$-1"])
+def test_declared_hourly_price_must_be_positive(price):
+    with pytest.raises(ValidationError, match="hourly_price"):
+        Experiment.model_validate(_local_doc("http://127.0.0.1:1/v1", None, hourly_price=price))
+    with pytest.raises(ValidationError, match="hourly_price"):
+        mock_experiment(provider={"kind": "mock", "hourly_price": price})
+    assert mock_experiment(provider={"kind": "mock"}).provider.hourly_price is None
+
+
+async def test_local_results_are_unpriced_unless_the_experiment_sets_a_price(mock_host, ctx):
+    provider, host = mock_host
+    endpoint = await provider.start_engine(host, mock_launch(SPEC, MockConfig(**FAST)), warm=False)
+    ranked = {}
+    for name, over in (("unpriced", {}), ("priced", {"hourly_price": "$2"})):
+        exp = Experiment.model_validate(
+            {**_local_doc(endpoint.base_url, endpoint.metrics_url, **over), "name": name}
+        )
+        outcome = await run_experiment(exp, ctx)
+        with session_scope(ctx.db_url) as s:
+            runs = repo.list_runs(s, experiment_id=outcome.experiment_id)
+        prov = Provenance.model_validate(runs[0].provenance)
+        (result,) = analyze_runs(
+            runs,
+            slo=exp.slo,
+            allocation=exp.cost_allocation.allocation(),
+            price_resolver=default_price_resolver(ctx.prices),
+        )
+        ranked[name] = (prov, result, build_leaderboard([result]).boards[0].rows[0])
+        assert outcome.spent_micros == 0  # a local endpoint is never billed
+
+    prov, result, row = ranked["unpriced"]
+    assert prov.hourly_micros is None and prov.price_basis is None
+    assert result.cost is None and result.as_run_cost is None
+    assert row.status is RowStatus.NO_COST and row.rank is None
+    assert row.recommendation == f"No cost at SLO: {NO_LOCAL_PRICE}"
+
+    prov, result, row = ranked["priced"]
+    assert prov.hourly_micros == 2_000_000
+    assert prov.price_basis == PriceBasis(market=Market.LOCAL, source="experiment")
+    assert result.prices.on_demand == result.prices.as_run == 2_000_000
+    assert result.cost is not None and row.status is not RowStatus.NO_COST
 
 
 def test_mock_launch_carries_the_whole_config():

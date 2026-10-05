@@ -56,6 +56,8 @@ def _usd(value: Any) -> int:
 
 
 UsdMicros = Annotated[int, BeforeValidator(_usd), Field(ge=0)]
+# A declared hourly price for a mock or local host: positive, or omitted for no price.
+HourlyPrice = Annotated[int, BeforeValidator(_usd), Field(gt=0)]
 
 
 class _Strict(BaseModel):
@@ -66,10 +68,11 @@ class _Strict(BaseModel):
 
 
 class MockProviderSpec(MockConfig):
-    """Mock backend settings plus a simulated hourly price so cost math runs end to end."""
+    """Mock backend settings plus a simulated hourly price so cost math runs end to end.
+    Without `hourly_price` results have no cost at SLO and are not ranked."""
 
     kind: Literal["mock"]
-    hourly_price: UsdMicros = 0
+    hourly_price: HourlyPrice | None = None
 
     def mock_config(self, overrides: Mapping[str, Any] | None = None) -> MockConfig:
         base = self.model_dump(exclude={"kind", "hourly_price"})
@@ -77,7 +80,11 @@ class MockProviderSpec(MockConfig):
 
 
 class LocalProviderSpec(_Strict):
-    """An OpenAI-compatible endpoint you already run (any engine, or `bench mock-server`)."""
+    """An OpenAI-compatible endpoint you already run (any engine, or `bench mock-server`).
+
+    Not provisioned or billed by Loom, so it has no price unless `hourly_price` declares
+    what its hardware costs; without one, results have no cost at SLO and are not ranked.
+    """
 
     kind: Literal["local"]
     base_url: str  # including the API prefix, e.g. http://127.0.0.1:8000/v1
@@ -85,6 +92,7 @@ class LocalProviderSpec(_Strict):
     engine: Literal["vllm", "sglang", "mock"]
     served_model: str
     tokenizer: Literal["hf", "simple"] = "hf"
+    hourly_price: HourlyPrice | None = None
 
 
 class AwsEc2ProviderSpec(_Strict):
