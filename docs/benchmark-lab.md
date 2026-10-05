@@ -51,7 +51,9 @@ To benchmark an endpoint you already run (vLLM, SGLang, or `bench mock-server`),
 
 Exit codes: 0 ok, 1 failed, 2 invalid input, 3 refused by the planner, 4 stopped before a
 step that would pass the cap, 5 hard budget abort, 6 reproduction outside normal variance,
-7 quality gate blocked.
+7 quality gate blocked. Invalid input (a malformed or missing file, an unknown model or
+suite, an instance type with no price in `bench/prices.yaml`, a malformed experiment id)
+is reported as one message, never a traceback.
 
 The database is `--db`, else `$LOOM_DATABASE_URL`, else the local compose Postgres.
 

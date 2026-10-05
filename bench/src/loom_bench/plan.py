@@ -25,7 +25,7 @@ from loom_bench.experiment import (
     WorkloadEntry,
 )
 from loom_bench.money import Micros, cost_for_seconds, format_usd
-from loom_bench.prices import HOURS_PER_MONTH, PriceBook
+from loom_bench.prices import HOURS_PER_MONTH, BlockStorage, InstanceType, PriceBook
 from loom_bench.quality.divergence import load_prompts
 from loom_bench.quality.suite import SuiteTask
 from loom_bench.records import LoadMode, Market
@@ -307,6 +307,31 @@ class Plan:
         return not self.refusals
 
 
+class PlanError(ValueError):
+    """The experiment cannot be planned as written, e.g. its instance type has no price."""
+
+
+def _instance(prices: PriceBook, region: str, instance_type: str) -> InstanceType:
+    try:
+        return prices.instance("aws", region, instance_type)
+    except KeyError:
+        raise PlanError(
+            f"instance type {instance_type} has no price for aws/{region} in "
+            "bench/prices.yaml: add it (docs/how-to/add-gpu-type.md) or set "
+            "provider.instance_type to a priced type"
+        ) from None
+
+
+def _storage(prices: PriceBook, region: str) -> BlockStorage:
+    try:
+        storage = prices.region("aws", region).storage
+    except KeyError:
+        storage = None
+    if storage is None:
+        raise PlanError(f"aws/{region} has no block storage price in bench/prices.yaml")
+    return storage
+
+
 def host_price(exp: Experiment, cell: Cell, prices: PriceBook) -> tuple[Micros, str, list[str]]:
     """(hourly micros, market, notes) for the host a cell runs on."""
     p = exp.provider
@@ -319,12 +344,10 @@ def host_price(exp: Experiment, cell: Cell, prices: PriceBook) -> tuple[Micros, 
     hw = cell.hardware
     terms = aws_accrual_terms()
     notes: list[str] = []
-    instance = prices.instance("aws", hw["region"], hw["instance_type"])
+    instance = _instance(prices, hw["region"], hw["instance_type"])
     if not instance.verified:
         notes.append(f"unverified instance price: {instance.note}")
-    storage = prices.region("aws", hw["region"]).storage
-    if storage is None:
-        raise KeyError(f"no storage price for aws/{hw['region']}")
+    storage = _storage(prices, hw["region"])
     if not storage.verified:
         notes.append(f"unverified storage price included: {storage.note}")
     quote = prices.instance_price(
@@ -369,7 +392,7 @@ def _hardware_problems(exp: Experiment, cell: Cell, prices: PriceBook) -> list[s
     if not isinstance(exp.provider, AwsEc2ProviderSpec):
         return []
     hw = cell.hardware
-    it = prices.instance("aws", hw["region"], hw["instance_type"])
+    it = _instance(prices, hw["region"], hw["instance_type"])
     out = []
     if it.gpu != cell.spec.hardware.gpu:
         out.append(

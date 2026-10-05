@@ -10,10 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import typer
+import yaml
 from pydantic import ValidationError
 from rich.console import Console
 from rich.logging import RichHandler
@@ -24,7 +27,7 @@ from rich.table import Table
 from loom_bench.budget import load_budget
 from loom_bench.experiment import ExpansionError, Experiment, load_experiment
 from loom_bench.money import format_usd
-from loom_bench.plan import Plan
+from loom_bench.plan import Plan, PlanError
 from loom_bench.prices import load_prices
 from loom_bench.registry import load_registry
 from loom_bench.report.analyze import ColdStartStat, ConfigResult
@@ -91,32 +94,52 @@ def _setup_logging() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-def _load(path: Path) -> Experiment:
+# What a bad file, id or option raises while it is read: reported as invalid input
+# (exit 2) with the message, never as a traceback.
+INPUT_ERRORS = (ValidationError, OSError, yaml.YAMLError, ValueError, LookupError)
+
+
+@contextmanager
+def _invalid_input(what: str) -> Iterator[None]:
     try:
-        return load_experiment(path)
-    except (ValidationError, FileNotFoundError) as e:
-        err.print(f"[red]invalid experiment {path}:[/red]\n{e}")
+        yield
+    except INPUT_ERRORS as e:
+        err.print(f"[red]{what}:[/red]\n{e}")
         raise typer.Exit(EXIT_INVALID) from None
+
+
+def _experiment_id(value: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        err.print(f"[red]not an experiment id:[/red] {value!r}")
+        raise typer.Exit(EXIT_INVALID) from None
+
+
+def _load(path: Path) -> Experiment:
+    with _invalid_input(f"invalid experiment {path}"):
+        return load_experiment(path)
 
 
 def _context(db: str | None, out: Path) -> RunnerContext:
     from loom_bench.store.db import upgrade
 
     upgrade(db)
-    return RunnerContext(
-        db_url=db,
-        out_dir=out,
-        registry=load_registry(),
-        prices=load_prices(),
-        budget=load_budget(),
-    )
+    with _invalid_input("invalid configuration (config/models.yaml, bench/*.yaml)"):
+        return RunnerContext(
+            db_url=db,
+            out_dir=out,
+            registry=load_registry(),
+            prices=load_prices(),
+            budget=load_budget(),
+        )
 
 
 def _plan(exp: Experiment, ctx: RunnerContext) -> Plan:
     try:
         _, plan = plan_experiment(exp, ctx)
-    except ExpansionError as e:
-        err.print(f"[red]cannot expand {exp.name}:[/red] {e}")
+    except (ExpansionError, PlanError) as e:
+        err.print(f"[red]cannot plan {exp.name}:[/red] {e}")
         raise typer.Exit(EXIT_INVALID) from None
     return plan
 
@@ -325,7 +348,7 @@ def reproduce_cmd(
     except PlanRefused as e:
         render_plan(e.plan)
         raise typer.Exit(EXIT_REFUSED) from None
-    except (LookupError, ValueError, ValidationError) as e:
+    except INPUT_ERRORS as e:
         err.print(f"[red]cannot reproduce {ref}:[/red] {e}")
         raise typer.Exit(EXIT_INVALID) from None
     render_reproduce(result)
@@ -399,7 +422,7 @@ def export(
     from loom_bench.store.db import session_scope
     from loom_bench.store.export import export_runs_csv, export_runs_parquet
 
-    exp_id = uuid.UUID(experiment) if experiment else None
+    exp_id = _experiment_id(experiment) if experiment else None
     with session_scope(db) as s:
         runs = repo.list_runs(s, experiment_id=exp_id)
         path = (export_runs_csv if fmt == "csv" else export_runs_parquet)(runs, out)
@@ -415,7 +438,8 @@ def job_run(
     from loom_bench.jobexec import execute_load_job
     from loom_bench.jobs import LoadJob
 
-    job = LoadJob.model_validate_json(in_.read_text())
+    with _invalid_input(f"invalid load job {in_}"):
+        job = LoadJob.model_validate_json(in_.read_text())
     try:
         result = asyncio.run(execute_load_job(job))
     except Exception as e:
@@ -437,7 +461,8 @@ def mock_server(
     from loom_bench.mock.config import MockConfig
     from loom_bench.mock.server import create_app
 
-    cfg = MockConfig.from_yaml(config) if config else MockConfig()
+    with _invalid_input(f"invalid mock config {config}"):
+        cfg = MockConfig.from_yaml(config) if config else MockConfig()
     uvicorn.run(create_app(cfg), host=host, port=port, log_level="info")
 
 
@@ -467,7 +492,7 @@ def _analyze(
     with session_scope(db) as s:
         stmt = select(BenchExperiment)
         if experiments:
-            stmt = stmt.where(BenchExperiment.id.in_([uuid.UUID(e) for e in experiments]))
+            stmt = stmt.where(BenchExperiment.id.in_([_experiment_id(e) for e in experiments]))
         else:
             stmt = stmt.where(
                 BenchExperiment.status == "completed",
@@ -555,9 +580,10 @@ def compare_cmd(
     from loom_bench.store import repo
     from loom_bench.store.db import session_scope
 
+    id_a, id_b = _experiment_id(a), _experiment_id(b)
     with session_scope(db) as s:
-        runs_a = repo.list_runs(s, experiment_id=uuid.UUID(a))
-        runs_b = repo.list_runs(s, experiment_id=uuid.UUID(b))
+        runs_a = repo.list_runs(s, experiment_id=id_a)
+        runs_b = repo.list_runs(s, experiment_id=id_b)
     if not runs_a or not runs_b:
         err.print("[red]both experiments need runs")
         raise typer.Exit(EXIT_INVALID)
@@ -587,7 +613,8 @@ def quality_run(
     from loom_bench.quality.runner import run_suite
     from loom_bench.runner import write_samples
 
-    s = load_quality_suite(suite)
+    with _invalid_input(f"invalid quality suite {suite}"):
+        s = load_quality_suite(suite)
     result = asyncio.run(
         run_suite(
             s,
@@ -618,7 +645,8 @@ def quality_job(
     from loom_bench.jobs import EvalJob
     from loom_bench.quality.runner import execute_eval_job
 
-    job = EvalJob.model_validate_json(in_.read_text())
+    with _invalid_input(f"invalid eval job {in_}"):
+        job = EvalJob.model_validate_json(in_.read_text())
     workdir = out.parent / f"eval-{job.run_id}"
     try:
         result = asyncio.run(execute_eval_job(job, workdir))
@@ -641,11 +669,8 @@ def quality_gate(
     """Re-decide the gate from stored per-item samples; exit 7 when blocked."""
     from loom_bench.runner import gate_stored
 
-    try:
+    with _invalid_input("cannot re-decide the gate"):
         decision, base_hash, cand_hash = gate_stored(db, baseline, candidate, suite=suite)
-    except LookupError as e:
-        err.print(f"[red]{e}")
-        raise typer.Exit(EXIT_INVALID) from None
     console.print(f"baseline {base_hash[:12]} -> candidate {cand_hash[:12]}")
     console.print(decision.summary())
     raise typer.Exit(EXIT_GATE_BLOCKED if decision.blocked else EXIT_OK)
@@ -674,8 +699,9 @@ def site_export(
     from loom_bench.store.db import session_scope
 
     out = out or DEFAULT_SNAPSHOT_DIR
-    target = Slo.from_yaml(slo.read_text(encoding="utf-8")) if slo else None
-    with session_scope(db) as s:
+    with _invalid_input(f"invalid SLO file {slo}"):
+        target = Slo.from_yaml(slo.read_text(encoding="utf-8")) if slo else None
+    with session_scope(db) as s, _invalid_input("cannot export the snapshot"):
         manifest = export_snapshot(s, out, experiment or "latest", slo=target)
     configs = sum(m.configs for m in manifest.models)
     console.print(
@@ -699,7 +725,8 @@ def site_build(
     )
 
     out = out or DEFAULT_BUILD_DIR
-    pages = build_site(data or DEFAULT_SNAPSHOT_DIR, out, config or DEFAULT_SITE_CONFIG)
+    with _invalid_input("cannot build the site"):
+        pages = build_site(data or DEFAULT_SNAPSHOT_DIR, out, config or DEFAULT_SITE_CONFIG)
     console.print(f"wrote {len(pages)} pages to {out}")
 
 

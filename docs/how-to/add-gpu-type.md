@@ -114,6 +114,7 @@ uv run bench plan <experiment using the instance>.yaml     # exit 0, host priced
 ```
 
 The plan's host line shows the accrual rate: spot price × 1.25 (rounded up) plus the
-root EBS volume ([cost-model.md](../cost-model.md#4-the-hourly-price-h)). An instance
-type missing from `bench/prices.yaml` makes `bench plan` fail with
-`KeyError: 'no prices for aws/us-east-1/<type>'`.
+root EBS volume ([cost-model.md](../cost-model.md#4-the-hourly-price-h)); reports price the
+same host at its on-demand list price plus the volume. An instance type missing from
+`bench/prices.yaml` is invalid input: `bench plan` and `bench run` exit 2 with
+`instance type <type> has no price for aws/us-east-1 in bench/prices.yaml`.
