@@ -3,7 +3,9 @@
 experiment row -> plan + cap check -> per host group: provision -> cold start ->
 per cell (warm restart between configs): per workload, load points (fixed or
 bisected on the SLO) x repetitions -> LoadJob -> provider.run_job -> Parquet +
-summary + provenance -> quality evals -> teardown (always) -> completed.
+summary + provenance -> EvalJob -> provider.run_eval (the baseline variant
+captures the divergence reference; every other cell is scored against it and
+gated against the baseline) -> teardown (always) -> completed.
 
 Warmup is excluded from every summary and each load point is repeated; a single
 repetition is never trusted (see `metrics.aggregate`).
@@ -49,13 +51,13 @@ from loom_bench.experiment import (
     mock_config_from_launch,
     tokenizer_for,
 )
-from loom_bench.jobs import LoadJob, LoadJobResult
+from loom_bench.jobs import EvalJob, LoadJob, LoadJobResult
 from loom_bench.metrics.aggregate import AggregateSummary, aggregate_runs
 from loom_bench.metrics.gpu import parse_nvidia_smi, summarize_gpu
 from loom_bench.metrics.prometheus import summarize_scrapes
 from loom_bench.metrics.summary import RunSummary, summarize_run
 from loom_bench.mock.config import MockConfig
-from loom_bench.plan import Estimator, Plan, build_plan
+from loom_bench.plan import EVAL_CONCURRENCY, Estimator, Plan, build_plan
 from loom_bench.prices import PriceBook
 from loom_bench.provenance import (
     DatasetInfo,
@@ -72,6 +74,7 @@ from loom_bench.provenance import (
     canonical_json,
     config_hash,
     git_info,
+    to_jsonable,
 )
 from loom_bench.providers import make_provider
 from loom_bench.providers.base import (
@@ -83,6 +86,7 @@ from loom_bench.providers.base import (
     Provider,
     SpotInterrupted,
 )
+from loom_bench.quality.divergence import ReferenceLogprobs
 from loom_bench.quality.gate import GateDecision
 from loom_bench.quality.runner import (
     SuiteResult,
@@ -90,7 +94,7 @@ from loom_bench.quality.runner import (
     gate_against_baseline,
     record_gate,
     record_suite_result,
-    run_suite,
+    suite_result_of,
 )
 from loom_bench.quality.sanity import SanityResult
 from loom_bench.quality.suite import Suite
@@ -160,6 +164,13 @@ class GoodputRow(BaseModel):
     hourly_micros: int
     output_per_mtok_micros: int | None
     total_per_mtok_micros: int | None
+
+
+@dataclass
+class _Baseline:
+    cell: Cell
+    result: SuiteResult
+    reference: ReferenceLogprobs | None  # None when the suite has no divergence section
 
 
 class GateRow(BaseModel):
@@ -263,7 +274,8 @@ class _Executor:
         self.goodput: list[GoodputRow] = []
         self.events: list[dict[str, Any]] = []
         self.suite = exp.quality.load() if exp.quality is not None else None
-        self.baselines: dict[str, tuple[Cell, SuiteResult]] = {}
+        self.baselines: dict[str, _Baseline] = {}
+        self.eval_hosts: set[str] = set()  # hosts whose client env has the eval harness
         self.gates: list[GateRow] = []
 
     def event(self, kind: str, **data: Any) -> None:
@@ -393,21 +405,47 @@ class _Executor:
         if self.suite is not None:
             await self._run_quality(host, cell, endpoint, self.suite)
 
+    def _eval_job(self, cell: Cell, endpoint: Endpoint, suite: Suite) -> EvalJob:
+        quality = self.exp.quality
+        assert quality is not None
+        divergence, reference = None, None
+        if suite.divergence is not None:
+            if cell.variant == quality.baseline_variant:
+                divergence = "capture"
+            else:
+                divergence, reference = "score", self._baseline(cell).reference
+        return EvalJob(
+            run_id=str(uuid.uuid4()),
+            suite=suite,
+            tasks=quality.task_names(suite),
+            base_url=endpoint.base_url,
+            served_model=endpoint.served_model,
+            extra_body=suite.extra_body(),
+            allow_code_exec=quality.allow_code_exec,
+            seed=suite.seed,
+            concurrency=EVAL_CONCURRENCY,
+            divergence=divergence,
+            reference=reference,
+        )
+
+    def _baseline(self, cell: Cell) -> _Baseline:
+        base = self.baselines.get(canonical_json(cell.knobs))
+        if base is None:
+            raise RuntimeError(f"{cell.key}: its baseline cell has no quality results to gate on")
+        return base
+
     async def _run_quality(self, host: Host, cell: Cell, endpoint: Endpoint, suite: Suite) -> None:
         quality = self.exp.quality
         assert quality is not None
-        self.guard.check_next(self.est.eval_s(cell), what=f"quality suite on {cell.key}")
-        workdir = self.run_dir / "evals" / cell.config_hash[:16]
-        result = await self.guard.guarded(
-            run_suite(
-                suite,
-                endpoint.base_url,
-                endpoint.served_model,
-                workdir=workdir,
-                allow_code_exec=quality.allow_code_exec,
-            )
-        )
-        samples = write_samples(workdir / "samples.json", quality.suite, result)
+        is_baseline = cell.variant == quality.baseline_variant
+        job = self._eval_job(cell, endpoint, suite)
+        setup = 0.0 if host.host_id in self.eval_hosts else self.est.eval_setup_s()
+        self.guard.check_next(self.est.eval_s(cell) + setup, what=f"quality suite on {cell.key}")
+        out = await self.guard.guarded(self.provider.run_eval(host, job))
+        self.eval_hosts.add(host.host_id)
+        result = suite_result_of(out)
+        evals_dir = self.run_dir / "evals" / cell.config_hash[:16]
+        samples = write_samples(evals_dir / "samples.json", quality.suite, result)
         prov = build_provenance(cell.config, **self._serving_sections(host, cell, endpoint))
         with session_scope(self.ctx.db_url) as s:
             record_suite_result(
@@ -419,29 +457,50 @@ class _Executor:
                 samples_uri=str(samples),
             )
         scores = {name: run.estimate.mean for name, run in result.tasks.items()}
-        self.event("quality", cell=cell.key, suite=result.suite, scores=scores)
-        point = canonical_json(cell.knobs)
-        if cell.variant == quality.baseline_variant:
-            self.baselines[point] = (cell, result)
+        seconds = {name: round(run.seconds, 1) for name, run in result.tasks.items()}
+        self.event(
+            "quality",
+            cell=cell.key,
+            suite=result.suite,
+            eval_job=job.run_id,
+            scores=scores,
+            seconds=seconds,
+        )
+        if is_baseline:
+            reference = None
+            if out.reference is not None:
+                reference = out.reference.model_copy(
+                    update={"config_hash": cell.config_hash, "provenance": to_jsonable(prov)}
+                )
+                path = evals_dir / "reference.json"
+                path.write_text(reference.model_dump_json())
+                self.event(
+                    "reference_captured",
+                    cell=cell.key,
+                    config_hash=cell.config_hash,
+                    prompts=len(reference.prompts),
+                    path=str(path),
+                )
+            self.baselines[canonical_json(cell.knobs)] = _Baseline(cell, result, reference)
             return
-        base_cell, base_result = self.baselines[point]
-        decision = gate_against_baseline(base_result, result, suite)
+        base = self._baseline(cell)
+        decision = gate_against_baseline(base.result, result, suite, out.divergence)
         with session_scope(self.ctx.db_url) as s:
             record_gate(
                 s,
                 experiment_id=self.experiment_id,
-                baseline_config_hash=base_cell.config_hash,
+                baseline_config_hash=base.cell.config_hash,
                 candidate_config_hash=cell.config_hash,
                 decision=decision,
             )
         row = GateRow(
             cell=cell.key,
-            baseline=base_cell.key,
+            baseline=base.cell.key,
             decision=decision.decision.value,
             blocked=decision.blocked,
         )
         self.gates.append(row)
-        self.event("gate", **row.model_dump())
+        self.event("gate", **row.model_dump(), reasons=decision.reasons)
 
     async def _run_workload(
         self,
