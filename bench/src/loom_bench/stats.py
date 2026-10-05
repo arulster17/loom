@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
+from typing import Any
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, computed_field
@@ -14,7 +15,7 @@ from scipy import stats as sps
 
 # A numpy-style reduction that accepts `axis` (np.mean, np.median,
 # functools.partial(np.percentile, q=95), ...). Bootstrap applies it row-wise.
-Statistic = Callable[..., np.ndarray | float]
+Statistic = Callable[..., Any]
 
 # Upper bound on floats held per bootstrap chunk (n_boot rows x n samples).
 _CHUNK_ELEMENTS = 4_000_000
@@ -99,7 +100,7 @@ def mean_ci(values: Sequence[float] | np.ndarray, confidence: float = 0.95) -> E
 
 
 def _bootstrap_distribution(
-    n: int, n_boot: int, seed: int, fn: Callable[[np.ndarray], np.ndarray]
+    n: int, n_boot: int, seed: int, fn: Callable[[np.ndarray], Any]
 ) -> np.ndarray:
     """Draw `n_boot` index resamples of size n and evaluate `fn` on each row block."""
     rng = np.random.default_rng(seed)
