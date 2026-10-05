@@ -22,9 +22,10 @@ import yaml
 from jinja2 import ChoiceLoader, Environment, PackageLoader
 
 from loom_bench.cost import CostAllocation, cost_at_slo
+from loom_bench.experiment import AwsEc2ProviderSpec
 from loom_bench.money import SECONDS_PER_HOUR, TOKENS_PER_MTOK, Micros
-from loom_bench.prices import InstanceType, PriceBook
-from loom_bench.records import LoadMode
+from loom_bench.prices import BlockStorage, InstanceType, PriceBook, UnverifiedPriceError
+from loom_bench.records import LoadMode, Market
 from loom_bench.registry import Cloud, ModelSpec
 from loom_bench.report.analyze import ConfigResult, LoadPoint
 from loom_bench.report.competitiveness import (
@@ -40,6 +41,8 @@ from loom_bench.report.leaderboard import (
     RowStatus,
     build_leaderboard,
     cold_text,
+    price_header,
+    ranking_cost,
 )
 from loom_bench.report.methodology import (
     ALLOCATION_TEXT,
@@ -106,6 +109,8 @@ def _env() -> Environment:
         cold_text=cold_text,
         margin_text=margin_text,
         price_text=price_text,
+        price_header=price_header,
+        ranking_cost=ranking_cost,
         slug=slug,
         nav=NAV,
     )
@@ -230,6 +235,7 @@ class PriceRow:
     region: str
     instance: str
     entry: InstanceType
+    storage: BlockStorage | None
 
 
 def _model_view(m: ModelSnapshot, price_book: PriceBook | None) -> ModelView:
@@ -301,22 +307,27 @@ def _worked_example(
         if region is None:
             continue
         instance = m.spec.hardware.instance_types.aws
+        storage_gb = AwsEc2ProviderSpec.model_fields["disk_gb"].default
         try:
-            entry = price_book.instance("aws", region, instance)
-        except KeyError:
+            hourly = price_book.replica_hourly_cost(
+                "aws", region, instance, Market.ON_DEMAND, storage_gb
+            ).per_hour
+        except (KeyError, UnverifiedPriceError):
             continue
-        hourly = entry.on_demand_per_hour
         point = Estimate(mean=EXAMPLE_OUTPUT_TOK_S, lo=None, hi=None, n=1, std=None)
         cost = cost_at_slo(
             hourly, input_tok_s=point, output_tok_s=point, allocation=CostAllocation.all_output()
         )
         return WorkedExample(
             measured=False,
-            source=f"the {m.snap.display_name} replica's instance at its on-demand price",
+            source=(
+                f"the {m.snap.display_name} replica's instance at its on-demand price, plus "
+                f"the default {storage_gb} GB storage volume"
+            ),
             hourly_micros=hourly,
             output_tok_s=EXAMPLE_OUTPUT_TOK_S,
             output_per_mtok=cost.output_per_mtok.value,
-            instance=f"aws / {region} · {instance} · on_demand",
+            instance=f"aws / {region} · {instance} · on-demand",
         )
     return None
 
@@ -345,7 +356,10 @@ def _price_rows(snapshot: Snapshot, models: Sequence[ModelView]) -> list[PriceRo
             entry = book.instance(cast(Cloud, cloud), region, instance)
         except KeyError:
             continue
-        rows.append(PriceRow(cloud=cloud, region=region, instance=instance, entry=entry))
+        storage = book.region(cast(Cloud, cloud), region).storage
+        rows.append(
+            PriceRow(cloud=cloud, region=region, instance=instance, entry=entry, storage=storage)
+        )
     return rows
 
 

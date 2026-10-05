@@ -24,7 +24,7 @@ def analyze(runs, price_book):
         runs,
         slo=SLO,
         allocation=CostAllocation.all_output(),
-        hourly_price=default_price_resolver(price_book),
+        price_resolver=default_price_resolver(price_book),
     )
 
 

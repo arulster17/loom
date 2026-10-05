@@ -133,8 +133,10 @@ no WAN hop. A `LoadJobResult` carries the records, the measurement window, the r
 **Providers** (`providers/base.py`). The `Provider` protocol:
 `provision(HostRequest) -> Host`, `start_engine(host, EngineLaunch, warm) -> Endpoint`,
 `stop_engine`, `run_job(host, LoadJob) -> LoadJobResult`, `teardown` (idempotent),
-`reap(now)`. A `Host` reports the spend inputs (`hourly_micros`, market, launch time,
-`ttl_at`); the guard decides when to abort. Every host gets a TTL; mock and EC2 hosts are
+`reap(now)`. A `Host` reports the spend inputs (`hourly_micros`, the accrual rate, market,
+launch time, `ttl_at`); the guard decides when to abort. It also carries its as-run cost
+price and basis (`as_run_micros`, `price_basis`, no safety multiplier), which the runner
+writes into every run's provenance. Every host gets a TTL; mock and EC2 hosts are
 recorded in `bench_resources` so the reaper can find them. Losing a host raises
 `HostLost`, or `SpotInterrupted` for a spot reclaim. An `Endpoint` returns the base URL,
 metrics URL, cold/warm start stage timings and system info (GPU names, driver, CUDA,
@@ -195,7 +197,7 @@ docker-compose Postgres); SQLite URLs work for local use.
 results/<experiment id>/
   spec.json            validated experiment spec
   events.jsonl         provisioning, engine starts, spot interruptions, quality, gates
-  goodput.json         per cell and workload, priced at the host's accrual rate
+  goodput.json         per cell and workload, every price column, priced as bench report does
   runs/<run id>/requests.parquet, provenance.json
   evals/<config hash>/samples.json   per-item scores for re-gating
 reports/               bench report / competitiveness / compare output

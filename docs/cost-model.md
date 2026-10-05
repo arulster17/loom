@@ -5,8 +5,9 @@ price contains, and how that cost is compared with our planned price and public 
 prices.
 
 Code: `money.py` (integer micro-dollar math), `prices.py` (price book), `slo.py`
-(goodput), `cost.py` (prices at goodput), `report/analyze.py` (which hourly price),
-`competitiveness.py` and `report/competitiveness.py` (margins and flags).
+(goodput), `cost.py` (which hourly prices, `replica_prices`, and prices at goodput),
+`report/analyze.py` (one priced result per sweep), `competitiveness.py` and
+`report/competitiveness.py` (margins and flags).
 
 ## Money
 
@@ -67,7 +68,8 @@ to price or to compare a margin against (`MicrosRange.na_reason`). Every result 
 - blended total: H × 10⁶ / ((in_tok_s + out_tok_s) × 3600);
 - per 1,000 requests: H × 1000 / (request_rate × 3600).
 
-Leaderboards rank by $/1M output tokens (by input under `all_input`).
+Leaderboards rank by $/1M output tokens (by input under `all_input`) at the on-demand
+price (section 4).
 
 ## 3. Confidence intervals on cost
 
@@ -87,43 +89,79 @@ failing one; `rel_tol` bounds that bracket.
 
 ## 4. The hourly price H
 
-Which hourly price is used depends on what is being computed. All of them start from
-`bench/prices.yaml`.
+Every result is priced in four columns, all computed by one function,
+`cost.replica_prices`, from the run's provenance and `bench/prices.yaml`. Each column's
+H is an instance price plus the run's block storage, amortised per hour and rounded
+once, half-up (`PriceBook.with_storage`):
 
-### Reported cost (`bench report`, `bench competitiveness`, the table after `bench run`, the site)
+    H = round_half_up(instance $/h + per_gb_month × storage GB / 730)
 
-`report.analyze.default_price_resolver` reads the run's provenance (cloud, region,
-instance type, market) and looks the price up in `bench/prices.yaml` with no storage
-(`replica_hourly_cost(..., storage_gb=0)`):
+where 730 is `prices.HOURS_PER_MONTH`, the hours per month AWS uses to convert GB-month
+prices, and storage GB is the root volume the host ran with, recorded in the
+provenance's `price_basis.storage_gb` (max(`disk_gb`, `root_volume_gb` 200) on
+`aws_ec2`). us-east-1 storage is EBS gp3 at $0.08/GB-month, from the AWS price list.
 
-| Run market | H |
+| Column | Instance price | Use |
+|---|---|---|
+| **on-demand** | `on_demand_per_hour` | ranks leaderboards; the headline, the site and margins |
+| **spot** | `spot_per_hour` (indicative average across us-east-1 AZs) | shown next to it |
+| **committed 1y** | `committed_1y_per_hour`, where present (no entry has one today) | shown next to it |
+| **as run** | the price recorded at launch (below) | shown next to it |
+
+On-demand is the ranking price because it is a public list price: anyone can recompute
+a ranking from the price book alone, and it does not depend on when, where or in which
+market a run happened. A spot run is ranked at the on-demand price like any other; what
+it actually paid is its as-run column.
+
+A **mock or local host** has no list price. Its on-demand and as-run columns are the
+price its experiment declares (`provider.hourly_price`, simulated for the mock) and it
+has no spot or committed column; without a declared price it has no cost at SLO and is
+not ranked (warning `no_price`).
+
+### As run: what the provenance records
+
+At launch the provider records the host's cost price in each run's provenance:
+`hourly_micros` (instance plus storage, as above) and `price_basis` saying where it came
+from:
+
+| `price_basis.source` | `hourly_micros` |
 |---|---|
-| `on_demand` | `on_demand_per_hour` |
-| `spot` | `spot_per_hour` from `prices.yaml` (an indicative average across us-east-1 AZs, not the price the run paid); on-demand if the entry has no spot price |
-| `local` (mock, local provider) | the `hourly_micros` recorded in the provenance: the mock's simulated `hourly_price`, or 0 for a local endpoint |
+| `observed_spot` | the spot price of the host's AZ read at launch (`describe_spot_price_history`; `spot_price_usd`, `observed_at` and `availability_zone` are recorded) plus storage |
+| `prices_yaml` | an on-demand host: `on_demand_per_hour` plus storage, the same as its on-demand column |
+| `experiment` | a mock or local host's declared price |
+| `unobserved` | none: a spot host in an AZ with no spot price to read; its as-run cost is unknown |
 
-So the reported cost is the instance price only: no EBS volume, no spot safety
-multiplier, no S3, Secrets Manager or Lambda. A price entry marked `verified: false`
-makes the report refuse rather than use it (`UnverifiedPriceError`).
+`hourly_micros` never includes the budget guard's safety multiplier. A record written
+before provenance schema 2 has no `price_basis`; its storage volume is unknown, so it
+gets no cost (warning `no_price`) rather than a guessed one.
+
+### One price everywhere
+
+`bench report` (md, html, csv), `bench competitiveness`, the table printed after
+`bench run`, the site snapshot and `results/<experiment>/goodput.json` all price through
+`report.analyze.default_price_resolver`, which calls `cost.replica_prices`, so the same
+column has the same value in every artefact. The CSV has every column
+(`on_demand_*`, `spot_*`, `committed_1y_*`, `as_run_*`, plus `storage_gb`); the md and
+html tables show spot, committed 1y and as run where a board has a value in them. A
+price entry marked `verified: false` makes the report refuse rather than use it
+(`UnverifiedPriceError`); `goodput.json` records the refusal in `price_error`.
 
 ### Budget accrual (what the guard records as spend)
 
-`providers/aws_ec2.py` (`_candidates`) gives each host an `hourly_micros`:
+The budget guard does not use these prices. `providers/aws_ec2.py` (`_candidates`)
+gives each host an accrual rate, `Host.hourly_micros`:
 
-- spot: ⌈current spot price of the chosen AZ (`describe_spot_price_history`) × 1.25 ×
-  10⁶⌉, where 1.25 is `AwsSettings.spot_price_multiplier`; an AZ with no spot price is
-  accrued at the on-demand rate;
+- spot: ⌈current spot price of the chosen AZ × 1.25 × 10⁶⌉, where 1.25 is
+  `AwsSettings.spot_price_multiplier`; an AZ with no spot price is accrued at the
+  on-demand rate;
 - on-demand: `on_demand_per_hour`;
-- plus the root EBS volume: ⌈`per_gb_month` × volume GB / 730⌉, volume =
-  max(`disk_gb`, `root_volume_gb` 200). 730 is `prices.HOURS_PER_MONTH`, the hours per
-  month AWS uses to convert GB-month prices.
+- plus the root EBS volume: ⌈`per_gb_month` × volume GB / 730⌉.
 
 The multiplier keeps recorded spend above the real bill, since spot prices move during a
-run. The planner estimates the same way from `prices.yaml` (`plan.host_price`). Each
-`bench_spend` row records the basis (spot price and timestamp, multiplier, EBS rate).
-
-`results/<experiment>/goodput.json`, written by the runner, is priced with this accrual
-rate, so for AWS runs it is higher than the reported cost of the same result.
+run; it stays inside accrual and never reaches a reported cost. The planner estimates
+the same way from `prices.yaml` (`plan.host_price`; `bench plan` shows "accrued at
+$x/h"). Each `bench_spend` row records the accrual basis (spot price and timestamp,
+multiplier, EBS rate) under `accrual_basis`.
 
 ### Not included anywhere
 
@@ -137,42 +175,51 @@ rate, so for AWS runs it is higher than the reported cost of the same result.
 
 ## 5. Worked example
 
-Qwen3-8B on `g6e.xlarge` spot in us-east-1, `all_output`. H from `bench/prices.yaml`:
-`spot_per_hour: 1_838_600` ($1.8386/h). The throughputs are illustrative (no GPU results
-are published yet): three repetitions at the goodput load measured 1480, 1510 and 1530
-output tok/s, 1470, 1505 and 1532 input tok/s, and 1.44, 1.47 and 1.49 req/s.
+Qwen3-8B on `g6e.xlarge` in us-east-1 with the default 200 GB root volume, `all_output`.
+The throughputs are illustrative (no GPU results are published yet): three repetitions
+at the goodput load measured 1480, 1510 and 1530 output tok/s, 1470, 1505 and 1532
+input tok/s, and 1.44, 1.47 and 1.49 req/s.
 
-1. Output throughput, `log_t`: geometric mean 1506.53 tok/s, 95% CI [1445.19, 1570.46].
-2. $/1M output tokens:
-   1,838,600 × 10⁶ / (1506.53 × 3600) = 339,007 micros = **$0.3390**.
-3. CI: low bound from the high throughput, 1,838,600 × 10⁶ / (1570.46 × 3600) = 325,205;
-   high bound from the low throughput, 1,838,600 × 10⁶ / (1445.19 × 3600) = 353,394.
-   Reported: $0.3390 [$0.3252, $0.3534] per 1M output tokens.
-4. Blended total: input geometric mean 1502.12, so 1,838,600 × 10⁶ /
-   ((1502.12 + 1506.53) × 3600) = 169,752 micros ($0.1698 per 1M tokens).
-5. Per 1,000 requests: 1,838,600 × 1000 / (1.4665 × 3600) = 348,254 micros ($0.3483).
-6. Under `weighted` with r = 4: E = 1502.12 + 4 × 1506.53 = 7528.22, input
-   1,838,600 × 10⁶ / (7528.22 × 3600) = 67,841 micros ($0.0678), output 4 × that,
-   computed exactly: 271,364 micros ($0.2714).
+1. H, on-demand: `on_demand_per_hour: 1_861_000` + 80,000 × 200 / 730 = 1,861,000 +
+   21,917.8 = 1,882,918 micros ($1.882918/h), rounded once.
+2. Output throughput, `log_t`: geometric mean 1506.53 tok/s, 95% CI [1445.19, 1570.46].
+3. $/1M output tokens:
+   1,882,918 × 10⁶ / (1506.53 × 3600) = 347,178 micros = **$0.3472**.
+4. CI: low bound from the high throughput, 1,882,918 × 10⁶ / (1570.46 × 3600) = 333,043;
+   high bound from the low throughput, 1,882,918 × 10⁶ / (1445.19 × 3600) = 361,913.
+   Reported: $0.3472 [$0.3330, $0.3619] per 1M output tokens, on-demand.
+5. Blended total: input geometric mean 1502.12, so 1,882,918 × 10⁶ /
+   ((1502.12 + 1506.53) × 3600) = 173,843 micros ($0.1738 per 1M tokens).
+6. Per 1,000 requests: 1,882,918 × 1000 / (1.4665 × 3600) = 356,648 micros ($0.3566).
+7. Under `weighted` with r = 4: E = 1502.12 + 4 × 1506.53 = 7528.22, input
+   1,882,918 × 10⁶ / (7528.22 × 3600) = 69,476 micros ($0.0695), output 4 × that,
+   computed exactly: 277,905 micros ($0.2779).
+8. The other columns, same throughputs: spot, 1,838,600 + 21,917.8 → 1,860,518 micros/h,
+   $0.3430 per 1M output; as run, for a spot host that observed $1.70/h at launch,
+   1,700,000 + 21,917.8 → 1,721,918 micros/h, $0.3175.
 
-The budget guard would have accrued this host at a higher rate: at the `prices.yaml` spot
-price, ⌈1,838,600 × 1.25⌉ + ⌈80,000 × 200 / 730⌉ = 2,298,250 + 21,918 = 2,320,168 micros
-($2.3202/h), which is what `bench plan` shows for `qwen3-8b-vllm-vs-sglang`.
+The budget guard would have accrued that spot host at a higher rate: ⌈1,700,000 × 1.25⌉
++ ⌈80,000 × 200 / 730⌉ = 2,125,000 + 21,918 = 2,146,918 micros ($2.1469/h). At the
+`prices.yaml` spot price the planner estimates ⌈1,838,600 × 1.25⌉ + 21,918 = 2,320,168
+micros ($2.3202/h), which is what `bench plan` shows for `qwen3-8b-vllm-vs-sglang`.
 
 To check numbers like these, call the code directly:
 
 ```bash
 uv run python -c "
 from loom_bench.cost import cost_at_slo
+from loom_bench.prices import load_prices
 from loom_bench.stats import log_mean_ci
+h = load_prices().replica_hourly_cost('aws', 'us-east-1', 'g6e.xlarge', storage_gb=200).per_hour
 out, inp = log_mean_ci([1480, 1510, 1530]), log_mean_ci([1470, 1505, 1532])
-print(cost_at_slo(1_838_600, input_tok_s=inp, output_tok_s=out).output_per_mtok)"
+print(h, cost_at_slo(h, input_tok_s=inp, output_tok_s=out).output_per_mtok)"
 ```
 
 ## 6. Competitiveness and margin
 
-`bench competitiveness` takes, per registry model and workload, the cost at SLO of the
-top-ranked leaderboard config (trusted, not failing the quality gate), and compares it
+`bench competitiveness` takes, per registry model and workload, the on-demand cost at
+SLO of the top-ranked leaderboard config (trusted, not failing the quality gate), and
+compares it
 with the model's planned price (`pricing` in `config/models.yaml`, micros per 1M tokens)
 and with public list prices from `bench/competitors.yaml` (entered by hand; no
 competitor endpoint is ever called, see
@@ -192,7 +239,7 @@ competitor endpoint is ever called, see
 
 Eligible means a listed price from a non-aggregator; `--include-aggregators` and
 `--include-unverified` widen it. Example with the worked cost above and a hypothetical
-price of $0.40 per 1M output tokens: margin $0.0610 (15.2% of price), $0.0466 at the cost
+price of $0.40 per 1M output tokens: margin $0.0528 (13.2% of price), $0.0381 at the cost
 CI high bound. For `qwen3-8b` no default-eligible price exists (the Fireworks entry is
 `availability: unverified`, OpenRouter is an aggregator), so the flag is
 `no_public_comparison`; with both options the market minimum is Fireworks' $0.20 and the
@@ -200,11 +247,11 @@ price is flagged `price_above_market`.
 
 ## Open items
 
-- **EBS price unverified**: `bench/prices.yaml` storage `per_gb_month: 80_000` is
-  `verified: false`. The planner and the AWS provider use it anyway (with a note); a
-  report that included storage would refuse it.
 - **GCP prices unverified**: the three `gcp/us-central1` instances are
   `verified: false` (third-party snapshot), so cost math refuses them.
-- **Spot prices are indicative**: reports use the `prices.yaml` spot average, not the
-  price paid; the paid basis is only in `bench_spend` and `goodput.json`.
+- **Spot prices are indicative**: the spot column uses the `prices.yaml` spot average,
+  not a price any run paid; the price paid is the as-run column, and spend is in
+  `bench_spend`.
+- **No committed prices**: no `prices.yaml` entry has `committed_1y_per_hour` yet, so
+  that column is empty everywhere.
 - **Data transfer** is not modelled (see above).

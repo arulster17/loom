@@ -1,7 +1,9 @@
 """Competitiveness view: our cost at SLO and planned price against public list prices.
 
 Per registry model and workload, "our cost" is the cost at SLO of the leaderboard's
-top-ranked config (trusted, not failing the quality gate). Competitor prices come
+top-ranked config (trusted, not failing the quality gate) at the on-demand price the
+leaderboard ranks by (`cost.replica_prices`), so margins are reproducible from the
+price book. Competitor prices come
 from `bench/competitors.yaml`: public list prices only, never measured. Aggregators
 and entries whose availability is unverified are listed but, by default, left out
 of the market comparison behind the `assess()` flags.
@@ -271,8 +273,8 @@ def comparison_scope(report: CompetitivenessReport) -> str:
 OURS_HEADERS = (
     "Workload",
     "Best config at SLO",
-    "Our cost $/1M in",
-    "Our cost $/1M out",
+    "Our cost $/1M in (on-demand)",
+    "Our cost $/1M out (on-demand)",
     "Our price $/1M in",
     "Our price $/1M out",
     "Margin in",
@@ -322,7 +324,7 @@ def render_markdown(report: CompetitivenessReport) -> str:
     parts = [f"# {report.title}", "", f"> {report.note}", ""]
     parts.append(
         f"Competitor prices last checked {report.competitors_last_checked.isoformat()}. "
-        f"{comparison_scope(report)} Margin is our price minus our cost at SLO under the "
+        f"{comparison_scope(report)} Margin is our price minus our on-demand cost at SLO under the "
         "stated cost allocation."
     )
     by_model: dict[str, list[CompetitivenessRow]] = defaultdict(list)

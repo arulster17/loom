@@ -15,7 +15,7 @@
 {% if comp is none %}
 <p>This snapshot has no pricing data.</p>
 {% else %}
-<p>Competitor prices last checked {{ comp.competitors_last_checked }}. {{ scope }} Our cost is the cheapest ranked configuration's cost at SLO (<a href="{{ root }}methodology.html#cost">how it is derived</a>); margin is our price minus that cost, and its worst case uses the high end of the cost interval. Planned prices are set in <a href="{{ registry_url }}">config/models.yaml</a> and stay unset until the cost is measured.</p>
+<p>Competitor prices last checked {{ comp.competitors_last_checked }}. {{ scope }} Our cost is the cheapest ranked configuration's cost at SLO at the on-demand list price, storage included (<a href="{{ root }}methodology.html#cost">how it is derived</a>); margin is our price minus that cost, and its worst case uses the high end of the cost interval. Planned prices are set in <a href="{{ registry_url }}">config/models.yaml</a> and stay unset until the cost is measured.</p>
 
 {% for model_id, rows in by_model.items() %}
 {% set first = rows[0] %}

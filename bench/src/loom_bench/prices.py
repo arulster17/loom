@@ -129,6 +129,38 @@ class PriceBook(StrictModel):
             return Quote(it.committed_1y_per_hour, Market.COMMITTED_1Y, spot_fallback=False)
         return Quote(it.on_demand_per_hour, Market.ON_DEMAND, spot_fallback=False)
 
+    def storage_per_hour(
+        self, cloud: Cloud, region: str, storage_gb: int, *, allow_unverified: bool = False
+    ) -> Fraction:
+        """`storage_gb` of the region's block storage amortised per hour, exactly."""
+        if storage_gb < 0:
+            raise ValueError("storage_gb must be >= 0")
+        if storage_gb == 0:
+            return Fraction(0)
+        storage = self.region(cloud, region).storage
+        if storage is None:
+            raise KeyError(f"no storage price for {cloud}/{region}")
+        if not storage.verified and not allow_unverified:
+            raise UnverifiedPriceError(f"{cloud}/{region} storage: {storage.note}")
+        return Fraction(storage.per_gb_month * storage_gb, HOURS_PER_MONTH)
+
+    def with_storage(
+        self,
+        cloud: Cloud,
+        region: str,
+        instance_per_hour: Fraction | int,
+        storage_gb: int,
+        *,
+        allow_unverified: bool = False,
+    ) -> Micros:
+        """An instance's hourly price (micros, possibly fractional) plus `storage_gb` of
+        block storage amortised per hour, rounded once, half-up. Every replica price that
+        includes storage (report columns, the as-run price) goes through here."""
+        storage = self.storage_per_hour(
+            cloud, region, storage_gb, allow_unverified=allow_unverified
+        )
+        return round_half_up(Fraction(instance_per_hour) + storage)
+
     def replica_hourly_cost(
         self,
         cloud: Cloud,
@@ -139,22 +171,15 @@ class PriceBook(StrictModel):
         *,
         allow_unverified: bool = False,
     ) -> Quote:
-        """Hourly cost of one single-node replica: the instance plus `storage_gb` of
-        block storage amortised per hour. Rounded once, at the end."""
-        if storage_gb < 0:
-            raise ValueError("storage_gb must be >= 0")
+        """Hourly cost of one single-node replica: the instance at `market` plus
+        `storage_gb` of block storage (`with_storage`)."""
         quote = self.instance_price(
             cloud, region, instance_type, market, allow_unverified=allow_unverified
         )
-        if storage_gb == 0:
-            return quote
-        storage = self.region(cloud, region).storage
-        if storage is None:
-            raise KeyError(f"no storage price for {cloud}/{region}")
-        if not storage.verified and not allow_unverified:
-            raise UnverifiedPriceError(f"{cloud}/{region} storage: {storage.note}")
-        storage_per_hour = Fraction(storage.per_gb_month * storage_gb, HOURS_PER_MONTH)
-        return quote._replace(per_hour=round_half_up(quote.per_hour + storage_per_hour))
+        per_hour = self.with_storage(
+            cloud, region, quote.per_hour, storage_gb, allow_unverified=allow_unverified
+        )
+        return quote._replace(per_hour=per_hour)
 
 
 def load_prices(path: Path | str = DEFAULT_PRICES_YAML) -> PriceBook:

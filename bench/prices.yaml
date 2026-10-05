@@ -7,18 +7,18 @@
 # snapshot. Spot moves by the hour, so a run's spend records the price it used.
 # Entries with `verified: false` are refused by cost math unless explicitly allowed.
 
-last_checked: 2026-10-04
+last_checked: 2026-10-05
 
 clouds:
   aws:
     us-east-1:
       storage:
         kind: ebs-gp3
-        per_gb_month: 80_000
-        sources: [https://aws.amazon.com/ebs/pricing/]
-        last_checked: 2026-10-04
-        verified: false
-        note: $0.08/GB-month, not yet confirmed on the EBS pricing page.
+        per_gb_month: 80_000  # "Storage General Purpose gp3 GB Mo", AWS price list 2026-09-25
+        sources:
+          - https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ebs.json
+          - https://aws.amazon.com/ebs/pricing/
+        last_checked: 2026-10-05
       # On-demand prices: AWS price list published 2026-09-25. Specs and spot: vantage.sh.
       # p5e.48xlarge is omitted: it has no on-demand price (Capacity Blocks only).
       instances:

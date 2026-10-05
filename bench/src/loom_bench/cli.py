@@ -139,7 +139,8 @@ def render_plan(plan: Plan) -> None:
         table.add_row(
             "",
             "[bold]host total",
-            f"{format_usd(host.hourly_micros)}/h, {host.market}, TTL {_secs(host.ttl_s)}",
+            f"accrued at {format_usd(host.hourly_micros)}/h, {host.market}, "
+            f"TTL {_secs(host.ttl_s)}",
             f"[bold]{_secs(host.seconds)} = {format_usd(host.cost_micros, 2)}",
             end_section=True,
         )
@@ -184,7 +185,7 @@ def _analyze_experiments(
 
     runs = [run for i in experiment_ids for run in repo.list_runs(session, experiment_id=i)]
     results = analyze_runs(
-        runs, slo=slo, allocation=allocation, hourly_price=default_price_resolver(prices)
+        runs, slo=slo, allocation=allocation, price_resolver=default_price_resolver(prices)
     )
     return with_quality(
         results,
@@ -210,13 +211,15 @@ def _run_results(exp: Experiment, ctx: RunnerContext, outcome: Outcome) -> list[
 
 
 def render_goodput(results: list[ConfigResult]) -> None:
-    """Goodput and cost at SLO per sweep, with trust exactly as `bench report` decides it."""
+    """Goodput and cost at SLO per sweep, priced and trusted exactly as `bench report`
+    does: on-demand (the ranking price) and as run."""
     from loom_bench.report.format import UNBRACKETED_NOTE, est, goodput_load, usd_ci
 
     if not results:
         return
     table = Table(title="Goodput at SLO (as in bench report)")
-    for col in ("cell", "workload", "goodput load", "out tok/s", "$/1M out", "trusted"):
+    columns = ("cell", "workload", "goodput load", "out tok/s", "$/1M out on-demand")
+    for col in (*columns, "$/1M out as run", "trusted"):
         table.add_column(col)
     table.add_column("main warning", overflow="fold")
     for r in results:
@@ -227,6 +230,7 @@ def render_goodput(results: list[ConfigResult]) -> None:
             goodput_load(r.goodput),  # the unit (req/s, concurrent) gives the load mode
             est(r.goodput.output_tok_s, 1),
             usd_ci(r.cost.output_per_mtok if r.cost else None),
+            usd_ci(r.as_run_cost.output_per_mtok if r.as_run_cost else None),
             "yes" if r.trusted else "[red]no[/]",
             "" if warning is None else warning.label,
         )

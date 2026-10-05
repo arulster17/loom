@@ -116,7 +116,7 @@ def test_populated_snapshot_renders_results(full_site, populated):
     index = _text(full_site, "index.html")
     assert PENDING not in index
     assert "sglang-bf16" in index
-    assert "$0.8615" in index  # cheapest ranked config's $/1M out at SLO
+    assert "$0.8717" in index  # cheapest ranked config's $/1M out at SLO
     assert "No published results for this model yet" in index  # Llama
 
     model = _text(full_site, "models/qwen3-8b.html")
@@ -126,12 +126,17 @@ def test_populated_snapshot_renders_results(full_site, populated):
         assert f"../data/provenance/{run_id}.json" in model
     assert "quality gate failed" in model
     assert "100 s (median of 1)" in model
-    assert "$0.8404 – $0.8832" in model  # cost CI
+    assert "$0.8503 – $0.8936" in model  # on-demand cost CI, storage included
+    assert "$/1M out at SLO, spot" in model and "$/1M out at SLO, as run" in model
+    assert "committed 1y</th>" not in model  # no committed price in the price book
+    assert "Price as run" in model and "observed at launch" in model
     assert "$/1M in at SLO" not in model  # all_output: input has no separate price
     assert "$0.0000" not in model
 
     methodology = _text(full_site, "methodology.html")
     assert "From the published results" in methodology
+    assert "On-demand (ranked)" in methodology and "As run" in methodology
+    assert "so on-demand is the default" not in methodology
     assert "Illustrative" not in methodology
     assert "TTFT p95 ≤ 600 ms" in methodology
     assert "data/experiments/" in methodology

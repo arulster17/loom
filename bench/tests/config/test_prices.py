@@ -1,4 +1,5 @@
 import copy
+from fractions import Fraction
 from typing import Any
 
 import pytest
@@ -33,7 +34,11 @@ def instance(**overrides: Any) -> dict[str, Any]:
     }
 
 
-def book(storage_per_gb_month: int | None = None, **instance_overrides: Any) -> PriceBook:
+def book(
+    storage_per_gb_month: int | None = None,
+    storage_verified: bool = True,
+    **instance_overrides: Any,
+) -> PriceBook:
     region: dict[str, Any] = {"instances": {"x.large": instance(**instance_overrides)}}
     if storage_per_gb_month is not None:
         region["storage"] = {
@@ -41,6 +46,7 @@ def book(storage_per_gb_month: int | None = None, **instance_overrides: Any) -> 
             "per_gb_month": storage_per_gb_month,
             "sources": [URL],
             "last_checked": "2026-10-04",
+            **({} if storage_verified else {"verified": False, "note": "check it"}),
         }
     return PriceBook.model_validate(
         {"last_checked": "2026-10-04", "clouds": {"aws": {"r-1": region}}}
@@ -137,9 +143,15 @@ def test_replica_cost_keeps_spot_fallback_flag():
 
 def test_storage_price_checks():
     prices = load_prices()
-    with pytest.raises(UnverifiedPriceError, match="storage"):
-        prices.replica_hourly_cost("aws", "us-east-1", "g6e.xlarge", storage_gb=100)
     assert prices.replica_hourly_cost("aws", "us-east-1", "g6e.xlarge").per_hour == 1_861_000
+    # $0.08/GB-month x 200 GB / 730 h = 21,917.8 micros/h, added before the one rounding
+    with_volume = prices.replica_hourly_cost("aws", "us-east-1", "g6e.xlarge", storage_gb=200)
+    assert with_volume.per_hour == 1_882_918
+    assert prices.with_storage("aws", "us-east-1", Fraction(1, 2), 200) == 21_918
+    unverified = book(730, storage_verified=False)
+    with pytest.raises(UnverifiedPriceError, match="storage"):
+        unverified.replica_hourly_cost("aws", "r-1", "x.large", storage_gb=100)
+    assert unverified.with_storage("aws", "r-1", 0, 730, allow_unverified=True) == 730
     with pytest.raises(KeyError, match="no storage price"):
         book().replica_hourly_cost("aws", "r-1", "x.large", storage_gb=1)
     with pytest.raises(ValueError, match="storage_gb"):

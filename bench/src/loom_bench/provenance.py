@@ -19,7 +19,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum, StrEnum
 from pathlib import Path, PurePath
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
@@ -27,7 +27,9 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validato
 from loom_bench import __version__
 from loom_bench.records import LoadMode, Market
 
-SCHEMA_VERSION = 1
+# 2: `hourly_micros` is the as-run cost price (no budget safety multiplier), with
+# `price_basis` saying how it was obtained.
+SCHEMA_VERSION = 2
 
 
 def to_jsonable(obj: Any) -> Any:
@@ -199,6 +201,24 @@ class LoadInfo(_Section):
     seed: int | None = None
 
 
+class PriceBasis(_Section):
+    """How the as-run hourly price (`Provenance.hourly_micros`) was obtained.
+
+    `source`: `observed_spot`, the AZ's spot price read at launch; `prices_yaml`, the
+    on-demand price in `bench/prices.yaml`; `experiment`, the price the experiment
+    declares for a mock or local host; `unobserved`, a spot host whose AZ had no spot
+    price to read, so the as-run price is unknown. Never includes the budget guard's
+    spot safety multiplier.
+    """
+
+    market: Market
+    source: Literal["observed_spot", "prices_yaml", "experiment", "unobserved"]
+    spot_price_usd: str | None = None  # observed_spot: the price read at launch
+    observed_at: AwareDatetime | None = None  # observed_spot: that price's timestamp
+    availability_zone: str | None = None
+    storage_gb: int = Field(default=0, ge=0)  # block storage included in the price
+
+
 class HostInfo(_Section):
     python: str | None = None
     platform: str | None = None
@@ -219,9 +239,10 @@ class Provenance(_Section):
     cloud: str | None = None
     region: str | None = None
     market: Market | None = None
-    # Hourly price (micro-dollars) the cost math used for this host; recorded so a
-    # report never has to guess, and set explicitly for mock/local runs.
+    # As-run cost price of this host per hour (micro-dollars), storage included, never
+    # the budget guard's multiplied accrual rate; None when unpriced or unknown.
     hourly_micros: int | None = Field(default=None, ge=0, strict=True)
+    price_basis: PriceBasis | None = None
     config_hash: str
     config: dict[str, Any]
     workload: WorkloadInfo = Field(default_factory=WorkloadInfo)

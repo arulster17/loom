@@ -1,9 +1,20 @@
 """$/1M tokens at SLO from goodput and the replica's hourly price.
 
-The replica's hourly price (integer micros, already including storage, egress etc.)
-buys `goodput` tokens per second. A GPU produces input (prefill) and output (decode)
-tokens at the same time, so splitting its cost between them is a choice, recorded
-as a `CostAllocation`:
+Which hourly price: `replica_prices` gives one per price column, each the instance
+price plus the run's block storage amortised per hour (`PriceBook.with_storage`);
+network egress and fixed account costs are not included (docs/cost-model.md):
+
+- on_demand: the public on-demand list price in `bench/prices.yaml`. Reproducible
+  from the price book alone, so results are ranked by it. A mock or local host has
+  no list price; it uses the price its experiment declares, else it has none.
+- spot: the indicative `spot_per_hour` in `bench/prices.yaml`.
+- committed_1y: `committed_1y_per_hour`, where the price book has one.
+- as_run: the price recorded in the run's provenance at launch (the observed spot
+  price, or the on-demand price), without the budget guard's safety multiplier.
+
+The replica's hourly price (integer micros) buys `goodput` tokens per second. A GPU
+produces input (prefill) and output (decode) tokens at the same time, so splitting
+its cost between them is a choice, recorded as a `CostAllocation`:
 
 - all_output: the whole cost is charged to output tokens. This is the headline
   "$ per 1M output tokens at SLO". The input price is not applicable (not $0: the
@@ -30,13 +41,18 @@ gives no bounds.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from fractions import Fraction
-from typing import Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel
 
 from loom_bench.money import SECONDS_PER_HOUR, TOKENS_PER_MTOK, Micros, round_half_up
+from loom_bench.prices import PriceBook, UnverifiedPriceError
+from loom_bench.records import Market
+from loom_bench.registry import Cloud
 from loom_bench.slo import GoodputResult
 from loom_bench.stats import Estimate
 
@@ -197,4 +213,113 @@ def cost_from_goodput(
         output_tok_s=goodput.output_tok_s,
         request_rate=goodput.request_rate,
         allocation=allocation,
+    )
+
+
+class PriceColumn(StrEnum):
+    ON_DEMAND = "on_demand"
+    SPOT = "spot"
+    COMMITTED_1Y = "committed_1y"
+    AS_RUN = "as_run"
+
+
+PRICE_COLUMN_LABELS = {
+    PriceColumn.ON_DEMAND: "on-demand",
+    PriceColumn.SPOT: "spot",
+    PriceColumn.COMMITTED_1Y: "committed 1y",
+    PriceColumn.AS_RUN: "as run",
+}
+
+
+class ReplicaPrices(BaseModel):
+    """One replica's hourly price per price column (micros, storage included).
+
+    None means no price in that column; `missing` says why there is no on-demand
+    price, the one results are ranked by.
+    """
+
+    on_demand: Micros | None
+    spot: Micros | None
+    committed_1y: Micros | None
+    as_run: Micros | None
+    storage_gb: int | None  # block storage included; None for a mock or local host
+    missing: str | None = None
+
+    def get(self, column: PriceColumn) -> Micros | None:
+        return cast(Micros | None, getattr(self, column.value))
+
+
+NO_LOCAL_PRICE = (
+    "no hourly price: a mock or local host is priced only when its experiment sets "
+    "provider.hourly_price"
+)
+NO_PRICE_BASIS = (
+    "the provenance records no price basis (written before provenance schema 2), so the "
+    "storage volume and as-run price are unknown"
+)
+
+
+def recorded_hourly_micros(prov: Mapping[str, Any]) -> Micros | None:
+    """The as-run price recorded in a provenance record, when it records its basis."""
+    if not isinstance(prov.get("price_basis"), Mapping):
+        return None
+    value = prov.get("hourly_micros")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"hourly_micros must be integer micros, got {value!r}")
+    return value
+
+
+def replica_prices(
+    prov: Mapping[str, Any], book: PriceBook, *, allow_unverified: bool = False
+) -> ReplicaPrices:
+    """Every price column for the replica a run's provenance describes.
+
+    A price-book entry that is missing raises KeyError and an unverified one raises
+    UnverifiedPriceError, so a report never silently drops a price it should have had.
+    """
+    as_run = recorded_hourly_micros(prov)
+    market = prov.get("market")
+    if market is None or Market(market) is Market.LOCAL:
+        return ReplicaPrices(
+            on_demand=as_run,
+            spot=None,
+            committed_1y=None,
+            as_run=as_run,
+            storage_gb=None,
+            missing=None if as_run is not None else NO_LOCAL_PRICE,
+        )
+    basis = prov.get("price_basis")
+    if not isinstance(basis, Mapping):
+        return ReplicaPrices(
+            on_demand=None,
+            spot=None,
+            committed_1y=None,
+            as_run=None,
+            storage_gb=None,
+            missing=NO_PRICE_BASIS,
+        )
+    cloud = cast(Cloud, prov.get("cloud"))
+    region = prov.get("region") or ""
+    hardware = prov.get("hardware")
+    instance_type = (hardware.get("instance_type") if isinstance(hardware, Mapping) else None) or ""
+    entry = book.instance(cloud, region, instance_type)
+    if not entry.verified and not allow_unverified:
+        raise UnverifiedPriceError(f"{cloud}/{region}/{instance_type}: {entry.note}")
+    storage_gb = int(basis.get("storage_gb", 0))
+
+    def priced(per_hour: Micros | None) -> Micros | None:
+        if per_hour is None:
+            return None
+        return book.with_storage(
+            cloud, region, per_hour, storage_gb, allow_unverified=allow_unverified
+        )
+
+    return ReplicaPrices(
+        on_demand=priced(entry.on_demand_per_hour),
+        spot=priced(entry.spot_per_hour),
+        committed_1y=priced(entry.committed_1y_per_hour),
+        as_run=as_run,
+        storage_gb=storage_gb,
     )

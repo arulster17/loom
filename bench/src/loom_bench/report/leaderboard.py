@@ -1,7 +1,10 @@
-"""Per-model leaderboard ranked by $/1M output tokens at SLO.
+"""Per-model leaderboard ranked by $/1M output tokens at SLO, at the on-demand price.
 
 Under the all_input cost allocation output tokens have no price of their own, so
-those results rank by $/1M input tokens instead (`ranking_cost`).
+those results rank by $/1M input tokens instead (`ranking_cost`). The on-demand
+price (`cost.replica_prices`) is the public list price, so the ranking is
+reproducible from the price book; spot, committed-1y and as-run costs of the same
+side are shown next to it where a board has them.
 
 One board per (model, workload, load mode): costs measured on different workloads
 are not comparable. Rows are ranked cheapest first. Configs that failed the
@@ -13,14 +16,14 @@ are generated from the numbers alone, so the same data always gives the same tex
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from enum import StrEnum
 from fractions import Fraction
 from typing import Any
 
 from pydantic import BaseModel
 
-from loom_bench.cost import MicrosRange
+from loom_bench.cost import PRICE_COLUMN_LABELS, MicrosRange, PriceColumn
 from loom_bench.prices import PriceBook
 from loom_bench.provenance import ContentKind
 from loom_bench.records import LoadMode
@@ -70,12 +73,22 @@ class LeaderboardRow(BaseModel):
     recommendation: str
 
 
+# Price columns shown next to the on-demand ranking cost, when any row has one.
+EXTRA_PRICE_COLUMNS = (PriceColumn.SPOT, PriceColumn.COMMITTED_1Y, PriceColumn.AS_RUN)
+
+
 class Leaderboard(BaseModel):
     model: str
     workload: str
     load_mode: LoadMode
     content: ContentKind | None
     rows: list[LeaderboardRow]
+    price_columns: list[PriceColumn]  # extra cost columns with a value in some row
+
+    @property
+    def side(self) -> str:
+        """The token side every row is ranked by: "in" under all_input, else "out"."""
+        return ranking_side(row.result for row in self.rows)
 
 
 class LeaderboardReport(BaseModel):
@@ -84,11 +97,32 @@ class LeaderboardReport(BaseModel):
     methodology: Methodology
 
 
-def ranking_cost(r: ConfigResult) -> MicrosRange | None:
-    """The price a result is ranked by: $/1M output, or $/1M input under all_input."""
-    if r.cost is None:
+def ranking_cost(
+    r: ConfigResult, column: PriceColumn = PriceColumn.ON_DEMAND
+) -> MicrosRange | None:
+    """The side a result is ranked by ($/1M output, or $/1M input under all_input) at
+    one price column; the on-demand column is the ranking itself."""
+    cost = r.cost_at(column)
+    if cost is None:
         return None
-    return r.cost.input_per_mtok if r.allocation == "all_input" else r.cost.output_per_mtok
+    return cost.input_per_mtok if r.allocation == "all_input" else cost.output_per_mtok
+
+
+def ranking_side(results: Iterable[ConfigResult]) -> str:
+    return "in" if any(r.allocation == "all_input" for r in results) else "out"
+
+
+def price_columns(results: Sequence[ConfigResult]) -> list[PriceColumn]:
+    """The extra price columns at least one of `results` has a cost in."""
+    return [
+        c
+        for c in EXTRA_PRICE_COLUMNS
+        if any((rng := ranking_cost(r, c)) is not None and rng.value is not None for r in results)
+    ]
+
+
+def price_header(column: PriceColumn, side: str) -> str:
+    return f"$/1M {side} at SLO, {PRICE_COLUMN_LABELS[column]}"
 
 
 def _out_cost(r: ConfigResult) -> int | None:
@@ -150,7 +184,7 @@ def recommend(
         if r.goodput.max_load is None:
             return "No cost at SLO: no tested load met the SLO; test lower loads"
         if r.hourly_micros is None:
-            return "No cost at SLO: no hourly price for this replica"
+            return f"No cost at SLO: {r.prices.missing or 'no on-demand price for this replica'}"
         return "No cost at SLO: no token throughput measured at the goodput load"
     if status in (RowStatus.GATE_FAILED, RowStatus.UNTRUSTED):
         if status is RowStatus.GATE_FAILED:
@@ -233,6 +267,7 @@ def build_leaderboard(
                 load_mode=mode,
                 content=contents.pop() if len(contents) == 1 else None,
                 rows=rank(members, cold_starts, names),
+                price_columns=price_columns(members),
             )
         )
     ordered = [row.result for b in boards for row in b.rows]
@@ -260,11 +295,8 @@ def board_title(b: Leaderboard) -> str:
     return f"{b.model}: {b.workload} ({b.load_mode.value.replace('_', ' ')}{content})"
 
 
-MD_HEADERS = (
-    "#",
-    "Config",
-    "$/1M out at SLO",
-    "$/1M in at SLO",
+MD_HEAD = ("#", "Config", "$/1M out at SLO, on-demand", "$/1M in at SLO, on-demand")
+MD_TAIL = (
     "Goodput out tok/s per replica",
     "per GPU",
     "Load at goodput",
@@ -278,7 +310,11 @@ MD_HEADERS = (
 )
 
 
-def _md_row(row: LeaderboardRow) -> list[Any]:
+def md_headers(b: Leaderboard) -> list[str]:
+    return [*MD_HEAD, *(price_header(c, b.side) for c in b.price_columns), *MD_TAIL]
+
+
+def _md_row(row: LeaderboardRow, columns: Sequence[PriceColumn]) -> list[Any]:
     r = row.result
     cost = r.cost
     return [
@@ -286,6 +322,7 @@ def _md_row(row: LeaderboardRow) -> list[Any]:
         f"**{r.name}**<br>{r.label.text}",
         usd_ci(cost.output_per_mtok if cost else None),
         usd_ci(cost.input_per_mtok if cost else None),
+        *(usd_ci(ranking_cost(r, c)) for c in columns),
         est(r.goodput.output_tok_s, 1),
         est(r.goodput_output_tok_s_per_gpu, 1),
         goodput_load(r.goodput),
@@ -303,7 +340,9 @@ def render_markdown(report: LeaderboardReport) -> str:
     parts = [f"# {report.title}", ""]
     parts.append(
         "Ranked by $/1M output tokens at SLO (input tokens under the all_input cost "
-        "allocation), cheapest first. Values are point estimates (geometric means for "
+        "allocation) at the on-demand list price, cheapest first; spot, committed-1y and "
+        "as-run costs of the same tokens are shown where available. Every price includes "
+        "the replica's block storage. Values are point estimates (geometric means for "
         "latency and throughput) with 95% confidence intervals in brackets; the methodology "
         "below says how each is computed. Goodput is the highest tested load that met the "
         "SLO; raw peak throughput ignores the SLO and is not goodput. Unranked rows (quality "
@@ -312,7 +351,8 @@ def render_markdown(report: LeaderboardReport) -> str:
     if any_unbracketed(row.result.goodput for b in report.boards for row in b.rows):
         parts += ["", UNBRACKETED_NOTE]
     for b in report.boards:
-        parts += ["", f"## {board_title(b)}", "", md_table(MD_HEADERS, map(_md_row, b.rows))]
+        rows = [_md_row(row, b.price_columns) for row in b.rows]
+        parts += ["", f"## {board_title(b)}", "", md_table(md_headers(b), rows)]
         warned = [row.result for row in b.rows if row.result.warnings]
         if warned:
             parts += ["", "**Warnings**", ""]
@@ -329,6 +369,8 @@ def render_html(report: LeaderboardReport) -> str:
         .render(
             report=report,
             board_title=board_title,
+            price_header=price_header,
+            ranking_cost=ranking_cost,
             quality_text=quality_text,
             cold_text=cold_text,
             unbracketed=any_unbracketed(
@@ -348,11 +390,18 @@ CSV_COLUMNS = [
     "config",
     "config_hash",
     "label",
-    *micros_column_names("output_per_mtok"),
-    *micros_column_names("input_per_mtok"),
-    *micros_column_names("blended_per_mtok"),
-    "hourly_micros",
-    "hourly_usd",
+    *(
+        name
+        for column in PriceColumn
+        for name in (
+            *micros_column_names(f"{column.value}_output_per_mtok"),
+            *micros_column_names(f"{column.value}_input_per_mtok"),
+            *micros_column_names(f"{column.value}_blended_per_mtok"),
+            f"{column.value}_hourly_micros",
+            f"{column.value}_hourly_usd",
+        )
+    ),
+    "storage_gb",
     "allocation",
     "goodput_load",
     "first_failing_load",
@@ -384,11 +433,23 @@ CSV_COLUMNS = [
     "dataset",
     "dataset_source",
     "price_basis",
+    "as_run_price_basis",
     "price_sources",
     "price_last_checked",
     "provenance_digests",
     "reproduce_command",
 ]
+
+
+def _price_csv(r: ConfigResult, column: PriceColumn) -> dict[str, Any]:
+    cost, hourly, name = r.cost_at(column), r.prices.get(column), column.value
+    return {
+        **micros_columns(f"{name}_output_per_mtok", cost.output_per_mtok if cost else None),
+        **micros_columns(f"{name}_input_per_mtok", cost.input_per_mtok if cost else None),
+        **micros_columns(f"{name}_blended_per_mtok", cost.total_per_mtok if cost else None),
+        f"{name}_hourly_micros": hourly,
+        f"{name}_hourly_usd": None if hourly is None else usd(hourly, 6),
+    }
 
 
 def _csv_row(b: Leaderboard, row: LeaderboardRow, m: Methodology) -> dict[str, Any]:
@@ -407,11 +468,8 @@ def _csv_row(b: Leaderboard, row: LeaderboardRow, m: Methodology) -> dict[str, A
         "config": r.name,
         "config_hash": r.config_hash,
         "label": r.label.text,
-        **micros_columns("output_per_mtok", r.cost.output_per_mtok if r.cost else None),
-        **micros_columns("input_per_mtok", r.cost.input_per_mtok if r.cost else None),
-        **micros_columns("blended_per_mtok", r.cost.total_per_mtok if r.cost else None),
-        "hourly_micros": r.hourly_micros,
-        "hourly_usd": None if r.hourly_micros is None else usd(r.hourly_micros, 6),
+        **{k: v for column in PriceColumn for k, v in _price_csv(r, column).items()},
+        "storage_gb": r.prices.storage_gb,
         "allocation": r.allocation,
         "goodput_load": r.goodput.max_load,
         "first_failing_load": r.goodput.first_failing_load,
@@ -443,6 +501,7 @@ def _csv_row(b: Leaderboard, row: LeaderboardRow, m: Methodology) -> dict[str, A
         "dataset": dataset.text,
         "dataset_source": dataset.source,
         "price_basis": prov.price.basis,
+        "as_run_price_basis": prov.price.as_run,
         "price_sources": " ".join(prov.price.urls),
         "price_last_checked": prov.price.last_checked,
         "provenance_digests": " ".join(r.provenance_digests),

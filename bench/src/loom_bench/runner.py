@@ -38,7 +38,7 @@ from loom_bench.budget import (
     caps_for,
     is_billable,
 )
-from loom_bench.cost import cost_from_goodput
+from loom_bench.cost import PriceColumn, ReplicaPrices
 from loom_bench.experiment import (
     Cell,
     Experiment,
@@ -58,7 +58,7 @@ from loom_bench.metrics.prometheus import summarize_scrapes
 from loom_bench.metrics.summary import RunSummary, summarize_run
 from loom_bench.mock.config import MockConfig
 from loom_bench.plan import EVAL_CONCURRENCY, Estimator, Plan, build_plan
-from loom_bench.prices import PriceBook
+from loom_bench.prices import PriceBook, UnverifiedPriceError
 from loom_bench.provenance import (
     DatasetInfo,
     EngineInfo,
@@ -101,6 +101,7 @@ from loom_bench.quality.suite import Suite
 from loom_bench.quality.tasks.base import ItemResult
 from loom_bench.records import LoadMode, Market
 from loom_bench.registry import REPO_ROOT, ModelSpec, Registry, read_yaml
+from loom_bench.report.analyze import costs_at, default_price_resolver
 from loom_bench.report.compare import Comparison, compare
 from loom_bench.slo import bisect_next_load, find_goodput, slo_met
 from loom_bench.stats import mean_ci
@@ -151,7 +152,16 @@ class PlanRefused(Exception):
         self.experiment_id = experiment_id
 
 
+class GoodputCost(BaseModel):
+    hourly_micros: int | None
+    output_per_mtok_micros: int | None
+    total_per_mtok_micros: int | None
+
+
 class GoodputRow(BaseModel):
+    """One sweep's goodput, priced per price column exactly as `bench report` prices it
+    (`default_price_resolver`); `price_error` says why a column has no price."""
+
     cell: str
     config_hash: str
     workload: str
@@ -161,9 +171,8 @@ class GoodputRow(BaseModel):
     bracketed: bool
     trusted: bool
     output_tok_s: float | None
-    hourly_micros: int
-    output_per_mtok_micros: int | None
-    total_per_mtok_micros: int | None
+    costs: dict[PriceColumn, GoodputCost]
+    price_error: str | None
 
 
 @dataclass
@@ -541,7 +550,23 @@ class _Executor:
         if slo is None or not points:
             return
         goodput = find_goodput(slo, points, load.mode)
-        cost = cost_from_goodput(host.hourly_micros, goodput, self.exp.cost_allocation.allocation())
+        prov = build_provenance(cell.config, **self._serving_sections(host, cell, endpoint))
+        prices: ReplicaPrices | None = None
+        try:
+            prices = default_price_resolver(self.ctx.prices)(prov.model_dump(mode="json"))
+            error = prices.missing
+        except (KeyError, UnverifiedPriceError) as e:
+            error = str(e)
+        allocation = self.exp.cost_allocation.allocation()
+        costs = {}
+        for column in PriceColumn:
+            hourly = prices.get(column) if prices else None
+            cost = costs_at(hourly, goodput, allocation)
+            costs[column] = GoodputCost(
+                hourly_micros=hourly,
+                output_per_mtok_micros=cost.output_per_mtok.value if cost else None,
+                total_per_mtok_micros=cost.total_per_mtok.value if cost else None,
+            )
         self.goodput.append(
             GoodputRow(
                 cell=cell.key,
@@ -553,9 +578,8 @@ class _Executor:
                 bracketed=goodput.bracketed,
                 trusted=goodput.trusted,
                 output_tok_s=goodput.output_tok_s.mean if goodput.output_tok_s else None,
-                hourly_micros=host.hourly_micros,
-                output_per_mtok_micros=cost.output_per_mtok.value if cost else None,
-                total_per_mtok_micros=cost.total_per_mtok.value if cost else None,
+                costs=costs,
+                price_error=error,
             )
         )
 
@@ -641,7 +665,8 @@ class _Executor:
         )
 
     def _serving_sections(self, host: Host, cell: Cell, endpoint: Endpoint) -> dict[str, Any]:
-        """Provenance sections describing what served: git, engine, model, hardware, price."""
+        """Provenance sections describing what served: git, engine, model, hardware, and
+        the as-run price with its basis (never the budget accrual rate)."""
         system = endpoint.system
         launch, hw = cell.launch, cell.hardware
         image = launch.image or None
@@ -685,7 +710,8 @@ class _Executor:
             cloud=hw.get("cloud"),
             region=hw.get("region"),
             market=host.request.market,
-            hourly_micros=host.hourly_micros,
+            hourly_micros=host.as_run_micros,
+            price_basis=host.price_basis,
         )
 
     def _summarize(self, cell: Cell, endpoint: Endpoint, result: LoadJobResult) -> RunSummary:
@@ -809,10 +835,6 @@ class _Executor:
                 **result.meta,
                 "timeline": result.timeline,
                 "client_saturated_count": result.client_saturated_count,
-            },
-            "cost_basis": {
-                "hourly_micros": host.hourly_micros,
-                "market": host.request.market.value,
             },
         }
         self._record(

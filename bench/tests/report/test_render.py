@@ -43,7 +43,7 @@ def test_reports_from_stored_runs(tmp_path, all_runs, price_book, competitors):
             stored,
             slo=SLO,
             allocation=CostAllocation.all_output(),
-            hourly_price=default_price_resolver(price_book),
+            price_resolver=default_price_resolver(price_book),
         )
         run_ids = {str(r.id) for r in stored}
 

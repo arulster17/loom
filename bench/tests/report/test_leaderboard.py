@@ -3,7 +3,7 @@ import io
 
 import pytest
 
-from loom_bench.cost import CostAllocation
+from loom_bench.cost import CostAllocation, PriceColumn
 from loom_bench.report.analyze import (
     ColdStartStat,
     analyze_runs,
@@ -13,10 +13,10 @@ from loom_bench.report.analyze import (
 from loom_bench.report.format import UNBRACKETED_NOTE
 from loom_bench.report.leaderboard import (
     CSV_COLUMNS,
-    MD_HEADERS,
     RowStatus,
     build_leaderboard,
     cold_text,
+    md_headers,
     render_csv,
     render_html,
     render_markdown,
@@ -34,7 +34,7 @@ def results(all_runs, price_book):
         [*all_runs, *single],
         slo=SLO,
         allocation=CostAllocation.all_output(),
-        hourly_price=default_price_resolver(price_book),
+        price_resolver=default_price_resolver(price_book),
     )
     h = {r.name: r.config_hash for r in out}
     evals = [
@@ -65,6 +65,7 @@ def test_one_board_per_model_and_workload(report):
 
 def test_ranking_cheapest_first_then_gate_failed_then_untrusted(report):
     rows = report.boards[0].rows
+    assert report.boards[0].price_columns == [PriceColumn.SPOT, PriceColumn.AS_RUN]
     assert [(r.rank, r.result.name, r.status) for r in rows] == [
         (1, "sglang-bf16", RowStatus.RANKED),
         (2, "vllm-bf16", RowStatus.RANKED),
@@ -88,7 +89,7 @@ def test_recommendations_are_generated_from_numbers(report):
     )
     assert recs["vllm-awq"] == (
         "Not ranked: failed the quality gate vs vllm-bf16 (worst: gsm8k -0.100); "
-        "would be 1.2% cheaper than sglang-bf16"
+        "would be 25% cheaper than sglang-bf16"
     )
     assert recs["sglang-1rep"] == (
         "Not ranked: untrusted (goodput not bracketed, single repetition); rerun before "
@@ -101,7 +102,7 @@ def test_single_ranked_and_no_cost_recommendations(price_book):
         [*make_runs("only"), *make_runs("slow", latency_scale=10)],
         slo=SLO,
         allocation=CostAllocation.all_output(),
-        hourly_price=default_price_resolver(price_book),
+        price_resolver=default_price_resolver(price_book),
     )
     rows = build_leaderboard(results).boards[0].rows
     assert [(r.result.name, r.status) for r in rows] == [
@@ -116,17 +117,21 @@ def test_single_ranked_and_no_cost_recommendations(price_book):
 
 def test_markdown_table_and_footer(report):
     md = render_markdown(report)
-    assert "| " + " | ".join(MD_HEADERS) + " |" in md
+    assert "| " + " | ".join(md_headers(report.boards[0])) + " |" in md
+    assert "$/1M out at SLO, on-demand | $/1M in at SLO, on-demand | $/1M out at SLO, spot | " in md
+    assert "$/1M out at SLO, as run | Goodput out tok/s per replica" in md
     row = next(line for line in md.splitlines() if line.startswith("| 1 |"))
     cells = [c.strip() for c in row.strip("|").split(" | ")]
     assert cells[1].startswith("**sglang-bf16**<br>sglang 0.5.21 · unquantized · 1×L40S")
-    assert cells[2] == "$0.8615 [0.8404, 0.8832]"
-    assert cells[4] == "600.0 [585.3, 615.1]"  # geometric mean, log-t CI
-    assert cells[6] == "6 req/s"
-    assert cells[7] == "413 [393, 434] ms"
-    assert cells[9] == "800.0 [780.4, 820.2] at 8 req/s"
-    assert cells[10] == "-0.010 (gsm8k) · pass"
-    assert cells[11] == "95 s (median of 3)"
+    assert cells[2] == "$0.8717 [0.8503, 0.8936]"  # on-demand, 200 GB volume included
+    assert cells[4] == "$0.8613 [0.8402, 0.8830]"  # spot from the price book
+    assert cells[5] == "$0.8717 [0.8503, 0.8936]"  # as run: an on-demand host
+    assert cells[6] == "600.0 [585.3, 615.1]"  # geometric mean, log-t CI
+    assert cells[8] == "6 req/s"
+    assert cells[9] == "413 [393, 434] ms"
+    assert cells[11] == "800.0 [780.4, 820.2] at 8 req/s"
+    assert cells[12] == "-0.010 (gsm8k) · pass"
+    assert cells[13] == "95 s (median of 3)"
     assert "- sglang-1rep: load 2 req/s: 1 completed repetition; no confidence interval" in md
     for needle in (
         "## Methodology and provenance",
@@ -142,9 +147,13 @@ def test_markdown_table_and_footer(report):
         "  - error rate, SLO attainment, cache fractions and hit rates: arithmetic mean of "
         "per-run proportions, Student-t interval clipped to [0, 1] (t_clipped)",
         "- **Cost allocation:** all_output",
-        "- **Price book last checked:** 2026-10-04",
-        "aws/us-east-1 g6e.xlarge spot: $1.8386/h",
-        "spot prices are indicative and move hourly",
+        "- **Price book last checked:** 2026-10-05",
+        "aws/us-east-1 g6e.xlarge + 200 GB block storage, from the price book: on-demand "
+        "$1.8829/h; spot $1.8605/h; committed 1y n/a",
+        "the spot price is an indicative average and moves hourly",
+        "As run: $1.7219/h, spot host: spot $1.700000/h observed at launch in us-east-1a "
+        "(2026-10-01T00:00:00+00:00) + 200 GB block storage",
+        "As run: $1.8829/h, on_demand host: price-book on-demand price + 200 GB block storage",
         "commit `0123456789abcdef0123456789abcdef01234567`",
         "digest `sha256:8a8a",
         "Qwen/Qwen3-8B @ b968826d9c46dd6066d109eabc6255188de91218",
@@ -161,16 +170,29 @@ def test_csv_has_integer_micros_and_formatted_usd(report):
     assert list(rows[0]) == CSV_COLUMNS
     assert [r["config"] for r in rows] == ["sglang-bf16", "vllm-bf16", "vllm-awq", "sglang-1rep"]
     first = rows[0]
-    micros = int(first["output_per_mtok_micros"])
-    assert first["output_per_mtok_usd"] == f"${micros / 1e6:.6f}"
+    micros = int(first["on_demand_output_per_mtok_micros"])
+    assert first["on_demand_output_per_mtok_usd"] == f"${micros / 1e6:.6f}"
     assert (
-        int(first["output_per_mtok_lo_micros"]) < micros < int(first["output_per_mtok_hi_micros"])
+        int(first["on_demand_output_per_mtok_lo_micros"])
+        < micros
+        < int(first["on_demand_output_per_mtok_hi_micros"])
     )
-    assert first["input_per_mtok_micros"] == "" and first["input_per_mtok_usd"] == ""
-    assert first["input_per_mtok_na_reason"] == "all cost allocated to output"
-    assert first["output_per_mtok_na_reason"] == ""
+    assert first["on_demand_input_per_mtok_micros"] == ""
+    assert first["on_demand_input_per_mtok_na_reason"] == "all cost allocated to output"
+    assert first["on_demand_output_per_mtok_na_reason"] == ""
     assert first["goodput_output_tok_s_ci_method"] == "log_t"
-    assert first["hourly_micros"] == "1861000" and first["hourly_usd"] == "$1.861000"
+    assert first["on_demand_hourly_micros"] == "1882918"
+    assert first["on_demand_hourly_usd"] == "$1.882918"
+    assert first["spot_hourly_micros"] == "1860518"
+    assert first["committed_1y_hourly_micros"] == ""
+    assert first["committed_1y_output_per_mtok_micros"] == ""
+    assert first["as_run_hourly_micros"] == "1882918"
+    assert rows[2]["as_run_hourly_micros"] == "1721918"  # vllm-awq ran on spot
+    assert int(rows[2]["as_run_output_per_mtok_micros"]) < int(
+        rows[2]["on_demand_output_per_mtok_micros"]
+    )
+    assert first["storage_gb"] == "200"
+    assert first["as_run_price_basis"].startswith("$1.8829/h, on_demand host")
     assert (
         first["rank"] == "1"
         and rows[2]["rank"] == ""
@@ -189,6 +211,7 @@ def test_csv_has_integer_micros_and_formatted_usd(report):
 
 ALLOWED_URL_PREFIXES = (
     "https://b0.p.awsstatic.com/pricing/",
+    "https://aws.amazon.com/ebs/pricing/",
     "https://instances.vantage.sh/",
     "https://huggingface.co/datasets/",
 )
@@ -229,7 +252,7 @@ def test_all_input_ranks_by_input_cost(all_runs, price_book):
         all_runs,
         slo=SLO,
         allocation=CostAllocation.all_input(),
-        hourly_price=default_price_resolver(price_book),
+        price_resolver=default_price_resolver(price_book),
     )
     rows = build_leaderboard(results).boards[0].rows
     ranked = [r for r in rows if r.status is RowStatus.RANKED]
@@ -247,8 +270,8 @@ def test_unbracketed_goodput_is_marked_and_explained_once(report):
         if line.startswith("| ") and "**" in line
         for cells in [[c.strip() for c in line.strip("|").split(" | ")]]
     }
-    assert rows["sglang-bf16"][6] == "6 req/s"  # bracketed: a failing load above it
-    assert rows["sglang-1rep"][6] == "8+ req/s"  # every tested load met the SLO
+    assert rows["sglang-bf16"][8] == "6 req/s"  # bracketed: a failing load above it
+    assert rows["sglang-1rep"][8] == "8+ req/s"  # every tested load met the SLO
     assert md.count(UNBRACKETED_NOTE) == 1
     assert render_html(report).count(UNBRACKETED_NOTE) == 1
 
@@ -266,7 +289,7 @@ def test_provenance_is_per_workload_not_per_config(price_book):
         runs,
         slo=SLO,
         allocation=CostAllocation.all_output(),
-        hourly_price=default_price_resolver(price_book),
+        price_resolver=default_price_resolver(price_book),
     )
     assert len({r.config_hash for r in results}) == 1 and len(results) == 2
     report = build_leaderboard(results, price_book=price_book)

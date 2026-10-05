@@ -41,6 +41,7 @@
 <dt>Hardware</dt><dd>{{ c.gpu }} · {{ c.location }}; CUDA {{ c.cuda_version or 'not recorded' }}, driver {{ c.driver_version or 'not recorded' }}</dd>
 <dt>Code</dt><dd>commit {% for s in c.git_shas %}<code>{{ s }}</code>{{ ', ' if not loop.last }}{% else %}not recorded{% endfor %}; loom-bench {{ c.bench_version or 'not recorded' }}</dd>
 <dt>Price</dt><dd>{{ c.price.basis }}{% if c.price.urls %}; source: {{ link_list(c.price.urls) }}{% endif %}{% if c.price.last_checked %}; last checked {{ c.price.last_checked }}{% endif %}{% if c.price.note %}; {{ c.price.note }}{% endif %}</dd>
+<dt>Price as run</dt><dd>{{ c.price.as_run }}</dd>
 <dt>Runs</dt><dd>{{ c.runs }}; provenance digests: {% for d in c.provenance_digests %}<code>{{ d }}</code>{{ ', ' if not loop.last }}{% endfor %}</dd>
 <dt>Reproduce</dt><dd><code>{{ c.reproduce }}</code></dd>
 </dl>

@@ -44,7 +44,7 @@
 {% call scroll_table("models-h") %}
 <table>
 <thead>
-<tr><th scope="col">Model</th><th scope="col">Workload</th><th scope="col">Best config at SLO</th><th scope="col" class="num">$/1M output tokens</th><th scope="col" class="num">Goodput out tok/s per GPU</th><th scope="col" class="num">p95 TTFT</th><th scope="col" class="num">p95 TPOT</th><th scope="col">Quality gate</th></tr>
+<tr><th scope="col">Model</th><th scope="col">Workload</th><th scope="col">Best config at SLO</th><th scope="col" class="num">$/1M output tokens,<br>on-demand</th><th scope="col" class="num">Goodput out tok/s per GPU</th><th scope="col" class="num">p95 TTFT</th><th scope="col" class="num">p95 TPOT</th><th scope="col">Quality gate</th></tr>
 </thead>
 <tbody>
 {% for h in headline %}
@@ -71,7 +71,7 @@
 </tbody>
 </table>
 {% endcall %}
-<p class="section-note">{{ manifest.experiment_ids|length }} experiment{{ '' if manifest.experiment_ids|length == 1 else 's' }}, {{ manifest.run_count }} runs. Cost covers the replica's hourly price only; see <a href="{{ root }}methodology.html#cost">how cost is derived</a> and <a href="{{ root }}pricing.html">how it compares with public list prices</a>.</p>
+<p class="section-note">{{ manifest.experiment_ids|length }} experiment{{ '' if manifest.experiment_ids|length == 1 else 's' }}, {{ manifest.run_count }} runs. Cost is at the on-demand list price of the replica's instance plus its block storage; see <a href="{{ root }}methodology.html#cost">how cost is derived</a> and <a href="{{ root }}pricing.html">how it compares with public list prices</a>.</p>
 {% endif %}
 </section>
 
@@ -81,7 +81,7 @@
 <dt>Goodput at SLO</dt>
 <dd>The highest tested load at which latency and errors stay within the service-level objective, judged on the upper end of the confidence interval. Raw peak throughput is reported separately and never used for cost. <a href="{{ root }}methodology.html#goodput">Definition</a></dd>
 <dt>Cost per token</dt>
-<dd>The replica's hourly cloud price divided by the tokens it produces per hour at goodput. Prices come from public price pages, each with its source and check date. <a href="{{ root }}methodology.html#cost">Formula and worked example</a></dd>
+<dd>The replica's hourly on-demand list price (instance plus block storage) divided by the tokens it produces per hour at goodput. Spot and as-run costs are shown on each model page. Prices come from public price pages, each with its source and check date. <a href="{{ root }}methodology.html#cost">Formula and worked example</a></dd>
 <dt>Quality</dt>
 <dd>Each configuration is scored on pinned evaluation sets against a baseline configuration of the same model; one that fails the quality gate is listed but never ranked. <a href="{{ root }}methodology.html#quality">Gate rule</a></dd>
 </dl>

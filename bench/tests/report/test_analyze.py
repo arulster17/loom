@@ -2,7 +2,14 @@ import uuid
 
 import pytest
 
-from loom_bench.cost import CostAllocation, cost_from_goodput
+from loom_bench.cost import (
+    NO_LOCAL_PRICE,
+    NO_PRICE_BASIS,
+    CostAllocation,
+    PriceColumn,
+    cost_from_goodput,
+    recorded_hourly_micros,
+)
 from loom_bench.prices import UnverifiedPriceError
 from loom_bench.provenance import Provenance, provenance_hash
 from loom_bench.records import LoadMode, Market
@@ -12,7 +19,6 @@ from loom_bench.report.analyze import (
     analyze_runs,
     cold_starts_by_config,
     default_price_resolver,
-    explicit_hourly_micros,
     label_from_provenance,
     load_points,
     quality_for,
@@ -20,10 +26,13 @@ from loom_bench.report.analyze import (
 )
 from loom_bench.store.models import BenchColdStart
 
-from .factories import EXPERIMENT, SLO, TTFT_SGLANG, eval_row, gate_row, make_runs
+from .factories import EXPERIMENT, LOADS, SLO, TTFT_SGLANG, eval_row, gate_row, make_runs
 
-ON_DEMAND = 1_861_000  # g6e.xlarge us-east-1, bench/prices.yaml
-SPOT = 1_838_600
+# g6e.xlarge us-east-1 from bench/prices.yaml plus a 200 GB gp3 volume
+# ($0.08/GB-month x 200 / 730 h = $0.0219178/h), rounded once.
+ON_DEMAND = 1_882_918  # 1_861_000 + 21_917.8
+SPOT = 1_860_518  # 1_838_600 + 21_917.8
+AS_RUN_SPOT = 1_721_918  # observed $1.70/h + 21_917.8
 
 
 @pytest.fixture(scope="module")
@@ -32,7 +41,7 @@ def results(all_runs, price_book):
         all_runs,
         slo=SLO,
         allocation=CostAllocation.all_output(),
-        hourly_price=default_price_resolver(price_book),
+        price_resolver=default_price_resolver(price_book),
     )
 
 
@@ -45,7 +54,7 @@ def analyze(runs, price_book, allocation=None):
         runs,
         slo=SLO,
         allocation=allocation or CostAllocation.all_output(),
-        hourly_price=default_price_resolver(price_book),
+        price_resolver=default_price_resolver(price_book),
     )
 
 
@@ -59,11 +68,12 @@ def test_groups_by_config_and_load_point(results):
     )
     assert set(by_name(results)) == {"vllm-bf16", "sglang-bf16", "vllm-awq"}
     for r in results:
+        loads = [*LOADS, 10.0] if r.name == "vllm-awq" else list(LOADS)
         assert r.workload == "chat"
         assert r.load_mode is LoadMode.OPEN_LOOP
-        assert [p.load for p in r.points] == [2.0, 4.0, 6.0, 8.0]
+        assert [p.load for p in r.points] == loads
         assert all(p.aggregate.n_runs == 3 and p.repetitions == [1, 2, 3] for p in r.points)
-        assert len(r.run_ids) == 12 == len(set(r.run_ids))
+        assert len(r.run_ids) == 3 * len(loads) == len(set(r.run_ids))
         assert r.experiment_ids == [str(EXPERIMENT)]
         assert r.gpus == 1
 
@@ -88,14 +98,15 @@ def test_goodput_and_latency_at_goodput(results):
 def test_cost_uses_price_book_and_goodput(results):
     r = by_name(results)
     vllm, sglang, awq = r["vllm-bf16"], r["sglang-bf16"], r["vllm-awq"]
+    # every result ranks at the on-demand list price, whatever market it ran on
     assert (vllm.hourly_micros, sglang.hourly_micros, awq.hourly_micros) == (
         ON_DEMAND,
         ON_DEMAND,
-        SPOT,
+        ON_DEMAND,
     )
     assert vllm.cost == cost_from_goodput(ON_DEMAND, vllm.goodput, CostAllocation.all_output())
-    # $1.861/h at 400 output tok/s = $1.2924 per 1M output tokens
-    assert vllm.cost.output_per_mtok.value == pytest.approx(1_292_361, rel=1e-3)
+    # $1.882918/h at 400 output tok/s = $1.3076 per 1M output tokens
+    assert vllm.cost.output_per_mtok.value == pytest.approx(1_307_582, rel=1e-3)
     assert vllm.cost.input_per_mtok.value is None  # all_output: input has no price
     assert vllm.cost.input_per_mtok.na_reason == "all cost allocated to output"
     lo, value, hi = (
@@ -171,6 +182,36 @@ def test_failed_runs_are_excluded_and_counted(price_book):
     assert WarningKind.EXCLUDED_RUNS not in UNTRUSTING
 
 
+def test_every_price_column_comes_from_one_resolver(results, price_book):
+    r = by_name(results)
+    vllm, awq = r["vllm-bf16"], r["vllm-awq"]
+    for result in (vllm, awq):
+        assert result.prices == default_price_resolver(price_book)(result.provenance)
+        assert (result.prices.on_demand, result.prices.spot) == (ON_DEMAND, SPOT)
+        assert result.prices.committed_1y is None and result.committed_1y_cost is None
+        assert result.prices.storage_gb == 200
+        for column in PriceColumn:
+            hourly = result.prices.get(column)
+            assert result.cost_at(column) == (
+                None
+                if hourly is None
+                else cost_from_goodput(hourly, result.goodput, CostAllocation.all_output())
+            )
+    # as run: the on-demand host paid list price; the spot host its observed price,
+    # never the budget guard's multiplied accrual rate
+    assert vllm.prices.as_run == ON_DEMAND
+    assert awq.prices.as_run == AS_RUN_SPOT
+    assert awq.as_run_cost.output_per_mtok.value < awq.cost.output_per_mtok.value
+
+
+def test_cloud_run_without_price_basis_is_not_priced(price_book):
+    runs = make_runs("legacy", price_basis=None, hourly_micros=2_323_168, reps=(1, 2))
+    (legacy,) = analyze(runs, price_book)
+    assert legacy.cost is None and legacy.as_run_cost is None
+    assert legacy.prices.missing == NO_PRICE_BASIS
+    assert any(NO_PRICE_BASIS in w.message for w in legacy.warnings)
+
+
 def test_local_market_needs_explicit_hourly_price(price_book):
     resolve = default_price_resolver(price_book)
     local = dict(
@@ -179,14 +220,18 @@ def test_local_market_needs_explicit_hourly_price(price_book):
     (unpriced,) = analyze(make_runs("local", **local), price_book)
     assert unpriced.hourly_micros is None and unpriced.cost is None
     assert WarningKind.NO_PRICE in kinds(unpriced)
+    assert unpriced.prices.missing == NO_LOCAL_PRICE
 
     (priced,) = analyze(make_runs("mock", hourly_micros=500_000, **local), price_book)
-    assert priced.hourly_micros == 500_000
+    assert priced.hourly_micros == 500_000 and priced.prices.as_run == 500_000
     assert priced.cost is not None and priced.cost.hourly_micros == 500_000
-    assert resolve(priced.provenance) == 500_000
-    assert explicit_hourly_micros({"hourly_micros": 7}) == 7
+    assert priced.spot_cost is None and priced.prices.storage_gb is None
+    assert resolve(priced.provenance).on_demand == 500_000
+    basis = {"market": "local", "source": "experiment"}
+    assert recorded_hourly_micros({"hourly_micros": 7, "price_basis": basis}) == 7
+    assert recorded_hourly_micros({"hourly_micros": 7}) is None
     with pytest.raises(TypeError):
-        explicit_hourly_micros({"hourly_micros": 1.5})
+        recorded_hourly_micros({"hourly_micros": 1.5, "price_basis": basis})
 
 
 def test_price_resolver_refuses_unverified_and_unknown(price_book):
@@ -196,10 +241,11 @@ def test_price_resolver_refuses_unverified_and_unknown(price_book):
         "cloud": "gcp",
         "region": "us-central1",
         "hardware": {"instance_type": "g2-standard-8"},
+        "price_basis": {"market": "on_demand", "source": "prices_yaml", "storage_gb": 0},
     }
     with pytest.raises(UnverifiedPriceError):
         resolve(gcp)
-    assert default_price_resolver(price_book, allow_unverified=True)(gcp) == 853_600
+    assert default_price_resolver(price_book, allow_unverified=True)(gcp).on_demand == 853_600
     with pytest.raises(KeyError):
         resolve({**gcp, "cloud": "aws", "region": "us-east-1"})
 

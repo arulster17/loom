@@ -157,7 +157,7 @@ it there.
    image only when it changes.
 3. **Budget guard** (`budget.BudgetGuard`). Every `accrual_interval_s` it writes
    `Σ host.hourly_micros x elapsed` to `bench_spend` (computed from launch each time, so no
-   rounding drift; the basis records price, market and the provider's price basis). Before
+   rounding drift; the basis records price, market and the provider's accrual basis). Before
    each step (provision, engine start, run, eval) it stops gracefully (exit 4) if spend so
    far plus the step's estimate would pass the cap. When recorded spend reaches the cap, or
    the overall cap across experiments, it trips: the in-flight provider call is cancelled,
@@ -184,7 +184,10 @@ Each run's provenance (`bench_runs.provenance`, and `results/<experiment>/runs/<
 records: git sha, dirty flag and branch; bench and load-generator versions; engine name,
 version, image, image digest and args; CUDA and driver versions (from the host); model repo,
 revision and quantization; parallelism; GPU type and count; cloud, region, instance type and
-market; the hourly price used; the config hash and the full resolved config; the workload
+market; the as-run hourly price (`hourly_micros`: instance plus storage, never the budget
+guard's multiplied rate) and its `price_basis` (market, source: observed spot price at
+launch, `prices.yaml` or the experiment, storage GB; [cost-model.md](cost-model.md#4-the-hourly-price-h));
+the config hash and the full resolved config; the workload
 name, profile hash and content kind (synthetic or realistic); dataset and license; load
 mode, value and seed; the repetition index; the client host. Fields nobody measured stay
 null (the mock has no CUDA, image or cloud).
@@ -203,7 +206,8 @@ experiment's `spec.json` next to it (or `--spec`).
 results/<experiment id>/
   spec.json            the validated experiment spec
   events.jsonl         provisioning, engine starts, spot interruptions, quality, gates
-  goodput.json         goodput and cost at SLO per cell and workload
+  goodput.json         goodput and cost at SLO per cell and workload, per price column
+                       (on-demand, spot, committed 1y, as run), priced as bench report does
   runs/<run id>/requests.parquet, provenance.json
   evals/<config hash>/samples.json   per-item quality scores (for re-gating)
   evals/<config hash>/reference.json the baseline's divergence reference (ReferenceLogprobs)

@@ -18,6 +18,7 @@ from loom_bench.jobs import (
     TokenizerSpec,
 )
 from loom_bench.prices import load_prices
+from loom_bench.provenance import PriceBasis
 from loom_bench.providers.aws_ec2 import (
     AwsEc2Provider,
     AwsSettings,
@@ -107,12 +108,20 @@ async def test_provision_on_demand_sets_safety_rails(aws: dict[str, Any]) -> Non
     inst = describe(ec2, host.host_id)
 
     assert host.hourly_micros == G6E_XLARGE_ON_DEMAND + EBS_200GB
-    assert host.info["price_basis"] == {
+    assert host.info["accrual_basis"] == {
         "source": "prices.yaml",
         "market": "on_demand",
         "instance_micros_per_hour": G6E_XLARGE_ON_DEMAND,
         "ebs_micros_per_hour": EBS_200GB,
     }
+    # as run: the same list price and volume, rounded once (21_917.8 micros of EBS)
+    assert host.as_run_micros == 1_882_918
+    assert host.price_basis == PriceBasis(
+        market=Market.ON_DEMAND,
+        source="prices_yaml",
+        availability_zone=host.info["az"],
+        storage_gb=200,
+    )
     assert host.info["subnet_id"] == aws["settings"].subnet_ids[0]
     assert "InstanceLifecycle" not in inst
     assert timedelta(seconds=3599) <= host.ttl_at - before <= timedelta(seconds=3601)
@@ -162,10 +171,17 @@ async def test_provision_spot_accrues_spot_price_times_multiplier(aws: dict[str,
     # moto quotes every spot price as $0.00001/h: 10 micros x 1.25 = 12.5, rounded up;
     # 500 GB gp3 = 54_794.5 micros/h, rounded up.
     assert host.hourly_micros == 13 + 54_795
-    basis = host.info["price_basis"]
+    basis = host.info["accrual_basis"]
     assert basis["source"] == "describe_spot_price_history"
     assert basis["spot_price_usd"] == "0.00001"
     assert basis["multiplier"] == "1.25"
+    # as run: the observed price without the multiplier, plus the volume, rounded once
+    assert host.as_run_micros == 10 + 54_795  # 10 + 54_794.5, half up
+    assert host.price_basis is not None
+    assert host.price_basis.source == "observed_spot"
+    assert host.price_basis.spot_price_usd == "0.00001"
+    assert host.price_basis.storage_gb == 500
+    assert host.price_basis.availability_zone == host.info["az"]
     vols = aws["ec2"].describe_volumes(
         Filters=[{"Name": "attachment.instance-id", "Values": [host.host_id]}]
     )["Volumes"]
@@ -197,11 +213,16 @@ async def test_spot_picks_cheapest_az_and_falls_back_to_on_demand_price(
     host = await provider(aws, ec2=ec2).provision(request(market=Market.SPOT))
     assert host.info["az"] == b
     assert host.hourly_micros == 1_250_000 + EBS_200GB
+    assert host.as_run_micros == 1_021_918  # $1.00 observed + 21_917.8 EBS
+    assert host.price_basis is not None and host.price_basis.observed_at == now
 
     empty = Proxy(aws["ec2"], describe_spot_price_history=lambda **_: {"SpotPriceHistory": []})
     host = await provider(aws, ec2=empty).provision(request(market=Market.SPOT))
     assert host.hourly_micros == G6E_XLARGE_ON_DEMAND + EBS_200GB
-    assert host.info["price_basis"]["market"] == "on_demand_fallback"
+    assert host.info["accrual_basis"]["market"] == "on_demand_fallback"
+    # nothing observed: the as-run price is unknown, never guessed
+    assert host.as_run_micros is None
+    assert host.price_basis is not None and host.price_basis.source == "unobserved"
 
 
 async def test_provision_tries_next_az_on_capacity_error(aws: dict[str, Any]) -> None:

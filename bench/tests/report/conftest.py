@@ -4,7 +4,7 @@ from loom_bench.prices import PriceBook, load_competitors, load_prices
 from loom_bench.records import Market
 from loom_bench.store.models import BenchRun
 
-from .factories import TTFT_SGLANG, make_runs
+from .factories import AWQ_LOADS, TTFT_AWQ, TTFT_SGLANG, make_runs
 
 
 @pytest.fixture(scope="session")
@@ -29,7 +29,9 @@ def sglang_runs() -> list[BenchRun]:
 
 @pytest.fixture(scope="session")
 def awq_runs() -> list[BenchRun]:
-    return make_runs("vllm-awq", quantization="awq", ttft=TTFT_SGLANG, market=Market.SPOT)
+    return make_runs(
+        "vllm-awq", quantization="awq", ttft=TTFT_AWQ, loads=AWQ_LOADS, market=Market.SPOT
+    )
 
 
 @pytest.fixture(scope="session")

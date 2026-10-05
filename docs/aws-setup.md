@@ -245,4 +245,5 @@ a full-suite run on a large model.
 
 The S3 bucket and the Lambda cost cents. Secrets Manager is $0.40 per secret per
 month. CloudWatch Logs for the reaper are kept 30 days. The root gp3 volume
-(200 GB, about $0.022/h) is part of each host's accrued `hourly_micros`.
+(200 GB, about $0.022/h) is part of each host's accrued `hourly_micros` and of every
+reported cost ([cost-model.md](cost-model.md#4-the-hourly-price-h)).

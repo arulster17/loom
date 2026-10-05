@@ -50,11 +50,11 @@
 <h2 id="{{ b.anchor }}">{{ b.title }}</h2>
 {% set first = b.configs[0].result %}
 {% set show_input = b.input_priced %}
-<p class="section-note">Ranked by $/1M output tokens at SLO, cheapest first.{% if not show_input %} Cost allocation all_output: the replica's whole cost is charged to output tokens, so input tokens have no separate price.{% endif %} Load generation: {{ load_mode_label(b.board.load_mode) }}. SLO: {{ describe_slo(first.goodput.slo) }}. Values are point estimates (geometric means for latency and throughput); the line under each is its confidence interval (<a href="{{ root }}methodology.html#ci">how it is computed</a>). Unranked configs (quality gate failed, untrusted, or no cost at SLO) are listed last.{% if any_unbracketed(b.configs|map(attribute='result.goodput')) %} {{ unbracketed_note }}{% endif %}</p>
+<p class="section-note">Ranked by $/1M output tokens at SLO at the on-demand list price, cheapest first; spot, committed-1y and as-run costs are shown where available. Every price includes the replica's block storage (<a href="{{ root }}methodology.html#cost">price columns</a>).{% if not show_input %} Cost allocation all_output: the replica's whole cost is charged to output tokens, so input tokens have no separate price.{% endif %} Load generation: {{ load_mode_label(b.board.load_mode) }}. SLO: {{ describe_slo(first.goodput.slo) }}. Values are point estimates (geometric means for latency and throughput); the line under each is its confidence interval (<a href="{{ root }}methodology.html#ci">how it is computed</a>). Unranked configs (quality gate failed, untrusted, or no cost at SLO) are listed last.{% if any_unbracketed(b.configs|map(attribute='result.goodput')) %} {{ unbracketed_note }}{% endif %}</p>
 {% call scroll_table(b.anchor) %}
 <table>
 <thead>
-<tr><th scope="col" class="num">#</th><th scope="col">Config</th><th scope="col" class="num">$/1M out at SLO</th>{% if show_input %}<th scope="col" class="num">$/1M in at SLO</th>{% endif %}<th scope="col" class="num">Goodput out tok/s<br>per GPU</th><th scope="col" class="num">Load at goodput</th><th scope="col" class="num">p95 TTFT<br>at goodput</th><th scope="col" class="num">p95 TPOT<br>at goodput</th><th scope="col">Quality gate</th><th scope="col" class="num">Cold start</th><th scope="col">Status</th></tr>
+<tr><th scope="col" class="num">#</th><th scope="col">Config</th><th scope="col" class="num">$/1M out at SLO,<br>on-demand</th>{% if show_input %}<th scope="col" class="num">$/1M in at SLO,<br>on-demand</th>{% endif %}{% for col in b.board.price_columns %}<th scope="col" class="num">{{ price_header(col, b.board.side) }}</th>{% endfor %}<th scope="col" class="num">Goodput out tok/s<br>per GPU</th><th scope="col" class="num">Load at goodput</th><th scope="col" class="num">p95 TTFT<br>at goodput</th><th scope="col" class="num">p95 TPOT<br>at goodput</th><th scope="col">Quality gate</th><th scope="col" class="num">Cold start</th><th scope="col">Status</th></tr>
 </thead>
 <tbody>
 {% for c in b.configs %}
@@ -65,6 +65,7 @@
 <td class="cfg"><a href="#{{ c.anchor }}"><strong>{{ r.name }}</strong></a><span class="sub">{{ r.label.text }}</span></td>
 <td class="num">{{ money(r.cost.output_per_mtok if r.cost else none) }}</td>
 {% if show_input %}<td class="num">{{ money(r.cost.input_per_mtok if r.cost else none) }}</td>{% endif %}
+{% for col in b.board.price_columns %}<td class="num">{{ money(ranking_cost(r, col)) }}</td>{% endfor %}
 <td class="num">{{ estimate(r.goodput_output_tok_s_per_gpu, 1) }}</td>
 <td class="num">{{ goodput_load(r.goodput) }}</td>
 <td class="num">{{ estimate(r.ttft_p95_ms, 0, 'ms') }}</td>
@@ -93,6 +94,7 @@
 <dt>Goodput</dt><dd>{{ load_value(r.goodput.max_load, r.load_mode) }}{% if r.goodput.first_failing_load is not none %}; first failing load {{ load_value(r.goodput.first_failing_load, r.load_mode) }}{% else %}; no tested load failed, so goodput may be higher{% endif %}</dd>
 <dt>Raw peak</dt><dd>{{ r.peak_output_tok_s|est(1) }} output tok/s at {{ load_value(r.peak_load, r.load_mode) }} (SLO ignored; not used for cost)</dd>
 <dt>Hourly price</dt><dd>{{ p.price.basis }}{% if p.price.urls %}; source: {{ link_list(p.price.urls) }}{% endif %}{% if p.price.last_checked %}; last checked {{ p.price.last_checked }}{% endif %}{% if p.price.note %}; {{ p.price.note }}{% endif %}</dd>
+<dt>Price as run</dt><dd>{{ p.price.as_run }}</dd>
 <dt>Cost allocation</dt><dd>{{ r.allocation }}</dd>
 <dt>Code</dt><dd>commit {% for s in p.git_shas %}<code>{{ s }}</code>{{ ', ' if not loop.last }}{% else %}not recorded{% endfor %}; loom-bench {{ p.bench_version or 'not recorded' }}</dd>
 </dl>

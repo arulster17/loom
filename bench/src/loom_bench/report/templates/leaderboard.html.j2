@@ -4,7 +4,7 @@
 {% block content %}
 <header>
 <h1>{{ report.title }}</h1>
-<p class="lede">Ranked by $/1M output tokens at SLO (input tokens under the all_input cost allocation), cheapest first. Values are point estimates (geometric means for latency and throughput); the smaller line under each is its 95% confidence interval, computed as the methodology below describes. Goodput is the highest tested load that met the SLO; raw peak throughput ignores the SLO and is not goodput. Unranked rows (quality gate failed, untrusted, or no cost) are listed last.</p>
+<p class="lede">Ranked by $/1M output tokens at SLO (input tokens under the all_input cost allocation) at the on-demand list price, cheapest first; spot, committed-1y and as-run costs of the same tokens are shown where available. Every price includes the replica's block storage. Values are point estimates (geometric means for latency and throughput); the smaller line under each is its 95% confidence interval, computed as the methodology below describes. Goodput is the highest tested load that met the SLO; raw peak throughput ignores the SLO and is not goodput. Unranked rows (quality gate failed, untrusted, or no cost) are listed last.</p>
 {% if unbracketed %}<p class="lede">{{ unbracketed_note }}</p>{% endif %}
 </header>
 {% for b in report.boards %}
@@ -13,7 +13,7 @@
 <div class="table-wrap">
 <table>
 <thead>
-<tr><th class="num">#</th><th>Config</th><th class="num">$/1M out at SLO</th><th class="num">$/1M in at SLO</th><th class="num">Goodput out tok/s<br>per replica</th><th class="num">per GPU</th><th class="num">Load at goodput</th><th class="num">p95 TTFT<br>at goodput</th><th class="num">p95 TPOT<br>at goodput</th><th class="num">Raw peak out tok/s<br>(no SLO)</th><th>Quality Δ / gate</th><th class="num">Cold start</th><th>Status</th><th>Recommendation</th></tr>
+<tr><th class="num">#</th><th>Config</th><th class="num">$/1M out at SLO,<br>on-demand</th><th class="num">$/1M in at SLO,<br>on-demand</th>{% for c in b.price_columns %}<th class="num">{{ price_header(c, b.side) }}</th>{% endfor %}<th class="num">Goodput out tok/s<br>per replica</th><th class="num">per GPU</th><th class="num">Load at goodput</th><th class="num">p95 TTFT<br>at goodput</th><th class="num">p95 TPOT<br>at goodput</th><th class="num">Raw peak out tok/s<br>(no SLO)</th><th>Quality Δ / gate</th><th class="num">Cold start</th><th>Status</th><th>Recommendation</th></tr>
 </thead>
 <tbody>
 {% for row in b.rows %}
@@ -23,6 +23,9 @@
 <td><strong>{{ r.name }}</strong><span class="sub">{{ r.label.text }}</span></td>
 <td class="num">{{ money(r.cost.output_per_mtok if r.cost else none) }}</td>
 <td class="num">{{ money(r.cost.input_per_mtok if r.cost else none) }}</td>
+{% for c in b.price_columns %}
+<td class="num">{{ money(ranking_cost(r, c)) }}</td>
+{% endfor %}
 <td class="num">{{ estimate(r.goodput.output_tok_s, 1) }}</td>
 <td class="num">{{ estimate(r.goodput_output_tok_s_per_gpu, 1) }}</td>
 <td class="num">{{ goodput_load(r.goodput) }}</td>

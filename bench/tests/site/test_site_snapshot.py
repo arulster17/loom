@@ -27,7 +27,7 @@ def test_export_round_trips(populated, tmp_path):
                 runs,
                 slo=SLO,
                 allocation=CostAllocation.all_output(),
-                hourly_price=default_price_resolver(load_prices()),
+                price_resolver=default_price_resolver(load_prices()),
             ),
             s.query(BenchEvalRun).all(),
             s.query(BenchGateDecision).all(),

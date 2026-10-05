@@ -55,7 +55,7 @@ def test_summary_shows_trust_and_main_warning(monkeypatch):
         runs,
         slo=SLO,
         allocation=CostAllocation.all_output(),
-        hourly_price=default_price_resolver(load_prices()),
+        price_resolver=default_price_resolver(load_prices()),
     )
     steady, one_shot = sorted(results, key=lambda r: r.name != "steady")
     assert steady.trusted and steady.main_warning is None

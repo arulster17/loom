@@ -5,7 +5,7 @@
 <header>
 <h1>{{ report.title }}</h1>
 <p class="note"><strong>{{ report.note }}</strong></p>
-<p class="lede">Competitor prices last checked {{ report.competitors_last_checked }}. {{ scope }} Margin is our price minus our cost at SLO under the stated cost allocation.</p>
+<p class="lede">Competitor prices last checked {{ report.competitors_last_checked }}. {{ scope }} Margin is our price minus our cost at SLO at the on-demand list price (storage included), under the stated cost allocation.</p>
 </header>
 {% for model_id, rows in by_model.items() %}
 {% set first = rows[0] %}
@@ -14,7 +14,7 @@
 <div class="table-wrap">
 <table>
 <thead>
-<tr><th>Workload</th><th>Best config at SLO</th><th class="num">Our cost $/1M in</th><th class="num">Our cost $/1M out</th><th class="num">Our price $/1M in</th><th class="num">Our price $/1M out</th><th class="num">Margin in</th><th class="num">Margin out</th></tr>
+<tr><th>Workload</th><th>Best config at SLO</th><th class="num">Our cost $/1M in<br>(on-demand)</th><th class="num">Our cost $/1M out<br>(on-demand)</th><th class="num">Our price $/1M in</th><th class="num">Our price $/1M out</th><th class="num">Margin in</th><th class="num">Margin out</th></tr>
 </thead>
 <tbody>
 {% for r in rows %}

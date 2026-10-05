@@ -3,8 +3,10 @@
 A sweep is every completed run of one (config_hash, workload, load_mode). Its runs
 are grouped by load value, repetitions are aggregated (mean ± t-CI per metric), the
 SLO is checked conservatively per load point, goodput is the highest passing load
-below the first failure, and cost at SLO prices that goodput with the replica's
-hourly price. Runs whose status is not "completed" are excluded and counted.
+below the first failure, and cost at SLO prices that goodput at each of the replica's
+hourly prices (`cost.replica_prices`: on-demand, which ranks results, spot,
+committed 1y and as run). Runs whose status is not "completed" are excluded and
+counted.
 
 Untrusted results are still reported but carry warnings, and leaderboards rank them
 after trusted ones. A result is untrusted when any load point has fewer than two
@@ -24,14 +26,20 @@ from typing import Any, Literal, NamedTuple, cast
 
 from pydantic import BaseModel
 
-from loom_bench.cost import CostAllocation, CostAtSlo, cost_from_goodput
+from loom_bench.cost import (
+    CostAllocation,
+    CostAtSlo,
+    PriceColumn,
+    ReplicaPrices,
+    cost_from_goodput,
+    replica_prices,
+)
 from loom_bench.metrics.aggregate import HEADLINE_METRICS, AggregateSummary, aggregate_runs
 from loom_bench.metrics.summary import RunSummary
 from loom_bench.money import Micros
 from loom_bench.prices import PriceBook
 from loom_bench.provenance import ContentKind, config_hash
-from loom_bench.records import LoadMode, Market
-from loom_bench.registry import Cloud
+from loom_bench.records import LoadMode
 from loom_bench.slo import GoodputResult, Slo, find_goodput
 from loom_bench.stats import Estimate
 from loom_bench.store.models import (
@@ -47,7 +55,7 @@ COMPLETED = "completed"
 # Engine-arg keys that carry tensor parallelism (vLLM, SGLang); shown as TPn, not as args.
 TP_ARG_KEYS = ("tensor_parallel_size", "tensor-parallel-size", "tp_size", "tp-size", "tp")
 
-HourlyPrice = Callable[[Mapping[str, Any]], Micros | None]
+PriceResolver = Callable[[Mapping[str, Any]], ReplicaPrices]
 
 
 class SweepKey(NamedTuple):
@@ -180,8 +188,11 @@ class ConfigResult(BaseModel):
     points: list[LoadPoint]
     goodput: GoodputResult
     allocation: str
-    hourly_micros: Micros | None
-    cost: CostAtSlo | None
+    prices: ReplicaPrices
+    cost: CostAtSlo | None  # at the on-demand price: what results are ranked by
+    spot_cost: CostAtSlo | None
+    committed_1y_cost: CostAtSlo | None
+    as_run_cost: CostAtSlo | None
     ttft_p95_ms: Estimate | None  # at the goodput point
     tpot_p95_ms: Estimate | None
     peak_output_tok_s: Estimate | None  # raw peak over all loads, SLO ignored
@@ -197,6 +208,16 @@ class ConfigResult(BaseModel):
     @property
     def name(self) -> str:
         return self.cell_key or self.config_hash[:12]
+
+    @property
+    def hourly_micros(self) -> Micros | None:
+        """The on-demand hourly price, the one results are ranked by."""
+        return self.prices.on_demand
+
+    def cost_at(self, column: PriceColumn) -> CostAtSlo | None:
+        if column is PriceColumn.ON_DEMAND:
+            return self.cost
+        return cast(CostAtSlo | None, getattr(self, f"{column.value}_cost"))
 
     @property
     def key(self) -> SweepKey:
@@ -281,38 +302,15 @@ def provenance_digest(prov: Mapping[str, Any]) -> str:
     return config_hash(prov)
 
 
-def explicit_hourly_micros(prov: Mapping[str, Any]) -> Micros | None:
-    """`hourly_micros` recorded in the provenance."""
-    value = prov.get("hourly_micros")
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(f"hourly_micros must be integer micros, got {value!r}")
-    return value
-
-
 def default_price_resolver(
-    price_book: PriceBook, *, storage_gb: int = 0, allow_unverified: bool = False
-) -> HourlyPrice:
-    """Hourly replica price from `price_book` by the run's cloud, region, instance and market.
+    price_book: PriceBook, *, allow_unverified: bool = False
+) -> PriceResolver:
+    """Every price column for a run from `price_book` and its provenance
+    (`cost.replica_prices`): the one pricing used by reports, the site, the run
+    summary and `goodput.json`."""
 
-    `market: local` (own hardware, mock) is not billed: None, unless the provenance
-    records an explicit `hourly_micros`. A missing price-book entry or an unverified
-    price raises, so a report never silently drops a price it should have had.
-    """
-
-    def resolve(prov: Mapping[str, Any]) -> Micros | None:
-        market = prov.get("market")
-        if market is None or Market(market) is Market.LOCAL:
-            return explicit_hourly_micros(prov)
-        return price_book.replica_hourly_cost(
-            cast(Cloud, prov.get("cloud")),
-            prov.get("region") or "",
-            _section(prov, "hardware").get("instance_type") or "",
-            Market(market),
-            storage_gb,
-            allow_unverified=allow_unverified,
-        ).per_hour
+    def resolve(prov: Mapping[str, Any]) -> ReplicaPrices:
+        return replica_prices(prov, price_book, allow_unverified=allow_unverified)
 
     return resolve
 
@@ -379,7 +377,7 @@ def _warnings(
     points: list[LoadPoint],
     summaries: list[RunSummary],
     goodput: GoodputResult,
-    hourly: Micros | None,
+    prices: ReplicaPrices,
     excluded: int,
     cv_warn: float,
 ) -> list[ResultWarning]:
@@ -422,8 +420,9 @@ def _warnings(
             WarningKind.MISSING_USAGE,
             f"{missing} successful requests had no usage block; their tokens are not counted",
         )
-    if hourly is None:
-        add(WarningKind.NO_PRICE, "no hourly price for this replica; cost at SLO not computed")
+    if prices.on_demand is None:
+        reason = prices.missing or "no on-demand price for this replica"
+        add(WarningKind.NO_PRICE, f"{reason}; cost at SLO not computed")
     if excluded:
         add(WarningKind.EXCLUDED_RUNS, f"{excluded} runs not completed were excluded")
     return out
@@ -437,6 +436,13 @@ def _git_label(prov: Mapping[str, Any]) -> str | None:
     return f"{sha}-dirty" if git.get("dirty") else sha
 
 
+def costs_at(
+    hourly: Micros | None, goodput: GoodputResult, allocation: CostAllocation
+) -> CostAtSlo | None:
+    """Cost at SLO at one hourly price; None without a price or a goodput."""
+    return None if hourly is None else cost_from_goodput(hourly, goodput, allocation)
+
+
 def _analyze_sweep(
     key: SweepKey,
     runs: Sequence[BenchRun],
@@ -444,7 +450,7 @@ def _analyze_sweep(
     *,
     slo: Slo,
     allocation: CostAllocation,
-    hourly_price: HourlyPrice,
+    price_resolver: PriceResolver,
     confidence: float,
     cv_warn: float,
 ) -> ConfigResult:
@@ -454,8 +460,8 @@ def _analyze_sweep(
         raise ValueError(f"{key}: runs disagree on GPUs per replica: {sorted(gpus)}")
     goodput = find_goodput(slo, [(p.load, p.aggregate) for p in points], key.load_mode)
     prov = ordered[0].provenance
-    hourly = hourly_price(prov)
-    cost = None if hourly is None else cost_from_goodput(hourly, goodput, allocation)
+    prices = price_resolver(prov)
+    costs = {col: costs_at(prices.get(col), goodput, allocation) for col in PriceColumn}
     at = next((p for p in points if p.load == goodput.max_load), None)
 
     peak: LoadPoint | None = None
@@ -481,13 +487,16 @@ def _analyze_sweep(
         points=points,
         goodput=goodput,
         allocation=allocation.describe(),
-        hourly_micros=hourly,
-        cost=cost,
+        prices=prices,
+        cost=costs[PriceColumn.ON_DEMAND],
+        spot_cost=costs[PriceColumn.SPOT],
+        committed_1y_cost=costs[PriceColumn.COMMITTED_1Y],
+        as_run_cost=costs[PriceColumn.AS_RUN],
         ttft_p95_ms=at.aggregate.get("ttft_ms.p95") if at else None,
         tpot_p95_ms=at.aggregate.get("tpot_ms.p95") if at else None,
         peak_output_tok_s=peak.aggregate.get("throughput.output_tok_s") if peak else None,
         peak_load=peak.load if peak else None,
-        warnings=_warnings(key, points, summaries, goodput, hourly, excluded, cv_warn),
+        warnings=_warnings(key, points, summaries, goodput, prices, excluded, cv_warn),
         experiment_ids=sorted({str(r.experiment_id) for r in ordered}),
         run_ids=[str(r.id) for r in ordered],
         provenance_digests=sorted({provenance_digest(r.provenance) for r in ordered}),
@@ -501,7 +510,7 @@ def analyze_runs(
     *,
     slo: Slo,
     allocation: CostAllocation,
-    hourly_price: HourlyPrice,
+    price_resolver: PriceResolver,
     confidence: float = 0.95,
     cv_warn: float = 0.10,
 ) -> list[ConfigResult]:
@@ -514,7 +523,7 @@ def analyze_runs(
             excluded.get(key, 0),
             slo=slo,
             allocation=allocation,
-            hourly_price=hourly_price,
+            price_resolver=price_resolver,
             confidence=confidence,
             cv_warn=cv_warn,
         )

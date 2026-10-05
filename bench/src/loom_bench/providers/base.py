@@ -6,9 +6,11 @@ A Phase 1 `k8s` provider will reuse the Helm chart.
 
 Lifecycle per host: provision -> start_engine (cold) -> run jobs and evals ->
 [stop_engine -> start_engine (warm) -> run jobs and evals]* -> teardown.
-Providers report spend inputs (hourly price, market, start time); the runner's
-budget guard decides when to abort. Every provisioned resource carries a TTL
-and is recorded so the reaper can remove it if the runner dies.
+Providers report spend inputs (accrual price, market, start time); the runner's
+budget guard decides when to abort. Separately, each host carries its as-run cost
+price and its basis, which the runner records in every run's provenance. Every
+provisioned resource carries a TTL and is recorded so the reaper can remove it if
+the runner dies.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult
+from loom_bench.provenance import PriceBasis
 from loom_bench.records import Market
 
 
@@ -41,9 +44,13 @@ class Host(BaseModel):
     provider: str
     host_id: str
     request: HostRequest
-    hourly_micros: int  # price used for budget accrual (0 for local/mock unless configured)
+    hourly_micros: int  # budget accrual rate (spot x safety multiplier); 0 if unpriced
     launched_at: datetime  # UTC; billing starts here
     ttl_at: datetime
+    # As-run cost price (storage included, no safety multiplier) and how it was obtained;
+    # None when the host is unpriced or its price was not observable.
+    as_run_micros: int | None = None
+    price_basis: PriceBasis | None = None
     info: dict[str, Any] = Field(default_factory=dict)  # az, ami, private ip, ...
 
 

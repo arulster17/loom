@@ -48,7 +48,9 @@ from loom_bench.slo import Slo
 from loom_bench.store import repo
 from loom_bench.store.models import BenchExperiment, BenchRun, ExperimentStatus
 
-SCHEMA_VERSION = 2  # 2: Estimate.method (log-scale CIs), Methodology.ci_methods
+# 2: Estimate.method (log-scale CIs), Methodology.ci_methods. 3: price columns
+# (ConfigResult.prices and spot, committed_1y and as_run costs; PriceSource.as_run).
+SCHEMA_VERSION = 3
 
 MANIFEST = "manifest.json"
 COMPETITIVENESS = "competitiveness.json"
@@ -334,7 +336,7 @@ def export_snapshot(
             runs,
             slo=slo,
             allocation=allocation,
-            hourly_price=default_price_resolver(price_book),
+            price_resolver=default_price_resolver(price_book),
             confidence=confidence,
         )
         results = with_quality(

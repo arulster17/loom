@@ -88,6 +88,14 @@
 <div class="formula" role="group" aria-label="Cost formula">
 <p>$/1M output tokens at SLO = hourly price ÷ (goodput output tok/s × {{ seconds_per_hour|num }} s/h) × {{ tokens_per_mtok|num }}</p>
 </div>
+<h3 id="price-columns">Which hourly price</h3>
+<p>Every hourly price is the replica's instance price plus its block storage volume (EBS gp3) amortised per hour at 730 hours per month, computed the same way in every table, file and report. Network egress and fixed account costs (bucket, secrets, the reaper) are not included.</p>
+<dl class="defs">
+<dt>On-demand (ranked)</dt><dd>The public on-demand list price from the <a href="#prices">price book</a>. It does not depend on when or where a run launched, so anyone can recompute it: leaderboards, the headline table and margins use it. A mock or local host has no list price and uses the price its experiment declares; without one it has no cost at SLO and is not ranked.</dd>
+<dt>Spot</dt><dd>The price book's indicative spot price, an average across availability zones that moves hourly.</dd>
+<dt>Committed 1y</dt><dd>A one-year commitment price, shown only where the price book has one.</dd>
+<dt>As run</dt><dd>What the host cost per hour when it ran: the spot price observed in its availability zone at launch, or the on-demand price for an on-demand host, recorded with its basis in every run's provenance. The budget guard accrues spot hosts at that price times a safety multiplier, so recorded spend stays above the bill; the multiplier never appears in a reported cost.</dd>
+</dl>
 <p>Money is held as integer micro-dollars and computed exactly, rounded once, half up, to the micro-dollar. Cost falls as throughput rises, so the low end of the cost interval comes from the high end of the throughput interval and vice versa.</p>
 
 <h3 id="example">Worked example</h3>
@@ -100,7 +108,7 @@
 <p class="notice-inline">Illustrative: the throughput below is a round number chosen to show the arithmetic, not a measurement. The price is real: {{ example.source }} ({{ example.instance }}), from the <a href="#prices">price book</a>.</p>
 {% endif %}
 <dl class="defs compact worked">
-<dt>Hourly price</dt><dd class="num-text">{{ example.hourly_micros|usd(4) }} per hour</dd>
+<dt>Hourly price</dt><dd class="num-text">{{ example.hourly_micros|usd(4) }} per hour (on-demand, storage included)</dd>
 <dt>Goodput output throughput</dt><dd class="num-text">{{ example.output_tok_s|num(1) }} tok/s{% if not example.measured %} (illustrative){% endif %}</dd>
 <dt>Output tokens per hour</dt><dd class="num-text">{{ example.output_tok_s|num(1) }} × {{ seconds_per_hour|num }} = {{ (example.output_tok_s * seconds_per_hour)|num }}</dd>
 <dt>$/1M output tokens</dt><dd class="num-text">{{ example.hourly_micros|usd(4) }} ÷ {{ (example.output_tok_s * seconds_per_hour)|num }} × {{ tokens_per_mtok|num }} = <strong>{{ example.output_per_mtok|usd(4) }}</strong></dd>
@@ -111,11 +119,11 @@
 
 <section aria-labelledby="prices">
 <h2 id="prices">Price sources</h2>
-<p>Hourly prices come from <code>bench/prices.yaml</code>, maintained by hand from public price pages. Every entry records its sources and the date it was checked; entries not yet confirmed are marked unverified and cost math refuses them. Spot prices are indicative and move hourly, so on-demand is the default.{% if snapshot.price_book %} Price book last checked {{ snapshot.price_book.last_checked }}.{% endif %}</p>
+<p>Hourly prices come from <code>bench/prices.yaml</code>, maintained by hand from public price pages. Every entry records its sources and the date it was checked; entries not yet confirmed are marked unverified and cost math refuses them. Results are ranked at the on-demand price, a public list price anyone can check; spot prices are indicative and move hourly, so the spot column and the price observed when a run launched are shown next to it, never ranked.{% if snapshot.price_book %} Price book last checked {{ snapshot.price_book.last_checked }}.{% endif %}</p>
 {% if price_rows %}
 {% call scroll_table("prices") %}
 <table>
-<thead><tr><th scope="col">Instance</th><th scope="col">GPU</th><th scope="col" class="num">On-demand $/h</th><th scope="col" class="num">Spot $/h</th><th scope="col">Sources</th><th scope="col">Last checked</th></tr></thead>
+<thead><tr><th scope="col">Instance</th><th scope="col">GPU</th><th scope="col" class="num">On-demand $/h</th><th scope="col" class="num">Spot $/h</th><th scope="col" class="num">Committed 1y $/h</th><th scope="col" class="num">Storage $/GB-month</th><th scope="col">Sources</th><th scope="col">Last checked</th></tr></thead>
 <tbody>
 {% for p in price_rows %}
 <tr>
@@ -123,6 +131,8 @@
 <td>{{ p.entry.gpu_count }}×{{ p.entry.gpu }}<span class="sub">{{ p.entry.gpu_memory_gb }} GB each</span></td>
 <td class="num">{{ p.entry.on_demand_per_hour|usd(4) }}</td>
 <td class="num">{{ p.entry.spot_per_hour|usd(4) if p.entry.spot_per_hour is not none else 'n/a' }}</td>
+<td class="num">{{ p.entry.committed_1y_per_hour|usd(4) if p.entry.committed_1y_per_hour is not none else 'n/a' }}</td>
+<td class="num">{% if p.storage is not none %}{{ p.storage.per_gb_month|usd(4) }}<span class="sub">{{ p.storage.kind }}{% if not p.storage.verified %}, unverified{% endif %}</span>{% else %}n/a{% endif %}</td>
 <td>{% for u in p.entry.sources %}<a href="{{ u }}">{{ u|string|truncate(64, true, '…') }}</a>{% if not loop.last %}<br>{% endif %}{% endfor %}{% if not p.entry.verified %}<span class="sub">unverified: {{ p.entry.note }}</span>{% endif %}</td>
 <td class="nowrap">{{ p.entry.last_checked }}</td>
 </tr>
@@ -130,7 +140,7 @@
 </tbody>
 </table>
 {% endcall %}
-<p class="section-note">Instances planned in the model registry and used by published results. The full price book is in <a href="{{ root }}data/prices.json">prices.json</a>.</p>
+<p class="section-note">Instances planned in the model registry and used by published results. Hourly prices above are the instance alone; costs add the storage volume each run recorded. The full price book is in <a href="{{ root }}data/prices.json">prices.json</a>.</p>
 {% else %}
 <p>No price book is included in this snapshot.</p>
 {% endif %}

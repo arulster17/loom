@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from loom_bench.metrics.aggregate import ci_rule_summary
 from loom_bench.money import Micros
 from loom_bench.prices import PriceBook
+from loom_bench.provenance import PriceBasis
 from loom_bench.records import LoadMode, Market
 from loom_bench.registry import Cloud
 from loom_bench.report.analyze import ConfigResult, SweepKey
@@ -26,8 +27,9 @@ ALLOCATION_TEXT = {
 
 
 class PriceSource(BaseModel):
-    hourly_micros: Micros | None
+    hourly_micros: Micros | None  # on-demand: the price results are ranked by
     basis: str
+    as_run: str
     urls: list[str]
     last_checked: dt.date | None
     note: str | None
@@ -119,48 +121,102 @@ def _section(prov: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def per_hour(m: Micros | None) -> str:
+    return "n/a" if m is None else f"{usd(m)}/h"
+
+
+def _storage_text(gb: int | None) -> str:
+    return f" + {gb} GB block storage" if gb else ""
+
+
+def as_run_text(result: ConfigResult) -> str:
+    """How the as-run price recorded at launch was obtained."""
+    doc = result.provenance.get("price_basis")
+    if not isinstance(doc, Mapping):
+        return "not recorded"
+    b = PriceBasis.model_validate(doc)
+    hourly = per_hour(result.prices.as_run)
+    host = f"{b.market.value} host"
+    if b.source == "observed_spot":
+        at = b.observed_at.isoformat() if b.observed_at else "time not recorded"
+        return (
+            f"{hourly}, {host}: spot ${b.spot_price_usd}/h observed at launch in "
+            f"{b.availability_zone or 'an unrecorded AZ'} ({at}){_storage_text(b.storage_gb)}"
+        )
+    if b.source == "prices_yaml":
+        return f"{hourly}, {host}: price-book on-demand price{_storage_text(b.storage_gb)}"
+    if b.source == "experiment":
+        return f"{hourly}, {host}: declared by the experiment (provider.hourly_price)"
+    return f"unknown, {host}: no spot price was observed for its availability zone at launch"
+
+
 def price_source(result: ConfigResult, price_book: PriceBook | None) -> PriceSource:
+    """Where the on-demand (ranking), spot and committed prices of a result come from."""
     prov = result.provenance
+    p = result.prices
     market = prov.get("market")
-    hourly = result.hourly_micros
+    as_run = as_run_text(result)
     if market is None or Market(market) is Market.LOCAL:
         basis = (
-            "not billed (market local, no hourly_micros recorded)"
-            if hourly is None
-            else f"{usd(hourly)}/h recorded as hourly_micros in the provenance (not a cloud price)"
+            f"{usd(p.on_demand)}/h declared by the experiment (provider.hourly_price); "
+            "not a cloud price"
+            if p.on_demand is not None
+            else p.missing or "no price"
         )
-        return PriceSource(hourly_micros=hourly, basis=basis, urls=[], last_checked=None, note=None)
+        return PriceSource(
+            hourly_micros=p.on_demand,
+            basis=basis,
+            as_run=as_run,
+            urls=[],
+            last_checked=None,
+            note=None,
+        )
 
-    cloud, region = prov.get("cloud"), prov.get("region")
-    instance = _section(prov, "hardware").get("instance_type")
-    basis = f"{cloud}/{region} {instance} {market}: {usd(hourly)}/h"
+    cloud, region = cast(Cloud, prov.get("cloud")), prov.get("region") or ""
+    instance = _section(prov, "hardware").get("instance_type") or ""
+    where = f"{cloud}/{region} {instance}"
+    if p.on_demand is None:
+        basis = f"{where}: {p.missing or 'no on-demand price'}"
+    else:
+        basis = (
+            f"{where}{_storage_text(p.storage_gb)}, from the price book: on-demand "
+            f"{per_hour(p.on_demand)}; spot {per_hour(p.spot)}; "
+            f"committed 1y {per_hour(p.committed_1y)}"
+        )
     if price_book is None:
         return PriceSource(
-            hourly_micros=hourly,
+            hourly_micros=p.on_demand,
             basis=basis,
+            as_run=as_run,
             urls=[],
             last_checked=None,
             note="price book not supplied to the report",
         )
     try:
-        entry = price_book.instance(cast(Cloud, cloud), region or "", instance or "")
+        entry = price_book.instance(cloud, region, instance)
     except KeyError as e:
         return PriceSource(
-            hourly_micros=hourly, basis=basis, urls=[], last_checked=None, note=str(e)
+            hourly_micros=p.on_demand,
+            basis=basis,
+            as_run=as_run,
+            urls=[],
+            last_checked=None,
+            note=str(e),
         )
+    urls = [str(u) for u in entry.sources]
+    storage = price_book.region(cloud, region).storage
+    if p.storage_gb and storage is not None:
+        urls += [str(u) for u in storage.sources if str(u) not in urls]
     notes = []
-    if Market(market) is Market.SPOT:
-        notes.append(
-            "no spot price recorded; the on-demand price was used"
-            if entry.spot_per_hour is None
-            else "spot prices are indicative and move hourly"
-        )
+    if entry.spot_per_hour is not None:
+        notes.append("the spot price is an indicative average and moves hourly")
     if not entry.verified:
         notes.append(f"unverified price: {entry.note}")
     return PriceSource(
-        hourly_micros=hourly,
+        hourly_micros=p.on_demand,
         basis=basis,
-        urls=[str(u) for u in entry.sources],
+        as_run=as_run,
+        urls=urls,
         last_checked=entry.last_checked,
         note="; ".join(notes) or None,
     )
@@ -279,6 +335,7 @@ def methodology_markdown(m: Methodology) -> str:
             price += f"; last checked {p.last_checked.isoformat()}"
         if p.note:
             price += f"; {p.note}"
+        price += f". As run: {p.as_run}"
         shas = ", ".join(_code(s) for s in c.git_shas) or "not recorded"
         lines += [
             "",

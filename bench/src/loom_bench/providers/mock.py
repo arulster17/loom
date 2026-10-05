@@ -22,8 +22,10 @@ from loom_bench.experiment import mock_config_from_launch
 from loom_bench.jobexec import execute_load_job
 from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult
 from loom_bench.mock.config import MockConfig
+from loom_bench.provenance import PriceBasis
 from loom_bench.providers.base import Endpoint, EngineLaunch, Host, HostRequest
 from loom_bench.quality.runner import execute_eval_job
+from loom_bench.records import Market
 
 SERVER_START_TIMEOUT_S = 10.0
 
@@ -74,18 +76,21 @@ def _stop_server(s: _Server) -> None:
 class MockProvider:
     name = "mock"
 
-    def __init__(self, hourly_micros: int = 0) -> None:
-        self.hourly_micros = hourly_micros
+    def __init__(self, hourly_micros: int | None = None) -> None:
+        self.hourly_micros = hourly_micros  # simulated; None: unpriced
 
     async def provision(self, req: HostRequest) -> Host:
         now = datetime.now(UTC)
+        priced = self.hourly_micros is not None
         host = Host(
             provider=self.name,
             host_id=f"mock-{uuid.uuid4().hex[:12]}",
             request=req,
-            hourly_micros=self.hourly_micros,
+            hourly_micros=self.hourly_micros or 0,
             launched_at=now,
             ttl_at=now + timedelta(seconds=req.ttl_s),
+            as_run_micros=self.hourly_micros,
+            price_basis=PriceBasis(market=Market.LOCAL, source="experiment") if priced else None,
         )
         _LIVE[host.host_id] = _MockHost(host)
         return host

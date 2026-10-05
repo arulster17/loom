@@ -43,7 +43,7 @@ def _host(hourly: int, host_id: str = "h1") -> Host:
         hourly_micros=hourly,
         launched_at=T0,
         ttl_at=T0 + timedelta(hours=1),
-        info={"price_basis": {"source": "test"}},
+        info={"accrual_basis": {"source": "test"}},
     )
 
 
@@ -72,7 +72,7 @@ def test_accrual_is_exact_and_persisted(db):
     with session_scope(db) as s:
         rows = list(s.scalars(select(BenchSpend).where(BenchSpend.experiment_id == exp_id)))
         assert sum(r.amount_micros for r in rows) == 20_000
-        assert rows[0].basis["price_basis"] == {"source": "test"}
+        assert rows[0].basis["accrual_basis"] == {"source": "test"}
         assert s.get(BenchExperiment, exp_id).spent_micros == 20_000
 
 

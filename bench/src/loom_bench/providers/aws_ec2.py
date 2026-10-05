@@ -2,7 +2,9 @@
 
 Safety rails, in the order they act:
 1. the runner's budget guard accrues `Host.hourly_micros` (spot price x a safety
-   multiplier, rounded up, plus the root EBS volume) and calls `teardown`;
+   multiplier, rounded up, plus the root EBS volume) and calls `teardown`. The
+   multiplier stays inside accrual: `Host.as_run_micros`, the cost price recorded in
+   provenance, is the observed spot (or on-demand) price plus the same volume;
 2. user-data schedules `shutdown -h` at the TTL and the instance is launched with
    shutdown behaviour `terminate`, so it ends itself if the runner dies;
 3. the reaper Lambda (`aws_reaper`) terminates anything managed past its TTL;
@@ -36,6 +38,7 @@ from loom_bench.engines import docker_run_argv
 from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult, TokenizerSpec
 from loom_bench.money import MICROS_PER_USD, Micros
 from loom_bench.prices import HOURS_PER_MONTH, PriceBook, load_prices
+from loom_bench.provenance import PriceBasis
 from loom_bench.providers import aws_reaper
 from loom_bench.providers.aws_ssm import parse_markers, render_script, run_script, stage_offsets
 from loom_bench.providers.base import (
@@ -260,8 +263,41 @@ class AwsEc2Provider:
     def _volume_gb(self, req: HostRequest) -> int:
         return max(req.disk_gb, self.settings.root_volume_gb)
 
+    def _as_run(
+        self, req: HostRequest, rec: Mapping[str, Any] | None, az: str
+    ) -> tuple[Micros | None, PriceBasis]:
+        """The host's cost price (no safety multiplier) plus its root volume, rounded
+        once (`PriceBook.with_storage`), and its basis. A spot host in an AZ with no
+        observed spot price has no known as-run price."""
+        assert req.instance_type is not None
+        volume = self._volume_gb(req)
+        region = self.settings.region
+        if rec is not None:
+            spot = Fraction(Decimal(rec["SpotPrice"])) * MICROS_PER_USD
+            basis = PriceBasis(
+                market=Market.SPOT,
+                source="observed_spot",
+                spot_price_usd=rec["SpotPrice"],
+                observed_at=rec["Timestamp"],
+                availability_zone=az,
+                storage_gb=volume,
+            )
+            price = self.prices.with_storage("aws", region, spot, volume, allow_unverified=True)
+            return price, basis
+        if req.market is Market.SPOT:
+            return None, PriceBasis(
+                market=Market.SPOT, source="unobserved", availability_zone=az, storage_gb=volume
+            )
+        price = self.prices.replica_hourly_cost(
+            "aws", region, req.instance_type, Market.ON_DEMAND, volume, allow_unverified=True
+        ).per_hour
+        basis = PriceBasis(
+            market=Market.ON_DEMAND, source="prices_yaml", availability_zone=az, storage_gb=volume
+        )
+        return price, basis
+
     def _candidates(self, req: HostRequest, now: datetime) -> list[dict[str, Any]]:
-        """Subnets to try in order, each with its AZ and accrual price.
+        """Subnets to try in order, each with its AZ, accrual price and as-run price.
 
         Accrual = instance rate + root EBS rate, both rounded up. On-demand keeps the
         configured subnet order at the prices.yaml rate. Spot tries the cheapest AZ
@@ -304,11 +340,14 @@ class AwsEc2Provider:
                     "multiplier": str(multiplier),
                 }
             basis.update(instance_micros_per_hour=instance, ebs_micros_per_hour=ebs)
+            as_run, price_basis = self._as_run(req, rec, az_of[sid])
             cand = {
                 "subnet_id": sid,
                 "az": az_of[sid],
                 "hourly_micros": instance + ebs,
-                "price_basis": basis,
+                "accrual_basis": basis,
+                "as_run_micros": as_run,
+                "price_basis": price_basis,
             }
             (spot if rec is not None else fallback).append(cand)
         return sorted(spot, key=lambda c: c["hourly_micros"]) + fallback
@@ -423,6 +462,8 @@ class AwsEc2Provider:
                 hourly_micros=cand["hourly_micros"],
                 launched_at=now,
                 ttl_at=ttl_at,
+                as_run_micros=cand["as_run_micros"],
+                price_basis=cand["price_basis"],
                 info={
                     "region": self.settings.region,
                     "az": cand["az"],
@@ -430,7 +471,7 @@ class AwsEc2Provider:
                     "ami": ami,
                     "instance_type": req.instance_type,
                     "market": req.market.value,
-                    "price_basis": cand["price_basis"],
+                    "accrual_basis": cand["accrual_basis"],
                     "tags": tags,
                 },
             )

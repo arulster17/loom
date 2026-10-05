@@ -12,15 +12,18 @@ from sqlalchemy import select
 from typer.testing import CliRunner
 
 from loom_bench import runner as runner_module
-from loom_bench.cli import EXIT_MISMATCH, app
-from loom_bench.experiment import load_experiment, mock_launch
+from loom_bench.cli import EXIT_MISMATCH, _analyze_experiments, app
+from loom_bench.cost import PriceColumn
+from loom_bench.experiment import Experiment, load_experiment, mock_launch
 from loom_bench.jobs import LoadJob, LoadJobResult
 from loom_bench.metrics.summary import RunSummary
 from loom_bench.mock.config import MockConfig
 from loom_bench.money import parse_usd
-from loom_bench.provenance import GitInfo, Provenance
+from loom_bench.prices import load_prices
+from loom_bench.provenance import GitInfo, PriceBasis, Provenance
 from loom_bench.providers.base import HostRequest, SpotInterrupted
 from loom_bench.providers.mock import MockProvider, live_host_ids
+from loom_bench.records import Market
 from loom_bench.registry import load_registry
 from loom_bench.runner import EXIT_BUDGET_ABORT, RUN_INTERRUPTED, run_experiment
 from loom_bench.store import repo
@@ -115,7 +118,8 @@ def test_smoke_runs_have_complete_provenance_and_summaries(smoke):
             prov.host.python,
         ]
         assert None not in known, prov
-        assert prov.hourly_micros == 1_000_000
+        assert prov.hourly_micros == 1_000_000  # as run: the experiment's declared price
+        assert prov.price_basis == PriceBasis(market=Market.LOCAL, source="experiment")
         summary = RunSummary.model_validate(run.summary)
         assert summary.n_total > 0 and summary.ttft_ms.p95 is not None
         assert summary.server is not None and summary.server.n_scrapes >= 2
@@ -124,6 +128,32 @@ def test_smoke_runs_have_complete_provenance_and_summaries(smoke):
         records = read_requests(run.requests_uri)
         assert len(records) == summary.n_total + summary.n_warmup_excluded
         assert Path(run.requests_uri).parent.joinpath("provenance.json").is_file()
+
+
+@shares_smoke
+def test_goodput_json_prices_exactly_like_the_report(smoke):
+    exp = _experiment(smoke.db)
+    spec = Experiment.model_validate(exp.spec)
+    rows = json.loads((smoke.out / str(exp.id) / "goodput.json").read_text())
+    with session_scope(smoke.db) as s:
+        results = _analyze_experiments(
+            s, [exp.id], spec.slo, spec.cost_allocation.allocation(), load_prices()
+        )
+    by_key = {(r.config_hash, r.workload): r for r in results}
+    assert len(rows) == len(results) == 4
+    for row in rows:
+        r = by_key[(row["config_hash"], row["workload"])]
+        assert row["max_load"] == r.goodput.max_load
+        for column in PriceColumn:
+            cost = r.cost_at(column)
+            assert row["costs"][column.value] == {
+                "hourly_micros": r.prices.get(column),
+                "output_per_mtok_micros": cost.output_per_mtok.value if cost else None,
+                "total_per_mtok_micros": cost.total_per_mtok.value if cost else None,
+            }
+        assert row["costs"]["on_demand"]["hourly_micros"] == 1_000_000
+        assert row["costs"]["spot"]["hourly_micros"] is None
+        assert row["price_error"] is None
 
 
 @shares_smoke

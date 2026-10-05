@@ -21,8 +21,8 @@ Code: `bench/src/loom_bench/site/`. Public functions: `export_snapshot`, `build_
 | Page | Shows |
 |---|---|
 | `index.html` | What Loom is, the headline table (best ranked config per model and workload), the waitlist |
-| `models/<id>.html` | Leaderboard per workload with CIs, quality gate, cold start, per-config details: config YAML, load sweep, price source, `bench reproduce` command, links to every run's provenance JSON |
-| `methodology.html` | Open and closed loop, metric definitions, goodput at SLO, repetitions and CIs, cost formula with a worked example, price sources, quality gate rule, synthetic vs realistic content, what we don't do |
+| `models/<id>.html` | Leaderboard per workload with CIs, ranked by on-demand cost with spot, committed-1y and as-run costs where present, quality gate, cold start, per-config details: config YAML, load sweep, price source and as-run price basis, `bench reproduce` command, links to every run's provenance JSON |
+| `methodology.html` | Open and closed loop, metric definitions, goodput at SLO, repetitions and CIs, cost formula, the four price columns and which one ranks, a worked example, price sources, quality gate rule, synthetic vs realistic content, what we don't do |
 | `pricing.html` | Our cost at SLO, planned price and margin per model, next to public list prices with sources |
 | `harness.html` | Repository link, license, quickstart with the mock backend |
 
@@ -44,7 +44,9 @@ uses a real instance price with a round, clearly labelled illustrative throughpu
 
    The export analyses the runs with the report module (`analyze_runs`,
    `with_quality`, `cold_starts_by_config`, `build_competitiveness`): goodput at SLO,
-   cost from `bench/prices.yaml`, quality gate, cold starts; the same analysis as
+   cost per price column from `bench/prices.yaml` and each run's recorded as-run price
+   ([cost-model.md](cost-model.md#4-the-hourly-price-h)), quality gate, cold starts; the
+   same analysis as
    `bench report` and the summary after `bench run`. It replaces the previous
    snapshot. The SLO comes from the experiment specs and run summaries; if they
    disagree, pass `--slo slo.yaml` or publish the experiments separately.

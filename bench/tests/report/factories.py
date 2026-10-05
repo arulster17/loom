@@ -5,7 +5,12 @@ Latency is set per load so the SLO verdicts are known in advance:
 - vllm-bf16 (on-demand g6e.xlarge): passes 2 and 4 req/s, fails at 6 → goodput 4.
 - sglang-bf16 (on-demand g6e.xlarge): passes 2, 4, 6, fails at 8 → goodput 6, so its
   cost at SLO is 2/3 of vllm-bf16's (same instance price, 1.5x the tokens).
-- vllm-awq (spot g6e.xlarge, cheapest): goodput 6 but fails the quality gate.
+- vllm-awq (spot g6e.xlarge): passes up to 8, fails at 10 → goodput 8, the
+  cheapest at SLO (ranked at the on-demand price like the others), but it fails the
+  quality gate.
+
+Cloud runs record a 200 GB volume and their as-run price: the price-book on-demand
+price, or an observed spot price of $1.70/h, each plus that volume.
 
 Each request asks for 200 prompt tokens and returns 100 output tokens, so at load L
 req/s output throughput is 100·L tok/s (within the per-repetition window jitter).
@@ -19,6 +24,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from loom_bench.metrics.summary import summarize_run
+from loom_bench.prices import load_prices
 from loom_bench.provenance import (
     ContentKind,
     DatasetInfo,
@@ -28,6 +34,7 @@ from loom_bench.provenance import (
     HostInfo,
     LoadInfo,
     ModelInfo,
+    PriceBasis,
     WorkloadInfo,
     build_provenance,
 )
@@ -51,6 +58,32 @@ WINDOW_S = 30.0
 # base TTFT (ms) per load; the run's p95 is about 1.2x the base
 TTFT_VLLM = {2.0: 200.0, 4.0: 300.0, 6.0: 700.0, 8.0: 900.0}
 TTFT_SGLANG = {2.0: 150.0, 4.0: 200.0, 6.0: 350.0, 8.0: 800.0}
+TTFT_AWQ = {2.0: 150.0, 4.0: 200.0, 6.0: 300.0, 8.0: 400.0, 10.0: 900.0}
+AWQ_LOADS = (*LOADS, 10.0)
+
+STORAGE_GB = 200
+OBSERVED_SPOT_USD = "1.700000"
+DEFAULT = object()
+
+
+def as_run(market: Market, region: str | None) -> tuple[int | None, PriceBasis | None]:
+    """The as-run price and basis a cloud provider records for a g6e.xlarge host."""
+    if market is Market.LOCAL or region is None:
+        return None, None
+    book = load_prices()
+    if market is Market.SPOT:
+        basis = PriceBasis(
+            market=market,
+            source="observed_spot",
+            spot_price_usd=OBSERVED_SPOT_USD,
+            observed_at=CREATED,
+            availability_zone=f"{region}a",
+            storage_gb=STORAGE_GB,
+        )
+        return book.with_storage("aws", region, 1_700_000, STORAGE_GB), basis
+    basis = PriceBasis(market=market, source="prices_yaml", storage_gb=STORAGE_GB)
+    price = book.replica_hourly_cost("aws", region, "g6e.xlarge", market, STORAGE_GB).per_hour
+    return price, basis
 
 
 def _id(*parts: Any) -> uuid.UUID:
@@ -92,7 +125,8 @@ def make_runs(
     instance_type: str | None = "g6e.xlarge",
     cloud: str | None = "aws",
     region: str | None = "us-east-1",
-    hourly_micros: int | None = None,
+    hourly_micros: Any = DEFAULT,
+    price_basis: Any = DEFAULT,
     reps: tuple[int, ...] = REPS,
     loads: tuple[float, ...] = LOADS,
     experiment_id: uuid.UUID = EXPERIMENT,
@@ -103,6 +137,13 @@ def make_runs(
     workload: str = "chat",
 ) -> list[BenchRun]:
     args = engine_args if engine_args is not None else {"max_num_seqs": 256}
+    recorded, basis = as_run(market, region)
+    if hourly_micros is not DEFAULT:
+        recorded = hourly_micros
+        if price_basis is DEFAULT and hourly_micros is not None and basis is None:
+            basis = PriceBasis(market=market, source="experiment")
+    if price_basis is not DEFAULT:
+        basis = price_basis
     config: dict[str, Any] = {
         "cell": cell_key,
         "engine": engine,
@@ -127,7 +168,8 @@ def make_runs(
             prov = build_provenance(
                 config,
                 created_at=CREATED,
-                hourly_micros=hourly_micros,
+                hourly_micros=recorded,
+                price_basis=basis,
                 git=GitInfo(sha=GIT_SHA, dirty=False, branch="main"),
                 loadgen={"name": "native", "version": "0.1.0"},
                 engine=EngineInfo(

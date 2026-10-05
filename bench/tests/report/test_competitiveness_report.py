@@ -23,7 +23,7 @@ def results(vllm_runs, sglang_runs, price_book):
         [*vllm_runs, *sglang_runs],
         slo=SLO,
         allocation=CostAllocation.all_output(),
-        hourly_price=default_price_resolver(price_book),
+        price_resolver=default_price_resolver(price_book),
     )
 
 
@@ -50,7 +50,7 @@ def report(results, registry, competitors, price_book):
 def test_rows_use_best_ranked_config_and_margins(report):
     qwen, llama = report.rows
     assert (qwen.model_id, qwen.workload, qwen.best_config) == ("qwen3-8b", "chat", "sglang-bf16")
-    assert qwen.cost_output.value == pytest.approx(861_517, rel=1e-3)
+    assert qwen.cost_output.value == pytest.approx(871_692, rel=1e-3)
     assert qwen.margin_output.value == 500_000 - qwen.cost_output.value
     assert qwen.margin_output.worst == 500_000 - qwen.cost_output.hi
     # all_output allocation: input has no cost of its own, so no input margin
@@ -87,7 +87,7 @@ def test_markdown_states_public_list_prices_only(report):
     assert "> Public list prices only" in md
     assert (
         "| chat (open loop) | sglang-bf16 | n/a (all cost allocated to output) "
-        "| $0.8615 [0.8404, 0.8832] | $0.0500 | $0.5000 | n/a (all cost allocated to output) |"
+        "| $0.8717 [0.8503, 0.8936] | $0.0500 | $0.5000 | n/a (all cost allocated to output) |"
         in md
     )
     assert "$0.0000" not in md
@@ -111,7 +111,10 @@ def test_csv_long_format(report):
     assert int(first["cost_output_per_mtok_micros"]) == report.rows[0].cost_output.value
     assert first["price_output_per_mtok_usd"] == "$0.500000"
     assert first["flags"] == "price_above_market(output); negative_margin(output)"
-    assert first["price_basis"] == "aws/us-east-1 g6e.xlarge on_demand: $1.8610/h"
+    assert first["price_basis"] == (
+        "aws/us-east-1 g6e.xlarge + 200 GB block storage, from the price book: "
+        "on-demand $1.8829/h; spot $1.8605/h; committed 1y n/a"
+    )
     llama = [r for r in rows if r["model_id"] == "llama-3.3-70b-instruct"]
     assert len(llama) == 5 and all(r["best_config"] == "" for r in llama)
 
@@ -122,6 +125,7 @@ def test_html_self_contained_with_source_links(report, competitors):
     allowed = (
         *sources,
         "https://b0.p.awsstatic.com/pricing/",
+        "https://aws.amazon.com/ebs/pricing/",
         "https://instances.vantage.sh/",
         "https://huggingface.co/datasets/",
     )
