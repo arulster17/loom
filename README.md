@@ -7,7 +7,6 @@ engines (vLLM, SGLang), GPU types and clouds on correctness, latency, throughput
 cost per token, with full provenance for every number.
 
 - Plan, stack and schemas: [docs/PLAN.md](docs/PLAN.md)
-- Build spec: [inference-platform-build-prompt.md](inference-platform-build-prompt.md)
 
 ## Quick start (no GPU needed)
 

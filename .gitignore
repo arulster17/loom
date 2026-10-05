@@ -32,3 +32,10 @@ site/_build/
 .DS_Store
 .idea/
 .vscode/
+
+# Private build spec (kept local, never committed)
+inference-platform-build-prompt.md
+
+# Claude Code agent worktrees
+.claude/worktrees/
+.playwright-mcp/
