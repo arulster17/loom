@@ -140,14 +140,16 @@ class EngineMetricNames:
     queue_time: tuple[str, ...]  # histogram base name, seconds
 
 
+# Names verified against vllm/v1/metrics/loggers.py at v0.30.0 and
+# sglang/srt/observability/metrics_collector.py at v0.5.21.
 VLLM_METRICS = EngineMetricNames(
     running=("vllm:num_requests_running",),
     waiting=("vllm:num_requests_waiting",),
-    kv_usage=("vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc"),
+    kv_usage=("vllm:kv_cache_usage_perc",),
     preemptions=("vllm:num_preemptions_total",),
-    prefix_queries=("vllm:prefix_cache_queries_total", "vllm:gpu_prefix_cache_queries_total"),
-    prefix_hits=("vllm:prefix_cache_hits_total", "vllm:gpu_prefix_cache_hits_total"),
-    prefix_hit_rate=("vllm:gpu_prefix_cache_hit_rate",),
+    prefix_queries=("vllm:prefix_cache_queries_total",),
+    prefix_hits=("vllm:prefix_cache_hits_total",),
+    prefix_hit_rate=(),
     queue_time=("vllm:request_queue_time_seconds",),
 )
 
@@ -155,7 +157,8 @@ SGLANG_METRICS = EngineMetricNames(
     running=("sglang:num_running_reqs",),
     waiting=("sglang:num_queue_reqs",),
     kv_usage=("sglang:token_usage",),
-    preemptions=(),
+    # SGLang "retracts" requests under KV pressure; its preemption equivalent.
+    preemptions=("sglang:num_retracted_requests_total",),
     prefix_queries=(),
     prefix_hits=(),
     prefix_hit_rate=("sglang:cache_hit_rate",),

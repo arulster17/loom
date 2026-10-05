@@ -165,16 +165,16 @@ def test_counter_reset_is_handled():
     assert m.queue_time_mean_ms == pytest.approx((1.0 + 0.5) / (10 + 5) * 1000)
 
 
-def test_vllm_fallback_names():
+def test_pre_v1_vllm_names_are_reported_missing_not_guessed():
     old = (
         "vllm:gpu_cache_usage_perc 0.25\n"
         "vllm:gpu_prefix_cache_hit_rate 0.7\n"
         "vllm:num_requests_running 1\n"
     )
     m = summarize_scrapes("vllm", [(0.0, old), (1.0, old)])
-    assert m.kv_usage_mean == 0.25
-    assert m.prefix_cache_hit_rate == 0.7
-    assert set(m.missing) == {"waiting", "preemptions", "queue_time"}
+    assert m.kv_usage_mean is None
+    assert m.prefix_cache_hit_rate is None
+    assert {"kv_usage", "waiting", "preemptions", "queue_time"} <= set(m.missing)
 
 
 def test_mock_uses_vllm_names():
