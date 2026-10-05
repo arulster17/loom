@@ -8,7 +8,7 @@
 # baseline and candidate (half each way), the 95% CI half-width of the paired delta is about
 # 1.96 * sqrt(d / n), and the gate never claims less than 3/n (rule of three):
 #
-#     n      d=2%     d=5%    floor 3/n   | unpaired, p=0.8
+#     n      d=2%     d=5%    floor 3/n   | one run alone, p=0.8
 #     60     3.6 pts  5.7     5.0         | 10.1
 #     400    1.4      2.2     0.75        |  3.9
 #     541    1.2      1.9     0.55        |  3.4
@@ -17,8 +17,8 @@
 #     1319   0.8      1.2     0.23        |  2.2
 #     2100   0.6      1.0     0.14        |  1.7
 #
-# FP8 / AWQ variants of 8B models typically flip 2-5% of items on reasoning tasks, so a
-# 1-point margin needs ~1000-2000 items. Where the source set is smaller (IFEval, HumanEval +
+# Sizes are planned for d between 2% and 5% (the first Phase 0 runs measure it); at that
+# churn a 1-point margin needs ~1000-2000 items. Where the source set is smaller (IFEval, HumanEval +
 # MBPP) or the pinned set is small by design (JSON schema, tool calling), the task's threshold
 # says which margin its size can decide.
 
