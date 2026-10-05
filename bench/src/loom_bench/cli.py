@@ -360,7 +360,7 @@ def reproduce_cmd(
 def _ec2_client() -> object | None:
     """An EC2 client for the configured AWS settings, or None when AWS is not set up."""
     try:
-        import boto3
+        import boto3  # type: ignore[import-untyped]
 
         from loom_bench.providers.aws_ec2 import load_aws_settings
 

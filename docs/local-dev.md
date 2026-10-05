@@ -181,15 +181,18 @@ See [site.md](site.md) for publishing.
 uv run ruff format .            # format
 uv run ruff format --check .    # what CI checks
 uv run ruff check .             # lint (rules in pyproject.toml); --fix applies safe fixes
+uv run mypy bench/src           # type check; CI fails on any error
 ```
 
-mypy is in the dev dependencies but not enforced: `uv run mypy bench/src` currently
-reports errors and CI does not run it.
+Untyped third-party libraries get stub packages in the dev group (`types-PyYAML`,
+`scipy-stubs`, `pyarrow-stubs`); boto3 and botocore, which have none installed, are
+imported with a targeted `# type: ignore[import-untyped]`.
 
 ## CI
 
 `.github/workflows/ci.yml` runs on pushes to `main` and on pull requests:
-`uv sync --frozen`, `ruff check`, `ruff format --check`, `pytest -q` with a Postgres 16
+`uv sync --frozen`, `ruff check`, `ruff format --check`, `mypy bench/src`,
+`pytest -q -n auto` with a Postgres 16
 service and `LOOM_TEST_DATABASE_URL` set, so Postgres-marked tests run there.
 `.github/workflows/site.yml` builds the results site on pushes to `main` that touch the
 site or report code, and deploys it to GitHub Pages once Pages is enabled
@@ -198,5 +201,6 @@ site or report code, and deploys it to GitHub Pages once Pages is enabled
 Run the CI checks locally before pushing:
 
 ```bash
-uv run ruff format --check . && uv run ruff check . && uv run pytest -q
+uv run ruff format --check . && uv run ruff check . && uv run mypy bench/src \
+  && uv run pytest -q -n auto
 ```

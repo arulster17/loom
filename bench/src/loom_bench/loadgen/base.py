@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any, Protocol
 
+import numpy as np
+
 from loom_bench.client.openai_stream import PreparedRequest
 from loom_bench.jobs import LoadJob, Timeline, TokenizerSpec
 from loom_bench.loadgen.arrivals import ArrivalSpec, parse_arrivals
@@ -45,7 +47,7 @@ class RunResult:
 
 @dataclass(frozen=True, slots=True)
 class OpenLoopPlan:
-    arrivals: Sequence[float]  # sorted offsets in seconds, from `loadgen.arrivals`
+    arrivals: Sequence[float] | np.ndarray  # sorted offsets (s), from `loadgen.arrivals`
     duration_s: float
     warmup_s: float
     max_inflight: int
@@ -98,7 +100,7 @@ def _plan(job: LoadJob, arrival: ArrivalSpec | None) -> tuple[LoadPlan, int]:
         if arrival is None or job.duration_s is None:
             raise ValueError("open-loop jobs need arrival and duration_s")
         offsets = arrival.schedule(job.duration_s, job.seed)
-        plan = OpenLoopPlan(
+        open_plan = OpenLoopPlan(
             arrivals=offsets,
             duration_s=job.duration_s,
             warmup_s=job.warmup_s,
@@ -106,7 +108,7 @@ def _plan(job: LoadJob, arrival: ArrivalSpec | None) -> tuple[LoadPlan, int]:
             drain_timeout_s=job.drain_timeout_s,
             load_value=job.load_value,
         )
-        return plan, len(offsets)
+        return open_plan, len(offsets)
     concurrency = int(job.load_value)
     if job.num_requests is not None:
         n = job.warmup_requests + job.num_requests

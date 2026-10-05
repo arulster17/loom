@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import pyarrow as pa
@@ -15,33 +16,33 @@ from loom_bench.records import RequestRecord
 
 REQUESTS_SCHEMA_VERSION = "1"
 
+_FIELDS: list[pa.Field[Any]] = [
+    pa.field("request_id", pa.string(), nullable=False),
+    pa.field("status", pa.string(), nullable=False),
+    pa.field("sent_at_s", pa.float64(), nullable=False),
+    pa.field("scheduled_at_s", pa.float64()),
+    pa.field("first_token_at_s", pa.float64()),
+    pa.field("finished_at_s", pa.float64()),
+    pa.field("itl_s", pa.list_(pa.field("item", pa.float64(), nullable=False)), nullable=False),
+    pa.field("prompt_tokens", pa.int64()),
+    pa.field("completion_tokens", pa.int64()),
+    pa.field("cached_prompt_tokens", pa.int64()),
+    pa.field("expected_prompt_tokens", pa.int64()),
+    pa.field("max_tokens", pa.int64()),
+    pa.field("finish_reason", pa.string()),
+    pa.field("http_status", pa.int64()),
+    pa.field("error", pa.string()),
+    pa.field("warmup", pa.bool_(), nullable=False),
+    pa.field("output_text", pa.string()),
+    pa.field("meta", pa.string(), nullable=False),  # JSON object
+    # Derived on write for ad-hoc analysis; ignored on read.
+    pa.field("ttft_s", pa.float64()),
+    pa.field("e2e_s", pa.float64()),
+    pa.field("tpot_s", pa.float64()),
+    pa.field("queue_delay_s", pa.float64()),
+]
 REQUEST_SCHEMA = pa.schema(
-    [
-        pa.field("request_id", pa.string(), nullable=False),
-        pa.field("status", pa.string(), nullable=False),
-        pa.field("sent_at_s", pa.float64(), nullable=False),
-        pa.field("scheduled_at_s", pa.float64()),
-        pa.field("first_token_at_s", pa.float64()),
-        pa.field("finished_at_s", pa.float64()),
-        pa.field("itl_s", pa.list_(pa.field("item", pa.float64(), nullable=False)), nullable=False),
-        pa.field("prompt_tokens", pa.int64()),
-        pa.field("completion_tokens", pa.int64()),
-        pa.field("cached_prompt_tokens", pa.int64()),
-        pa.field("expected_prompt_tokens", pa.int64()),
-        pa.field("max_tokens", pa.int64()),
-        pa.field("finish_reason", pa.string()),
-        pa.field("http_status", pa.int64()),
-        pa.field("error", pa.string()),
-        pa.field("warmup", pa.bool_(), nullable=False),
-        pa.field("output_text", pa.string()),
-        pa.field("meta", pa.string(), nullable=False),  # JSON object
-        # Derived on write for ad-hoc analysis; ignored on read.
-        pa.field("ttft_s", pa.float64()),
-        pa.field("e2e_s", pa.float64()),
-        pa.field("tpot_s", pa.float64()),
-        pa.field("queue_delay_s", pa.float64()),
-    ],
-    metadata={"loom.requests.schema_version": REQUESTS_SCHEMA_VERSION},
+    _FIELDS, metadata={"loom.requests.schema_version": REQUESTS_SCHEMA_VERSION}
 )
 
 

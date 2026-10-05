@@ -14,6 +14,7 @@ repetition is never trusted (see `metrics.aggregate`).
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import uuid
@@ -21,7 +22,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -60,6 +61,7 @@ from loom_bench.mock.config import MockConfig
 from loom_bench.plan import EVAL_CONCURRENCY, Estimator, Plan, build_plan
 from loom_bench.prices import PriceBook, UnverifiedPriceError
 from loom_bench.provenance import (
+    ContentKind,
     DatasetInfo,
     EngineInfo,
     GitInfo,
@@ -417,7 +419,8 @@ class _Executor:
     def _eval_job(self, cell: Cell, endpoint: Endpoint, suite: Suite) -> EvalJob:
         quality = self.exp.quality
         assert quality is not None
-        divergence, reference = None, None
+        divergence: Literal["capture", "score"] | None = None
+        reference = None
         if suite.divergence is not None:
             if cell.variant == quality.baseline_variant:
                 divergence = "capture"
@@ -657,7 +660,9 @@ class _Executor:
                 name=self.exp.loadgen, version=__version__ if self.exp.loadgen == "native" else None
             ),
             workload=WorkloadInfo(
-                name=entry.name, profile_hash=config_hash(profile), content=profile.content
+                name=entry.name,
+                profile_hash=config_hash(profile),
+                content=ContentKind(profile.content),
             ),
             dataset=dataset,
             load=LoadInfo(mode=mode, value=value, seed=seed),
@@ -790,7 +795,9 @@ class _Executor:
         seed = derive_seed(self.exp.seed, entry.name, value, rep)
         job = self._job(cell, endpoint, load, profile, value, seed)
         prov = self.provenance(host, cell, endpoint, entry, profile, load.mode, value, seed, rep)
-        common = dict(
+        started_at = _now()
+        record = functools.partial(
+            self._record,
             run_id=uuid.UUID(job.run_id),
             cell=cell,
             entry=entry,
@@ -798,35 +805,26 @@ class _Executor:
             value=value,
             rep=rep,
             prov=prov,
+            started_at=started_at,
         )
-        started_at = _now()
         try:
             result = await self.guard.guarded(self.provider.run_job(host, job))
         except BudgetExceeded:
-            self._record(**common, status=RUN_ABORTED, started_at=started_at)
+            record(status=RUN_ABORTED)
             raise
         except HostLost as e:
             status = RUN_INTERRUPTED if isinstance(e, SpotInterrupted) else RUN_HOST_LOST
-            self._record(**common, status=status, started_at=started_at, summary={"error": str(e)})
+            record(status=status, summary={"error": str(e)})
             raise
         except Exception as e:
             log.exception("run %s failed", label)
-            self._record(
-                **common,
-                status=RUN_FAILED,
-                started_at=started_at,
-                summary={"error": f"{type(e).__name__}: {e}"},
-            )
+            record(status=RUN_FAILED, summary={"error": f"{type(e).__name__}: {e}"})
             return None
         try:
             summary = self._summarize(cell, endpoint, result)
         except ValueError as e:
-            self._record(
-                **common,
-                status=RUN_FAILED,
-                started_at=started_at,
-                summary={"error": str(e), "client": result.meta},
-                result=result,
+            record(
+                status=RUN_FAILED, summary={"error": str(e), "client": result.meta}, result=result
             )
             return None
         doc = {
@@ -837,9 +835,7 @@ class _Executor:
                 "client_saturated_count": result.client_saturated_count,
             },
         }
-        self._record(
-            **common, status=RUN_COMPLETED, started_at=started_at, summary=doc, result=result
-        )
+        record(status=RUN_COMPLETED, summary=doc, result=result)
         log.info(
             "%s: p95 TTFT %s ms, %.1f out tok/s",
             label,
