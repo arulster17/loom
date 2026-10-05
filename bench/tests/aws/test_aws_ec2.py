@@ -530,17 +530,18 @@ async def test_run_job_loads_a_gated_tokenizer_from_the_host_snapshot(
     ("repo", "revision", "match"),
     [(LLAMA_REPO, "main", "pinned commit"), ("../x", LLAMA_REV, "org/name")],
 )
-async def test_host_tokenizer_needs_a_pinned_commit(
-    aws: dict[str, Any], tmp_path: Path, repo: str, revision: str, match: str
-) -> None:
-    wheel = tmp_path / "w.whl"
-    wheel.write_bytes(b"x")
-    p = provider(aws, ssm=FakeSsm(), wheel_path=wheel)
-    host = await p.provision(request())
+def test_host_tokenizer_needs_a_pinned_commit(repo: str, revision: str, match: str) -> None:
+    settings = AwsSettings(
+        bucket="loom-bench-test",
+        instance_profile_name="loom-bench-instance",
+        security_group_id="sg-0123",
+        subnet_ids=["subnet-0123"],
+        hf_token_secret_name="loom/hf-token",
+        owner="arul",
+    )
+    p = AwsEc2Provider(settings, prices=load_prices(), ec2=object(), ssm=object(), s3=object())
     with pytest.raises(ValueError, match=match):
-        p._stage_job(
-            host, load_job(tokenizer=TokenizerSpec(kind="hf", repo=repo, revision=revision))
-        )
+        p._host_tokenizer(TokenizerSpec(kind="hf", repo=repo, revision=revision))
 
 
 async def test_run_job_requires_wheel_and_safe_run_id(aws: dict[str, Any], tmp_path: Path) -> None:

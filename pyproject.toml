@@ -25,6 +25,7 @@ dev = [
     "mypy>=1.11",
     "types-PyYAML",
     "moto[ec2,s3,ssm,secretsmanager]>=5.0",
+    "pytest-xdist>=3.6",
 ]
 
 [tool.ruff]
@@ -40,6 +41,9 @@ testpaths = ["bench/tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 timeout = 120
+# Under `-n auto`, tests sharing an expensive module fixture (`xdist_group`) stay on one
+# worker; without `-n` this does nothing.
+addopts = "--dist loadgroup"
 markers = [
     "postgres: needs a Postgres database (LOOM_TEST_DATABASE_URL)",
     "slow: slower integration tests",

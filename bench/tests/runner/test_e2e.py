@@ -39,6 +39,9 @@ from loom_bench.store.parquet import read_requests
 from .conftest import ABORT, SMOKE, mock_experiment, write_yaml
 
 pytestmark = pytest.mark.timeout(240)
+# One xdist worker runs every test that reads the module-scoped `smoke` run, so the run
+# happens once under `-n auto` (pytest's `--dist loadgroup`) instead of once per worker.
+shares_smoke = pytest.mark.xdist_group("e2e-smoke")
 
 
 def invoke(*args: str):
@@ -66,6 +69,7 @@ def _experiment(db: str) -> BenchExperiment:
         return s.scalars(select(BenchExperiment)).one()
 
 
+@shares_smoke
 def test_smoke_completes(smoke):
     assert smoke.exit_code == 0, smoke.output
     exp = _experiment(smoke.db)
@@ -74,6 +78,7 @@ def test_smoke_completes(smoke):
     assert 0 < exp.spent_micros < parse_usd("$0.10")
 
 
+@shares_smoke
 def test_smoke_runs_have_complete_provenance_and_summaries(smoke):
     with session_scope(smoke.db) as s:
         runs = list(s.scalars(select(BenchRun)))
@@ -121,6 +126,7 @@ def test_smoke_runs_have_complete_provenance_and_summaries(smoke):
         assert Path(run.requests_uri).parent.joinpath("provenance.json").is_file()
 
 
+@shares_smoke
 def test_smoke_hosts_cold_warm_and_teardown(smoke):
     with session_scope(smoke.db) as s:
         resources = list(s.scalars(select(BenchResource)))
@@ -136,6 +142,7 @@ def test_smoke_hosts_cold_warm_and_teardown(smoke):
     assert not live_host_ids()
 
 
+@shares_smoke
 def test_smoke_quality_suite_and_gate(smoke):
     with session_scope(smoke.db) as s:
         evals = list(s.scalars(select(BenchEvalRun)))
@@ -151,6 +158,7 @@ def test_smoke_quality_suite_and_gate(smoke):
     assert "PASS" in result.output.upper()
 
 
+@shares_smoke
 def test_smoke_reports_export_and_self_compare(smoke, tmp_path):
     report = invoke("report", "--db", smoke.db, "--out", tmp_path)
     assert report.exit_code == 0, report.output
@@ -162,6 +170,7 @@ def test_smoke_reports_export_and_self_compare(smoke, tmp_path):
     assert compare.exit_code == 0, compare.output
 
 
+@shares_smoke
 def test_smoke_site_export_build_and_waitlist(smoke, tmp_path):
     exp_id = str(_experiment(smoke.db).id)
     export = invoke("site", "export", "-e", exp_id, "--out", tmp_path / "data", "--db", smoke.db)

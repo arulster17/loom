@@ -89,7 +89,10 @@ async def test_open_loop_follows_schedule_and_flags_warmup():
 async def test_open_loop_records_client_saturation():
     server = FakeServer(ttft_s=0.12, tokens=1)
     arrivals = constant(50.0, 0.3)  # 15 arrivals, ~3 slots' worth of service capacity
-    res = await open_loop(server, arrivals, duration_s=0.3, warmup_s=0.0, max_inflight=2)
+    # A generous drain: the stragglers finish within ~0.25 s; the deadline is not under test.
+    res = await open_loop(
+        server, arrivals, duration_s=0.3, warmup_s=0.0, max_inflight=2, drain_timeout_s=5.0
+    )
     assert server.max_inflight <= 2
     assert res.client_saturated_count > 0
     assert res.meta["unsent"] > 0

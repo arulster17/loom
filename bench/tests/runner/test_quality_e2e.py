@@ -9,17 +9,21 @@ import pytest
 from sqlalchemy import select
 from typer.testing import CliRunner
 
+from loom_bench.budget import load_budget
 from loom_bench.cli import app
 from loom_bench.jobs import EvalJob
+from loom_bench.prices import load_prices
 from loom_bench.providers.mock import MockProvider
 from loom_bench.quality.divergence import ReferenceLogprobs
-from loom_bench.runner import run_experiment
-from loom_bench.store.db import session_scope
+from loom_bench.registry import load_registry
+from loom_bench.runner import RunnerContext, run_experiment
+from loom_bench.store.db import session_scope, upgrade
 from loom_bench.store.models import BenchEvalRun, BenchGateDecision, BenchRun
 
 from .conftest import mock_experiment, write_yaml
 
-pytestmark = pytest.mark.timeout(240)
+# The module-scoped experiment runs once: all its tests go to one xdist worker.
+pytestmark = [pytest.mark.timeout(240), pytest.mark.xdist_group("quality-e2e")]
 
 SUITE = {
     "suite": "quality-e2e",
@@ -49,9 +53,20 @@ class RecordingProvider(MockProvider):
         return await super().run_eval(host, job)
 
 
-@pytest.fixture
-def outcome(ctx, tmp_path):
-    suite = write_yaml(tmp_path / "suite.yaml", SUITE)
+@pytest.fixture(scope="module")
+def quality_run(tmp_path_factory):
+    """One experiment for the whole module: every test only reads what it recorded."""
+    tmp = tmp_path_factory.mktemp("quality-e2e")
+    db = f"sqlite:///{tmp / 'loom.db'}"
+    upgrade(db)
+    ctx = RunnerContext(
+        db_url=db,
+        out_dir=tmp / "results",
+        registry=load_registry(),
+        prices=load_prices(),
+        budget=load_budget(),
+    )
+    suite = write_yaml(tmp / "suite.yaml", SUITE)
     exp = mock_experiment(
         variants=[
             {"name": "base"},
@@ -59,9 +74,28 @@ def outcome(ctx, tmp_path):
             {"name": "small-batch", "mock": {"max_num_seqs": 8}},
         ],
         quality={"suite": str(suite), "baseline_variant": "base"},
+        # No latency target: whether a config has a cost at SLO must not depend on how
+        # busy the machine is (a missed SLO would list it as "no cost at SLO" instead).
+        slo={"max_error_rate": 0.01},
     )
     ctx.provider = RecordingProvider()
-    return asyncio.run(run_experiment(exp, ctx)), ctx.provider
+    return asyncio.run(run_experiment(exp, ctx)), ctx.provider, ctx
+
+
+@pytest.fixture
+def outcome(quality_run):
+    result, provider, _ = quality_run
+    return result, provider
+
+
+@pytest.fixture
+def ctx(quality_run) -> RunnerContext:
+    return quality_run[2]
+
+
+@pytest.fixture
+def db(ctx) -> str:
+    return ctx.db_url
 
 
 def test_gate_blocks_the_degraded_candidate(outcome, db):

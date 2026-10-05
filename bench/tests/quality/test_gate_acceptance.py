@@ -6,6 +6,7 @@ JSON) and heavy logit noise; the baseline is the clean mock. Every request goes
 over HTTP through the real client, tasks, divergence measurement and gate.
 """
 
+import asyncio
 from collections.abc import Iterator
 
 import pytest
@@ -80,9 +81,20 @@ async def _gate(suite_: Suite, baseline_url: str, candidate_url: str, tmp_path):
     return base, cand, div, gate_against_baseline(base, cand, suite_, div)
 
 
-async def test_gate_blocks_over_aggressive_quantization(baseline_url, broken_url, tmp_path):
-    s = suite(400)
-    base, cand, div, decision = await _gate(s, baseline_url, broken_url, tmp_path)
+# The tests reading `broken_gate` share one xdist worker, so the gate runs once.
+shares_broken_gate = pytest.mark.xdist_group("broken-gate")
+
+
+@pytest.fixture(scope="module")
+def broken_gate(baseline_url, broken_url, tmp_path_factory):
+    """The broken candidate gated against the baseline once, for every test that reads it."""
+    workdir = tmp_path_factory.mktemp("broken-gate")
+    return asyncio.run(_gate(suite(400), baseline_url, broken_url, workdir))
+
+
+@shares_broken_gate
+def test_gate_blocks_over_aggressive_quantization(broken_gate):
+    base, cand, div, decision = broken_gate
 
     assert base.tasks["arithmetic"].estimate.mean == 1.0
     assert cand.tasks["arithmetic"].estimate.mean == pytest.approx(0.7, abs=0.08)
@@ -133,9 +145,10 @@ async def test_small_sample_is_inconclusive(baseline_url, same_url, tmp_path):
     assert "min_samples" in tiny_decision.tasks[0].reason
 
 
-async def test_results_and_decision_persist(baseline_url, broken_url, tmp_path):
+@shares_broken_gate
+def test_results_and_decision_persist(broken_gate, tmp_path):
     s = suite(400)
-    base, cand, _, decision = await _gate(s, baseline_url, broken_url, tmp_path)
+    base, cand, _, decision = broken_gate
     url = f"sqlite:///{tmp_path / 'loom.db'}"
     upgrade(url)
     base_prov = build_provenance({"engine": "mock", "degrade": 0.0})

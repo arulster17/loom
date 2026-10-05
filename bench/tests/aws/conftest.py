@@ -29,7 +29,11 @@ def ec2(moto_aws: None) -> Any:
 
 
 def amazon_ami(ec2: Any) -> str:
-    return str(ec2.describe_images(Owners=["amazon"])["Images"][0]["ImageId"])
+    # Filtered: moto serializes ~1200 Amazon AMIs (0.5 s) for an unfiltered listing.
+    images = ec2.describe_images(
+        Owners=["amazon"], Filters=[{"Name": "name", "Values": ["amzn2-ami-hvm-*"]}]
+    )
+    return str(images["Images"][0]["ImageId"])
 
 
 def launch(ec2: Any, tags: dict[str, str]) -> str:
