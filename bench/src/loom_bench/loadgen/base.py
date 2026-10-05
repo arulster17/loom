@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from importlib import import_module
 from typing import Any, Protocol
 
 from loom_bench.client.openai_stream import PreparedRequest
@@ -72,7 +73,10 @@ def _native() -> LoadGenerator:
 
 
 # Factories import lazily so a tool's optional dependencies load only when selected.
-LOAD_GENERATORS: dict[str, Callable[[], LoadGenerator]] = {"native": _native}
+LOAD_GENERATORS: dict[str, Callable[[], LoadGenerator]] = {
+    "native": _native,
+    "vllm_bench": lambda: import_module("loom_bench.loadgen.vllm_bench").generator(),
+}
 
 
 def get_load_generator(name: str) -> LoadGenerator:
