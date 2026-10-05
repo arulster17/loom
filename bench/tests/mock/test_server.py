@@ -244,7 +244,8 @@ def test_arithmetic_degrade(make_client):
 
 
 def test_chat_logprobs_shape(client):
-    data = chat(client, "Hello", max_tokens=8, logprobs=True, top_logprobs=5).json()
+    params = {"max_tokens": 8, "logprobs": True, "top_logprobs": 5}
+    data = chat(client, "Hello", **params).json()
     content = data["choices"][0]["logprobs"]["content"]
     assert len(content) == data["usage"]["completion_tokens"]
     assert "".join(e["token"] for e in content) == data["choices"][0]["message"]["content"]
@@ -255,12 +256,8 @@ def test_chat_logprobs_shape(client):
         assert top == sorted(top, reverse=True)
         assert entry["bytes"] == list(entry["token"].encode())
 
-    events = stream_events(
-        client,
-        "/v1/chat/completions",
-        {"model": MODEL, "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 8,
-         "logprobs": True, "top_logprobs": 5},
-    )  # fmt: skip
+    body = {"model": MODEL, "messages": [{"role": "user", "content": "Hello"}], **params}
+    events = stream_events(client, "/v1/chat/completions", body)
     streamed = [e["choices"][0]["logprobs"]["content"][0] for e in events[1:-1]]
     assert streamed == content
 
@@ -484,7 +481,7 @@ def test_abort_rate_drops_stream(make_client):
 
 
 def test_startup_delay(make_client):
-    c = make_client(startup_delay_s=0.3, time_scale=1.0)
+    c = make_client(startup_delay_s=0.5, time_scale=1.0)
     assert_openai_error(c.get("/health"), 503)
     assert_openai_error(chat(c, "hi"), 503)
     deadline = time.monotonic() + 5
