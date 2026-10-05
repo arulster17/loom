@@ -1,0 +1,11 @@
+# Spend caps for the Benchmark Lab, enforced by loom_bench.budget.
+#
+# - per_experiment_cap: no experiment may set budget.max_spend above this.
+# - overall_cap: total billable spend across every experiment in the results DB.
+#   Simulated spend (provider kind `mock`) is recorded but never counts toward it.
+#
+# `bench run` refuses to start when the plan's estimate, or the worst case of every
+# host living to its TTL, exceeds the effective cap:
+#   min(budget.max_spend, per_experiment_cap, overall_cap - billable spend so far).
+overall_cap: "$150"
+per_experiment_cap: "$50"

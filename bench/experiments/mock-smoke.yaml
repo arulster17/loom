@@ -1,0 +1,46 @@
+# CI smoke test of the whole Lab on the mock backend: 2 variants x 2 workloads x
+# 3 load points x 2 repetitions, one host with a warm restart between variants.
+# time_scale 0.01 makes the simulated GPU 100x faster than real time, so it runs
+# in well under a minute. Numbers are not meaningful; the plumbing is.
+name: mock-smoke
+description: Two mock engine configs, open- and closed-loop sweeps, end to end.
+model: qwen3-8b
+provider:
+  kind: mock
+  hourly_price: "$1.00"  # simulated: exercises cost math and the guard, not billed
+  time_scale: 0.01
+  startup_delay_s: 20  # 0.2 s real: emulates the cold start
+  seed: 0
+variants:
+  - name: baseline
+  - name: small-batch
+    mock: {max_num_seqs: 8, step_base_ms: 9.0}
+workloads:
+  - profile: fixed-128-128
+    overrides: {input_len: 64, output_len: 32}
+    load:
+      mode: open_loop
+      values: [10, 20, 40]
+      duration_s: 0.6
+      warmup_s: 0.1
+      drain_timeout_s: 5
+      arrival: {kind: poisson}
+      scrape_interval_s: 0.1
+  - profile: shared-prefix
+    overrides: {input_len: 256, output_len: 16, prefix_share: 0.5}
+    load:
+      mode: closed_loop
+      values: [1, 4, 8]
+      num_requests: 12
+      warmup_requests: 2
+      scrape_interval_s: 0.1
+repetitions: 2
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+budget:
+  max_spend: "$1"
+  ttl_minutes: 10
+  accrual_interval_s: 0.5
+seed: 0

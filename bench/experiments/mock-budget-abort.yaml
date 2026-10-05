@@ -1,0 +1,29 @@
+# Exercises the hard budget abort. The plan fits the $6 cap (open-loop runs are
+# estimated at their duration), but the mock serves one sequence at a time, so
+# every run overloads it and then waits out its 30 s drain. At a simulated
+# $3600/h ($1/s) recorded spend reaches the cap mid-run: the guard cancels the
+# in-flight job, tears the host down and the experiment ends `aborted`.
+name: mock-budget-abort
+description: Overloaded mock at $1/s so the budget guard trips mid-run.
+model: qwen3-8b
+provider:
+  kind: mock
+  hourly_price: "$3600"
+  time_scale: 1.0
+  max_num_seqs: 1
+  step_base_ms: 50
+variants:
+  - name: overloaded
+workloads:
+  - profile: fixed-128-128
+    load:
+      mode: open_loop
+      values: [20, 40]
+      duration_s: 1.0
+      warmup_s: 0.2
+      drain_timeout_s: 30
+repetitions: 2
+budget:
+  max_spend: "$6"
+  ttl_minutes: 0.1
+  accrual_interval_s: 0.25
