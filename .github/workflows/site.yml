@@ -30,7 +30,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen
       - run: >-
-          uv run python -m loom_bench.site build
+          uv run bench site build
           --data site/data --config site/config.yaml --out site/_build
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -209,6 +209,44 @@ def list_runs(
     if config_hash is not None:
         stmt = stmt.where(BenchRun.config_hash == config_hash)
     stmt = stmt.order_by(BenchRun.started_at.asc().nulls_last(), BenchRun.id)
+    return list(session.scalars(stmt))
+
+
+def list_cold_starts(session: Session, experiment_ids: Sequence[uuid.UUID]) -> list[BenchColdStart]:
+    """Cold- and warm-start records of these experiments, oldest first."""
+    if not experiment_ids:
+        return []
+    stmt = (
+        select(BenchColdStart)
+        .where(BenchColdStart.experiment_id.in_(list(experiment_ids)))
+        .order_by(BenchColdStart.created_at, BenchColdStart.id)
+    )
+    return list(session.scalars(stmt))
+
+
+def list_eval_runs(session: Session, experiment_ids: Sequence[uuid.UUID]) -> list[BenchEvalRun]:
+    """Quality eval runs of these experiments, oldest first."""
+    if not experiment_ids:
+        return []
+    stmt = (
+        select(BenchEvalRun)
+        .where(BenchEvalRun.experiment_id.in_(list(experiment_ids)))
+        .order_by(BenchEvalRun.created_at, BenchEvalRun.id)
+    )
+    return list(session.scalars(stmt))
+
+
+def list_gate_decisions(
+    session: Session, experiment_ids: Sequence[uuid.UUID]
+) -> list[BenchGateDecision]:
+    """Quality gate decisions of these experiments, oldest first."""
+    if not experiment_ids:
+        return []
+    stmt = (
+        select(BenchGateDecision)
+        .where(BenchGateDecision.experiment_id.in_(list(experiment_ids)))
+        .order_by(BenchGateDecision.created_at, BenchGateDecision.id)
+    )
     return list(session.scalars(stmt))
 
 

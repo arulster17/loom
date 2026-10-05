@@ -288,3 +288,38 @@ def test_waitlist_unique_index_is_case_insensitive(db_url):
         s.flush()
     with session_scope(db_url) as s:
         assert s.scalar(select(func.count()).select_from(WaitlistSignup)) == 1
+
+
+def test_list_cold_starts_evals_and_gates_by_experiment(session):
+    a, b, other = _experiment(session), _experiment(session), _experiment(session)
+    for i, exp in enumerate((a, b, other)):
+        repo.record_cold_start(
+            session, experiment_id=exp.id, kind="cold", stages={}, total_s=float(i)
+        )
+        repo.record_eval_run(
+            session,
+            experiment_id=exp.id,
+            config_hash=f"h{i}",
+            task="gsm8k",
+            task_version="1.0",
+            n=10,
+            score=0.5,
+            ci_low=None,
+            ci_high=None,
+            provenance={},
+        )
+        repo.record_gate_decision(
+            session,
+            experiment_id=exp.id,
+            baseline_config_hash="base",
+            candidate_config_hash=f"h{i}",
+            decision="pass",
+            details={},
+        )
+    ids = [a.id, b.id]
+    assert {c.total_s for c in repo.list_cold_starts(session, ids)} == {0.0, 1.0}
+    assert {e.config_hash for e in repo.list_eval_runs(session, ids)} == {"h0", "h1"}
+    gates = repo.list_gate_decisions(session, ids)
+    assert {g.candidate_config_hash for g in gates} == {"h0", "h1"}
+    assert repo.list_cold_starts(session, []) == []
+    assert repo.list_eval_runs(session, []) == [] == repo.list_gate_decisions(session, [])

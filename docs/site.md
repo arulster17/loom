@@ -39,19 +39,20 @@ uses a real instance price with a round, clearly labelled illustrative throughpu
 
    ```bash
    LOOM_DATABASE_URL=postgresql+psycopg://... \
-     uv run python -m loom_bench.site export --out site/data
+     uv run bench site export --out site/data      # or --db URL
    ```
 
    The export analyses the runs with the report module (`analyze_runs`,
    `with_quality`, `cold_starts_by_config`, `build_competitiveness`): goodput at SLO,
-   cost from `bench/prices.yaml`, quality gate, cold starts. It replaces the previous
+   cost from `bench/prices.yaml`, quality gate, cold starts; the same analysis as
+   `bench report` and the summary after `bench run`. It replaces the previous
    snapshot. The SLO comes from the experiment specs and run summaries; if they
    disagree, pass `--slo slo.yaml` or publish the experiments separately.
 
 2. Build and check locally:
 
    ```bash
-   uv run python -m loom_bench.site build        # site/data -> site/_build
+   uv run bench site build        # site/data -> site/_build
    python -m http.server 8000 --directory site/_build
    # open http://localhost:8000
    ```
@@ -69,7 +70,7 @@ Everything in the snapshot is copied to `data/` on the site and linked from the 
 | File | Contents |
 |---|---|
 | `manifest.json` | Generation time, git commit of the export, loom-bench version, experiment ids, SLO, cost allocation, model index |
-| `models/<id>.json` | The model's registry entry and its analysed results (`ConfigResult`s, with every load point and its CIs) and cold starts |
+| `models/<id>.json` | The model's registry entry and its analysed results (`ConfigResult`s, with every load point and its CIs; each estimate names its interval `method`: `log_t` geometric mean with a log-scale t-interval, `t_clipped` or `t`) and cold starts |
 | `competitiveness.json` | Our cost at SLO, planned price and margin, competitors' public list prices with sources and flags |
 | `prices.json` | The price book used for every cost |
 | `experiments/<id>.json` | Each experiment's record, including its full spec and spend |
