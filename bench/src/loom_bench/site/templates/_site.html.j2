@@ -1,0 +1,59 @@
+{% macro waitlist(config) %}
+{% set w = config.waitlist %}
+<section class="panel waitlist" aria-labelledby="waitlist-h">
+<h2 id="waitlist-h">Waitlist</h2>
+{% if w.enabled %}
+<p>Loom's API is not open yet. Leave an email address to hear when it is.</p>
+<form id="waitlist-form" action="{{ w.action_url }}" method="{{ w.method|lower }}">
+<label for="waitlist-email">Email address</label>
+<div class="field-row">
+<input id="waitlist-email" name="{{ w.field }}" type="email" required autocomplete="email" spellcheck="false">
+<button type="submit">Join the waitlist</button>
+</div>
+<div class="hp" aria-hidden="true">
+<label for="waitlist-hp">Leave this field empty</label>
+<input id="waitlist-hp" name="{{ w.honeypot }}" type="text" tabindex="-1" autocomplete="off">
+</div>
+{% for name, value in w.extra_fields.items() %}
+<input type="hidden" name="{{ name }}" value="{{ value }}">
+{% endfor %}
+<p class="privacy">We only use this to tell you when Loom opens; no sharing.</p>
+<p class="form-status" id="waitlist-status" role="status" aria-live="polite"></p>
+</form>
+<script>
+(function () {
+  var form = document.getElementById("waitlist-form");
+  var status = document.getElementById("waitlist-status");
+  if (!form || !window.fetch || !window.FormData) return;
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    var button = form.querySelector("button");
+    var done = function (ok, text) { status.textContent = text; status.className = "form-status " + (ok ? "ok" : "error"); button.disabled = false; };
+    if (form.elements["{{ w.honeypot }}"].value) { done(true, "Thanks. You're on the list."); return; }
+    button.disabled = true;
+    status.className = "form-status";
+    status.textContent = "Sending…";
+    var data = new FormData(form);
+    var get = form.method.toLowerCase() === "get";
+    var url = get ? form.action + (form.action.indexOf("?") < 0 ? "?" : "&") + new URLSearchParams(data) : form.action;
+    fetch(url, { method: form.method.toUpperCase(), body: get ? undefined : data, headers: { Accept: "application/json" } })
+      .then(function (r) { done(r.ok, r.ok ? "Thanks. You're on the list." : "That didn't go through (HTTP " + r.status + "). Please try again."); if (r.ok) form.reset(); })
+      .catch(function () { done(false, "Couldn't reach the signup service. Check your connection and try again."); });
+  });
+})();
+</script>
+{% else %}
+<p><strong>Waitlist opens soon.</strong> Loom's API is not open yet, and there is no signup form until it is. To follow progress, watch the repository: <a href="{{ config.repo }}">{{ config.repo.removeprefix('https://') }}</a>.</p>
+{% endif %}
+</section>
+{% endmacro %}
+
+{% macro pending(text) %}
+<div class="notice" role="note"><p><strong>No published results yet — first runs pending.</strong> {{ text }}</p></div>
+{% endmacro %}
+
+{% macro scroll_table(label_id) %}
+<div class="table-wrap" role="region" aria-labelledby="{{ label_id }}" tabindex="0">
+{{ caller() }}
+</div>
+{% endmacro %}

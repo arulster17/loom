@@ -1,0 +1,18 @@
+# Public results site settings (not results; those are in site/data/).
+# Validated by loom_bench.site.config. See docs/site.md.
+
+title: Loom
+repo_url: https://github.com/arulster17/loom
+
+waitlist:
+  # Where the signup form posts. While null the site shows "Waitlist opens soon"
+  # and no form. Set it to a form service endpoint (e.g. Formspree, Buttondown)
+  # or a Loom endpoint once one is chosen.
+  action_url: null
+  method: POST
+  # Name of the email field the endpoint expects.
+  field: email
+  # Hidden spam-trap field; submissions that fill it are dropped. Formspree checks _gotcha.
+  honeypot: _gotcha
+  # Extra hidden fields the endpoint needs, e.g. {tag: results-page}.
+  extra_fields: {}

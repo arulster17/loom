@@ -1,0 +1,57 @@
+{% extends "base.html.j2" %}
+{% block title %}Harness · Loom{% endblock %}
+{% block description %}The open-source Loom Benchmark Lab: run it against a simulated GPU in minutes, or reproduce a published result.{% endblock %}
+{% block content %}
+<header class="page-head">
+<h1>The harness</h1>
+<p class="lede">Every number on this site is produced by the Loom Benchmark Lab, which is open source under the Apache-2.0 license. You can run it without a GPU against a simulated one, and rerun any published result from its provenance.</p>
+<p><a class="button" href="{{ config.repo }}">Source on GitHub</a></p>
+</header>
+
+<section aria-labelledby="quickstart">
+<h2 id="quickstart">Quickstart with the mock backend</h2>
+<p>The mock is an OpenAI-compatible streaming server with a simulated batching GPU: queueing, prefill and decode costs, prefix caching and Prometheus metrics. It needs Python 3.12+ and <code>uv</code>, and no GPU.</p>
+<ol class="steps">
+<li>
+<p>Clone the repository and install the workspace.</p>
+<pre class="code" tabindex="0"><code>git clone {{ config.repo }}.git
+cd loom
+uv sync</code></pre>
+</li>
+<li>
+<p>Run the test suite. It covers the mock backend, load generator, metrics, SLO, cost and report code, and needs no GPU; tests that need Postgres are skipped unless <code>LOOM_TEST_DATABASE_URL</code> is set.</p>
+<pre class="code" tabindex="0"><code>uv run pytest</code></pre>
+</li>
+<li>
+<p>Start the mock and send it a streaming request.</p>
+<pre class="code" tabindex="0"><code>uv run python -m loom_bench.mock --port 8000
+
+curl -N http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "mock-model", "stream": true,
+       "messages": [{"role": "user", "content": "Hello"}]}'</code></pre>
+</li>
+<li>
+<p>Explore the command line.</p>
+<pre class="code" tabindex="0"><code>uv run bench --help</code></pre>
+</li>
+</ol>
+</section>
+
+<section aria-labelledby="reproduce">
+<h2 id="reproduce">Reproducing a published result</h2>
+<p>Each config on a model page lists its runs, links each run's provenance file and gives a <code>bench reproduce &lt;run id&gt;</code> command. The provenance records everything the run depended on: the git commit, engine version and image digest, model revision, GPU, CUDA and driver versions, cloud, region and market, workload profile and dataset, load mode and seed. Reproducing reruns that configuration and compares the new numbers with the original, reporting whether the differences are within normal run-to-run variance. Cloud runs need your own cloud account and pay its prices.</p>
+</section>
+
+<section aria-labelledby="layout">
+<h2 id="layout">What is in the repository</h2>
+<dl class="defs compact">
+<dt><a href="{{ config.repo }}/tree/main/bench"><code>bench/</code></a></dt><dd>The Benchmark Lab: load generator, metrics, SLO and goodput search, cost, results store, reports and this site.</dd>
+<dt><a href="{{ registry_url }}"><code>config/models.yaml</code></a></dt><dd>The model registry: pinned weights revision, digest-pinned engine image, hardware, parallelism and planned price for every model.</dd>
+<dt><a href="{{ config.repo }}/blob/main/bench/prices.yaml"><code>bench/prices.yaml</code></a></dt><dd>Cloud prices with sources and check dates.</dd>
+<dt><a href="{{ config.repo }}/blob/main/bench/competitors.yaml"><code>bench/competitors.yaml</code></a></dt><dd>Other providers' public list prices with sources and check dates.</dd>
+<dt><a href="{{ config.repo }}/tree/main/bench/workloads"><code>bench/workloads/</code></a></dt><dd>Workload profiles: fixed input/output shapes, chat, shared prefix, long-context retrieval, code completion, long generation and trace replay.</dd>
+<dt><a href="{{ config.repo }}/tree/main/site/data"><code>site/data/</code></a></dt><dd>The results snapshot this site is built from.</dd>
+</dl>
+</section>
+{% endblock %}

@@ -1,0 +1,172 @@
+{% extends "base.html.j2" %}
+{% from "_macros.html.j2" import link_list %}
+{% from "_site.html.j2" import scroll_table %}
+{% block title %}Methodology · Loom{% endblock %}
+{% block description %}How Loom measures latency, throughput, goodput at SLO, quality and cost per token, and where its prices come from.{% endblock %}
+{% block content %}
+<header class="page-head">
+<h1>Methodology</h1>
+<p class="lede">How every published number is produced, and what it does and does not cover. The code that implements each rule is in the <a href="{{ config.repo }}">open-source harness</a>.</p>
+</header>
+
+<nav class="toc" aria-label="On this page">
+<ul>
+<li><a href="#load">Load generation</a></li>
+<li><a href="#metrics">Latency and throughput</a></li>
+<li><a href="#goodput">Goodput at SLO</a></li>
+<li><a href="#ci">Repetitions and confidence intervals</a></li>
+<li><a href="#cost">Cost per token</a></li>
+<li><a href="#prices">Price sources</a></li>
+<li><a href="#quality">Quality gate</a></li>
+<li><a href="#content">Synthetic and realistic content</a></li>
+<li><a href="#scope">What we don't do</a></li>
+<li><a href="#snapshot">This snapshot</a></li>
+</ul>
+</nav>
+
+<section aria-labelledby="load">
+<h2 id="load">Load generation: open and closed loop</h2>
+<dl class="defs">
+<dt>Open loop</dt>
+<dd>{{ open_loop|sentence }}. Requests are sent on the arrival schedule whatever the server does, so queueing shows up as latency. This is the mode used for latency SLOs and goodput; load is in requests per second.</dd>
+<dt>Closed loop</dt>
+<dd>{{ closed_loop|sentence }}. The server never sees more than that many requests in flight, so it measures saturation throughput, and the highest concurrency that meets the SLO is the maximum sustainable concurrency.</dd>
+</dl>
+<p>Warmup requests are discarded before any metric is computed. On cloud runs the load generator runs on the GPU host itself, so client-observed latency never includes a round trip over the internet. Each run is one load point × one repetition, with its seed, workload profile and dataset recorded in its provenance.</p>
+</section>
+
+<section aria-labelledby="metrics">
+<h2 id="metrics">Latency and throughput</h2>
+<dl class="defs">
+<dt>TTFT</dt><dd>Time to first token: from sending the request to receiving the first streamed token.</dd>
+<dt>TPOT</dt><dd>Time per output token after the first: (end-to-end latency − TTFT) ÷ (output tokens − 1), per request.</dd>
+<dt>Error rate</dt><dd>(errors + timeouts) ÷ (successful + errors + timeouts) requests.</dd>
+<dt>Throughput</dt><dd>Tokens of successful requests ÷ the measurement window. Token counts come from the server's usage block; a successful request without one is counted and flagged, and its tokens are left out.</dd>
+<dt>Raw peak</dt><dd>The highest output throughput at any tested load, ignoring the SLO. It is reported for context and never used for cost.</dd>
+</dl>
+<p>Latency percentiles are computed per run over successful requests. A run's p95 TTFT is one value; repetitions of the same load point are then combined as described under <a href="#ci">confidence intervals</a>.</p>
+</section>
+
+<section aria-labelledby="goodput">
+<h2 id="goodput">Goodput at SLO</h2>
+<p>An SLO sets latency targets (for example p95 TTFT and p95 TPOT in milliseconds) and a maximum error rate. Each experiment declares its SLO; the one used for published results is under <a href="#snapshot">this snapshot</a>.</p>
+<ol>
+<li>A load point <strong>meets the SLO</strong> only if, for every target, the upper bound of its confidence interval across repetitions is within the target. Being under the target on average is not enough.</li>
+<li><strong>Goodput</strong> is the highest load that meets the SLO below the first load that does not. Loads above the first failure never count, even if they happen to pass.</li>
+<li>Goodput throughput (output and input tokens per second, per replica) is the mean measured at that load, with its confidence interval.</li>
+<li>If every tested load met the SLO, goodput is not bracketed: the real goodput may be higher, the cost is an upper bound, and the result is flagged and not ranked.</li>
+</ol>
+</section>
+
+<section aria-labelledby="ci">
+<h2 id="ci">Repetitions and confidence intervals</h2>
+<p>{{ method.ci_method }}</p>
+<p>A result is <strong>untrusted</strong>, listed but not ranked, when any load point has fewer than two completed repetitions, goodput is not bracketed, a headline metric at the goodput load varies run to run by more than 10% (coefficient of variation), or successful requests lacked token usage. Runs that did not complete are excluded and counted.</p>
+<p>Repetitions in this snapshot: {{ method.repetitions }}.</p>
+</section>
+
+<section aria-labelledby="cost">
+<h2 id="cost">Cost per token</h2>
+<p>A replica's hourly price buys the tokens it produces per hour at goodput. A GPU produces input (prefill) and output (decode) tokens at the same time, so splitting its cost between them is a choice, and every result states which:</p>
+<dl class="defs">
+<dt>all_output</dt><dd>{{ allocation_text['all_output']|sentence }}.</dd>
+<dt>all_input</dt><dd>{{ allocation_text['all_input']|sentence }}.</dd>
+<dt>weighted(r)</dt><dd>One output token costs as much as r input tokens. With effective throughput E = input tok/s + r × output tok/s, the input price is hourly price ÷ (E × 3,600) per token and the output price is r times that; at the measured token mix these prices bill exactly the replica's hourly cost.</dd>
+</dl>
+<div class="formula" role="group" aria-label="Cost formula">
+<p>$/1M output tokens at SLO = hourly price ÷ (goodput output tok/s × {{ seconds_per_hour|num }} s/h) × {{ tokens_per_mtok|num }}</p>
+</div>
+<p>Money is held as integer micro-dollars and computed exactly, rounded once, half up, to the micro-dollar. Cost falls as throughput rises, so the low end of the cost interval comes from the high end of the throughput interval and vice versa.</p>
+
+<h3 id="example">Worked example</h3>
+{% if example is none %}
+<p>No price book is included in this snapshot, so no example can be computed.</p>
+{% else %}
+{% if example.measured %}
+<p>From the published results: {{ example.source }}, on {{ example.instance }}.</p>
+{% else %}
+<p class="notice-inline">Illustrative: the throughput below is a round number chosen to show the arithmetic, not a measurement. The price is real: {{ example.source }} ({{ example.instance }}), from the <a href="#prices">price book</a>.</p>
+{% endif %}
+<dl class="defs compact worked">
+<dt>Hourly price</dt><dd class="num-text">{{ example.hourly_micros|usd(4) }} per hour</dd>
+<dt>Goodput output throughput</dt><dd class="num-text">{{ example.output_tok_s|num(1) }} tok/s{% if not example.measured %} (illustrative){% endif %}</dd>
+<dt>Output tokens per hour</dt><dd class="num-text">{{ example.output_tok_s|num(1) }} × {{ seconds_per_hour|num }} = {{ (example.output_tok_s * seconds_per_hour)|num }}</dd>
+<dt>$/1M output tokens</dt><dd class="num-text">{{ example.hourly_micros|usd(4) }} ÷ {{ (example.output_tok_s * seconds_per_hour)|num }} × {{ tokens_per_mtok|num }} = <strong>{{ example.output_per_mtok|usd(4) }}</strong></dd>
+</dl>
+{% endif %}
+<p>This is the cost of a replica kept busy at goodput. Idle capacity, autoscaling headroom, cold starts and Loom's own overhead are not in it; the margin on the <a href="{{ root }}pricing.html">pricing page</a> has to cover them.</p>
+</section>
+
+<section aria-labelledby="prices">
+<h2 id="prices">Price sources</h2>
+<p>Hourly prices come from <code>bench/prices.yaml</code>, maintained by hand from public price pages. Every entry records its sources and the date it was checked; entries not yet confirmed are marked unverified and cost math refuses them. Spot prices are indicative and move hourly, so on-demand is the default.{% if snapshot.price_book %} Price book last checked {{ snapshot.price_book.last_checked }}.{% endif %}</p>
+{% if price_rows %}
+{% call scroll_table("prices") %}
+<table>
+<thead><tr><th scope="col">Instance</th><th scope="col">GPU</th><th scope="col" class="num">On-demand $/h</th><th scope="col" class="num">Spot $/h</th><th scope="col">Sources</th><th scope="col">Last checked</th></tr></thead>
+<tbody>
+{% for p in price_rows %}
+<tr>
+<td>{{ p.instance }}<span class="sub">{{ p.cloud }} / {{ p.region }}</span></td>
+<td>{{ p.entry.gpu_count }}×{{ p.entry.gpu }}<span class="sub">{{ p.entry.gpu_memory_gb }} GB each</span></td>
+<td class="num">{{ p.entry.on_demand_per_hour|usd(4) }}</td>
+<td class="num">{{ p.entry.spot_per_hour|usd(4) if p.entry.spot_per_hour is not none else 'n/a' }}</td>
+<td>{% for u in p.entry.sources %}<a href="{{ u }}">{{ u|string|truncate(64, true, '…') }}</a>{% if not loop.last %}<br>{% endif %}{% endfor %}{% if not p.entry.verified %}<span class="sub">unverified: {{ p.entry.note }}</span>{% endif %}</td>
+<td class="nowrap">{{ p.entry.last_checked }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% endcall %}
+<p class="section-note">Instances planned in the model registry and used by published results. The full price book is in <a href="{{ root }}data/prices.json">prices.json</a>.</p>
+{% else %}
+<p>No price book is included in this snapshot.</p>
+{% endif %}
+</section>
+
+<section aria-labelledby="quality">
+<h2 id="quality">Quality gate</h2>
+<p>A cheaper configuration (a quantized checkpoint, a different engine, other engine flags) is only worth ranking if it answers as well as a baseline configuration of the same model. Each candidate is scored on pinned subsets of evaluation tasks, on the same items as its baseline, and the gate compares them per task with a paired bootstrap confidence interval of the score difference (candidate − baseline), so per-item difficulty cancels out.</p>
+<ul>
+<li><strong>pass</strong>: on every task, the lower end of the interval is above the non-inferiority margin, the largest drop accepted.</li>
+<li><strong>fail</strong>: on at least one task, the interval lies entirely below that margin. Failing configs are listed with the reason and never ranked, however cheap.</li>
+<li><strong>inconclusive</strong>: otherwise; the interval is too wide to decide. The config is shown with that status.</li>
+</ul>
+<p>Each model page shows every task's score, its interval and the difference from the baseline. A config with no gate decision is shown as "not evaluated".</p>
+</section>
+
+<section aria-labelledby="content">
+<h2 id="content">Synthetic and realistic content</h2>
+<p>Workloads use either synthetic prompts (random words with fixed input and output lengths, so engines are compared on identical shapes) or realistic text from a named dataset. Every result states which. Random text understates the gains from prefix caching and speculative decoding, so a synthetic-content cost can be higher than the same config would achieve on real traffic; realistic content depends on the dataset's mix of lengths. Compare costs only within one workload.</p>
+{% if method.datasets %}
+<p>Datasets in this snapshot:</p>
+<ul>
+{% for d in method.datasets %}
+<li>{{ d.text }}{% if d.source %}; source: {{ link_list([d.source]) }}{% endif %}</li>
+{% endfor %}
+</ul>
+{% endif %}
+</section>
+
+<section aria-labelledby="scope">
+<h2 id="scope">What we don't do</h2>
+<ul>
+<li>We do not benchmark other providers' APIs. Several providers' terms restrict benchmarking their services, so the harness ships no tooling, credentials or presets for third-party endpoints. Competitor numbers are public list prices only, entered by hand with their source and check date. See the <a href="{{ legal_url }}">competitor benchmarking note</a>.</li>
+<li>We do not publish raw peak throughput as capacity. Cost is always computed at goodput under the stated SLO.</li>
+<li>We do not rank a result that is untrusted or failed the quality gate. It stays on the page with the reason.</li>
+</ul>
+</section>
+
+<section aria-labelledby="snapshot">
+<h2 id="snapshot">This snapshot</h2>
+<dl class="defs compact">
+<dt>Generated</dt><dd>{{ manifest.generated_at.strftime('%Y-%m-%d %H:%M UTC') }} from commit <code>{{ manifest.git.sha or 'not recorded' }}</code></dd>
+<dt>Experiments</dt><dd>{% for e in snapshot.experiments %}<a href="{{ root }}data/experiments/{{ e.id }}.json">{{ e.name }}</a> <code>{{ e.id }}</code>{{ '; ' if not loop.last }}{% else %}none yet: first runs pending{% endfor %}</dd>
+<dt>SLO</dt><dd>{{ describe_slo(manifest.slo) if manifest.slo else 'none yet: no results published' }}</dd>
+<dt>Cost allocation</dt><dd>{{ manifest.allocation or 'none yet: no results published' }}</dd>
+<dt>Runs</dt><dd>{{ manifest.run_count }}</dd>
+{% if method.content_kinds %}<dt>Content</dt><dd>{{ method.content_kinds|join(', ') }}</dd>{% endif %}
+</dl>
+<p class="section-note">Everything the site is built from is published as JSON: <a href="{{ root }}data/manifest.json">manifest.json</a>, per-model results under <code>data/models/</code>, and one provenance file per run under <code>data/provenance/</code>.</p>
+</section>
+{% endblock %}

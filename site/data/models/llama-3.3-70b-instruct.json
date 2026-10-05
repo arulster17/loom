@@ -1,0 +1,60 @@
+{
+  "model_id": "llama-3.3-70b-instruct",
+  "display_name": "Llama 3.3 70B Instruct",
+  "repo": "meta-llama/Llama-3.3-70B-Instruct",
+  "registry": {
+    "id": "llama-3.3-70b-instruct",
+    "display_name": "Llama 3.3 70B Instruct",
+    "hf": {
+      "repo": "meta-llama/Llama-3.3-70B-Instruct",
+      "revision": "6f6073b423013f6a7d4d9f39144961bfbfbc386b",
+      "license": "llama3.3",
+      "gated": "manual",
+      "size_bytes": 141107497872,
+      "trust_remote_code": false,
+      "trust_remote_code_review": null
+    },
+    "engine": {
+      "name": "vllm",
+      "version": "0.30.0",
+      "image": "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90",
+      "args": {},
+      "chat_template_kwargs": {}
+    },
+    "hardware": {
+      "gpu": "L40S",
+      "gpus_per_replica": 4,
+      "nodes_per_replica": 1,
+      "instance_types": {
+        "aws": "g6e.12xlarge",
+        "gcp": null
+      }
+    },
+    "parallelism": {
+      "tp": 4,
+      "pp": 1,
+      "ep": 1
+    },
+    "max_context": 32768,
+    "quantization": "none",
+    "kv_cache_dtype": "auto",
+    "pricing": null,
+    "scaling": {
+      "min_replicas": 0,
+      "max_replicas": 1
+    },
+    "clouds": [
+      "aws"
+    ],
+    "capabilities": {
+      "tools": true,
+      "json_schema": true,
+      "vision": false,
+      "reasoning": false
+    },
+    "routing_tier": 1,
+    "status": "preview"
+  },
+  "results": [],
+  "cold_starts": {}
+}

@@ -1,0 +1,202 @@
+{
+  "title": "Loom competitiveness: cost at SLO vs public list prices",
+  "note": "Public list prices only: competitor numbers are the per-token prices each provider publishes on its pricing page, with the source and the date it was checked. No competitor endpoint was called or benchmarked, and list prices say nothing about a provider's latency, quality or quantization unless the page discloses it.",
+  "rows": [
+    {
+      "model_id": "qwen3-8b",
+      "display_name": "Qwen3 8B",
+      "workload": null,
+      "load_mode": null,
+      "best_config": null,
+      "best_config_hash": null,
+      "cost_input": null,
+      "cost_output": null,
+      "price": null,
+      "margin_input": null,
+      "margin_output": null,
+      "competitors": [
+        {
+          "provider": "Fireworks AI",
+          "provider_model": null,
+          "aggregator": false,
+          "availability": "unverified",
+          "input_per_mtok": 200000,
+          "output_per_mtok": 200000,
+          "quantization": null,
+          "source": "https://docs.fireworks.ai/serverless/pricing",
+          "last_checked": "2026-10-04",
+          "notes": "Size-bucket price for models of 4B-16B parameters.",
+          "in_comparison": false
+        },
+        {
+          "provider": "OpenRouter",
+          "provider_model": "qwen/qwen3-8b",
+          "aggregator": true,
+          "availability": "listed",
+          "input_per_mtok": 117000,
+          "output_per_mtok": 455000,
+          "quantization": null,
+          "source": "https://openrouter.ai/qwen/qwen3-8b",
+          "last_checked": "2026-10-04",
+          "notes": null,
+          "in_comparison": false
+        }
+      ],
+      "flags": [
+        {
+          "kind": "no_price_set",
+          "side": null,
+          "message": "qwen3-8b: no price set"
+        },
+        {
+          "kind": "no_cost_measurement",
+          "side": null,
+          "message": "qwen3-8b: no measured cost at SLO"
+        },
+        {
+          "kind": "no_public_comparison",
+          "side": null,
+          "message": "qwen3-8b: no eligible public list price"
+        }
+      ]
+    },
+    {
+      "model_id": "llama-3.3-70b-instruct",
+      "display_name": "Llama 3.3 70B Instruct",
+      "workload": null,
+      "load_mode": null,
+      "best_config": null,
+      "best_config_hash": null,
+      "cost_input": null,
+      "cost_output": null,
+      "price": null,
+      "margin_input": null,
+      "margin_output": null,
+      "competitors": [
+        {
+          "provider": "Together AI",
+          "provider_model": null,
+          "aggregator": false,
+          "availability": "listed",
+          "input_per_mtok": 1040000,
+          "output_per_mtok": 1040000,
+          "quantization": null,
+          "source": "https://www.together.ai/pricing",
+          "last_checked": "2026-10-04",
+          "notes": null,
+          "in_comparison": true
+        },
+        {
+          "provider": "Fireworks AI",
+          "provider_model": null,
+          "aggregator": false,
+          "availability": "unverified",
+          "input_per_mtok": 900000,
+          "output_per_mtok": 900000,
+          "quantization": null,
+          "source": "https://docs.fireworks.ai/serverless/pricing",
+          "last_checked": "2026-10-04",
+          "notes": "Size-bucket price for models above 16B parameters.",
+          "in_comparison": false
+        },
+        {
+          "provider": "DeepInfra",
+          "provider_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+          "aggregator": false,
+          "availability": "listed",
+          "input_per_mtok": 100000,
+          "output_per_mtok": 320000,
+          "quantization": "fp8",
+          "source": "https://deepinfra.com/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+          "last_checked": "2026-10-04",
+          "notes": null,
+          "in_comparison": true
+        },
+        {
+          "provider": "Novita AI",
+          "provider_model": null,
+          "aggregator": false,
+          "availability": "listed",
+          "input_per_mtok": 135000,
+          "output_per_mtok": 400000,
+          "quantization": null,
+          "source": "https://novita.ai/pricing",
+          "last_checked": "2026-10-04",
+          "notes": "Listed with a 12K-token context window.",
+          "in_comparison": true
+        },
+        {
+          "provider": "OpenRouter",
+          "provider_model": "meta-llama/llama-3.3-70b-instruct",
+          "aggregator": true,
+          "availability": "listed",
+          "input_per_mtok": 100000,
+          "output_per_mtok": 320000,
+          "quantization": null,
+          "source": "https://openrouter.ai/meta-llama/llama-3.3-70b-instruct",
+          "last_checked": "2026-10-04",
+          "notes": "Headline price; requests are routed across underlying providers.",
+          "in_comparison": false
+        }
+      ],
+      "flags": [
+        {
+          "kind": "no_price_set",
+          "side": null,
+          "message": "llama-3.3-70b-instruct: no price set"
+        },
+        {
+          "kind": "no_cost_measurement",
+          "side": null,
+          "message": "llama-3.3-70b-instruct: no measured cost at SLO"
+        }
+      ]
+    }
+  ],
+  "not_offered": [
+    {
+      "name": "Groq",
+      "reason": "Enterprise plans only; contact sales.",
+      "url": null,
+      "last_checked": "2026-10-04"
+    },
+    {
+      "name": "Cerebras",
+      "reason": "No public per-token price.",
+      "url": null,
+      "last_checked": "2026-10-04"
+    },
+    {
+      "name": "Lambda",
+      "reason": "Inference offering winding down.",
+      "url": null,
+      "last_checked": "2026-10-04"
+    },
+    {
+      "name": "Hyperbolic",
+      "reason": "Inference offering retired.",
+      "url": null,
+      "last_checked": "2026-10-04"
+    },
+    {
+      "name": "Nebius",
+      "reason": "Neither model is in its catalog.",
+      "url": null,
+      "last_checked": "2026-10-04"
+    }
+  ],
+  "competitors_last_checked": "2026-10-04",
+  "include_aggregators": false,
+  "include_unverified": false,
+  "methodology": {
+    "slos": [],
+    "allocations": [],
+    "load_modes": [],
+    "content_kinds": [],
+    "datasets": [],
+    "repetitions": "none",
+    "ci_method": "Each metric is the mean across repetitions with a two-sided Student-t 95% confidence interval. A load meets the SLO only if the CI upper bound of every target is within it; goodput is the highest passing load below the first failing one. Cost CI bounds come from the goodput throughput CI (low cost from high throughput). Results with a single repetition have no CI and are never trusted.",
+    "price_book_last_checked": "2026-10-04",
+    "configs": []
+  }
+}

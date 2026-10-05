@@ -1,0 +1,91 @@
+{% extends "base.html.j2" %}
+{% from "_macros.html.j2" import money, estimate %}
+{% from "_site.html.j2" import waitlist, pending, scroll_table %}
+{% block title %}Loom: measured cost per token for open-weight models{% endblock %}
+{% block content %}
+<header class="page-head">
+<h1>Open-weight model inference, priced from measurements</h1>
+<p class="lede">Loom is an inference service for open-weight models, in development. We publish measured quality, latency, throughput and cost per token — and how prices are derived from them. Every number links to the exact configuration and provenance that produced it, and the harness that measured it is open source.</p>
+</header>
+
+{% if manifest.empty %}
+{{ pending("The benchmark harness is built and tested against a simulated GPU; no GPU runs have been published. The table below lists the models and configurations queued for the first runs, and fills in from the results snapshot once they complete.") }}
+{% endif %}
+
+<section aria-labelledby="models-h">
+<h2 id="models-h">Models</h2>
+{% if manifest.empty %}
+<p class="section-note">Configurations come from the model registry, <a href="{{ registry_url }}">config/models.yaml</a>.</p>
+{% call scroll_table("models-h") %}
+<table>
+<thead>
+<tr><th scope="col">Model</th><th scope="col">Engine</th><th scope="col">Hardware</th><th scope="col">Weights</th><th scope="col">$/1M output tokens at SLO</th><th scope="col">Status</th></tr>
+</thead>
+<tbody>
+{% for m in models %}
+<tr>
+<td class="model"><a href="{{ root }}{{ m.path }}"><strong>{{ m.snap.display_name }}</strong></a><span class="sub">{{ m.snap.repo or '' }}</span></td>
+{% if m.planned %}
+<td class="nowrap">{{ m.planned.engine }}</td>
+<td>{{ m.planned.hardware }}</td>
+<td>{{ m.planned.quantization }}</td>
+{% else %}
+<td colspan="3">not in the registry</td>
+{% endif %}
+<td class="muted">not measured yet</td>
+<td><span class="badge pending">first runs pending</span></td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% endcall %}
+{% else %}
+<p class="section-note">The cheapest configuration at SLO on each benchmarked workload, ranked among configs that passed every check. Values are means; the line under each is its {{ (manifest.confidence * 100)|round|int }}% confidence interval. SLO: {{ describe_slo(manifest.slo) if manifest.slo else 'not recorded' }}.</p>
+{% call scroll_table("models-h") %}
+<table>
+<thead>
+<tr><th scope="col">Model</th><th scope="col">Workload</th><th scope="col">Best config at SLO</th><th scope="col" class="num">$/1M output tokens</th><th scope="col" class="num">Goodput out tok/s per GPU</th><th scope="col" class="num">p95 TTFT</th><th scope="col" class="num">p95 TPOT</th><th scope="col">Quality gate</th></tr>
+</thead>
+<tbody>
+{% for h in headline %}
+{% set m = h.model %}
+<tr>
+<td class="model"><a href="{{ root }}{{ m.path }}"><strong>{{ m.snap.display_name }}</strong></a><span class="sub">{{ m.snap.repo or '' }}</span></td>
+{% if h.board is none %}
+<td colspan="7" class="muted">No published results for this model yet — first runs pending.</td>
+{% elif h.best is none %}
+<td><a href="{{ root }}{{ m.path }}#{{ h.board.anchor }}">{{ h.board.title }}</a></td>
+<td colspan="6" class="muted">No config ranked: every config failed the quality gate, is untrusted, or has no cost at SLO. Details on the model page.</td>
+{% else %}
+{% set r = h.best.result %}
+<td><a href="{{ root }}{{ m.path }}#{{ h.board.anchor }}">{{ h.board.title }}</a></td>
+<td class="cfg">{{ r.name }}<span class="sub">{{ r.label.text }}</span></td>
+<td class="num">{{ money(r.cost.output_per_mtok) }}</td>
+<td class="num">{{ estimate(r.goodput_output_tok_s_per_gpu, 1) }}</td>
+<td class="num">{{ estimate(r.ttft_p95_ms, 0, 'ms') }}</td>
+<td class="num">{{ estimate(r.tpot_p95_ms, 1, 'ms') }}</td>
+<td>{% if r.quality and r.quality.gate %}<span class="badge {{ r.quality.gate }}">{{ r.quality.gate }}</span>{% else %}<span class="muted">not evaluated</span>{% endif %}</td>
+{% endif %}
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% endcall %}
+<p class="section-note">{{ manifest.experiment_ids|length }} experiment{{ '' if manifest.experiment_ids|length == 1 else 's' }}, {{ manifest.run_count }} runs. Cost covers the replica's hourly price only; see <a href="{{ root }}methodology.html#cost">how cost is derived</a> and <a href="{{ root }}pricing.html">how it compares with public list prices</a>.</p>
+{% endif %}
+</section>
+
+<section aria-labelledby="read-h">
+<h2 id="read-h">What the numbers mean</h2>
+<dl class="defs">
+<dt>Goodput at SLO</dt>
+<dd>The highest tested load at which latency and errors stay within the service-level objective, judged on the upper end of the confidence interval. Raw peak throughput is reported separately and never used for cost. <a href="{{ root }}methodology.html#goodput">Definition</a></dd>
+<dt>Cost per token</dt>
+<dd>The replica's hourly cloud price divided by the tokens it produces per hour at goodput. Prices come from public price pages, each with its source and check date. <a href="{{ root }}methodology.html#cost">Formula and worked example</a></dd>
+<dt>Quality</dt>
+<dd>Each configuration is scored on pinned evaluation sets against a baseline configuration of the same model; one that fails the quality gate is listed but never ranked. <a href="{{ root }}methodology.html#quality">Gate rule</a></dd>
+</dl>
+</section>
+
+{{ waitlist(config) }}
+{% endblock %}

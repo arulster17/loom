@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}{% endblock %}</title>
+<meta name="description" content="{% block description %}Loom publishes measured quality, latency, throughput and cost per token for open-weight models, with the exact configs and the open-source harness.{% endblock %}">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="{{ root }}style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header">
+<div class="wrap bar">
+<a class="brand" href="{{ root }}index.html">{{ config.title }}</a>
+<nav aria-label="Main">
+<ul>
+{% for item in nav %}
+<li><a href="{{ root }}{{ item.path }}"{% if item.key == page %} aria-current="page"{% endif %}>{{ item.title }}</a></li>
+{% endfor %}
+<li><a href="{{ config.repo }}">GitHub</a></li>
+</ul>
+</nav>
+</div>
+</header>
+<main id="main" class="wrap" tabindex="-1">
+{% block content %}{% endblock %}
+</main>
+<footer class="site-footer">
+<div class="wrap">
+<p>Results snapshot generated {{ manifest.generated_at.strftime('%Y-%m-%d %H:%M UTC') }} from commit <code>{{ manifest.git.sha|short_sha }}</code>{% if manifest.git.dirty %} (with uncommitted changes){% endif %} · loom-bench {{ manifest.bench_version }} · <a href="{{ root }}data/manifest.json">manifest.json</a></p>
+<p>Loom is open source under the Apache-2.0 license: <a href="{{ config.repo }}">{{ config.repo.removeprefix('https://') }}</a></p>
+</div>
+</footer>
+</body>
+</html>

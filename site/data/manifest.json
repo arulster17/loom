@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-05T06:17:25.237132Z",
+  "git": {
+    "sha": "9d51fa9aa5cacdb6155499bb1af7876ff437ca32",
+    "dirty": false,
+    "branch": "worktree-agent-a7141cc6ec3c1b150"
+  },
+  "bench_version": "0.1.0",
+  "experiment_ids": [],
+  "slo": null,
+  "allocation": null,
+  "confidence": 0.95,
+  "run_count": 0,
+  "models": [
+    {
+      "id": "qwen3-8b",
+      "display_name": "Qwen3 8B",
+      "repo": "Qwen/Qwen3-8B",
+      "configs": 0
+    },
+    {
+      "id": "llama-3.3-70b-instruct",
+      "display_name": "Llama 3.3 70B Instruct",
+      "repo": "meta-llama/Llama-3.3-70B-Instruct",
+      "configs": 0
+    }
+  ]
+}

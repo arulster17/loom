@@ -1,0 +1,154 @@
+{% extends "base.html.j2" %}
+{% from "_macros.html.j2" import money, estimate, link_list %}
+{% from "_site.html.j2" import pending, scroll_table %}
+{% set snap = model.snap %}
+{% block title %}{{ snap.display_name }} · Loom results{% endblock %}
+{% block description %}Benchmark results for {{ snap.display_name }} on Loom: cost per token at SLO with confidence intervals, quality gate, cold start, exact configs and provenance.{% endblock %}
+{% block content %}
+<header class="page-head">
+<p class="eyebrow"><a href="{{ root }}index.html">Results</a> / Model</p>
+<h1>{{ snap.display_name }}</h1>
+<dl class="meta">
+{% if snap.repo %}<dt>Weights</dt><dd><a href="https://huggingface.co/{{ snap.repo }}">{{ snap.repo }}</a>{% if model.revision %} at revision <code>{{ model.revision }}</code>{% endif %}</dd>{% endif %}
+{% if model.planned %}
+<dt>License</dt><dd>{{ model.planned.license }}</dd>
+<dt>Registry status</dt><dd>{{ model.planned.status }}</dd>
+{% endif %}
+</dl>
+</header>
+
+{% if not model.boards %}
+{{ pending("This model is in the registry and queued for benchmarking. Its leaderboard, quality gate result, cold-start time and run provenance appear here once the first runs are published.") }}
+{% if model.planned %}
+<section aria-labelledby="planned-h">
+<h2 id="planned-h">Configuration to be benchmarked</h2>
+<dl class="defs compact">
+<dt>Engine</dt><dd>{{ model.planned.engine }}</dd>
+<dt>Image</dt><dd><code>{{ model.planned.image }}</code></dd>
+<dt>Hardware</dt><dd>{{ model.planned.hardware }}</dd>
+<dt>Parallelism</dt><dd>{{ model.planned.parallelism }}</dd>
+<dt>Weights</dt><dd>{{ model.planned.quantization }}</dd>
+<dt>Max context</dt><dd>{{ model.planned.max_context|num }} tokens</dd>
+</dl>
+<h3 id="registry-h">Registry entry</h3>
+<p class="section-note">From <a href="{{ registry_url }}">config/models.yaml</a>, validated on load. Engine images are pinned by digest and weights by commit.</p>
+<pre class="code" tabindex="0" aria-labelledby="registry-h"><code>{{ snap.registry|yaml }}</code></pre>
+</section>
+{% endif %}
+{% else %}
+<nav class="toc" aria-label="Workloads on this page">
+<p>Workloads:</p>
+<ul>
+{% for b in model.boards %}
+<li><a href="#{{ b.anchor }}">{{ b.title }}</a></li>
+{% endfor %}
+</ul>
+</nav>
+
+{% for b in model.boards %}
+<section aria-labelledby="{{ b.anchor }}">
+<h2 id="{{ b.anchor }}">{{ b.title }}</h2>
+{% set first = b.configs[0].result %}
+{% set show_input = b.input_priced %}
+<p class="section-note">Ranked by $/1M output tokens at SLO, cheapest first.{% if not show_input %} Cost allocation all_output: the replica's whole cost is charged to output tokens, so input tokens are free.{% endif %} Load generation: {{ load_mode_label(b.board.load_mode) }}. SLO: {{ describe_slo(first.goodput.slo) }}. Values are means; the line under each is its confidence interval. Unranked configs (quality gate failed, untrusted, or no cost at SLO) are listed last.</p>
+{% call scroll_table(b.anchor) %}
+<table>
+<thead>
+<tr><th scope="col" class="num">#</th><th scope="col">Config</th><th scope="col" class="num">$/1M out at SLO</th>{% if show_input %}<th scope="col" class="num">$/1M in at SLO</th>{% endif %}<th scope="col" class="num">Goodput out tok/s<br>per GPU</th><th scope="col" class="num">Load at goodput</th><th scope="col" class="num">p95 TTFT<br>at goodput</th><th scope="col" class="num">p95 TPOT<br>at goodput</th><th scope="col">Quality gate</th><th scope="col" class="num">Cold start</th><th scope="col">Status</th></tr>
+</thead>
+<tbody>
+{% for c in b.configs %}
+{% set row = c.row %}
+{% set r = c.result %}
+<tr class="{{ 'ranked' if row.rank is not none else 'unranked' }}">
+<td class="num">{{ row.rank if row.rank is not none else '–' }}</td>
+<td class="cfg"><a href="#{{ c.anchor }}"><strong>{{ r.name }}</strong></a><span class="sub">{{ r.label.text }}</span></td>
+<td class="num">{{ money(r.cost.output_per_mtok if r.cost else none) }}</td>
+{% if show_input %}<td class="num">{{ money(r.cost.input_per_mtok if r.cost else none) }}</td>{% endif %}
+<td class="num">{{ estimate(r.goodput_output_tok_s_per_gpu, 1) }}</td>
+<td class="num">{{ load_value(r.goodput.max_load, r.load_mode) }}</td>
+<td class="num">{{ estimate(r.ttft_p95_ms, 0, 'ms') }}</td>
+<td class="num">{{ estimate(r.tpot_p95_ms, 1, 'ms') }}</td>
+<td>{% if r.quality and r.quality.gate %}<span class="badge {{ r.quality.gate }}">{{ r.quality.gate }}</span>{% set worst = r.quality.worst() %}{% if worst %}<span class="sub">worst Δ {{ '%+.3f'|format(worst.delta) }} ({{ worst.task }})</span>{% endif %}{% else %}<span class="muted">not evaluated</span>{% endif %}</td>
+<td class="num">{{ cold_text(row.cold_start) }}</td>
+<td><span class="badge {{ row.status.name|lower }}">{{ row.status.value }}</span></td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% endcall %}
+
+{% for c in b.configs %}
+{% set r = c.result %}
+{% set p = c.provenance %}
+<article class="config" aria-labelledby="{{ c.anchor }}">
+<h3 id="{{ c.anchor }}">{{ r.name }} <span class="badge {{ c.row.status.name|lower }}">{{ c.row.status.value }}</span></h3>
+<p>{{ c.row.recommendation }}.</p>
+<dl class="defs compact">
+<dt>Config</dt><dd>{{ r.label.text }}<span class="sub">config hash <code>{{ r.config_hash }}</code></span></dd>
+<dt>Engine</dt><dd>{{ p.engine }}; image <code>{{ p.image or 'not recorded' }}</code></dd>
+<dt>Model</dt><dd>{{ p.model }}</dd>
+<dt>Hardware</dt><dd>{{ p.gpu }} · {{ p.location }}; CUDA {{ p.cuda_version or 'not recorded' }}, driver {{ p.driver_version or 'not recorded' }}</dd>
+<dt>Workload content</dt><dd>{{ r.content.value if r.content else 'not recorded' }}</dd>
+<dt>Goodput</dt><dd>{{ load_value(r.goodput.max_load, r.load_mode) }}{% if r.goodput.first_failing_load is not none %}; first failing load {{ load_value(r.goodput.first_failing_load, r.load_mode) }}{% else %}; no tested load failed, so goodput may be higher{% endif %}</dd>
+<dt>Raw peak</dt><dd>{{ r.peak_output_tok_s|est(1) }} output tok/s at {{ load_value(r.peak_load, r.load_mode) }} (SLO ignored; not used for cost)</dd>
+<dt>Hourly price</dt><dd>{{ p.price.basis }}{% if p.price.urls %}; source: {{ link_list(p.price.urls) }}{% endif %}{% if p.price.last_checked %}; last checked {{ p.price.last_checked }}{% endif %}{% if p.price.note %}; {{ p.price.note }}{% endif %}</dd>
+<dt>Cost allocation</dt><dd>{{ r.allocation }}</dd>
+<dt>Code</dt><dd>commit {% for s in p.git_shas %}<code>{{ s }}</code>{{ ', ' if not loop.last }}{% else %}not recorded{% endfor %}; loom-bench {{ p.bench_version or 'not recorded' }}</dd>
+</dl>
+{% if r.warnings %}
+<ul class="warnings">
+{% for w in r.warnings %}
+<li>{{ w.message }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+{% if r.quality and r.quality.tasks %}
+<h4 id="{{ c.anchor }}-quality">Quality</h4>
+{% call scroll_table(c.anchor ~ '-quality') %}
+<table>
+<thead><tr><th scope="col">Task</th><th scope="col" class="num">n</th><th scope="col" class="num">Score</th><th scope="col" class="num">Baseline</th><th scope="col" class="num">Δ vs baseline</th></tr></thead>
+<tbody>
+{% for t in r.quality.tasks %}
+<tr><td>{{ t.task }}{% if t.task_version %}<span class="sub">version {{ t.task_version }}</span>{% endif %}</td><td class="num">{{ t.n|num }}</td><td class="num">{{ t.score|num(3) }}{% if t.ci_low is not none and t.ci_high is not none %}<span class="ci">{{ t.ci_low|num(3) }} – {{ t.ci_high|num(3) }}</span>{% endif %}</td><td class="num">{{ t.baseline_score|num(3) }}</td><td class="num">{{ '%+.3f'|format(t.delta) if t.delta is not none else 'n/a' }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+{% endcall %}
+{% endif %}
+<h4 id="{{ c.anchor }}-points">Load sweep</h4>
+{% call scroll_table(c.anchor ~ '-points') %}
+<table>
+<thead><tr><th scope="col" class="num">Load</th><th scope="col" class="num">Repetitions</th><th scope="col">SLO</th><th scope="col" class="num">p95 TTFT ms</th><th scope="col" class="num">p95 TPOT ms</th><th scope="col" class="num">Output tok/s</th><th scope="col" class="num">Error rate</th></tr></thead>
+<tbody>
+{% for pt in r.points %}
+{% set err = pt.aggregate.get('error_rate') %}
+<tr><td class="num">{{ load_value(pt.load, r.load_mode) }}</td><td class="num">{{ pt.aggregate.n_runs }}</td><td>{% if c.met[pt.load] %}<span class="badge pass">met</span>{% else %}<span class="badge fail">missed</span>{% endif %}</td><td class="num">{{ estimate(pt.aggregate.get('ttft_ms.p95'), 0) }}</td><td class="num">{{ estimate(pt.aggregate.get('tpot_ms.p95'), 1) }}</td><td class="num">{{ estimate(pt.aggregate.get('throughput.output_tok_s'), 1) }}</td><td class="num">{{ (err.mean|pct) if err is not none else 'n/a' }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+{% endcall %}
+<h4 id="{{ c.anchor }}-yaml">Config</h4>
+<pre class="code" tabindex="0" aria-labelledby="{{ c.anchor }}-yaml"><code>{{ c.config_yaml }}</code></pre>
+<h4 id="{{ c.anchor }}-reproduce">Reproduce</h4>
+<pre class="code" tabindex="0" aria-labelledby="{{ c.anchor }}-reproduce"><code>{{ p.reproduce }}</code></pre>
+<details>
+<summary id="{{ c.anchor }}-runs-h">Runs and provenance ({{ p.runs }} run{{ '' if p.runs == 1 else 's' }})</summary>
+<p class="section-note">Each file holds the run's summary and its provenance record as stored; sha256 of the record's canonical JSON is its digest.</p>
+{% call scroll_table(c.anchor ~ '-runs-h') %}
+<table>
+<thead><tr><th scope="col" class="num">Load</th><th scope="col" class="num">Repetition</th><th scope="col">Provenance</th></tr></thead>
+<tbody>
+{% for pt, run_id, rep in c.runs() %}
+<tr><td class="num">{{ load_value(pt.load, r.load_mode) }}</td><td class="num">{{ rep if rep is not none else '–' }}</td><td><a href="{{ root }}data/provenance/{{ run_id }}.json"><code>{{ run_id }}</code></a></td></tr>
+{% endfor %}
+</tbody>
+</table>
+{% endcall %}
+</details>
+</article>
+{% endfor %}
+</section>
+{% endfor %}
+{% endif %}
+{% endblock %}

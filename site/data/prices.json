@@ -1,0 +1,300 @@
+{
+  "last_checked": "2026-10-04",
+  "clouds": {
+    "aws": {
+      "us-east-1": {
+        "instances": {
+          "g5.xlarge": {
+            "sources": [
+              "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json",
+              "https://instances.vantage.sh/aws/ec2/g5.xlarge"
+            ],
+            "last_checked": "2026-10-04",
+            "verified": true,
+            "note": null,
+            "gpu": "A10G",
+            "gpu_count": 1,
+            "gpu_memory_gb": 24,
+            "vcpus": 4,
+            "memory_gib": 16,
+            "local_nvme_gb": 250,
+            "on_demand_per_hour": 1006000,
+            "spot_per_hour": 483000,
+            "committed_1y_per_hour": null
+          },
+          "g6.xlarge": {
+            "sources": [
+              "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json",
+              "https://instances.vantage.sh/aws/ec2/g6.xlarge"
+            ],
+            "last_checked": "2026-10-04",
+            "verified": true,
+            "note": null,
+            "gpu": "L4",
+            "gpu_count": 1,
+            "gpu_memory_gb": 24,
+            "vcpus": 4,
+            "memory_gib": 16,
+            "local_nvme_gb": 250,
+            "on_demand_per_hour": 804800,
+            "spot_per_hour": 605000,
+            "committed_1y_per_hour": null
+          },
+          "g6e.xlarge": {
+            "sources": [
+              "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json",
+              "https://instances.vantage.sh/aws/ec2/g6e.xlarge"
+            ],
+            "last_checked": "2026-10-04",
+            "verified": true,
+            "note": null,
+            "gpu": "L40S",
+            "gpu_count": 1,
+            "gpu_memory_gb": 48,
+            "vcpus": 4,
+            "memory_gib": 32,
+            "local_nvme_gb": 250,
+            "on_demand_per_hour": 1861000,
+            "spot_per_hour": 1838600,
+            "committed_1y_per_hour": null
+          },
+          "g6e.2xlarge": {
+            "sources": [
+              "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json",
+              "https://instances.vantage.sh/aws/ec2/g6e.2xlarge"
+            ],
+            "last_checked": "2026-10-04",
+            "verified": true,
+            "note": null,
+            "gpu": "L40S",
+            "gpu_count": 1,
+            "gpu_memory_gb": 48,
+            "vcpus": 8,
+            "memory_gib": 64,
+            "local_nvme_gb": 450,
+            "on_demand_per_hour": 2242080,
+            "spot_per_hour": 2215000,
+            "committed_1y_per_hour": null
+          },
+          "g6e.12xlarge": {
+            "sources": [
+              "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json",
+              "https://instances.vantage.sh/aws/ec2/g6e.12xlarge"
+            ],
+            "last_checked": "2026-10-04",
+            "verified": true,
+            "note": null,
+            "gpu": "L40S",
+            "gpu_count": 4,
+            "gpu_memory_gb": 48,
+            "vcpus": 48,
+            "memory_gib": 384,
+            "local_nvme_gb": 3800,
+            "on_demand_per_hour": 10492640,
+            "spot_per_hour": 8162000,
+            "committed_1y_per_hour": null
+          },
+          "g6e.24xlarge": {
+            "sources": [
+              "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json",
+              "https://instances.vantage.sh/aws/ec2/g6e.24xlarge"
+            ],
+            "last_checked": "2026-10-04",
+            "verified": true,
+            "note": null,
+            "gpu": "L40S",
+            "gpu_count": 4,
+            "gpu_memory_gb": 48,
+            "vcpus": 96,
+            "memory_gib": 768,
+            "local_nvme_gb": 3800,
+            "on_demand_per_hour": 15065590,
+            "spot_per_hour": 10170000,
+            "committed_1y_per_hour": null
+          },
+          "g6e.48xlarge": {
+            "sources": [
+              "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json",
+              "https://instances.vantage.sh/aws/ec2/g6e.48xlarge"
+            ],
+            "last_checked": "2026-10-04",
+            "verified": true,
+            "note": null,
+            "gpu": "L40S",
+            "gpu_count": 8,
+            "gpu_memory_gb": 48,
+            "vcpus": 192,
+            "memory_gib": 1536,
+            "local_nvme_gb": 7600,
+            "on_demand_per_hour": 30131180,
+            "spot_per_hour": 19120000,
+            "committed_1y_per_hour": null
+          },
+          "p4d.24xlarge": {
+            "sources": [
+              "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json",
+              "https://instances.vantage.sh/aws/ec2/p4d.24xlarge"
+            ],
+            "last_checked": "2026-10-04",
+            "verified": true,
+            "note": null,
+            "gpu": "A100",
+            "gpu_count": 8,
+            "gpu_memory_gb": 40,
+            "vcpus": 96,
+            "memory_gib": 1152,
+            "local_nvme_gb": 8000,
+            "on_demand_per_hour": 21957642,
+            "spot_per_hour": 18450000,
+            "committed_1y_per_hour": null
+          },
+          "p4de.24xlarge": {
+            "sources": [
+              "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json",
+              "https://instances.vantage.sh/aws/ec2/p4de.24xlarge"
+            ],
+            "last_checked": "2026-10-04",
+            "verified": true,
+            "note": null,
+            "gpu": "A100",
+            "gpu_count": 8,
+            "gpu_memory_gb": 80,
+            "vcpus": 96,
+            "memory_gib": 1152,
+            "local_nvme_gb": 8000,
+            "on_demand_per_hour": 27447050,
+            "spot_per_hour": 20110000,
+            "committed_1y_per_hour": null
+          },
+          "p5.4xlarge": {
+            "sources": [
+              "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json",
+              "https://instances.vantage.sh/aws/ec2/p5.4xlarge"
+            ],
+            "last_checked": "2026-10-04",
+            "verified": true,
+            "note": null,
+            "gpu": "H100",
+            "gpu_count": 1,
+            "gpu_memory_gb": 80,
+            "vcpus": 16,
+            "memory_gib": 256,
+            "local_nvme_gb": 3840,
+            "on_demand_per_hour": 6880000,
+            "spot_per_hour": 3291000,
+            "committed_1y_per_hour": null
+          },
+          "p5.48xlarge": {
+            "sources": [
+              "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json",
+              "https://instances.vantage.sh/aws/ec2/p5.48xlarge"
+            ],
+            "last_checked": "2026-10-04",
+            "verified": true,
+            "note": null,
+            "gpu": "H100",
+            "gpu_count": 8,
+            "gpu_memory_gb": 80,
+            "vcpus": 192,
+            "memory_gib": 2048,
+            "local_nvme_gb": 30720,
+            "on_demand_per_hour": 55040000,
+            "spot_per_hour": 26540000,
+            "committed_1y_per_hour": null
+          },
+          "p5en.48xlarge": {
+            "sources": [
+              "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json",
+              "https://instances.vantage.sh/aws/ec2/p5en.48xlarge"
+            ],
+            "last_checked": "2026-10-04",
+            "verified": true,
+            "note": null,
+            "gpu": "H200",
+            "gpu_count": 8,
+            "gpu_memory_gb": 141,
+            "vcpus": 192,
+            "memory_gib": 2048,
+            "local_nvme_gb": 30720,
+            "on_demand_per_hour": 63296000,
+            "spot_per_hour": 34790000,
+            "committed_1y_per_hour": null
+          }
+        },
+        "storage": {
+          "sources": [
+            "https://aws.amazon.com/ebs/pricing/"
+          ],
+          "last_checked": "2026-10-04",
+          "verified": false,
+          "note": "$0.08/GB-month, not yet confirmed on the EBS pricing page.",
+          "kind": "ebs-gp3",
+          "per_gb_month": 80000
+        },
+        "data_transfer": null
+      }
+    },
+    "gcp": {
+      "us-central1": {
+        "instances": {
+          "g2-standard-8": {
+            "sources": [
+              "https://gcloud-compute.com/",
+              "https://cloud.google.com/compute/vm-instance-pricing"
+            ],
+            "last_checked": "2026-10-04",
+            "verified": false,
+            "note": "Third-party snapshot (gcloud-compute.com); confirm on the GCP pricing page.",
+            "gpu": "L4",
+            "gpu_count": 1,
+            "gpu_memory_gb": 24,
+            "vcpus": null,
+            "memory_gib": null,
+            "local_nvme_gb": null,
+            "on_demand_per_hour": 853600,
+            "spot_per_hour": 512100,
+            "committed_1y_per_hour": null
+          },
+          "a2-highgpu-1g": {
+            "sources": [
+              "https://gcloud-compute.com/",
+              "https://cloud.google.com/compute/vm-instance-pricing"
+            ],
+            "last_checked": "2026-10-04",
+            "verified": false,
+            "note": "Third-party snapshot (gcloud-compute.com); confirm on the GCP pricing page.",
+            "gpu": "A100",
+            "gpu_count": 1,
+            "gpu_memory_gb": 40,
+            "vcpus": null,
+            "memory_gib": null,
+            "local_nvme_gb": null,
+            "on_demand_per_hour": 3673400,
+            "spot_per_hour": 2204000,
+            "committed_1y_per_hour": null
+          },
+          "a3-highgpu-8g": {
+            "sources": [
+              "https://gcloud-compute.com/",
+              "https://cloud.google.com/compute/vm-instance-pricing"
+            ],
+            "last_checked": "2026-10-04",
+            "verified": false,
+            "note": "Third-party snapshot (gcloud-compute.com); confirm on the GCP pricing page.",
+            "gpu": "H100",
+            "gpu_count": 8,
+            "gpu_memory_gb": 80,
+            "vcpus": null,
+            "memory_gib": null,
+            "local_nvme_gb": null,
+            "on_demand_per_hour": 88490000,
+            "spot_per_hour": 52960000,
+            "committed_1y_per_hour": null
+          }
+        },
+        "storage": null,
+        "data_transfer": null
+      }
+    }
+  }
+}
