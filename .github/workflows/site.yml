@@ -1,8 +1,7 @@
 name: site
 
 # Builds the public results site from the committed snapshot (site/data/) and deploys
-# it to GitHub Pages. Pages must be enabled once in the repository settings with
-# Source: GitHub Actions (docs/site.md).
+# it to GitHub Pages once Pages is enabled and LOOM_PAGES_ENABLED is set (docs/site.md).
 
 on:
   push:
@@ -38,6 +37,9 @@ jobs:
           path: site/_build
 
   deploy:
+    # Set the repository variable LOOM_PAGES_ENABLED=true after enabling Pages
+    # (Settings -> Pages -> Source: GitHub Actions); until then only the build runs.
+    if: vars.LOOM_PAGES_ENABLED == 'true'
     needs: build
     runs-on: ubuntu-latest
     environment:

@@ -89,7 +89,9 @@ sources named in the data.
 workflow itself, and on manual dispatch (Actions → site → Run workflow).
 
 **One-time setup, not done yet:** in the repository's Settings → Pages, set
-**Source: GitHub Actions**. Until then the deploy job fails. The site is then served at
+**Source: GitHub Actions**, then add the repository variable `LOOM_PAGES_ENABLED=true`
+(Settings → Secrets and variables → Actions → Variables). Until then the workflow only
+builds the site. The site is then served at
 `https://arulster17.github.io/loom/`; all links are relative, so the `/loom/` base path
 needs no configuration.
 
