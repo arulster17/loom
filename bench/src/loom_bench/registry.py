@@ -1,0 +1,214 @@
+"""Model registry: `config/models.yaml`, validated at load time.
+
+The registry is the single source of truth for what Loom can serve and how.
+Adding a model is a YAML change; every rule below is enforced on load.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import os
+from collections.abc import Hashable
+from pathlib import Path
+from typing import Annotated, Any, Literal, Self
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_MODELS_YAML = REPO_ROOT / "config" / "models.yaml"
+MODELS_YAML_ENV = "LOOM_MODELS_YAML"
+
+# Money in config files is integer micro-dollars; strict so a float like 1.86 is an error.
+Micros = Annotated[int, Field(strict=True, ge=0)]
+NonEmptyStr = Annotated[str, StringConstraints(min_length=1, strip_whitespace=True)]
+GitSha = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
+# Digest-pinned image reference: repo@sha256:<64 hex>. Tags are rejected because they move.
+PinnedImage = Annotated[
+    str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9._/-]*[a-z0-9]@sha256:[0-9a-f]{64}$")
+]
+Cloud = Literal["aws", "gcp"]
+Quantization = Literal["none", "fp8", "awq", "gptq", "w4a16", "w8a8", "fp4", "nvfp4"]
+KvCacheDtype = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
+Status = Literal["enabled", "preview", "disabled"]
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader that rejects duplicate mapping keys instead of keeping the last one."""
+
+
+def _construct_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode) -> dict[Any, Any]:
+    seen: set[Hashable] = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if key in seen:
+            raise yaml.constructor.ConstructorError(
+                None, None, f"duplicate key {key!r}", key_node.start_mark
+            )
+        seen.add(key)
+    return loader.construct_mapping(node, deep=True)
+
+
+_UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
+
+
+def read_yaml(path: Path) -> Any:
+    """Parse a config file with safe types only and no silently overwritten keys."""
+    with path.open(encoding="utf-8") as f:
+        return yaml.load(f, Loader=_UniqueKeyLoader)
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class TrustRemoteCodeReview(_Strict):
+    reviewer: NonEmptyStr
+    date: dt.date
+    notes: NonEmptyStr
+
+
+class HFSource(_Strict):
+    repo: Annotated[str, StringConstraints(pattern=r"^[\w.-]+/[\w.-]+$")]
+    revision: GitSha
+    license: NonEmptyStr
+    gated: Literal[False, "auto", "manual"]
+    size_bytes: Annotated[int, Field(strict=True, gt=0)]
+    trust_remote_code: bool = False
+    trust_remote_code_review: TrustRemoteCodeReview | None = None
+
+    @model_validator(mode="after")
+    def _remote_code_needs_review(self) -> Self:
+        if self.trust_remote_code and self.trust_remote_code_review is None:
+            raise ValueError("trust_remote_code: true requires trust_remote_code_review")
+        return self
+
+
+class Engine(_Strict):
+    name: Literal["vllm", "sglang"]
+    version: Annotated[str, StringConstraints(pattern=r"^\d+\.\d+\.\d+([.+-][\w.]+)?$")]
+    image: PinnedImage
+    args: dict[str, Any] = Field(default_factory=dict)
+    chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
+
+
+class InstanceTypes(_Strict):
+    aws: NonEmptyStr | None = None
+    gcp: NonEmptyStr | None = None
+
+
+class Hardware(_Strict):
+    gpu: NonEmptyStr
+    gpus_per_replica: Annotated[int, Field(ge=1)]
+    nodes_per_replica: Annotated[int, Field(ge=1)] = 1
+    instance_types: InstanceTypes
+
+    @model_validator(mode="after")
+    def _single_node_only(self) -> Self:
+        if self.nodes_per_replica != 1:
+            raise ValueError("nodes_per_replica > 1 is reserved; multi-node serving is not built")
+        return self
+
+
+class Parallelism(_Strict):
+    tp: Annotated[int, Field(ge=1)] = 1
+    pp: Annotated[int, Field(ge=1)] = 1
+    ep: Annotated[int, Field(ge=1)] = 1
+
+
+class Pricing(_Strict):
+    """Public price in micro-dollars per 1M tokens."""
+
+    input_per_mtok: Micros
+    output_per_mtok: Micros
+    cached_input_per_mtok: Micros
+
+    @model_validator(mode="after")
+    def _cached_not_above_input(self) -> Self:
+        if self.cached_input_per_mtok > self.input_per_mtok:
+            raise ValueError("cached_input_per_mtok must be <= input_per_mtok")
+        return self
+
+
+class Scaling(_Strict):
+    min_replicas: Annotated[int, Field(ge=0)]
+    max_replicas: Annotated[int, Field(ge=1)]
+
+    @model_validator(mode="after")
+    def _max_at_least_min(self) -> Self:
+        if self.max_replicas < self.min_replicas:
+            raise ValueError("max_replicas must be >= min_replicas")
+        return self
+
+
+class Capabilities(_Strict):
+    tools: bool = False
+    json_schema: bool = False
+    vision: bool = False
+    reasoning: bool = False
+
+
+class ModelSpec(_Strict):
+    id: Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9.-]*[a-z0-9]$")]
+    display_name: NonEmptyStr
+    hf: HFSource
+    engine: Engine
+    hardware: Hardware
+    parallelism: Parallelism
+    max_context: Annotated[int, Field(ge=1)]
+    quantization: Quantization
+    kv_cache_dtype: KvCacheDtype = "auto"
+    pricing: Pricing | None = None
+    scaling: Scaling
+    clouds: Annotated[list[Cloud], Field(min_length=1)]
+    capabilities: Capabilities
+    routing_tier: Annotated[int, Field(ge=0)]
+    status: Status
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        hw, par = self.hardware, self.parallelism
+        gpus = hw.gpus_per_replica * hw.nodes_per_replica
+        if gpus != par.tp * par.pp:
+            raise ValueError(
+                f"gpus_per_replica * nodes_per_replica ({gpus}) must equal tp * pp "
+                f"({par.tp * par.pp})"
+            )
+        if (par.tp * par.pp) % par.ep != 0:
+            raise ValueError(f"ep ({par.ep}) must divide tp * pp ({par.tp * par.pp})")
+        if len(set(self.clouds)) != len(self.clouds):
+            raise ValueError("clouds must not repeat")
+        missing = [c for c in self.clouds if getattr(hw.instance_types, c) is None]
+        if missing:
+            raise ValueError(f"hardware.instance_types missing for clouds {missing}")
+        if self.status == "enabled" and self.pricing is None:
+            raise ValueError("status: enabled requires pricing")
+        return self
+
+
+class Registry(_Strict):
+    models: list[ModelSpec]
+
+    @model_validator(mode="after")
+    def _unique_ids(self) -> Self:
+        ids = [m.id for m in self.models]
+        dupes = sorted({i for i in ids if ids.count(i) > 1})
+        if dupes:
+            raise ValueError(f"duplicate model ids: {dupes}")
+        return self
+
+    def get(self, model_id: str) -> ModelSpec:
+        for m in self.models:
+            if m.id == model_id:
+                return m
+        raise KeyError(f"unknown model id {model_id!r}")
+
+    def enabled(self) -> list[ModelSpec]:
+        return [m for m in self.models if m.status == "enabled"]
+
+
+def load_registry(path: Path | str | None = None) -> Registry:
+    """Load `config/models.yaml` (or `$LOOM_MODELS_YAML`, or `path`)."""
+    if path is None:
+        path = os.environ.get(MODELS_YAML_ENV) or DEFAULT_MODELS_YAML
+    return Registry.model_validate(read_yaml(Path(path)))

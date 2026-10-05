@@ -1,0 +1,78 @@
+# Loom model registry: the single source of truth for every model Loom serves.
+# The Benchmark Lab reads models from here (the gateway and billing will too), so
+# adding or changing a model is a config change, validated by loom_bench.registry.
+#
+# Prices stay null until the Benchmark Lab measures cost at SLO; only `enabled`
+# models must carry a price.
+
+models:
+  - id: qwen3-8b
+    display_name: Qwen3 8B
+    hf:
+      repo: Qwen/Qwen3-8B
+      revision: b968826d9c46dd6066d109eabc6255188de91218
+      license: apache-2.0
+      gated: false
+      size_bytes: 16381516776
+      trust_remote_code: false
+    engine:
+      # vLLM is the default engine; SGLang is compared against it in the Lab.
+      name: vllm
+      version: "0.30.0"
+      # vllm/vllm-openai:v0.30.0 multi-arch index digest (CUDA 13.0, needs driver >= 580).
+      image: vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
+      args: {}
+      # Benchmarks and evals pin non-thinking mode so output lengths are comparable
+      # across engines and runs.
+      chat_template_kwargs: {enable_thinking: false}
+    hardware:
+      gpu: L40S
+      gpus_per_replica: 1
+      nodes_per_replica: 1
+      instance_types: {aws: g6e.xlarge}
+    parallelism: {tp: 1, pp: 1, ep: 1}
+    # Native context. config.json says 40960, but the model card gives 32768 native and
+    # 131072 only with YaRN rope scaling, which is not enabled here.
+    max_context: 32768
+    quantization: none
+    kv_cache_dtype: auto
+    pricing: null
+    scaling: {min_replicas: 0, max_replicas: 1}
+    clouds: [aws]
+    capabilities: {tools: true, json_schema: true, vision: false, reasoning: true}
+    routing_tier: 1
+    status: preview
+
+  - id: llama-3.3-70b-instruct
+    display_name: Llama 3.3 70B Instruct
+    hf:
+      repo: meta-llama/Llama-3.3-70B-Instruct
+      revision: 6f6073b423013f6a7d4d9f39144961bfbfbc386b
+      license: llama3.3
+      gated: manual
+      size_bytes: 141107497872
+      trust_remote_code: false
+    engine:
+      name: vllm
+      version: "0.30.0"
+      # vllm/vllm-openai:v0.30.0 multi-arch index digest (CUDA 13.0, needs driver >= 580).
+      image: vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
+      args: {}
+      chat_template_kwargs: {}
+    hardware:
+      gpu: L40S
+      gpus_per_replica: 4
+      nodes_per_replica: 1
+      instance_types: {aws: g6e.12xlarge}
+    parallelism: {tp: 4, pp: 1, ep: 1}
+    # The model supports 131072. After ~141 GB of BF16 weights, 4 x 48 GB leaves too
+    # little KV-cache memory for useful concurrency at that length, so serving is capped.
+    max_context: 32768
+    quantization: none
+    kv_cache_dtype: auto
+    pricing: null
+    scaling: {min_replicas: 0, max_replicas: 1}
+    clouds: [aws]
+    capabilities: {tools: true, json_schema: true, vision: false, reasoning: false}
+    routing_tier: 1
+    status: preview
