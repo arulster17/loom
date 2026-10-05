@@ -17,6 +17,7 @@ import typer
 from pydantic import ValidationError
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
@@ -26,6 +27,8 @@ from loom_bench.money import format_usd
 from loom_bench.plan import Plan
 from loom_bench.prices import load_prices
 from loom_bench.registry import load_registry
+from loom_bench.report.analyze import ColdStartStat, ConfigResult
+from loom_bench.report.compare import render_markdown as render_compare_markdown
 from loom_bench.runner import (
     EXIT_FAILED,
     EXIT_OK,
@@ -71,6 +74,7 @@ def _setup_logging() -> None:
         handlers=[RichHandler(console=err, show_path=False)],
         force=True,
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def _load(path: Path) -> Experiment:
@@ -217,26 +221,16 @@ def render_reproduce(result: ReproduceOutcome) -> None:
     for w in result.warnings:
         err.print(Panel(w, title="[bold yellow]WARNING", border_style="yellow"))
     render_outcome(result.outcome)
-    if not result.comparisons:
-        console.print("[yellow]no comparison: the original or the new run has no summary")
+    if result.comparison is None:
+        console.print("[yellow]no comparison: the original or the new run did not complete")
         return
-    table = Table(title=f"Original {result.original_run_id} vs new {result.new_run_id}")
-    for col in ("metric", "original", "new", "rel diff", "original reps range", "verdict"):
-        table.add_column(col)
-
-    def f(v: float | None) -> str:
-        return "-" if v is None else f"{v:.4g}"
-
-    for c in result.comparisons:
-        table.add_row(
-            c.metric,
-            f(c.original),
-            f(c.new),
-            "-" if c.rel_diff is None else f"{c.rel_diff:.1%}",
-            "-" if c.sibling_lo is None else f"{f(c.sibling_lo)} .. {f(c.sibling_hi)}",
-            "[green]within" if c.within else "[red]OUTSIDE",
-        )
-    console.print(table)
+    console.print(Markdown(render_compare_markdown(result.comparison)))
+    verdict = result.comparison.within_normal_variance
+    console.print(
+        "[bold green]reproduced within normal variance"
+        if verdict
+        else "[bold red]NOT reproduced: outside normal variance"
+    )
 
 
 @app.command("reproduce")
@@ -347,3 +341,150 @@ def mock_server(
 
     cfg = MockConfig.from_yaml(config) if config else MockConfig()
     uvicorn.run(create_app(cfg), host=host, port=port, log_level="info")
+
+
+ExperimentsOpt = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--experiment",
+        "-e",
+        help="Experiment id, repeatable (default: every completed experiment but reproductions).",
+    ),
+]
+ReportDirOpt = Annotated[Path, typer.Option("--out", help="Directory for the report files.")]
+
+
+def _analyze(
+    db: str | None, experiments: list[str] | None
+) -> tuple[list[ConfigResult], dict[str, ColdStartStat]]:
+    """ConfigResults (with quality) and cold-start stats for the selected experiments."""
+    from sqlalchemy import select
+
+    from loom_bench.report import (
+        analyze_runs,
+        cold_starts_by_config,
+        default_price_resolver,
+        with_quality,
+    )
+    from loom_bench.store import repo
+    from loom_bench.store.db import session_scope, upgrade
+    from loom_bench.store.models import (
+        BenchColdStart,
+        BenchEvalRun,
+        BenchExperiment,
+        BenchGateDecision,
+    )
+
+    upgrade(db)
+    with session_scope(db) as s:
+        stmt = select(BenchExperiment)
+        if experiments:
+            stmt = stmt.where(BenchExperiment.id.in_([uuid.UUID(e) for e in experiments]))
+        else:
+            stmt = stmt.where(
+                BenchExperiment.status == "completed",
+                BenchExperiment.name.not_like("%--reproduce"),
+            )
+        rows = list(s.scalars(stmt))
+        if not rows:
+            err.print("[red]no matching experiments")
+            raise typer.Exit(EXIT_INVALID)
+        specs = [Experiment.model_validate(r.spec) for r in rows]
+        slo = specs[0].slo
+        same = all(x.slo == slo and x.cost_allocation == specs[0].cost_allocation for x in specs)
+        if slo is None or not same:
+            err.print(
+                "[red]selected experiments must all declare the same slo and cost_allocation; "
+                "pick them with --experiment"
+            )
+            raise typer.Exit(EXIT_INVALID)
+        ids = [r.id for r in rows]
+        runs = [run for i in ids for run in repo.list_runs(s, experiment_id=i)]
+        results = analyze_runs(
+            runs,
+            slo=slo,
+            allocation=specs[0].cost_allocation.allocation(),
+            hourly_price=default_price_resolver(load_prices()),
+        )
+        evals = s.scalars(select(BenchEvalRun).where(BenchEvalRun.experiment_id.in_(ids)))
+        gates = s.scalars(select(BenchGateDecision).where(BenchGateDecision.experiment_id.in_(ids)))
+        results = with_quality(results, evals, gates)
+        colds = s.scalars(select(BenchColdStart).where(BenchColdStart.experiment_id.in_(ids)))
+        return results, cold_starts_by_config(colds, results)
+
+
+def _written(paths: list[Path]) -> None:
+    for p in paths:
+        console.print(f"wrote {p}")
+
+
+@app.command()
+def report(
+    experiment: ExperimentsOpt = None,
+    out: ReportDirOpt = Path("reports"),
+    db: DbOpt = None,
+) -> None:
+    """Leaderboard ranked by $/1M output tokens at SLO (md, html, csv)."""
+    from loom_bench.report import render_leaderboard, write_reports
+
+    results, cold = _analyze(db, experiment)
+    rendered = render_leaderboard(results, cold_starts=cold, price_book=load_prices())
+    console.print(Markdown(rendered["md"]))
+    _written(write_reports(out, leaderboard=rendered))
+
+
+@app.command()
+def competitiveness(
+    experiment: ExperimentsOpt = None,
+    out: ReportDirOpt = Path("reports"),
+    db: DbOpt = None,
+    include_aggregators: Annotated[bool, typer.Option(help="Include resellers.")] = False,
+    include_unverified: Annotated[bool, typer.Option(help="Include unverified listings.")] = False,
+) -> None:
+    """Our cost at SLO and price vs competitors' list prices, with margin flags."""
+    from loom_bench.prices import load_competitors
+    from loom_bench.report import render_competitiveness, write_reports
+
+    results, _ = _analyze(db, experiment)
+    rendered = render_competitiveness(
+        results,
+        load_registry(),
+        load_competitors(),
+        price_book=load_prices(),
+        include_aggregators=include_aggregators,
+        include_unverified=include_unverified,
+    )
+    console.print(Markdown(rendered["md"]))
+    _written(write_reports(out, competitiveness=rendered))
+
+
+@app.command("compare")
+def compare_cmd(
+    a: Annotated[str, typer.Argument(help="Experiment id (A).")],
+    b: Annotated[str, typer.Argument(help="Experiment id (B).")],
+    match_by: Annotated[
+        Literal["config_hash", "cell_key", "workload"],
+        typer.Option(help="How sweeps are paired across A and B."),
+    ] = "config_hash",
+    tolerance: Annotated[float, typer.Option(help="Relative difference accepted.")] = 0.10,
+    out: Annotated[Path | None, typer.Option("--out", help="Write compare.md/json here.")] = None,
+    db: DbOpt = None,
+) -> None:
+    """Per-metric deltas between two experiments; exit 6 when outside normal variance."""
+    from loom_bench.report import write_reports
+    from loom_bench.report.compare import compare, render_json
+    from loom_bench.store import repo
+    from loom_bench.store.db import session_scope
+
+    with session_scope(db) as s:
+        runs_a = repo.list_runs(s, experiment_id=uuid.UUID(a))
+        runs_b = repo.list_runs(s, experiment_id=uuid.UUID(b))
+    if not runs_a or not runs_b:
+        err.print("[red]both experiments need runs")
+        raise typer.Exit(EXIT_INVALID)
+    c = compare(runs_a, runs_b, match_by=match_by, rel_tol=tolerance, label_a=a, label_b=b)
+    md = render_compare_markdown(c)
+    console.print(Markdown(md))
+    if out is not None:
+        _written(write_reports(out, compare={"md": md, "json": render_json(c)}))
+    raise typer.Exit(EXIT_OK if c.within_normal_variance else EXIT_MISMATCH)

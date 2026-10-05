@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from loom_bench import __version__
 from loom_bench.budget import (
@@ -46,10 +47,11 @@ from loom_bench.experiment import (
     tokenizer_for,
 )
 from loom_bench.jobs import LoadJob, LoadJobResult
-from loom_bench.metrics.aggregate import HEADLINE_METRICS, AggregateSummary, aggregate_runs
+from loom_bench.metrics.aggregate import AggregateSummary, aggregate_runs
 from loom_bench.metrics.gpu import parse_nvidia_smi, summarize_gpu
 from loom_bench.metrics.prometheus import summarize_scrapes
-from loom_bench.metrics.summary import RunSummary, flatten_metrics, summarize_run
+from loom_bench.metrics.summary import RunSummary, summarize_run
+from loom_bench.mock.config import MockConfig
 from loom_bench.plan import Estimator, Plan, build_plan
 from loom_bench.prices import PriceBook
 from loom_bench.provenance import (
@@ -60,6 +62,7 @@ from loom_bench.provenance import (
     LoadgenInfo,
     LoadInfo,
     ModelInfo,
+    ParallelismInfo,
     Provenance,
     WorkloadInfo,
     build_provenance,
@@ -71,11 +74,12 @@ from loom_bench.providers import make_provider, spot_interruption_errors
 from loom_bench.providers.base import Endpoint, EngineLaunch, Host, HostRequest, Provider
 from loom_bench.records import LoadMode, Market
 from loom_bench.registry import REPO_ROOT, ModelSpec, Registry, read_yaml
+from loom_bench.report.compare import Comparison, compare
 from loom_bench.slo import bisect_next_load, find_goodput, slo_met
 from loom_bench.store import repo
 from loom_bench.store.db import session_scope
-from loom_bench.store.models import BenchExperiment, ExperimentStatus, TerminatedBy
-from loom_bench.store.parquet import read_requests, write_requests
+from loom_bench.store.models import BenchExperiment, BenchRun, ExperimentStatus, TerminatedBy
+from loom_bench.store.parquet import write_requests
 from loom_bench.workloads import WorkloadProfile
 
 log = logging.getLogger(__name__)
@@ -175,6 +179,14 @@ def _extra_body(cell: Cell, profile: WorkloadProfile) -> dict[str, Any]:
     if kwargs and profile.endpoint == "chat":
         return {"chat_template_kwargs": dict(kwargs)}
     return {}
+
+
+def _engine_args(cell: Cell) -> dict[str, Any]:
+    """Engine args as configured; for the mock, its settings that differ from defaults."""
+    if cell.mock is None:
+        return dict(cell.spec.engine.args)
+    defaults = MockConfig().model_dump()
+    return {k: v for k, v in cell.mock.model_dump().items() if k != "models" and v != defaults[k]}
 
 
 class _Executor:
@@ -324,6 +336,7 @@ class _Executor:
                 stages=stages,
                 total_s=max(stages.values(), default=0.0),
                 resource_id=host.host_id,
+                config_hash=cell.config_hash,
             )
         self.event("engine_started", host=host.host_id, cell=cell.key, warm=warm, stages=stages)
         for entry, profile in self.workloads:
@@ -477,7 +490,7 @@ class _Executor:
                 version=version,
                 image=image,
                 image_digest=digest,
-                args={"argv": launch.args},
+                args=_engine_args(cell),
             ),
             cuda_version=system.get("cuda_version"),
             driver_version=system.get("driver_version"),
@@ -491,9 +504,15 @@ class _Executor:
                 gpu_count=system.get("gpu_count") or cell.gpus,
                 instance_type=hw.get("instance_type"),
             ),
+            parallelism=ParallelismInfo(
+                tp=cell.spec.parallelism.tp,
+                pp=cell.spec.parallelism.pp,
+                ep=cell.spec.parallelism.ep,
+            ),
             cloud=hw.get("cloud"),
             region=hw.get("region"),
             market=host.request.market,
+            hourly_micros=host.hourly_micros,
             workload=WorkloadInfo(
                 name=entry.name, profile_hash=config_hash(profile), content=profile.content
             ),
@@ -756,66 +775,21 @@ async def _execute(
 # --- reproduce -------------------------------------------------------------------
 
 
-class MetricComparison(BaseModel):
-    metric: str
-    original: float | None
-    new: float | None
-    rel_diff: float | None
-    sibling_lo: float | None  # range across the original's repetitions of the same point
-    sibling_hi: float | None
-    within: bool
-
-
 @dataclass
 class ReproduceOutcome:
     original_run_id: uuid.UUID | None
     new_run_id: uuid.UUID | None
     outcome: Outcome
     warnings: list[str]
-    comparisons: list[MetricComparison]
+    comparison: Comparison | None  # original point's repetitions (A) vs the new run (B)
 
     @property
     def ok(self) -> bool:
         return (
             self.outcome.status is ExperimentStatus.COMPLETED
-            and bool(self.comparisons)
-            and all(c.within for c in self.comparisons)
+            and self.comparison is not None
+            and self.comparison.within_normal_variance
         )
-
-
-def compare_summaries(
-    original: RunSummary,
-    new: RunSummary,
-    siblings: Sequence[RunSummary] = (),
-    *,
-    tolerance: float = 0.25,
-    metrics: Sequence[str] = HEADLINE_METRICS,
-) -> list[MetricComparison]:
-    """Per-metric relative difference. A metric is within normal variance when it is
-    within `tolerance` of the original or inside the range of the original's
-    repetitions at the same load point."""
-    a, b = flatten_metrics(original), flatten_metrics(new)
-    sib = [flatten_metrics(s) for s in siblings]
-    out = []
-    for m in metrics:
-        va, vb = a.get(m), b.get(m)
-        values = [s[m] for s in sib if m in s]
-        lo, hi = (min(values), max(values)) if values else (None, None)
-        rel = None if va is None or vb is None or va == 0 else abs(vb - va) / abs(va)
-        in_range = lo is not None and hi is not None and vb is not None and lo <= vb <= hi
-        within = va == vb or (rel is not None and rel <= tolerance) or in_range
-        out.append(
-            MetricComparison(
-                metric=m,
-                original=va,
-                new=vb,
-                rel_diff=rel,
-                sibling_lo=lo,
-                sibling_hi=hi,
-                within=within,
-            )
-        )
-    return out
 
 
 def cell_from_provenance(exp: Experiment, prov: Provenance, key: str) -> Cell:
@@ -860,46 +834,50 @@ class _Original:
     spec_doc: dict[str, Any]
     run_id: uuid.UUID | None = None
     cell_key: str | None = None
-    summary: RunSummary | None = None
-    siblings: list[RunSummary] = field(default_factory=list)
+    point_runs: list[BenchRun] = field(default_factory=list)  # every rep of its load point
 
 
-def _original_from_file(path: Path, spec_path: Path | None) -> _Original:
-    prov = Provenance.model_validate_json(path.read_text())
-    orig = _Original(prov=prov, spec_doc=_load_spec_doc(spec_path or path.parents[2] / "spec.json"))
-    parquet = path.parent / "requests.parquet"
-    if parquet.is_file():
-        orig.summary = summarize_run(read_requests(parquet), window_s=None, gpus=1)
-    return orig
-
-
-def _original_from_db(db_url: str | None, run_id: uuid.UUID, spec_path: Path | None) -> _Original:
-    with session_scope(db_url) as s:
-        run = repo.get_run(s, run_id)
-        if run is None:
-            raise LookupError(f"no run {run_id}")
-        exp_row = s.get(BenchExperiment, run.experiment_id)
-        assert exp_row is not None
-        orig = _Original(
-            prov=Provenance.model_validate(run.provenance),
-            spec_doc=_load_spec_doc(spec_path) if spec_path else exp_row.spec,
-            run_id=run_id,
-            cell_key=run.cell_key,
-        )
-        if run.status == RUN_COMPLETED and run.summary:
-            orig.summary = RunSummary.model_validate(run.summary)
-        for sib in repo.list_runs(s, experiment_id=run.experiment_id, config_hash=run.config_hash):
-            same_point = sib.workload == run.workload and sib.load_value == run.load_value
-            if same_point and sib.status == RUN_COMPLETED and sib.summary:
-                orig.siblings.append(RunSummary.model_validate(sib.summary))
-    return orig
+def _point_runs(s: Session, run: BenchRun) -> list[BenchRun]:
+    return [
+        r
+        for r in repo.list_runs(s, experiment_id=run.experiment_id, config_hash=run.config_hash)
+        if r.workload == run.workload and r.load_value == run.load_value
+    ]
 
 
 def _load_original(ref: str, db_url: str | None, spec_path: Path | None) -> _Original:
+    """From a run id, or a `runs/<run id>/provenance.json` written by `bench run`."""
     path = Path(ref)
-    if path.suffix == ".json" and path.is_file():
-        return _original_from_file(path, spec_path)
-    return _original_from_db(db_url, uuid.UUID(ref), spec_path)
+    from_file = path.suffix == ".json" and path.is_file()
+    prov = Provenance.model_validate_json(path.read_text()) if from_file else None
+    run_id = _uuid(path.parent.name) if from_file else uuid.UUID(ref)
+    with session_scope(db_url) as s:
+        run = repo.get_run(s, run_id) if run_id is not None else None
+        if run is None and not from_file:
+            raise LookupError(f"no run {ref}")
+        if spec_path is not None:
+            spec_doc = _load_spec_doc(spec_path)
+        elif from_file:
+            spec_doc = _load_spec_doc(path.parents[2] / "spec.json")
+        else:
+            exp_row = s.get(BenchExperiment, run.experiment_id)  # type: ignore[union-attr]
+            spec_doc = exp_row.spec  # type: ignore[union-attr]
+        if run is None:
+            return _Original(prov=prov, spec_doc=spec_doc)  # type: ignore[arg-type]
+        return _Original(
+            prov=prov or Provenance.model_validate(run.provenance),
+            spec_doc=spec_doc,
+            run_id=run.id,
+            cell_key=run.cell_key,
+            point_runs=_point_runs(s, run),
+        )
+
+
+def _uuid(text: str) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(text)
+    except ValueError:
+        return None
 
 
 async def reproduce(
@@ -913,7 +891,8 @@ async def reproduce(
 
     `ref` is a run id in the results DB or a run's `provenance.json`, whose
     experiment spec is read from `<results>/<experiment>/spec.json` unless
-    `spec_path` is given.
+    `spec_path` is given. The comparison (`report.compare`) puts the original
+    load point's repetitions against the new run.
     """
     orig = _load_original(ref, ctx.db_url, spec_path)
     prov = orig.prov
@@ -973,24 +952,26 @@ async def reproduce(
         repetitions=[rep],
     )
     new_id = outcome.run_ids[0] if outcome.run_ids else None
-    comparisons: list[MetricComparison] = []
-    if new_id is not None and orig.summary is not None:
+    comparison = None
+    if new_id is not None and orig.point_runs:
         with session_scope(ctx.db_url) as s:
-            new_run = repo.get_run(s, new_id)
-            new_doc = new_run.summary if new_run and new_run.status == RUN_COMPLETED else None
-        if new_doc:
-            comparisons = compare_summaries(
-                orig.summary,
-                RunSummary.model_validate(new_doc),
-                orig.siblings,
-                tolerance=tolerance,
+            new_runs = repo.list_runs(s, experiment_id=experiment_id)
+        if any(r.status == RUN_COMPLETED for r in new_runs) and any(
+            r.status == RUN_COMPLETED for r in orig.point_runs
+        ):
+            comparison = compare(
+                orig.point_runs,
+                new_runs,
+                rel_tol=tolerance,
+                label_a="original",
+                label_b="reproduction",
             )
     return ReproduceOutcome(
         original_run_id=orig.run_id,
         new_run_id=new_id,
         outcome=outcome,
         warnings=warnings,
-        comparisons=comparisons,
+        comparison=comparison,
     )
 
 
