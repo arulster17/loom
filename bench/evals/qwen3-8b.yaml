@@ -1,0 +1,133 @@
+# Pinned quality suite for Qwen3-8B (loom_bench.quality.suite; method in docs/quality-gate.md).
+#
+# Every config change that can alter outputs (quantization, engine, speculative decoding,
+# KV-cache dtype, context extension) runs this suite on the baseline and the candidate and
+# must pass the gate. Changing anything here changes what is measured: rerun the baseline.
+#
+# Sample sizes. With n paired items and a share d of items whose pass/fail flips between
+# baseline and candidate (half each way), the 95% CI half-width of the paired delta is about
+# 1.96 * sqrt(d / n), and the gate never claims less than 3/n (rule of three):
+#
+#     n      d=2%     d=5%    floor 3/n   | unpaired, p=0.8
+#     60     3.6 pts  5.7     5.0         | 10.1
+#     400    1.4      2.2     0.75        |  3.9
+#     541    1.2      1.9     0.55        |  3.4
+#     664    1.1      1.7     0.45        |  3.0
+#     1000   0.9      1.4     0.30        |  2.5
+#     1319   0.8      1.2     0.23        |  2.2
+#     2100   0.6      1.0     0.14        |  1.7
+#
+# FP8 / AWQ variants of 8B models typically flip 2-5% of items on reasoning tasks, so a
+# 1-point margin needs ~1000-2000 items. Where the source set is smaller (IFEval, HumanEval +
+# MBPP) or the pinned set is small by design (JSON schema, tool calling), the task's threshold
+# says which margin its size can decide.
+
+suite: qwen3-8b
+model: qwen3-8b
+seed: 1234
+# Non-thinking mode, as served (config/models.yaml); applied to every chat request.
+chat_template_kwargs: {enable_thinking: false}
+
+gate:
+  threshold: 0.01          # max allowed drop, absolute (1 point)
+  min_samples: 300
+  confidence: 0.95
+  n_boot: 10000
+  inconclusive_blocks: true
+
+tasks:
+  # General knowledge: MMLU-Pro, first 150 docs of each of the 14 subjects = 2100 items.
+  # d=5% -> ±0.96 pts.
+  - name: mmlu_pro
+    kind: lm_eval
+    params:
+      tasks: [mmlu_pro]
+      limit: 150
+      metric: exact_match
+      filter: custom-extract
+      num_concurrent: 32
+
+  # Math: GSM8K, full test split (1319), 8-shot chain of thought as multi-turn chat.
+  # d=2% -> ±0.76 pts; d=5% -> ±1.2 pts (may come out inconclusive at 1 point).
+  - name: gsm8k
+    kind: lm_eval
+    params:
+      tasks: [gsm8k_cot_llama]
+      metric: exact_match
+      filter: flexible-extract
+      fewshot_as_multiturn: true
+      gen_kwargs: {max_gen_toks: 1024}
+      num_concurrent: 32
+
+  # Instruction following: IFEval, all 541 prompts, prompt-level strict accuracy.
+  # d=5% -> ±1.9 pts, so the set can only decide a 2-point margin.
+  - name: ifeval
+    kind: lm_eval
+    threshold: 0.02
+    params:
+      tasks: [ifeval]
+      metric: prompt_level_strict_acc
+      num_concurrent: 32
+
+  # Long-context retrieval: RULER niah_single_2 at 4k and 16k tokens, 500 docs per length
+  # = 1000 items. d=2% -> ±0.88 pts. Raw completions prompts; RULER sizes its haystacks
+  # with the model's tokenizer (needs `transformers`).
+  - name: ruler_niah
+    kind: lm_eval
+    params:
+      tasks: [niah_single_2]
+      api: completions
+      apply_chat_template: false
+      metric_from_doc: max_length
+      metadata: {max_seq_lengths: [4096, 16384], tokenizer: Qwen/Qwen3-8B}
+      model_args: {tokenized_requests: false, tokenizer_backend: null, max_length: 32768}
+      num_concurrent: 16
+
+  # Native needle at the top of the native window (32768): 2 lengths x 5 depths x 40 = 400.
+  # Retrieval rarely flips (d~1% -> ±1.0 pts), floor 0.75 pts; decided at 2 points.
+  - name: needle
+    kind: needle
+    threshold: 0.02
+    params:
+      context_tokens: [8192, 28672]
+      depths: [0.1, 0.3, 0.5, 0.7, 0.9]
+      samples_per_cell: 40
+      seed: 1234
+
+  # Code: HumanEval (164) + MBPP test (500) = 664 programs, executed in the sandbox
+  # (needs allow_code_exec). d=5% -> ±1.7 pts; decided at 2 points.
+  - name: code
+    kind: code_exec
+    threshold: 0.02
+    params:
+      datasets: [humaneval, mbpp]
+      max_tokens: 1024
+
+  # Tool calling: 60 pinned BFCL-style items. Floor 3/60 = 5 pts; decided at 6 points,
+  # which catches a broken tool parser or chat template, not subtle drift.
+  - name: tool_calling
+    kind: tool_calling
+    threshold: 0.06
+    min_samples: 50
+
+  # JSON-schema validity under strict response_format: 60 pinned items, as above.
+  - name: json_schema
+    kind: json_schema
+    threshold: 0.06
+    min_samples: 50
+
+# Teacher-forced logprob divergence vs the BF16 reference on the 48 pinned prompts,
+# 64 continuation tokens each (~3000 positions), top-5 logprobs. The limits are initial
+# values, not yet calibrated on GPUs: the first Phase 0 runs measure BF16 vs BF16 across
+# engines (vLLM vs SGLang) to confirm they sit above engine and kernel noise.
+divergence:
+  top_k: 5
+  max_new_tokens: 64
+  max_kl: 0.05
+  min_top1: 0.95
+
+sanity_limits:
+  max_empty: 0.01
+  max_truncated: 0.02
+  max_repetition: 0.02
+  max_language_drift: 0.02

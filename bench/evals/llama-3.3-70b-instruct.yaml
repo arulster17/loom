@@ -1,0 +1,120 @@
+# Pinned quality suite for Llama 3.3 70B Instruct (loom_bench.quality.suite; method in
+# docs/quality-gate.md).
+#
+# Same structure and sample-size reasoning as qwen3-8b.yaml. With n paired items and a
+# share d of items flipping between baseline and candidate, the 95% CI half-width of the
+# paired delta is about 1.96 * sqrt(d / n), never below 3/n:
+#
+#     n      d=2%     d=5%    floor 3/n
+#     60     3.6 pts  5.7     5.0
+#     400    1.4      2.2     0.75
+#     541    1.2      1.9     0.55
+#     664    1.1      1.7     0.45
+#     1000   0.9      1.4     0.30
+#     1319   0.8      1.2     0.23
+#     2100   0.6      1.0     0.14
+#
+# Changing anything here changes what is measured: rerun the baseline.
+
+suite: llama-3.3-70b-instruct
+model: llama-3.3-70b-instruct
+seed: 1234
+
+gate:
+  threshold: 0.01
+  min_samples: 300
+  confidence: 0.95
+  n_boot: 10000
+  inconclusive_blocks: true
+
+tasks:
+  # MMLU-Pro: 150 docs per subject x 14 = 2100 items. d=5% -> ±0.96 pts.
+  - name: mmlu_pro
+    kind: lm_eval
+    params:
+      tasks: [mmlu_pro]
+      limit: 150
+      metric: exact_match
+      filter: custom-extract
+      num_concurrent: 32
+
+  # GSM8K: full test split (1319), 8-shot CoT in the Llama 3 evaluation format.
+  # d=2% -> ±0.76 pts.
+  - name: gsm8k
+    kind: lm_eval
+    params:
+      tasks: [gsm8k_cot_llama]
+      metric: exact_match
+      filter: flexible-extract
+      fewshot_as_multiturn: true
+      gen_kwargs: {max_gen_toks: 1024}
+      num_concurrent: 32
+
+  # IFEval: all 541 prompts; d=5% -> ±1.9 pts, decided at 2 points.
+  - name: ifeval
+    kind: lm_eval
+    threshold: 0.02
+    params:
+      tasks: [ifeval]
+      metric: prompt_level_strict_acc
+      num_concurrent: 32
+
+  # RULER niah_single_2 at 4k and 16k tokens, 500 docs per length = 1000 items.
+  # d=2% -> ±0.88 pts. The tokenizer comes from the gated meta-llama repo (HF token needed).
+  # Lengths stay inside the served window (max_context 32768 in config/models.yaml); a
+  # context-extension change extends this list.
+  - name: ruler_niah
+    kind: lm_eval
+    params:
+      tasks: [niah_single_2]
+      api: completions
+      apply_chat_template: false
+      metric_from_doc: max_length
+      metadata:
+        max_seq_lengths: [4096, 16384]
+        tokenizer: meta-llama/Llama-3.3-70B-Instruct
+      model_args: {tokenized_requests: false, tokenizer_backend: null, max_length: 32768}
+      num_concurrent: 16
+
+  # Native needle at 8k and 28k tokens: 2 x 5 depths x 40 = 400 items, decided at 2 points.
+  - name: needle
+    kind: needle
+    threshold: 0.02
+    params:
+      context_tokens: [8192, 28672]
+      depths: [0.1, 0.3, 0.5, 0.7, 0.9]
+      samples_per_cell: 40
+      seed: 1234
+
+  # HumanEval + MBPP: 664 sandboxed programs (needs allow_code_exec), decided at 2 points.
+  - name: code
+    kind: code_exec
+    threshold: 0.02
+    params:
+      datasets: [humaneval, mbpp]
+      max_tokens: 1024
+
+  # 60 pinned items each: floor 3/60 = 5 pts, decided at 6 points (catches broken parsers,
+  # templates and structured-output backends).
+  - name: tool_calling
+    kind: tool_calling
+    threshold: 0.06
+    min_samples: 50
+  - name: json_schema
+    kind: json_schema
+    threshold: 0.06
+    min_samples: 50
+
+# Teacher-forced divergence vs the BF16 reference: 48 pinned prompts x 64 tokens, top-5.
+# Initial limits, not yet calibrated on GPUs (see qwen3-8b.yaml).
+divergence:
+  top_k: 5
+  max_new_tokens: 64
+  max_kl: 0.05
+  min_top1: 0.95
+
+sanity_limits:
+  max_empty: 0.01
+  max_truncated: 0.02
+  max_repetition: 0.02
+  max_language_drift: 0.02
