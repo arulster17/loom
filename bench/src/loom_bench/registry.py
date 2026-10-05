@@ -20,7 +20,7 @@ DEFAULT_MODELS_YAML = REPO_ROOT / "config" / "models.yaml"
 MODELS_YAML_ENV = "LOOM_MODELS_YAML"
 
 # Money in config files is integer micro-dollars; strict so a float like 1.86 is an error.
-Micros = Annotated[int, Field(strict=True, ge=0)]
+MicrosField = Annotated[int, Field(strict=True, ge=0)]
 NonEmptyStr = Annotated[str, StringConstraints(min_length=1, strip_whitespace=True)]
 GitSha = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
 # Digest-pinned image reference: repo@sha256:<64 hex>. Tags are rejected because they move.
@@ -58,17 +58,17 @@ def read_yaml(path: Path) -> Any:
         return yaml.load(f, Loader=_UniqueKeyLoader)
 
 
-class _Strict(BaseModel):
+class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class TrustRemoteCodeReview(_Strict):
+class TrustRemoteCodeReview(StrictModel):
     reviewer: NonEmptyStr
     date: dt.date
     notes: NonEmptyStr
 
 
-class HFSource(_Strict):
+class HFSource(StrictModel):
     repo: Annotated[str, StringConstraints(pattern=r"^[\w.-]+/[\w.-]+$")]
     revision: GitSha
     license: NonEmptyStr
@@ -84,7 +84,7 @@ class HFSource(_Strict):
         return self
 
 
-class Engine(_Strict):
+class Engine(StrictModel):
     name: Literal["vllm", "sglang"]
     version: Annotated[str, StringConstraints(pattern=r"^\d+\.\d+\.\d+([.+-][\w.]+)?$")]
     image: PinnedImage
@@ -92,12 +92,12 @@ class Engine(_Strict):
     chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
 
 
-class InstanceTypes(_Strict):
+class InstanceTypes(StrictModel):
     aws: NonEmptyStr | None = None
     gcp: NonEmptyStr | None = None
 
 
-class Hardware(_Strict):
+class Hardware(StrictModel):
     gpu: NonEmptyStr
     gpus_per_replica: Annotated[int, Field(ge=1)]
     nodes_per_replica: Annotated[int, Field(ge=1)] = 1
@@ -110,18 +110,18 @@ class Hardware(_Strict):
         return self
 
 
-class Parallelism(_Strict):
+class Parallelism(StrictModel):
     tp: Annotated[int, Field(ge=1)] = 1
     pp: Annotated[int, Field(ge=1)] = 1
     ep: Annotated[int, Field(ge=1)] = 1
 
 
-class Pricing(_Strict):
+class Pricing(StrictModel):
     """Public price in micro-dollars per 1M tokens."""
 
-    input_per_mtok: Micros
-    output_per_mtok: Micros
-    cached_input_per_mtok: Micros
+    input_per_mtok: MicrosField
+    output_per_mtok: MicrosField
+    cached_input_per_mtok: MicrosField
 
     @model_validator(mode="after")
     def _cached_not_above_input(self) -> Self:
@@ -130,7 +130,7 @@ class Pricing(_Strict):
         return self
 
 
-class Scaling(_Strict):
+class Scaling(StrictModel):
     min_replicas: Annotated[int, Field(ge=0)]
     max_replicas: Annotated[int, Field(ge=1)]
 
@@ -141,14 +141,14 @@ class Scaling(_Strict):
         return self
 
 
-class Capabilities(_Strict):
+class Capabilities(StrictModel):
     tools: bool = False
     json_schema: bool = False
     vision: bool = False
     reasoning: bool = False
 
 
-class ModelSpec(_Strict):
+class ModelSpec(StrictModel):
     id: Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9.-]*[a-z0-9]$")]
     display_name: NonEmptyStr
     hf: HFSource
@@ -186,7 +186,7 @@ class ModelSpec(_Strict):
         return self
 
 
-class Registry(_Strict):
+class Registry(StrictModel):
     models: list[ModelSpec]
 
     @model_validator(mode="after")

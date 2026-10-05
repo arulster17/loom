@@ -1,0 +1,220 @@
+# Cloud prices used for every cost number the Benchmark Lab reports.
+# Maintained by hand from public price pages; each entry records its sources and
+# the date it was checked. Validated by loom_bench.prices.
+#
+# Money is integer micro-dollars: on_demand_per_hour: 1_861_000 means $1.861/hour.
+# Spot prices are indicative only: the average across us-east-1 AZs in a vantage.sh
+# snapshot. Spot moves by the hour, so a run's spend records the price it used.
+# Entries with `verified: false` are refused by cost math unless explicitly allowed.
+
+last_checked: 2026-10-04
+
+clouds:
+  aws:
+    us-east-1:
+      storage:
+        kind: ebs-gp3
+        per_gb_month: 80_000
+        sources: [https://aws.amazon.com/ebs/pricing/]
+        last_checked: 2026-10-04
+        verified: false
+        note: $0.08/GB-month, not yet confirmed on the EBS pricing page.
+      # On-demand prices: AWS price list published 2026-09-25. Specs and spot: vantage.sh.
+      # p5e.48xlarge is omitted: it has no on-demand price (Capacity Blocks only).
+      instances:
+        g5.xlarge:
+          gpu: A10G
+          gpu_count: 1
+          gpu_memory_gb: 24
+          vcpus: 4
+          memory_gib: 16
+          local_nvme_gb: 250
+          on_demand_per_hour: 1_006_000
+          spot_per_hour: 483_000
+          sources:
+            - https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json
+            - https://instances.vantage.sh/aws/ec2/g5.xlarge
+          last_checked: 2026-10-04
+        g6.xlarge:
+          gpu: L4
+          gpu_count: 1
+          gpu_memory_gb: 24
+          vcpus: 4
+          memory_gib: 16
+          local_nvme_gb: 250
+          on_demand_per_hour: 804_800
+          spot_per_hour: 605_000
+          sources:
+            - https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json
+            - https://instances.vantage.sh/aws/ec2/g6.xlarge
+          last_checked: 2026-10-04
+        g6e.xlarge:
+          gpu: L40S
+          gpu_count: 1
+          gpu_memory_gb: 48
+          vcpus: 4
+          memory_gib: 32
+          local_nvme_gb: 250
+          on_demand_per_hour: 1_861_000
+          spot_per_hour: 1_838_600
+          sources:
+            - https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json
+            - https://instances.vantage.sh/aws/ec2/g6e.xlarge
+          last_checked: 2026-10-04
+        g6e.2xlarge:
+          gpu: L40S
+          gpu_count: 1
+          gpu_memory_gb: 48
+          vcpus: 8
+          memory_gib: 64
+          local_nvme_gb: 450
+          on_demand_per_hour: 2_242_080
+          spot_per_hour: 2_215_000
+          sources:
+            - https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json
+            - https://instances.vantage.sh/aws/ec2/g6e.2xlarge
+          last_checked: 2026-10-04
+        g6e.12xlarge:
+          gpu: L40S
+          gpu_count: 4
+          gpu_memory_gb: 48
+          vcpus: 48
+          memory_gib: 384
+          local_nvme_gb: 3800
+          on_demand_per_hour: 10_492_640
+          spot_per_hour: 8_162_000
+          sources:
+            - https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json
+            - https://instances.vantage.sh/aws/ec2/g6e.12xlarge
+          last_checked: 2026-10-04
+        g6e.24xlarge:
+          gpu: L40S
+          gpu_count: 4
+          gpu_memory_gb: 48
+          vcpus: 96
+          memory_gib: 768
+          local_nvme_gb: 3800
+          on_demand_per_hour: 15_065_590
+          spot_per_hour: 10_170_000
+          sources:
+            - https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json
+            - https://instances.vantage.sh/aws/ec2/g6e.24xlarge
+          last_checked: 2026-10-04
+        g6e.48xlarge:
+          gpu: L40S
+          gpu_count: 8
+          gpu_memory_gb: 48
+          vcpus: 192
+          memory_gib: 1536
+          local_nvme_gb: 7600
+          on_demand_per_hour: 30_131_180
+          spot_per_hour: 19_120_000
+          sources:
+            - https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json
+            - https://instances.vantage.sh/aws/ec2/g6e.48xlarge
+          last_checked: 2026-10-04
+        p4d.24xlarge:
+          gpu: A100
+          gpu_count: 8
+          gpu_memory_gb: 40
+          vcpus: 96
+          memory_gib: 1152
+          local_nvme_gb: 8000
+          on_demand_per_hour: 21_957_642
+          spot_per_hour: 18_450_000
+          sources:
+            - https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json
+            - https://instances.vantage.sh/aws/ec2/p4d.24xlarge
+          last_checked: 2026-10-04
+        p4de.24xlarge:
+          gpu: A100
+          gpu_count: 8
+          gpu_memory_gb: 80
+          vcpus: 96
+          memory_gib: 1152
+          local_nvme_gb: 8000
+          on_demand_per_hour: 27_447_050
+          spot_per_hour: 20_110_000
+          sources:
+            - https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json
+            - https://instances.vantage.sh/aws/ec2/p4de.24xlarge
+          last_checked: 2026-10-04
+        p5.4xlarge:
+          gpu: H100
+          gpu_count: 1
+          gpu_memory_gb: 80
+          vcpus: 16
+          memory_gib: 256
+          local_nvme_gb: 3840
+          on_demand_per_hour: 6_880_000
+          spot_per_hour: 3_291_000
+          sources:
+            - https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json
+            - https://instances.vantage.sh/aws/ec2/p5.4xlarge
+          last_checked: 2026-10-04
+        p5.48xlarge:
+          gpu: H100
+          gpu_count: 8
+          gpu_memory_gb: 80
+          vcpus: 192
+          memory_gib: 2048
+          local_nvme_gb: 30720
+          on_demand_per_hour: 55_040_000
+          spot_per_hour: 26_540_000
+          sources:
+            - https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json
+            - https://instances.vantage.sh/aws/ec2/p5.48xlarge
+          last_checked: 2026-10-04
+        p5en.48xlarge:
+          gpu: H200
+          gpu_count: 8
+          gpu_memory_gb: 141
+          vcpus: 192
+          memory_gib: 2048
+          local_nvme_gb: 30720
+          on_demand_per_hour: 63_296_000
+          spot_per_hour: 34_790_000
+          sources:
+            - https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json
+            - https://instances.vantage.sh/aws/ec2/p5en.48xlarge
+          last_checked: 2026-10-04
+
+  gcp:
+    us-central1:
+      instances:
+        g2-standard-8:
+          gpu: L4
+          gpu_count: 1
+          gpu_memory_gb: 24
+          on_demand_per_hour: 853_600
+          spot_per_hour: 512_100
+          sources:
+            - https://gcloud-compute.com/
+            - https://cloud.google.com/compute/vm-instance-pricing
+          last_checked: 2026-10-04
+          verified: false
+          note: Third-party snapshot (gcloud-compute.com); confirm on the GCP pricing page.
+        a2-highgpu-1g:
+          gpu: A100
+          gpu_count: 1
+          gpu_memory_gb: 40
+          on_demand_per_hour: 3_673_400
+          spot_per_hour: 2_204_000
+          sources:
+            - https://gcloud-compute.com/
+            - https://cloud.google.com/compute/vm-instance-pricing
+          last_checked: 2026-10-04
+          verified: false
+          note: Third-party snapshot (gcloud-compute.com); confirm on the GCP pricing page.
+        a3-highgpu-8g:
+          gpu: H100
+          gpu_count: 8
+          gpu_memory_gb: 80
+          on_demand_per_hour: 88_490_000
+          spot_per_hour: 52_960_000
+          sources:
+            - https://gcloud-compute.com/
+            - https://cloud.google.com/compute/vm-instance-pricing
+          last_checked: 2026-10-04
+          verified: false
+          note: Third-party snapshot (gcloud-compute.com); confirm on the GCP pricing page.

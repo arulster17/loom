@@ -1,0 +1,94 @@
+# Public list prices of other inference providers, used only for the
+# competitiveness view and margin flags. Maintained by hand from each provider's
+# public pricing page, with the source URL and date recorded per entry.
+# No Loom tooling calls competitors' APIs (see docs/legal/competitor-benchmarking.md).
+#
+# Money is integer micro-dollars per 1M tokens: 1_040_000 means $1.04 / 1M tokens.
+# model_id is the Loom registry id (config/models.yaml), not the provider's name.
+
+last_checked: 2026-10-04
+
+providers:
+  - name: Together AI
+    pricing_url: https://www.together.ai/pricing
+    last_checked: 2026-10-04
+    entries:
+      - model_id: llama-3.3-70b-instruct
+        input_per_mtok: 1_040_000
+        output_per_mtok: 1_040_000
+        source: https://www.together.ai/pricing
+
+  - name: Fireworks AI
+    pricing_url: https://docs.fireworks.ai/serverless/pricing
+    last_checked: 2026-10-04
+    # Fireworks prices serverless models by parameter-count bucket. Whether these exact
+    # models are deployed on serverless was not confirmed.
+    entries:
+      - model_id: llama-3.3-70b-instruct
+        input_per_mtok: 900_000
+        output_per_mtok: 900_000
+        availability: unverified
+        source: https://docs.fireworks.ai/serverless/pricing
+        notes: Size-bucket price for models above 16B parameters.
+      - model_id: qwen3-8b
+        input_per_mtok: 200_000
+        output_per_mtok: 200_000
+        availability: unverified
+        source: https://docs.fireworks.ai/serverless/pricing
+        notes: Size-bucket price for models of 4B-16B parameters.
+
+  - name: DeepInfra
+    pricing_url: https://deepinfra.com/meta-llama/Llama-3.3-70B-Instruct-Turbo
+    last_checked: 2026-10-04
+    entries:
+      - model_id: llama-3.3-70b-instruct
+        provider_model: meta-llama/Llama-3.3-70B-Instruct-Turbo
+        input_per_mtok: 100_000
+        output_per_mtok: 320_000
+        quantization: fp8
+        source: https://deepinfra.com/meta-llama/Llama-3.3-70B-Instruct-Turbo
+
+  - name: Novita AI
+    pricing_url: https://novita.ai/pricing
+    last_checked: 2026-10-04
+    entries:
+      - model_id: llama-3.3-70b-instruct
+        input_per_mtok: 135_000
+        output_per_mtok: 400_000
+        source: https://novita.ai/pricing
+        notes: Listed with a 12K-token context window.
+
+  - name: OpenRouter
+    pricing_url: https://openrouter.ai/meta-llama/llama-3.3-70b-instruct
+    aggregator: true
+    last_checked: 2026-10-04
+    entries:
+      - model_id: llama-3.3-70b-instruct
+        provider_model: meta-llama/llama-3.3-70b-instruct
+        input_per_mtok: 100_000
+        output_per_mtok: 320_000
+        source: https://openrouter.ai/meta-llama/llama-3.3-70b-instruct
+        notes: Headline price; requests are routed across underlying providers.
+      - model_id: qwen3-8b
+        provider_model: qwen/qwen3-8b
+        input_per_mtok: 117_000
+        output_per_mtok: 455_000
+        source: https://openrouter.ai/qwen/qwen3-8b
+
+# Providers checked that publish no self-serve per-token price for these models.
+not_offered:
+  - name: Groq
+    reason: Enterprise plans only; contact sales.
+    last_checked: 2026-10-04
+  - name: Cerebras
+    reason: No public per-token price.
+    last_checked: 2026-10-04
+  - name: Lambda
+    reason: Inference offering winding down.
+    last_checked: 2026-10-04
+  - name: Hyperbolic
+    reason: Inference offering retired.
+    last_checked: 2026-10-04
+  - name: Nebius
+    reason: Neither model is in its catalog.
+    last_checked: 2026-10-04
