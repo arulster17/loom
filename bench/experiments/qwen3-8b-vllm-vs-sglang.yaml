@@ -1,0 +1,58 @@
+# Phase 0 leaderboard #1: Qwen3-8B (BF16) on one L40S, vLLM vs SGLang at engine
+# defaults (prefix caching on in both). One g6e.xlarge spot host serves both
+# engines: SGLang starts warm after vLLM, reusing the downloaded weights.
+#
+# Each workload bisects the open-loop rate for the highest load meeting the SLO,
+# 3 repetitions per point. Image digests: research notes of 2026-10-04.
+name: qwen3-8b-vllm-vs-sglang
+description: Qwen3-8B BF16 on g6e.xlarge spot, vLLM v0.30.0 vs SGLang v0.5.21, rate sweeps at SLO.
+model: qwen3-8b
+provider:
+  kind: aws_ec2
+  region: us-east-1
+  instance_type: g6e.xlarge
+  market: spot
+  disk_gb: 200
+variants:
+  - name: vllm
+    engine:
+      name: vllm
+      version: "0.30.0"
+      image: vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
+  - name: sglang
+    engine:
+      name: sglang
+      version: "0.5.21"
+      image: lmsysorg/sglang@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
+workloads:
+  - profile: fixed-1k-1k
+    load:
+      mode: open_loop
+      search: {lo: 0.5, hi: 12, rel_tol: 0.1, max_points: 6}
+      duration_s: 180
+      warmup_s: 30
+      drain_timeout_s: 60
+  - profile: shared-prefix
+    load:
+      mode: open_loop
+      search: {lo: 1, hi: 32, rel_tol: 0.1, max_points: 5}
+      duration_s: 120
+      warmup_s: 20
+      drain_timeout_s: 30
+  - profile: code-completion
+    load:
+      mode: open_loop
+      search: {lo: 1, hi: 48, rel_tol: 0.1, max_points: 5}
+      duration_s: 120
+      warmup_s: 20
+      drain_timeout_s: 30
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+budget:
+  max_spend: "$40"
+  ttl_minutes: 480
+  accrual_interval_s: 15
+seed: 0

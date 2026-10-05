@@ -213,6 +213,9 @@ def run(
     except PlanRefused as e:
         render_plan(e.plan)
         raise typer.Exit(EXIT_REFUSED) from None
+    except Exception as e:  # provider setup; the experiment is already marked failed
+        err.print(f"[red]experiment {exp.name} failed:[/red] {type(e).__name__}: {e}")
+        raise typer.Exit(EXIT_FAILED) from None
     render_outcome(outcome)
     raise typer.Exit(outcome.exit_code)
 
@@ -260,22 +263,46 @@ def reproduce_cmd(
     raise typer.Exit(EXIT_OK if result.ok else EXIT_MISMATCH)
 
 
+def _ec2_client() -> object | None:
+    """An EC2 client for the configured AWS settings, or None when AWS is not set up."""
+    try:
+        import boto3
+
+        from loom_bench.providers.aws_ec2 import load_aws_settings
+
+        settings = load_aws_settings()
+    except (ImportError, ValidationError, FileNotFoundError):
+        return None
+    return boto3.client("ec2", region_name=settings.region)
+
+
 @app.command("reap")
 def reap_cmd(
     dry_run: Annotated[bool, typer.Option("--dry-run", help="List, do not terminate.")] = False,
     db: DbOpt = None,
 ) -> None:
-    """Terminate recorded resources whose TTL passed (for when a runner died)."""
+    """Terminate resources whose TTL passed (for when a runner died).
+
+    Covers every provider's DB-recorded resources and, when AWS settings are
+    configured ($LOOM_AWS_CONFIG or LOOM_AWS_*), every Loom-tagged EC2 instance.
+    """
     from loom_bench.store.db import upgrade
 
     upgrade(db)
-    reaped = asyncio.run(reap(db, dry_run=dry_run))
+    ec2 = _ec2_client()
+    if ec2 is None:
+        console.print("[yellow]AWS not configured: only DB-recorded mock/local resources reaped")
+    reaped = asyncio.run(reap(db, dry_run=dry_run, ec2=ec2))
     table = Table(title="Expired resources")
     for col in ("provider", "resource", "experiment", "ttl", "action"):
         table.add_column(col)
     for r in reaped:
         table.add_row(
-            r.provider, r.resource_id, str(r.experiment_id), r.ttl_at.isoformat(), r.action
+            r.provider,
+            r.resource_id,
+            str(r.experiment_id or "-"),
+            r.ttl_at.isoformat() if r.ttl_at else "-",
+            r.action,
         )
     console.print(table if reaped else "no expired resources")
 

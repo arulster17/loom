@@ -30,6 +30,7 @@ from pydantic import (
 )
 
 from loom_bench.cost import CostAllocation
+from loom_bench.engines import render_launch
 from loom_bench.jobs import TokenizerSpec
 from loom_bench.loadgen.arrivals import parse_arrivals
 from loom_bench.loadgen.base import LOAD_GENERATORS
@@ -105,7 +106,7 @@ class EnginePatch(_Strict):
     name: str | None = None
     version: str | None = None
     image: str | None = None
-    # Merged over the registry args; reset to {} when `name` switches engine.
+    # Merged over the registry args (null removes a key); reset when `name` switches engine.
     args: dict[str, Any] | None = None
     chat_template_kwargs: dict[str, Any] | None = None
 
@@ -396,12 +397,35 @@ def _set_path(doc: dict[str, Any], path: str, value: Any) -> dict[str, Any]:
 
 
 def apply_variant(base: ModelSpec, variant: Variant) -> dict[str, Any]:
-    """Registry entry with the variant's overrides, as an unvalidated dict."""
+    """Registry entry with the variant's overrides, as an unvalidated dict.
+
+    Same rules as `engines.apply_overrides`: switching engine needs its image and
+    version and drops the other engine's args; an arg set to null is removed; the
+    registry's max_context is a cap.
+    """
     doc = base.model_dump(mode="json")
     patch = variant.model_dump(exclude_none=True, exclude={"name", "mock"})
-    engine = patch.get("engine", {})
-    if "name" in engine and engine["name"] != doc["engine"]["name"]:
+    engine = patch.pop("engine", {})
+    args = (variant.engine.args if variant.engine else None) or {}
+    if "name" in engine and engine["name"] != base.engine.name:
+        if "image" not in engine or "version" not in engine:
+            raise ExpansionError(
+                f"variant {variant.name}: switching engine to {engine['name']} needs image "
+                "and version"
+            )
         doc["engine"]["args"] = {}
+    engine.pop("args", None)
+    doc["engine"].update(engine)
+    for key, value in args.items():
+        if value is None:
+            doc["engine"]["args"].pop(key, None)
+        else:
+            doc["engine"]["args"][key] = value
+    if variant.max_context is not None and variant.max_context > base.max_context:
+        raise ExpansionError(
+            f"variant {variant.name}: max_context {variant.max_context} exceeds the registry "
+            f"cap {base.max_context}"
+        )
     return _merge(doc, patch)
 
 
@@ -468,18 +492,12 @@ def local_launch(spec: ModelSpec, provider: LocalProviderSpec) -> EngineLaunch:
     )
 
 
-def render_engine_launch(spec: ModelSpec) -> EngineLaunch:
-    from loom_bench.engines import render_launch
-
-    return render_launch(spec, None)
-
-
 def _launch(exp: Experiment, spec: ModelSpec, mock: MockConfig | None) -> EngineLaunch:
     if mock is not None:
         return mock_launch(spec, mock)
     if isinstance(exp.provider, LocalProviderSpec):
         return local_launch(spec, exp.provider)
-    return render_engine_launch(spec)
+    return render_launch(spec, None)
 
 
 def hardware_for(exp: Experiment, spec: ModelSpec) -> tuple[str, dict[str, Any]]:
@@ -569,9 +587,11 @@ def expand(exp: Experiment, registry: Registry) -> list[Cell]:
                     if isinstance(exp.provider, MockProviderSpec)
                     else None
                 )
-            except ValidationError as e:
+                cells.append(
+                    build_cell(exp, variant=variant.name, knobs=knobs, spec=spec, mock=mock)
+                )
+            except ValueError as e:  # pydantic ValidationError, or a launch that cannot render
                 raise ExpansionError(f"cell {key}: invalid overrides:\n{e}") from None
-            cells.append(build_cell(exp, variant=variant.name, knobs=knobs, spec=spec, mock=mock))
     keys = [c.key for c in cells]
     if len(set(keys)) != len(keys):
         raise ExpansionError(f"duplicate cell keys: {keys}")

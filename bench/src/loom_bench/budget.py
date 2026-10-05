@@ -207,6 +207,7 @@ class BudgetGuard:
                         "instance_type": acc.host.request.instance_type,
                         "billed_seconds": seconds,
                         "simulated": not self.billable,
+                        "price_basis": acc.host.info.get("price_basis"),
                     },
                 )
                 acc.recorded += due

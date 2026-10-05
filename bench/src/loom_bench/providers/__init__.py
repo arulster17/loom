@@ -6,16 +6,36 @@ boto3 for aws_ec2) load only when that provider is used.
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from loom_bench.experiment import ProviderSpec
+    from loom_bench.prices import PriceBook
     from loom_bench.providers.base import Provider
 
 PROVIDER_KINDS = ("mock", "local", "aws_ec2")
 
 
-def make_provider(spec: ProviderSpec) -> Provider:
+def build_wheel(out_dir: Path) -> Path:
+    """Build the loom-bench wheel that GPU hosts install to run `bench job run`."""
+    from loom_bench.registry import REPO_ROOT
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["uv", "build", "--wheel", "--package", "loom-bench", "--out-dir", str(out_dir)],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+    )
+    wheels = sorted(out_dir.glob("loom_bench-*.whl"), key=lambda p: p.stat().st_mtime)
+    if not wheels:
+        raise RuntimeError(f"uv build produced no wheel in {out_dir}")
+    return wheels[-1]
+
+
+def make_provider(spec: ProviderSpec, *, prices: PriceBook, work_dir: Path) -> Provider:
     if spec.kind == "mock":
         from loom_bench.providers.mock import MockProvider
 
@@ -24,9 +44,12 @@ def make_provider(spec: ProviderSpec) -> Provider:
         from loom_bench.providers.local import LocalProvider
 
         return LocalProvider(spec)
-    raise NotImplementedError(f"provider {spec.kind!r} is not available in this build")
+    from loom_bench.providers.aws_ec2 import AwsEc2Provider, load_aws_settings
 
-
-def spot_interruption_errors() -> tuple[type[BaseException], ...]:
-    """Exceptions meaning the host was reclaimed mid-work (retried once on a new host)."""
-    return ()
+    settings = load_aws_settings()
+    if settings.region != spec.region:
+        raise ValueError(
+            f"experiment region {spec.region} != AWS settings region {settings.region}"
+        )
+    wheel = settings.wheel_path or build_wheel(work_dir / "wheel")
+    return AwsEc2Provider(settings, prices=prices, wheel_path=wheel)

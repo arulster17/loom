@@ -10,6 +10,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from decimal import Decimal
+from fractions import Fraction
+
+from pydantic import ValidationError
 
 from loom_bench.budget import Caps
 from loom_bench.experiment import (
@@ -21,7 +25,7 @@ from loom_bench.experiment import (
     WorkloadEntry,
 )
 from loom_bench.money import Micros, cost_for_seconds, format_usd
-from loom_bench.prices import PriceBook
+from loom_bench.prices import HOURS_PER_MONTH, PriceBook
 from loom_bench.records import LoadMode, Market
 from loom_bench.workloads import WorkloadProfile
 
@@ -33,7 +37,7 @@ class Timing:
     download_bytes_per_s: float  # model weights, HF hub -> host disk
     load_bytes_per_s: float  # model weights, host disk -> GPU memory
     engine_init_s: float  # CUDA graph capture, compilation, KV-cache allocation
-    run_overhead_s: float  # per run, beyond its duration: job upload, drain, result download
+    run_overhead_s: float  # per run, beyond duration and drain: job upload, result download
     teardown_s: float  # terminate call -> billing stops
     eval_s: float  # quality suite, per cell
 
@@ -152,9 +156,15 @@ class Estimator:
         return MOCK_RUN_OVERHEAD_S if self.timing is None else self.timing.run_overhead_s
 
     def run_s(self, cell: Cell, load: LoadSpec, profile: WorkloadProfile, value: float) -> float:
+        if load.mode is LoadMode.OPEN_LOOP:
+            # Worst case: an overloaded point waits out its whole drain timeout.
+            assert load.duration_s is not None
+            return load.duration_s + load.drain_timeout_s + self.run_overhead_s()
         if load.duration_s is not None:
             return load.duration_s + self.run_overhead_s()
-        assert load.mode is LoadMode.CLOSED_LOOP and load.num_requests is not None
+        # Closed loop by count: rounds of `value` concurrent requests. Engine-side
+        # queueing (e.g. max_num_seqs below the concurrency) is not modelled.
+        assert load.num_requests is not None
         total = (load.warmup_requests or 0) + load.num_requests
         rounds = math.ceil(total / value)
         return rounds * self._request_s(cell, profile, value) + self.run_overhead_s()
@@ -248,24 +258,52 @@ def host_price(exp: Experiment, cell: Cell, prices: PriceBook) -> tuple[Micros, 
     if not isinstance(p, AwsEc2ProviderSpec):
         return 0, Market.LOCAL.value, ["not billed (local endpoint)"]
     hw = cell.hardware
+    terms = aws_accrual_terms()
     notes: list[str] = []
     instance = prices.instance("aws", hw["region"], hw["instance_type"])
     if not instance.verified:
         notes.append(f"unverified instance price: {instance.note}")
     storage = prices.region("aws", hw["region"]).storage
-    if storage is not None and not storage.verified:
+    if storage is None:
+        raise KeyError(f"no storage price for aws/{hw['region']}")
+    if not storage.verified:
         notes.append(f"unverified storage price included: {storage.note}")
-    quote = prices.replica_hourly_cost(
-        "aws",
-        hw["region"],
-        hw["instance_type"],
-        Market(hw["market"]),
-        storage_gb=hw["disk_gb"],
-        allow_unverified=True,
+    quote = prices.instance_price(
+        "aws", hw["region"], hw["instance_type"], Market(hw["market"]), allow_unverified=True
     )
+    per_hour = quote.per_hour
+    if quote.market is Market.SPOT:
+        # The provider accrues spot at the live price x a safety multiplier; plan the same.
+        per_hour = math.ceil(Fraction(per_hour) * Fraction(terms.spot_multiplier))
+        notes.append(f"spot price x {terms.spot_multiplier} safety multiplier (as accrued)")
     if quote.spot_fallback:
         notes.append("no spot price recorded; estimated at on-demand")
-    return quote.per_hour, quote.market.value, notes
+    volume_gb = max(hw["disk_gb"], terms.root_volume_gb)
+    ebs = math.ceil(Fraction(storage.per_gb_month * volume_gb, HOURS_PER_MONTH))
+    return per_hour + ebs, quote.market.value, notes
+
+
+@dataclass(frozen=True)
+class AwsAccrualTerms:
+    spot_multiplier: Decimal
+    root_volume_gb: int
+    max_ttl_s: int
+
+
+def aws_accrual_terms() -> AwsAccrualTerms:
+    """The aws_ec2 provider's accrual settings: configured ones, else its defaults."""
+    from loom_bench.providers.aws_ec2 import AwsSettings, load_aws_settings
+
+    try:
+        s = load_aws_settings()
+        return AwsAccrualTerms(s.spot_price_multiplier, s.root_volume_gb, s.max_ttl_s)
+    except (ValidationError, FileNotFoundError):
+        f = AwsSettings.model_fields
+        return AwsAccrualTerms(
+            f["spot_price_multiplier"].default,
+            f["root_volume_gb"].default,
+            f["max_ttl_s"].default,
+        )
 
 
 def _hardware_problems(exp: Experiment, cell: Cell, prices: PriceBook) -> list[str]:
@@ -294,6 +332,10 @@ def build_plan(
     profiles = [(w, w.resolve()) for w in exp.workloads]
     ttl_s = exp.budget.ttl_s
     refusals = caps.violations()
+    if isinstance(exp.provider, AwsEc2ProviderSpec):
+        max_ttl = aws_accrual_terms().max_ttl_s
+        if ttl_s > max_ttl:
+            refusals.append(f"budget.ttl_minutes is above the AWS host limit of {max_ttl / 60:g}")
     notes: list[str] = []
     hosts: dict[str, HostPlan] = {}
     prev: dict[str, Cell] = {}

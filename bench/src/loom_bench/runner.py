@@ -11,6 +11,7 @@ repetition is never trusted (see `metrics.aggregate`).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -70,8 +71,16 @@ from loom_bench.provenance import (
     config_hash,
     git_info,
 )
-from loom_bench.providers import make_provider, spot_interruption_errors
-from loom_bench.providers.base import Endpoint, EngineLaunch, Host, HostRequest, Provider
+from loom_bench.providers import make_provider
+from loom_bench.providers.base import (
+    Endpoint,
+    EngineLaunch,
+    Host,
+    HostLost,
+    HostRequest,
+    Provider,
+    SpotInterrupted,
+)
 from loom_bench.records import LoadMode, Market
 from loom_bench.registry import REPO_ROOT, ModelSpec, Registry, read_yaml
 from loom_bench.report.compare import Comparison, compare
@@ -93,7 +102,10 @@ EXIT_BUDGET_ABORT = 5
 RUN_COMPLETED = "completed"
 RUN_FAILED = "failed"
 RUN_ABORTED = "aborted"
-RUN_INTERRUPTED = "interrupted"
+RUN_INTERRUPTED = "interrupted"  # spot reclaim
+RUN_HOST_LOST = "host_lost"
+
+RESOURCE_TYPES = {"aws_ec2": "ec2_instance", "mock": "mock_server"}
 
 
 @dataclass
@@ -169,7 +181,6 @@ def _host_request(exp: Experiment, cell: Cell, experiment_id: uuid.UUID) -> Host
         tags={
             "loom:experiment": str(experiment_id),
             "loom:experiment-name": exp.name,
-            "loom:owner": "loom-bench",
         },
     )
 
@@ -222,7 +233,6 @@ class _Executor:
         self.run_ids: list[uuid.UUID] = []
         self.goodput: list[GoodputRow] = []
         self.events: list[dict[str, Any]] = []
-        self.spot_errors = spot_interruption_errors()
 
     def event(self, kind: str, **data: Any) -> None:
         entry = {"at": _now().isoformat(), "kind": kind, **data}
@@ -247,11 +257,11 @@ class _Executor:
                 repo.record_resource(
                     s,
                     provider=host.provider,
-                    resource_type="instance",
+                    resource_type=RESOURCE_TYPES.get(host.provider, "host"),
                     resource_id=host.host_id,
                     region=host.request.region,
                     experiment_id=self.experiment_id,
-                    tags=host.request.tags,
+                    tags=host.info.get("tags", host.request.tags),
                     created_at=host.launched_at,
                     ttl_at=host.ttl_at,
                 )
@@ -302,9 +312,13 @@ class _Executor:
                 while pending:
                     await self._run_cell(host, pending[0], prev)
                     prev = pending.pop(0)
-            except self.spot_errors as e:
+            except SpotInterrupted as e:
                 self.event(
-                    "spot_interruption", host=host.host_id, cell=pending[0].key, error=str(e)
+                    "spot_interruption",
+                    host=host.host_id,
+                    cell=pending[0].key,
+                    reason_code=e.reason_code,
+                    seconds_since_launch=e.seconds_since_launch,
                 )
                 if interrupted:
                     raise
@@ -602,8 +616,9 @@ class _Executor:
         except BudgetExceeded:
             self._record(**common, status=RUN_ABORTED, started_at=started_at)
             raise
-        except self.spot_errors:
-            self._record(**common, status=RUN_INTERRUPTED, started_at=started_at)
+        except HostLost as e:
+            status = RUN_INTERRUPTED if isinstance(e, SpotInterrupted) else RUN_HOST_LOST
+            self._record(**common, status=status, started_at=started_at, summary={"error": str(e)})
             raise
         except Exception as e:
             log.exception("run %s failed", label)
@@ -708,6 +723,11 @@ async def _execute(
     run_dir = ctx.out_dir / str(experiment_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "spec.json").write_text(json.dumps(exp.model_dump(mode="json"), indent=2))
+    try:
+        provider = ctx.provider or make_provider(exp.provider, prices=ctx.prices, work_dir=run_dir)
+    except Exception as e:
+        _finish(ctx, experiment_id, ExperimentStatus.FAILED, f"provider setup: {e}")
+        raise
     with session_scope(ctx.db_url) as s:
         repo.update_experiment_status(s, experiment_id, ExperimentStatus.RUNNING)
     guard = BudgetGuard(
@@ -724,7 +744,7 @@ async def _execute(
         experiment_id=experiment_id,
         git=git,
         guard=guard,
-        provider=ctx.provider or make_provider(exp.provider),
+        provider=provider,
         plan=plan,
         workloads=workloads,
         repetitions=repetitions,
@@ -982,17 +1002,24 @@ class ReapedResource(BaseModel):
     provider: str
     resource_id: str
     experiment_id: uuid.UUID | None
-    ttl_at: datetime
-    action: str  # terminated | gone | would terminate
+    ttl_at: datetime | None  # None: found by the AWS reaper, never recorded in this DB
+    action: str  # terminated | gone | would terminate | skipped: ...
 
 
 async def reap(
-    db_url: str | None, *, now: datetime | None = None, dry_run: bool = False
+    db_url: str | None,
+    *,
+    now: datetime | None = None,
+    dry_run: bool = False,
+    ec2: Any = None,
 ) -> list[ReapedResource]:
-    """Terminate DB-recorded resources whose TTL passed and mark them reaped.
+    """Terminate resources whose TTL passed and mark the DB rows reaped.
 
     Mock servers die with the process that started them, so an expired mock
     resource not running in this process is already gone and is only marked.
+    With an `ec2` client, `aws_reaper` also terminates every Loom-managed
+    instance past its TTL tag, recorded here or not; an expired recorded
+    instance AWS no longer lists ended itself at its TTL (`self-ttl`).
     """
     from loom_bench.providers.mock import MockProvider
 
@@ -1003,16 +1030,26 @@ async def reap(
             for r in repo.list_expired_resources(s, now)
         ]
     killed = set() if dry_run else set(await MockProvider().reap(now))
+    aws_ids: list[str] = []
+    if ec2 is not None:
+        from loom_bench.providers import aws_reaper
+
+        aws_ids = await asyncio.to_thread(aws_reaper.reap, ec2, now, dry_run=dry_run)
     out: list[ReapedResource] = []
     for provider, resource_id, experiment_id, ttl_at in expired:
-        if dry_run:
+        by = TerminatedBy.REAPER
+        if provider == "aws_ec2" and ec2 is None:
+            action = "skipped: aws not configured"
+        elif dry_run:
             action = "would terminate"
+        elif provider == "aws_ec2":
+            gone = resource_id not in aws_ids
+            action, by = ("gone", TerminatedBy.SELF_TTL) if gone else ("terminated", by)
         else:
             action = "terminated" if resource_id in killed else "gone"
+        if not dry_run and not action.startswith("skipped"):
             with session_scope(db_url) as s:
-                repo.mark_terminated(
-                    s, provider=provider, resource_id=resource_id, by=TerminatedBy.REAPER, at=now
-                )
+                repo.mark_terminated(s, provider=provider, resource_id=resource_id, by=by, at=now)
         out.append(
             ReapedResource(
                 provider=provider,
@@ -1022,4 +1059,16 @@ async def reap(
                 action=action,
             )
         )
+    recorded = {r[1] for r in expired}
+    out += [
+        ReapedResource(
+            provider="aws_ec2",
+            resource_id=rid,
+            experiment_id=None,
+            ttl_at=None,
+            action="would terminate" if dry_run else "terminated",
+        )
+        for rid in aws_ids
+        if rid not in recorded
+    ]
     return out

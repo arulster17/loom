@@ -124,6 +124,10 @@ async def execute_load_job(job: LoadJob) -> LoadJobResult:
         for req in requests:
             req.payload = {**req.payload, **job.extra_body}
     generator = get_load_generator(job.loadgen)
+    if hasattr(generator, "bind"):  # wrapped engine tools need the workload, not just requests
+        from loom_bench.loadgen.external import WorkloadContext
+
+        generator = generator.bind(WorkloadContext.from_job(job))
 
     meta: dict[str, object] = {"requests_prepared": n, "tokenizer": tokenizer.name}
     stop = asyncio.Event()

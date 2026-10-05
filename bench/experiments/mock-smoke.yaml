@@ -23,7 +23,7 @@ workloads:
       values: [10, 20, 40]
       duration_s: 0.6
       warmup_s: 0.1
-      drain_timeout_s: 5
+      drain_timeout_s: 2
       arrival: {kind: poisson}
       scrape_interval_s: 0.1
   - profile: shared-prefix

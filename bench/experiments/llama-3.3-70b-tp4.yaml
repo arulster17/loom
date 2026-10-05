@@ -1,0 +1,40 @@
+# Phase 0 leaderboard #2: Llama 3.3 70B Instruct (BF16, ~141 GB) with TP=4 on one
+# g6e.12xlarge spot host (4x L40S, PCIe), vLLM v0.30.0 at defaults. Fewer points
+# than the Qwen run: the 70B download dominates the cold start and the host is
+# ~4.4x the price. Needs an HF token with the Llama 3.3 license accepted.
+name: llama-3.3-70b-tp4
+description: Llama 3.3 70B BF16, TP=4 on g6e.12xlarge spot, vLLM v0.30.0, rate sweeps at SLO.
+model: llama-3.3-70b-instruct
+provider:
+  kind: aws_ec2
+  region: us-east-1
+  instance_type: g6e.12xlarge
+  market: spot
+  disk_gb: 400
+variants:
+  - name: vllm-tp4
+workloads:
+  - profile: fixed-1k-1k
+    load:
+      mode: open_loop
+      search: {lo: 0.25, hi: 6, rel_tol: 0.15, max_points: 4}
+      duration_s: 180
+      warmup_s: 30
+      drain_timeout_s: 90
+  - profile: shared-prefix
+    load:
+      mode: open_loop
+      search: {lo: 0.5, hi: 16, rel_tol: 0.15, max_points: 4}
+      duration_s: 120
+      warmup_s: 20
+      drain_timeout_s: 30
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+budget:
+  max_spend: "$45"
+  ttl_minutes: 210
+  accrual_interval_s: 15
+seed: 0
