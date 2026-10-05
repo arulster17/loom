@@ -1,4 +1,4 @@
-"""Public results site: snapshot export and static site build.
+"""Public results site: snapshot export, static site build and waitlist bookkeeping.
 
 `export_snapshot` writes the results the site shows to `site/data/` (committed);
 `build_site` renders that snapshot to static HTML in `site/_build/`.
@@ -7,6 +7,7 @@
 from loom_bench.site.build import build_site
 from loom_bench.site.config import SiteConfig, WaitlistConfig, load_site_config
 from loom_bench.site.snapshot import Manifest, Snapshot, export_snapshot, load_snapshot
+from loom_bench.site.waitlist import record_count, waitlist_count
 
 __all__ = [
     "Manifest",
@@ -17,4 +18,6 @@ __all__ = [
     "export_snapshot",
     "load_site_config",
     "load_snapshot",
+    "record_count",
+    "waitlist_count",
 ]
