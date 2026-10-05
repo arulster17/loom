@@ -1,0 +1,673 @@
+"""`aws_ec2` provider: one tagged EC2 GPU VM per host, engine in Docker, driven over SSM.
+
+Safety rails, in the order they act:
+1. the runner's budget guard accrues `Host.hourly_micros` (spot price x a safety
+   multiplier, rounded up) and calls `teardown`;
+2. user-data schedules `shutdown -h` at the TTL and the instance is launched with
+   shutdown behaviour `terminate`, so it ends itself if the runner dies;
+3. the reaper Lambda (`aws_reaper`) terminates anything managed past its TTL;
+4. `bench reap` does the same from a laptop.
+
+Nothing here handles a secret: the HF token is read on the host from Secrets
+Manager by the start script and never passes through SSM parameters, user-data,
+tags or logs.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import math
+import os
+import re
+import uuid
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from fractions import Fraction
+from pathlib import Path
+from typing import Annotated, Any
+
+import boto3  # type: ignore[import-untyped]
+from botocore.exceptions import ClientError  # type: ignore[import-untyped]
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+
+from loom_bench.engines import docker_run_argv
+from loom_bench.jobs import LoadJob, LoadJobResult
+from loom_bench.money import MICROS_PER_USD, Micros
+from loom_bench.prices import PriceBook, load_prices
+from loom_bench.providers import aws_reaper
+from loom_bench.providers.aws_ssm import parse_markers, render_script, run_script, stage_offsets
+from loom_bench.providers.base import Endpoint, EngineLaunch, Host, HostRequest
+from loom_bench.records import Market
+from loom_bench.registry import read_yaml
+
+PROVIDER_NAME = "aws_ec2"
+DLAMI_PARAMETER = (
+    "/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-24.04/latest/ami-id"
+)
+MANAGED_TAG = aws_reaper.MANAGED_TAG
+TTL_TAG = aws_reaper.TTL_TAG
+EXPERIMENT_TAG = "loom:experiment"
+OWNER_TAG = "loom:owner"
+RESERVED_TAGS = frozenset({MANAGED_TAG, TTL_TAG})
+SETTINGS_PATH_ENV = "LOOM_AWS_CONFIG"
+SETTINGS_ENV_PREFIX = "LOOM_AWS_"
+
+ENGINE_CONTAINER = "loom-engine"
+STAGE_FILE = "/var/lib/loom/stages"
+LOG_DIR = "/var/log/loom"
+JOBS_DIR = "/var/lib/loom/jobs"
+CLIENT_ENV_ROOT = "/var/lib/loom/clientenv"
+CLIENT_UID = 10001
+# Weight download allowance on top of the engine's ready timeout (Llama 70B is ~141 GB).
+DOWNLOAD_ALLOWANCE_S = 3600
+# Run-time allowance for a LoadJob on top of its own time budget (wheel install, drain).
+JOB_ALLOWANCE_S = 900
+BOOT_TIMEOUT_S = 900
+SSM_ONLINE_TIMEOUT_S = 900
+CAPACITY_ERRORS = frozenset(
+    {
+        "InsufficientInstanceCapacity",
+        "InsufficientHostCapacity",
+        "InsufficientCapacity",
+        "SpotMaxPriceTooLow",
+        "Unsupported",
+    }
+)
+SPOT_INTERRUPTION_CODES = frozenset(
+    {"Server.SpotInstanceTermination", "Server.SpotInstanceShutdown"}
+)
+GONE_STATES = frozenset({"shutting-down", "terminated", "stopping", "stopped"})
+
+_SAFE_ID = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+SafeId = Annotated[str, StringConstraints(pattern=_SAFE_ID)]
+_SAFE_ID_RE = re.compile(_SAFE_ID)
+
+
+def utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def ttl_tag_value(ttl_at: datetime) -> str:
+    return ttl_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class AwsSettings(BaseModel):
+    """Account-specific settings; `terraform output -raw aws_settings_yaml` fills them."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    region: str = "us-east-1"
+    bucket: Annotated[str, StringConstraints(min_length=3)]
+    instance_profile_name: Annotated[str, StringConstraints(min_length=1)]
+    security_group_id: Annotated[str, StringConstraints(pattern=r"^sg-[0-9a-f]+$")]
+    subnet_ids: Annotated[
+        list[Annotated[str, StringConstraints(pattern=r"^subnet-[0-9a-f]+$")]],
+        Field(min_length=1),
+    ]
+    hf_token_secret_name: Annotated[str, StringConstraints(min_length=1)]
+    owner: SafeId
+    name_prefix: SafeId = "loom-bench"
+    dlami_ssm_parameter: str = DLAMI_PARAMETER
+    root_volume_gb: Annotated[int, Field(ge=50, le=2000)] = 200
+    weights_dir: str = "/opt/dlami/nvme/loom-hf"
+    spot_price_multiplier: Annotated[Decimal, Field(ge=1)] = Decimal("1.25")
+    max_ttl_s: Annotated[int, Field(gt=0)] = 8 * 3600
+    wheel_path: Path | None = None
+    client_image: str = "python:3.12-slim"
+    poll_interval_s: Annotated[float, Field(gt=0)] = 5.0
+    job_timeout_s: Annotated[int, Field(gt=0)] = 7200
+    presign_expiry_s: Annotated[int, Field(gt=0, le=7 * 24 * 3600)] = 6 * 3600
+
+
+def load_aws_settings(
+    path: Path | str | None = None, env: Mapping[str, str] | None = None
+) -> AwsSettings:
+    """Settings from a YAML file (`path` or `$LOOM_AWS_CONFIG`), overridden by
+    `LOOM_AWS_<FIELD>` environment variables (`LOOM_AWS_SUBNET_IDS` is comma-separated)."""
+    env = os.environ if env is None else env
+    path = path or env.get(SETTINGS_PATH_ENV)
+    data: dict[str, Any] = dict(read_yaml(Path(path)) or {}) if path else {}
+    for field in AwsSettings.model_fields:
+        value = env.get(SETTINGS_ENV_PREFIX + field.upper())
+        if value is None:
+            continue
+        data[field] = (
+            [s.strip() for s in value.split(",") if s.strip()] if field == "subnet_ids" else value
+        )
+    return AwsSettings.model_validate(data)
+
+
+class HostLost(RuntimeError):
+    """The instance is gone or going (TTL self-shutdown, manual termination, ...)."""
+
+    def __init__(
+        self,
+        host_id: str,
+        *,
+        state: str,
+        reason_code: str | None,
+        reason_message: str | None,
+        detected_at: datetime,
+        seconds_since_launch: float,
+    ) -> None:
+        super().__init__(
+            f"{host_id} is {state} ({reason_code or 'no reason'}) after {seconds_since_launch:.0f}s"
+        )
+        self.host_id = host_id
+        self.state = state
+        self.reason_code = reason_code
+        self.reason_message = reason_message
+        self.detected_at = detected_at
+        self.seconds_since_launch = seconds_since_launch
+
+
+class SpotInterrupted(HostLost):
+    """EC2 reclaimed the spot instance. The runner records it for the interruption rate."""
+
+
+def host_loss(
+    instance: Mapping[str, Any] | None, host_id: str, launched_at: datetime, now: datetime
+) -> HostLost | None:
+    """The exception describing why `instance` can no longer serve, or None if it can."""
+    elapsed = (now - launched_at).total_seconds()
+    if instance is None:
+        return HostLost(
+            host_id,
+            state="not-found",
+            reason_code=None,
+            reason_message=None,
+            detected_at=now,
+            seconds_since_launch=elapsed,
+        )
+    state = instance["State"]["Name"]
+    if state not in GONE_STATES:
+        return None
+    reason = instance.get("StateReason") or {}
+    code, message = reason.get("Code"), reason.get("Message")
+    cls = SpotInterrupted if code in SPOT_INTERRUPTION_CODES else HostLost
+    return cls(
+        host_id,
+        state=state,
+        reason_code=code,
+        reason_message=message,
+        detected_at=now,
+        seconds_since_launch=elapsed,
+    )
+
+
+def spot_hourly_micros(spot_price_usd: str, multiplier: Decimal) -> Micros:
+    """Budget accrual rate for a spot price: price x multiplier, rounded up to a micro."""
+    return math.ceil(Fraction(Decimal(spot_price_usd)) * MICROS_PER_USD * Fraction(multiplier))
+
+
+def _tag_list(tags: Mapping[str, str]) -> list[dict[str, str]]:
+    return [{"Key": k, "Value": v} for k, v in tags.items()]
+
+
+def _error_code(e: ClientError) -> str:
+    return str(e.response.get("Error", {}).get("Code", ""))
+
+
+class AwsEc2Provider:
+    name = PROVIDER_NAME
+
+    def __init__(
+        self,
+        settings: AwsSettings,
+        *,
+        prices: PriceBook | None = None,
+        ec2: Any = None,
+        ssm: Any = None,
+        s3: Any = None,
+        wheel_path: Path | None = None,
+        clock: Callable[[], datetime] = utcnow,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self.settings = settings
+        self.prices = prices if prices is not None else load_prices()
+        self.ec2 = ec2 or boto3.client("ec2", region_name=settings.region)
+        self.ssm = ssm or boto3.client("ssm", region_name=settings.region)
+        self.s3 = s3 or boto3.client("s3", region_name=settings.region)
+        self.wheel_path = wheel_path or settings.wheel_path
+        self.clock = clock
+        self.sleep = sleep
+
+    # -- provisioning -------------------------------------------------------
+
+    def _validate_request(self, req: HostRequest) -> str:
+        if req.cloud != "aws":
+            raise ValueError(f"aws_ec2 needs cloud 'aws', got {req.cloud!r}")
+        if req.region not in (None, self.settings.region):
+            raise ValueError(
+                f"request region {req.region} != settings region {self.settings.region}"
+            )
+        if req.market not in (Market.SPOT, Market.ON_DEMAND):
+            raise ValueError(f"aws_ec2 supports spot and on_demand, not {req.market}")
+        if not req.instance_type:
+            raise ValueError("instance_type is required")
+        if not 0 < req.ttl_s <= self.settings.max_ttl_s:
+            raise ValueError(f"ttl_s must be in (0, {self.settings.max_ttl_s}], got {req.ttl_s}")
+        experiment = req.tags.get(EXPERIMENT_TAG)
+        if not experiment or not _SAFE_ID_RE.match(experiment):
+            raise ValueError(f"tags[{EXPERIMENT_TAG!r}] must match {_SAFE_ID}")
+        reserved = RESERVED_TAGS & req.tags.keys()
+        if reserved:
+            raise ValueError(f"tags {sorted(reserved)} are set by the provider")
+        return experiment
+
+    def _on_demand_micros(self, instance_type: str) -> Micros:
+        quote = self.prices.instance_price(
+            "aws", self.settings.region, instance_type, Market.ON_DEMAND, allow_unverified=True
+        )
+        return quote.per_hour
+
+    def _candidates(self, req: HostRequest, now: datetime) -> list[dict[str, Any]]:
+        """Subnets to try in order, each with its AZ and accrual price.
+
+        On-demand keeps the configured order at the prices.yaml rate. Spot tries the
+        cheapest AZ first at its current spot price x multiplier; an AZ with no spot
+        price is tried last, accrued at the on-demand rate.
+        """
+        assert req.instance_type is not None
+        on_demand = self._on_demand_micros(req.instance_type)
+        subnets = self.ec2.describe_subnets(SubnetIds=self.settings.subnet_ids)["Subnets"]
+        az_of = {s["SubnetId"]: s["AvailabilityZone"] for s in subnets}
+        ordered = [sid for sid in self.settings.subnet_ids if sid in az_of]
+        if req.market is Market.ON_DEMAND:
+            return [
+                {
+                    "subnet_id": sid,
+                    "az": az_of[sid],
+                    "hourly_micros": on_demand,
+                    "price_basis": {"source": "prices.yaml", "market": "on_demand"},
+                }
+                for sid in ordered
+            ]
+        history = self.ec2.describe_spot_price_history(
+            InstanceTypes=[req.instance_type],
+            ProductDescriptions=["Linux/UNIX"],
+            StartTime=now,
+        )["SpotPriceHistory"]
+        latest: dict[str, dict[str, Any]] = {}
+        for rec in history:
+            az = rec["AvailabilityZone"]
+            if az not in latest or rec["Timestamp"] > latest[az]["Timestamp"]:
+                latest[az] = rec
+        multiplier = self.settings.spot_price_multiplier
+        out = []
+        for sid in ordered:
+            rec = latest.get(az_of[sid])
+            if rec is None:
+                out.append(
+                    {
+                        "subnet_id": sid,
+                        "az": az_of[sid],
+                        "hourly_micros": on_demand,
+                        "price_basis": {"source": "prices.yaml", "market": "on_demand_fallback"},
+                    }
+                )
+                continue
+            out.append(
+                {
+                    "subnet_id": sid,
+                    "az": az_of[sid],
+                    "hourly_micros": spot_hourly_micros(rec["SpotPrice"], multiplier),
+                    "price_basis": {
+                        "source": "describe_spot_price_history",
+                        "market": "spot",
+                        "spot_price_usd": rec["SpotPrice"],
+                        "price_timestamp": rec["Timestamp"].isoformat(),
+                        "multiplier": str(multiplier),
+                    },
+                }
+            )
+        priced = [c for c in out if c["price_basis"]["market"] == "spot"]
+        unpriced = [c for c in out if c["price_basis"]["market"] != "spot"]
+        return sorted(priced, key=lambda c: c["hourly_micros"]) + unpriced
+
+    def _ami(self) -> tuple[str, str]:
+        ami = self.ssm.get_parameter(Name=self.settings.dlami_ssm_parameter)["Parameter"]["Value"]
+        image = self.ec2.describe_images(ImageIds=[ami])["Images"][0]
+        return ami, image["RootDeviceName"]
+
+    def user_data(self, ttl_at: datetime) -> str:
+        return render_script(
+            "user_data",
+            TTL_EPOCH=int(ttl_at.timestamp()),
+            STAGE_FILE=STAGE_FILE,
+            CLIENT_UID=CLIENT_UID,
+        )
+
+    def _tags(self, req: HostRequest, experiment: str, ttl_at: datetime) -> dict[str, str]:
+        return {
+            "Name": f"{self.settings.name_prefix}-{experiment}",
+            OWNER_TAG: self.settings.owner,
+            **req.tags,
+            EXPERIMENT_TAG: experiment,
+            MANAGED_TAG: "true",
+            TTL_TAG: ttl_tag_value(ttl_at),
+        }
+
+    def _run_instances_kwargs(
+        self,
+        req: HostRequest,
+        *,
+        ami: str,
+        root_device: str,
+        subnet_id: str,
+        tags: dict[str, str],
+        ttl_at: datetime,
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "ImageId": ami,
+            "InstanceType": req.instance_type,
+            "MinCount": 1,
+            "MaxCount": 1,
+            "SubnetId": subnet_id,
+            "SecurityGroupIds": [self.settings.security_group_id],
+            "IamInstanceProfile": {"Name": self.settings.instance_profile_name},
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": {
+                "HttpTokens": "required",
+                "HttpPutResponseHopLimit": 1,
+                "HttpEndpoint": "enabled",
+                "InstanceMetadataTags": "disabled",
+            },
+            "BlockDeviceMappings": [
+                {
+                    "DeviceName": root_device,
+                    "Ebs": {
+                        "VolumeSize": max(req.disk_gb, self.settings.root_volume_gb),
+                        "VolumeType": "gp3",
+                        "DeleteOnTermination": True,
+                        "Encrypted": True,
+                    },
+                }
+            ],
+            "TagSpecifications": [
+                {"ResourceType": "instance", "Tags": _tag_list(tags)},
+                {"ResourceType": "volume", "Tags": _tag_list(tags)},
+            ],
+            "UserData": self.user_data(ttl_at),
+            "ClientToken": uuid.uuid4().hex,
+        }
+        if req.market is Market.SPOT:
+            kwargs["InstanceMarketOptions"] = {
+                "MarketType": "spot",
+                "SpotOptions": {
+                    "SpotInstanceType": "one-time",
+                    "InstanceInterruptionBehavior": "terminate",
+                },
+            }
+        return kwargs
+
+    def _provision(self, req: HostRequest) -> Host:
+        experiment = self._validate_request(req)
+        now = self.clock()
+        ttl_at = now + timedelta(seconds=req.ttl_s)
+        tags = self._tags(req, experiment, ttl_at)
+        ami, root_device = self._ami()
+        candidates = self._candidates(req, now)
+        if not candidates:
+            raise ValueError("none of the configured subnets exist")
+        errors: list[str] = []
+        for cand in candidates:
+            kwargs = self._run_instances_kwargs(
+                req,
+                ami=ami,
+                root_device=root_device,
+                subnet_id=cand["subnet_id"],
+                tags=tags,
+                ttl_at=ttl_at,
+            )
+            try:
+                resp = self.ec2.run_instances(**kwargs)
+            except ClientError as e:
+                if _error_code(e) not in CAPACITY_ERRORS:
+                    raise
+                errors.append(f"{cand['az']}: {_error_code(e)}")
+                continue
+            inst = resp["Instances"][0]
+            return Host(
+                provider=PROVIDER_NAME,
+                host_id=inst["InstanceId"],
+                request=req,
+                hourly_micros=cand["hourly_micros"],
+                launched_at=now,
+                ttl_at=ttl_at,
+                info={
+                    "region": self.settings.region,
+                    "az": cand["az"],
+                    "subnet_id": cand["subnet_id"],
+                    "ami": ami,
+                    "instance_type": req.instance_type,
+                    "market": req.market.value,
+                    "price_basis": cand["price_basis"],
+                    "tags": tags,
+                },
+            )
+        raise RuntimeError(f"no capacity for {req.instance_type}: {'; '.join(errors)}")
+
+    async def provision(self, req: HostRequest) -> Host:
+        return await asyncio.to_thread(self._provision, req)
+
+    # -- host state -----------------------------------------------------------
+
+    def _describe(self, host_id: str) -> dict[str, Any] | None:
+        try:
+            resp = self.ec2.describe_instances(InstanceIds=[host_id])
+        except ClientError as e:
+            if _error_code(e) == "InvalidInstanceID.NotFound":
+                return None
+            raise
+        for reservation in resp["Reservations"]:
+            for inst in reservation["Instances"]:
+                return dict(inst)
+        return None
+
+    async def check_host(self, host: Host) -> dict[str, Any]:
+        """Describe the instance; raise `SpotInterrupted`/`HostLost` if it is gone."""
+        inst = await asyncio.to_thread(self._describe, host.host_id)
+        lost = host_loss(inst, host.host_id, host.launched_at, self.clock())
+        if lost is not None:
+            raise lost
+        assert inst is not None
+        return inst
+
+    async def _wait_until(
+        self, host: Host, ready: Callable[[], Awaitable[bool]], what: str, timeout_s: float
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while not await ready():
+            if loop.time() > deadline:
+                raise TimeoutError(f"{host.host_id}: {what} not reached in {timeout_s:.0f}s")
+            await self.sleep(self.settings.poll_interval_s)
+
+    async def _running(self, host: Host) -> bool:
+        inst = await self.check_host(host)
+        return bool(inst["State"]["Name"] == "running")
+
+    async def _ssm_online(self, host: Host) -> bool:
+        await self.check_host(host)
+        resp = await asyncio.to_thread(
+            self.ssm.describe_instance_information,
+            Filters=[{"Key": "InstanceIds", "Values": [host.host_id]}],
+        )
+        return any(i.get("PingStatus") == "Online" for i in resp["InstanceInformationList"])
+
+    async def _run(self, host: Host, script: str, *, timeout_s: int, comment: str) -> str:
+        async def check() -> None:
+            await self.check_host(host)
+
+        experiment = host.request.tags[EXPERIMENT_TAG]
+        return await run_script(
+            self.ssm,
+            host.host_id,
+            script,
+            timeout_s=timeout_s,
+            comment=comment,
+            poll_s=self.settings.poll_interval_s,
+            check_host=check,
+            output_bucket=self.settings.bucket,
+            output_prefix=f"ssm/{experiment}/{host.host_id}",
+            sleep=self.sleep,
+        )
+
+    # -- engine -----------------------------------------------------------------
+
+    def engine_script(self, launch: EngineLaunch, *, warm: bool) -> str:
+        cmd = docker_run_argv(
+            launch, weights_dir=self.settings.weights_dir, container_name=ENGINE_CONTAINER
+        )
+        return render_script(
+            "start_engine",
+            WARM=int(warm),
+            REGION=self.settings.region,
+            HF_SECRET_ID=self.settings.hf_token_secret_name,
+            IMAGE=launch.image,
+            MODEL_REPO=launch.model_repo,
+            MODEL_REVISION=launch.model_revision,
+            WEIGHTS_DIR=self.settings.weights_dir,
+            CONTAINER=ENGINE_CONTAINER,
+            PORT=launch.port,
+            SERVED_MODEL=launch.served_model,
+            READY_TIMEOUT_S=math.ceil(launch.ready_timeout_s),
+            LOG_DIR=LOG_DIR,
+            STAGE_FILE=STAGE_FILE,
+            ENGINE_ENV=[f"{k}={v}" for k, v in sorted(launch.env.items())],
+            ENGINE_CMD=cmd,
+        )
+
+    async def start_engine(self, host: Host, launch: EngineLaunch, *, warm: bool) -> Endpoint:
+        t0 = host.launched_at if not warm else self.clock()
+        controller_stages: dict[str, float] = {}
+        if not warm:
+            await self._wait_until(host, lambda: self._running(host), "running", BOOT_TIMEOUT_S)
+            controller_stages["instance_running"] = (self.clock() - t0).total_seconds()
+            await self._wait_until(
+                host, lambda: self._ssm_online(host), "SSM online", SSM_ONLINE_TIMEOUT_S
+            )
+            controller_stages["ssm_online"] = (self.clock() - t0).total_seconds()
+        timeout = math.ceil(launch.ready_timeout_s) + (0 if warm else DOWNLOAD_ALLOWANCE_S)
+        stdout = await self._run(
+            host,
+            self.engine_script(launch, warm=warm),
+            timeout_s=timeout,
+            comment=f"loom start {launch.engine} {launch.served_model}",
+        )
+        host_stages, system = parse_markers(stdout)
+        stages = {k: round(v, 3) for k, v in controller_stages.items()}
+        stages.update(stage_offsets(host_stages, t0.timestamp()))
+        info: dict[str, Any] = {
+            **system,
+            "instance_type": host.info.get("instance_type"),
+            "az": host.info.get("az"),
+            "ami": host.info.get("ami"),
+        }
+        if "gpus" in info:
+            info["gpus"] = [g.strip() for g in str(info["gpus"]).split(",") if g.strip()]
+        base = f"http://127.0.0.1:{launch.port}"
+        return Endpoint(
+            base_url=base,
+            metrics_url=f"{base}/metrics",
+            engine=launch.engine,
+            served_model=launch.served_model,
+            start_stages=stages,
+            warm=warm,
+            system=info,
+        )
+
+    async def stop_engine(self, host: Host) -> None:
+        await self._run(
+            host,
+            render_script("stop_engine", CONTAINER=ENGINE_CONTAINER),
+            timeout_s=300,
+            comment="loom stop engine",
+        )
+
+    # -- jobs -------------------------------------------------------------------
+
+    def _job_timeout_s(self, job: LoadJob) -> int:
+        if job.duration_s is None:
+            return self.settings.job_timeout_s
+        budget = job.duration_s + job.warmup_s + job.request_timeout_s + job.drain_timeout_s
+        return math.ceil(budget) + JOB_ALLOWANCE_S
+
+    def _presign(self, method: str, key: str) -> str:
+        return str(
+            self.s3.generate_presigned_url(
+                method,
+                Params={"Bucket": self.settings.bucket, "Key": key},
+                ExpiresIn=self.settings.presign_expiry_s,
+            )
+        )
+
+    def job_prefix(self, host: Host, run_id: str) -> str:
+        if not _SAFE_ID_RE.match(run_id):
+            raise ValueError(f"run_id must match {_SAFE_ID}")
+        return f"runs/{host.request.tags[EXPERIMENT_TAG]}/{run_id}/"
+
+    def _stage_job(self, host: Host, job: LoadJob) -> tuple[str, str]:
+        """Upload job.json and the wheel; return (key prefix, rendered script)."""
+        if self.wheel_path is None:
+            raise ValueError("no bench wheel: set AwsSettings.wheel_path or pass wheel_path")
+        wheel = Path(self.wheel_path)
+        prefix = self.job_prefix(host, job.run_id)
+        self.s3.put_object(
+            Bucket=self.settings.bucket,
+            Key=prefix + "job.json",
+            Body=job.model_dump_json().encode(),
+            ContentType="application/json",
+        )
+        self.s3.upload_file(str(wheel), self.settings.bucket, prefix + wheel.name)
+        script = render_script(
+            "run_job",
+            WORK_DIR=f"{JOBS_DIR}/{job.run_id}",
+            ENV_ROOT=CLIENT_ENV_ROOT,
+            CLIENT_IMAGE=self.settings.client_image,
+            CLIENT_UID=CLIENT_UID,
+            JOB_URL=self._presign("get_object", prefix + "job.json"),
+            WHEEL_URL=self._presign("get_object", prefix + wheel.name),
+            WHEEL_NAME=wheel.name,
+            WHEEL_SHA256=hashlib.sha256(wheel.read_bytes()).hexdigest(),
+            RESULT_URL=self._presign("put_object", prefix + "result.json"),
+            GPU_CSV_URL=self._presign("put_object", prefix + "gpu.csv") if job.sample_gpu else "",
+            SAMPLE_GPU=int(job.sample_gpu),
+        )
+        return prefix, script
+
+    def _fetch_result(self, prefix: str, job: LoadJob) -> LoadJobResult:
+        body = self.s3.get_object(Bucket=self.settings.bucket, Key=prefix + "result.json")["Body"]
+        result = LoadJobResult.model_validate_json(body.read())
+        if job.sample_gpu:
+            csv = self.s3.get_object(Bucket=self.settings.bucket, Key=prefix + "gpu.csv")["Body"]
+            result = result.model_copy(update={"nvidia_smi_csv": csv.read().decode()})
+        return result
+
+    async def run_job(self, host: Host, job: LoadJob) -> LoadJobResult:
+        prefix, script = await asyncio.to_thread(self._stage_job, host, job)
+        await self._run(
+            host,
+            script,
+            timeout_s=self._job_timeout_s(job),
+            comment=f"loom job {job.run_id}",
+        )
+        return await asyncio.to_thread(self._fetch_result, prefix, job)
+
+    # -- teardown ------------------------------------------------------------------
+
+    def _terminate(self, host_id: str) -> None:
+        try:
+            self.ec2.terminate_instances(InstanceIds=[host_id])
+        except ClientError as e:
+            if _error_code(e) != "InvalidInstanceID.NotFound":
+                raise
+
+    async def teardown(self, host: Host) -> None:
+        await asyncio.to_thread(self._terminate, host.host_id)
+
+    async def reap(self, now: datetime) -> list[str]:
+        return await asyncio.to_thread(aws_reaper.reap, self.ec2, now)

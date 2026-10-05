@@ -114,7 +114,7 @@ def reap(
 
 
 def lambda_handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]:
-    import boto3
+    import boto3  # type: ignore[import-untyped]
 
     logging.getLogger().setLevel(logging.INFO)
     event = event or {}

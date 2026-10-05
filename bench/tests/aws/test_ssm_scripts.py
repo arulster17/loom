@@ -1,0 +1,216 @@
+import re
+import shlex
+import shutil
+import subprocess
+from typing import Any
+
+import pytest
+
+from loom_bench.providers.aws_ssm import (
+    SsmCommandError,
+    parse_markers,
+    render_script,
+    required_vars,
+    run_script,
+    ssm_commands,
+    stage_offsets,
+)
+
+from .fakes import FakeSsm, no_sleep
+
+BASH = shutil.which("bash")
+needs_bash = pytest.mark.skipif(BASH is None, reason="bash not installed")
+
+START_VARS: dict[str, Any] = {
+    "WARM": 0,
+    "REGION": "us-east-1",
+    "HF_SECRET_ID": "loom/hf-token",
+    "IMAGE": "vllm/vllm-openai@sha256:" + "a" * 64,
+    "MODEL_REPO": "Qwen/Qwen3-8B",
+    "MODEL_REVISION": "b" * 40,
+    "WEIGHTS_DIR": "/opt/dlami/nvme/loom-hf",
+    "CONTAINER": "loom-engine",
+    "PORT": 8000,
+    "SERVED_MODEL": "qwen3-8b",
+    "READY_TIMEOUT_S": 1800,
+    "LOG_DIR": "/var/log/loom",
+    "STAGE_FILE": "/var/lib/loom/stages",
+    "ENGINE_ENV": ["VLLM_LOGGING_LEVEL=INFO"],
+    "ENGINE_CMD": ["docker", "run", "--name", "loom-engine", "img", "--x", "a b"],
+}
+JOB_VARS: dict[str, Any] = {
+    "WORK_DIR": "/var/lib/loom/jobs/r1",
+    "ENV_ROOT": "/var/lib/loom/clientenv",
+    "CLIENT_IMAGE": "python:3.12-slim",
+    "CLIENT_UID": 10001,
+    "JOB_URL": "https://b.s3.amazonaws.com/runs/e/r1/job.json?X-Amz-Signature=1&b=2",
+    "WHEEL_URL": "https://b.s3.amazonaws.com/w.whl?sig=1",
+    "WHEEL_NAME": "loom_bench-0.1.0-py3-none-any.whl",
+    "WHEEL_SHA256": "c" * 64,
+    "RESULT_URL": "https://b.s3.amazonaws.com/result.json?sig=2",
+    "GPU_CSV_URL": "",
+    "SAMPLE_GPU": 0,
+}
+RENDERED = {
+    "start_engine": START_VARS,
+    "run_job": JOB_VARS,
+    "stop_engine": {"CONTAINER": "loom-engine"},
+    "user_data": {
+        "TTL_EPOCH": 1_790_000_000,
+        "STAGE_FILE": "/var/lib/loom/stages",
+        "CLIENT_UID": 1,
+    },
+}
+
+
+def test_required_vars_match_templates() -> None:
+    assert required_vars("stop_engine") == {"CONTAINER"}
+    assert required_vars("start_engine") == set(START_VARS)
+
+
+def test_render_rejects_missing_and_extra() -> None:
+    with pytest.raises(ValueError, match="missing \\['CONTAINER'\\]"):
+        render_script("stop_engine")
+    with pytest.raises(ValueError, match="unexpected \\['EXTRA'\\]"):
+        render_script("stop_engine", CONTAINER="c", EXTRA="x")
+    with pytest.raises(TypeError):
+        render_script("stop_engine", CONTAINER=True)
+
+
+@needs_bash
+@pytest.mark.parametrize("name", sorted(RENDERED))
+def test_rendered_scripts_are_valid_bash(name: str) -> None:
+    script = render_script(name, **RENDERED[name])
+    assert script.startswith("#!/bin/bash\nset -euo pipefail\n")
+    assert not re.search(r"^\s*set -[a-z]*x|xtrace", script, re.MULTILINE)
+    subprocess.run([BASH, "-n"], input=script, text=True, check=True)
+
+
+@needs_bash
+def test_values_are_quoted_not_interpreted() -> None:
+    hostile = 'x\'; echo pwned; $(id) `id` "q"'
+    script = render_script(
+        "start_engine", **{**START_VARS, "CONTAINER": hostile, "ENGINE_CMD": [hostile, "b c"]}
+    )
+    header = script.split("\n\n", 1)[0]
+    out = subprocess.run(
+        [BASH, "-c", header + '\nprintf "%s|" "$CONTAINER" "${ENGINE_CMD[@]}"'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert out == f"{hostile}|{hostile}|b c|"
+    assert f"CONTAINER={shlex.quote(hostile)}" in script
+
+
+def test_start_script_never_holds_a_token_value() -> None:
+    script = render_script("start_engine", **START_VARS)
+    assert "HF_SECRET_ID=loom/hf-token" in script
+    assert 'HF_TOKEN="$(aws secretsmanager get-secret-value' in script
+    assert "--env HF_TOKEN " in script
+    assert "unset HF_TOKEN" in script
+
+
+def test_job_script_gpu_sampling_and_isolation() -> None:
+    script = render_script("run_job", **{**JOB_VARS, "SAMPLE_GPU": 1, "GPU_CSV_URL": "https://g"})
+    assert (
+        "nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used,memory.total,"
+        "power.draw \\\n    --format=csv,noheader,nounits -lms 1000"
+    ) in script
+    assert '--network host --user "$CLIENT_UID:$CLIENT_UID"' in script
+    assert "/env/bin/bench job run --in /work/job.json --out /work/result.json" in script
+    assert "JOB_URL='https://b.s3.amazonaws.com/runs/e/r1/job.json?X-Amz-Signature=1&b=2'" in script
+
+
+def test_user_data_arms_ttl_shutdown() -> None:
+    script = render_script("user_data", **RENDERED["user_data"])
+    assert "TTL_EPOCH=1790000000" in script
+    assert 'shutdown -h "+$remaining_min"' in script
+    assert "iptables -I OUTPUT -d 169.254.169.254 -m owner --uid-owner" in script
+
+
+@needs_bash
+def test_ssm_commands_run_under_bash_and_propagate_exit(tmp_path: Any) -> None:
+    script = "#!/bin/bash\nset -euo pipefail\narr=(a 'b c')\necho \"${arr[1]}\"\nexit 3\n"
+    wrapper = "\n".join(ssm_commands(script))
+    proc = subprocess.run(["/bin/sh", "-c", wrapper], capture_output=True, text=True)
+    assert proc.returncode == 3
+    assert proc.stdout == "b c\n"
+
+
+def test_parse_markers_and_offsets() -> None:
+    stdout = "\n".join(
+        [
+            "loom-stage user_data_started 100.5",
+            "noise line",
+            "loom-stage image_pulled 160.25",
+            "loom-stage bad notanumber",
+            "loom-sys gpus NVIDIA L40S,NVIDIA L40S",
+            "loom-sys driver 595.91.07",
+            "loom-stage image_pulled 161.0",
+        ]
+    )
+    stages, system = parse_markers(stdout)
+    assert stages == {"user_data_started": 100.5, "image_pulled": 161.0}
+    assert system == {"gpus": "NVIDIA L40S,NVIDIA L40S", "driver": "595.91.07"}
+    assert stage_offsets(stages, 100.0) == {"user_data_started": 0.5, "image_pulled": 61.0}
+
+
+async def _ok() -> None:
+    return None
+
+
+async def test_run_script_polls_until_success() -> None:
+    ssm = FakeSsm(
+        lambda s: [
+            {"Status": "Pending"},
+            {"Status": "InProgress"},
+            {"Status": "Success", "StandardOutputContent": "loom-stage x 1.0\n"},
+        ]
+    )
+    checks = 0
+
+    async def check() -> None:
+        nonlocal checks
+        checks += 1
+
+    out = await run_script(
+        ssm,
+        "i-1",
+        "#!/bin/bash\necho hi\n",
+        timeout_s=60,
+        comment="c" * 200,
+        poll_s=0,
+        check_host=check,
+        output_bucket="bkt",
+        output_prefix="ssm/e/i-1",
+        sleep=no_sleep,
+    )
+    assert out == "loom-stage x 1.0\n"
+    sent = ssm.sent[0]
+    assert sent["DocumentName"] == "AWS-RunShellScript"
+    assert sent["Parameters"]["executionTimeout"] == ["60"]
+    assert len(sent["Comment"]) == 100
+    assert sent["OutputS3BucketName"] == "bkt"
+    assert checks == 3
+
+
+async def test_run_script_failure_raises_with_stderr() -> None:
+    ssm = FakeSsm(lambda s: [{"Status": "Failed", "StandardErrorContent": "loom-error boom"}])
+    with pytest.raises(SsmCommandError, match="boom") as e:
+        await run_script(
+            ssm, "i-1", "x", timeout_s=5, comment="c", poll_s=0, check_host=_ok, sleep=no_sleep
+        )
+    assert e.value.status == "Failed"
+
+
+async def test_run_script_host_check_wins_over_command_failure() -> None:
+    ssm = FakeSsm(lambda s: [{"Status": "Failed"}])
+
+    async def gone() -> None:
+        raise RuntimeError("host gone")
+
+    with pytest.raises(RuntimeError, match="host gone"):
+        await run_script(
+            ssm, "i-1", "x", timeout_s=5, comment="c", poll_s=0, check_host=gone, sleep=no_sleep
+        )
