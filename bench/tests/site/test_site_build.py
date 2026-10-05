@@ -7,18 +7,12 @@ import pytest
 import yaml
 from site_helpers import REPO_URL, export, is_external, parse, resolve
 
-from loom_bench.registry import REPO_ROOT
+from loom_bench.registry import REPO_ROOT, load_registry
 from loom_bench.site import SiteConfig, WaitlistConfig, build_site, load_snapshot
 from loom_bench.site.build import stylesheet
 
-PAGES = {
-    "index.html",
-    "methodology.html",
-    "pricing.html",
-    "harness.html",
-    "models/qwen3-8b.html",
-    "models/llama-3.3-70b-instruct.html",
-}
+MODEL_PAGES = [f"models/{m.id}.html" for m in load_registry().models]  # one per model
+PAGES = {"index.html", "methodology.html", "pricing.html", "harness.html", *MODEL_PAGES}
 PENDING = "No published results yet — first runs pending."
 WAITLIST_ON = SiteConfig(
     waitlist=WaitlistConfig(
@@ -102,7 +96,7 @@ def test_empty_snapshot_renders_honest_empty_state(empty_site):
     assert "Public list prices only." in pricing
     assert "Not benchmarked yet" in pricing
     assert "https://www.together.ai/pricing" in pricing
-    for page in ("index.html", "models/qwen3-8b.html", "models/llama-3.3-70b-instruct.html"):
+    for page in ("index.html", *MODEL_PAGES):
         assert re.search(r"\$\d", _text(empty_site, page)) is None, page  # no money figures
 
 

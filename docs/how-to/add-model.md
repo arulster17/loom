@@ -1,9 +1,8 @@
 # How to add a model
 
 Adding a model is a configuration change: one entry in `config/models.yaml`, validated by
-`loom_bench.registry` on every load. No code changes, as long as the engine (vLLM or
-SGLang) and the GPU type are already supported. One test pins the shipped model list and
-must be updated with it.
+`loom_bench.registry` on every load. No code or test changes, as long as the engine
+(vLLM or SGLang) and the GPU type are already supported.
 
 ## 1. Collect the facts
 
@@ -115,10 +114,17 @@ review:
 
 A new revision needs a new review.
 
-## 4. Update the pinned test
+## 4. What the tests check for you
 
-`bench/tests/config/test_registry.py::test_real_registry_loads` asserts the exact list of
-shipped model ids. Add the new id there (and any field assertions you want to keep).
+No test lists the shipped models. The suite checks properties of whatever
+`config/models.yaml` holds, so a new entry is covered as soon as it is added:
+
+- `test_registry.py::test_every_shipped_model_loads_and_can_be_launched`: it loads, and
+  `render_launch` builds its engine command (repo, revision, image, GPUs);
+- `test_prices.py::test_every_registry_instance_type_has_a_price`: its instance type has
+  a verified AWS price with the right GPU and count;
+- the site tests expect one page per registry model, so re-export the committed snapshot
+  (step 6).
 
 ## 5. Prove it
 

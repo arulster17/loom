@@ -97,10 +97,12 @@ Every variant needs the override (a variant without it is refused with
 `g6.xlarge has L4, spec wants L40S`). To make it the model's default, change
 `hardware` in `config/models.yaml` instead.
 
-## 6. Update the pinned test and prove it
+## 6. Prove it
 
-`bench/tests/config/test_prices.py::test_real_prices_load` asserts the number of
-us-east-1 instances (12 today); update it.
+No test counts the price book's entries.
+`test_prices.py::test_every_shipped_price_loads_and_is_consistent` checks every entry,
+the new one included: it loads, `last_checked` is not after the book's, spot and
+committed prices are below on-demand, and every AWS region has a verified storage price.
 
 ```bash
 uv run python -c "

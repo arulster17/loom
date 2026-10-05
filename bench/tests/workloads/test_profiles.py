@@ -9,26 +9,17 @@ from loom_bench.workloads.profiles import (
     TraceProfile,
 )
 
-SHIPPED = {
-    "fixed-128-128",
-    "fixed-1k-1k",
-    "fixed-8k-1k",
-    "fixed-32k-1k",
-    "chat-sharegpt",
-    "shared-prefix",
-    "long-context-needle",
-    "code-completion",
-    "long-generation",
-    "trace-azure-code",
-}
 
-
-def test_all_shipped_profiles_load_and_validate():
-    assert set(list_profiles()) == SHIPPED
-    for name in SHIPPED:
+def test_every_shipped_profile_loads_and_validates():
+    """Properties of whatever bench/workloads/ ships, so adding a profile is config only."""
+    names = list_profiles()
+    assert names
+    for name in names:
         p = load_profile(name)
-        assert p.name == name
+        assert p.name == name  # the file name is the profile name experiments use
         assert p.description and p.content in ("synthetic", "realistic")
+        if p.content == "realistic" or hasattr(p, "path"):  # reads a dataset or trace file
+            assert p.dataset is not None and p.dataset.source and p.dataset.license, name
 
 
 def test_dataset_backed_profiles_carry_provenance_and_license():

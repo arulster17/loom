@@ -6,6 +6,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from loom_bench.engines import render_launch
 from loom_bench.registry import DEFAULT_MODELS_YAML, Registry, load_registry, read_yaml
 
 DIGEST = "sha256:" + "a" * 64
@@ -51,22 +52,17 @@ def validate(*models: dict[str, Any]) -> Registry:
 PRICING = {"input_per_mtok": 100_000, "output_per_mtok": 300_000, "cached_input_per_mtok": 50_000}
 
 
-def test_real_registry_loads():
+def test_every_shipped_model_loads_and_can_be_launched():
+    """Properties of whatever config/models.yaml ships, so adding a model is config only."""
     reg = load_registry()
-    assert [m.id for m in reg.models] == ["qwen3-8b", "llama-3.3-70b-instruct"]
-    assert all(m.hf.quant_method is None and m.quantization == "none" for m in reg.models)
-
-    qwen = reg.get("qwen3-8b")
-    assert qwen.hf.revision == "b968826d9c46dd6066d109eabc6255188de91218"
-    assert qwen.engine.chat_template_kwargs == {"enable_thinking": False}
-    assert qwen.hardware.instance_types.aws == "g6e.xlarge"
-    assert qwen.capabilities.reasoning
-
-    llama = reg.get("llama-3.3-70b-instruct")
-    assert llama.hf.gated == "manual"
-    assert (llama.hardware.gpus_per_replica, llama.parallelism.tp) == (4, 4)
-    assert llama.max_context == 32768
-    assert all(m.pricing is None and m.status == "preview" for m in reg.models)
+    assert reg.models
+    for m in reg.models:
+        assert reg.get(m.id) is m
+        assert m.hardware.gpus_per_replica == m.parallelism.tp * m.parallelism.pp
+        launch = render_launch(m)
+        assert (launch.model_repo, launch.model_revision) == (m.hf.repo, m.hf.revision)
+        assert launch.served_model == m.id and launch.image == m.engine.image
+        assert launch.gpus == m.hardware.gpus_per_replica
 
 
 def test_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

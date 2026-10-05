@@ -76,10 +76,13 @@ is published.
 - `bench plan` resolves every workload of an experiment and fails on a missing or
   invalid profile.
 
-## 4. Update the pinned test
+## 4. What the tests check for you
 
-`bench/tests/workloads/test_profiles.py` lists every shipped profile in `SHIPPED`
-and asserts the directory matches it. Add the new name.
+No test lists the shipped profiles:
+`test_profiles.py::test_every_shipped_profile_loads_and_validates` loads every file in
+`bench/workloads/` and checks that its name matches the file, it has a description and a
+content kind, and a profile that reads a dataset or trace records the dataset's source
+and license. A new file is covered without touching a test.
 
 ## 5. Prove it
 

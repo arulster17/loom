@@ -7,6 +7,7 @@ from site_helpers import EXPORT_GIT, GENERATED_AT, SLO, SPEC, export, make_runs,
 from loom_bench.cost import CostAllocation
 from loom_bench.prices import load_prices
 from loom_bench.provenance import GitInfo, config_hash
+from loom_bench.registry import load_registry
 from loom_bench.report import analyze_runs, default_price_resolver, with_quality
 from loom_bench.site import load_snapshot
 from loom_bench.site.snapshot import model_slug
@@ -14,6 +15,8 @@ from loom_bench.slo import Slo
 from loom_bench.store.db import session_scope
 from loom_bench.store.models import BenchEvalRun, BenchGateDecision
 from loom_bench.store.repo import create_experiment, list_runs, update_experiment_status
+
+REGISTERED = [m.id for m in load_registry().models]
 
 
 def test_export_round_trips(populated, tmp_path):
@@ -61,7 +64,7 @@ def test_export_round_trips(populated, tmp_path):
     assert snap.experiments[0].status == "completed"
     assert snap.price_book == load_prices()
     assert snap.competitiveness is not None
-    assert {r.model_id for r in snap.competitiveness.rows} == {"qwen3-8b", "llama-3.3-70b-instruct"}
+    assert {r.model_id for r in snap.competitiveness.rows} == set(REGISTERED)
 
     files = sorted((tmp_path / "provenance").glob("*.json"))
     assert {f.stem for f in files} == {run_id for r in qwen.results for run_id in r.run_ids}
@@ -79,7 +82,7 @@ def test_export_of_empty_store_is_valid_and_empty(empty_db, tmp_path):
     assert manifest.run_count == 0
     assert manifest.slo is None and manifest.allocation is None
     assert manifest.empty
-    assert [m.model_id for m in snap.models] == ["qwen3-8b", "llama-3.3-70b-instruct"]
+    assert [m.model_id for m in snap.models] == REGISTERED  # every model gets a file
     assert all(m.results == [] for m in snap.models)
     assert not (tmp_path / "provenance").exists()
 
