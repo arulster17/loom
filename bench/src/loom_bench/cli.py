@@ -59,6 +59,10 @@ app.add_typer(db_app, name="db")
 app.add_typer(job_app, name="job")
 quality_app = typer.Typer(help="Quality suites and the regression gate.", no_args_is_help=True)
 app.add_typer(quality_app, name="quality")
+site_app = typer.Typer(help="Public results site (docs/site.md).", no_args_is_help=True)
+app.add_typer(site_app, name="site")
+waitlist_app = typer.Typer(help="Waitlist demand signal (docs/waitlist.md).", no_args_is_help=True)
+app.add_typer(waitlist_app, name="waitlist")
 
 console = Console()
 err = Console(stderr=True)
@@ -583,3 +587,75 @@ def quality_gate(
     console.print(f"baseline {base_hash[:12]} -> candidate {cand_hash[:12]}")
     console.print(decision.summary())
     raise typer.Exit(EXIT_GATE_BLOCKED if decision.blocked else EXIT_OK)
+
+
+@site_app.command("export")
+def site_export(
+    experiment: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--experiment",
+            "-e",
+            help="Experiment id, repeatable (default: latest completed of each name).",
+        ),
+    ] = None,
+    out: Annotated[Path | None, typer.Option("--out", help="Snapshot directory.")] = None,
+    slo: Annotated[
+        Path | None, typer.Option(help="SLO YAML, if the runs do not record one.")
+    ] = None,
+    db: DbOpt = None,
+) -> None:
+    """Write the results snapshot the site shows (default site/data)."""
+    from loom_bench.site import export_snapshot
+    from loom_bench.site.config import DEFAULT_SNAPSHOT_DIR
+    from loom_bench.slo import Slo
+    from loom_bench.store.db import session_scope
+
+    out = out or DEFAULT_SNAPSHOT_DIR
+    target = Slo.from_yaml(slo.read_text(encoding="utf-8")) if slo else None
+    with session_scope(db) as s:
+        manifest = export_snapshot(s, out, experiment or "latest", slo=target)
+    configs = sum(m.configs for m in manifest.models)
+    console.print(
+        f"wrote {out}: {len(manifest.experiment_ids)} experiments, {configs} configs, "
+        f"{manifest.run_count} runs"
+    )
+
+
+@site_app.command("build")
+def site_build(
+    data: Annotated[Path | None, typer.Option(help="Snapshot directory.")] = None,
+    config: Annotated[Path | None, typer.Option(help="Site config YAML.")] = None,
+    out: Annotated[Path | None, typer.Option("--out", help="Build directory.")] = None,
+) -> None:
+    """Render the static site from a snapshot (default site/data -> site/_build)."""
+    from loom_bench.site import build_site
+    from loom_bench.site.config import (
+        DEFAULT_BUILD_DIR,
+        DEFAULT_SITE_CONFIG,
+        DEFAULT_SNAPSHOT_DIR,
+    )
+
+    out = out or DEFAULT_BUILD_DIR
+    pages = build_site(data or DEFAULT_SNAPSHOT_DIR, out, config or DEFAULT_SITE_CONFIG)
+    console.print(f"wrote {len(pages)} pages to {out}")
+
+
+@waitlist_app.command("count")
+def waitlist_count_cmd(
+    db: DbOpt = None,
+    record: Annotated[
+        bool, typer.Option(help="Also add the count to the table in docs/waitlist.md.")
+    ] = True,
+    docs: Annotated[Path | None, typer.Option(help="Waitlist doc to record into.")] = None,
+    source: Annotated[str, typer.Option(help="Source column text.")] = "waitlist_signups table",
+) -> None:
+    """Count signups in `waitlist_signups` and record it as a demand signal."""
+    from loom_bench.site import record_count, waitlist_count
+    from loom_bench.store.db import session_scope
+
+    with session_scope(db) as s:
+        count = waitlist_count(s)
+    console.print(f"{count} signups")
+    if record:
+        console.print(f"recorded in {record_count(docs, count, source)}")

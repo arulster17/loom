@@ -42,6 +42,8 @@ To benchmark an endpoint you already run (vLLM, SGLang, or `bench mock-server`),
 | `bench quality run SUITE --base-url URL --model NAME` | Runs a pinned eval suite against an endpoint. |
 | `bench quality gate --baseline X --candidate Y` | Re-decides the gate from stored per-item samples (X, Y: experiment id or config hash). Exit 7 if blocked. |
 | `bench export csv\|parquet --out FILE` | One row per run with summary and provenance flattened. |
+| `bench site export [-e EXP]... [--out site/data]` / `bench site build` | Results snapshot and static site (`docs/site.md`). |
+| `bench waitlist count [--no-record]` | Signups in `waitlist_signups`, recorded in `docs/waitlist.md`. |
 | `bench db upgrade` | Applies schema migrations. |
 | `bench job run --in job.json --out result.json` | Executes one load job; cloud providers run this on the GPU host. |
 | `bench mock-server [--port] [--config mock.yaml]` | The OpenAI-compatible mock backend. |

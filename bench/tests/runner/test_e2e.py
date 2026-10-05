@@ -159,6 +159,22 @@ def test_smoke_reports_export_and_self_compare(smoke, tmp_path):
     assert compare.exit_code == 0, compare.output
 
 
+def test_smoke_site_export_build_and_waitlist(smoke, tmp_path):
+    exp_id = str(_experiment(smoke.db).id)
+    export = invoke("site", "export", "-e", exp_id, "--out", tmp_path / "data", "--db", smoke.db)
+    assert export.exit_code == 0, export.output
+    build = invoke("site", "build", "--data", tmp_path / "data", "--out", tmp_path / "_build")
+    assert build.exit_code == 0, build.output
+    assert (tmp_path / "_build" / "index.html").is_file()
+
+    docs = tmp_path / "waitlist.md"
+    docs.write_text("# Waitlist\n\n| Date | Count | Source |\n|---|---|---|\n")
+    count = invoke("waitlist", "count", "--db", smoke.db, "--docs", docs)
+    assert count.exit_code == 0, count.output
+    assert "0 signups" in count.output
+    assert "| 0 | waitlist_signups table |" in docs.read_text()
+
+
 def test_hard_budget_abort(tmp_path):
     db = f"sqlite:///{tmp_path / 'loom.db'}"
     result = invoke("run", ABORT, "--db", db, "--out", tmp_path / "results")
