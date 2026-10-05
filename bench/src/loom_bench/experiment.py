@@ -120,6 +120,7 @@ class HFPatch(_Strict):
     license: str | None = None
     gated: Literal[False, "auto", "manual"] | None = None
     size_bytes: int | None = None
+    quant_method: str | None = None
 
 
 class HardwarePatch(_Strict):
@@ -418,9 +419,8 @@ def _set_path(doc: dict[str, Any], path: str, value: Any) -> dict[str, Any]:
 def apply_variant(base: ModelSpec, variant: Variant) -> dict[str, Any]:
     """Registry entry with the variant's overrides, as an unvalidated dict.
 
-    Same rules as `engines.apply_overrides`: switching engine needs its image and
-    version and drops the other engine's args; an arg set to null is removed; the
-    registry's max_context is a cap.
+    Switching engine needs its image and version and drops the other engine's
+    args; an arg set to null is removed; the registry's max_context is a cap.
     """
     doc = base.model_dump(mode="json")
     patch = variant.model_dump(exclude_none=True, exclude={"name", "mock"})
@@ -516,7 +516,7 @@ def _launch(exp: Experiment, spec: ModelSpec, mock: MockConfig | None) -> Engine
         return mock_launch(spec, mock)
     if isinstance(exp.provider, LocalProviderSpec):
         return local_launch(spec, exp.provider)
-    return render_launch(spec, None)
+    return render_launch(spec)
 
 
 def hardware_for(exp: Experiment, spec: ModelSpec) -> tuple[str, dict[str, Any]]:

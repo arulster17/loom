@@ -54,7 +54,7 @@ PRICING = {"input_per_mtok": 100_000, "output_per_mtok": 300_000, "cached_input_
 def test_real_registry_loads():
     reg = load_registry()
     assert [m.id for m in reg.models] == ["qwen3-8b", "llama-3.3-70b-instruct"]
-    assert reg.enabled() == []
+    assert all(m.hf.quant_method is None and m.quantization == "none" for m in reg.models)
 
     qwen = reg.get("qwen3-8b")
     assert qwen.hf.revision == "b968826d9c46dd6066d109eabc6255188de91218"
@@ -84,9 +84,10 @@ def test_get_unknown_raises():
 
 def test_minimal_model_is_valid_and_enabled_with_pricing():
     reg = validate(model(), model(id="m-2", status="enabled", pricing=PRICING))
-    assert [m.id for m in reg.enabled()] == ["m-2"]
+    assert reg.get("m-2").status == "enabled"
     assert reg.get("m-1").kv_cache_dtype == "auto"
     assert reg.get("m-1").hf.trust_remote_code is False
+    assert reg.get("m-1").hf.quant_method is None
 
 
 @pytest.mark.parametrize(
@@ -108,6 +109,9 @@ def test_minimal_model_is_valid_and_enabled_with_pricing():
         ({"scaling": {"min_replicas": 2, "max_replicas": 1}}, "max_replicas"),
         ({"clouds": ["gcp"]}, "instance_types missing"),
         ({"quantization": "int3"}, "quantization"),
+        ({"quantization": "awq"}, "cannot be served from unquantized weights"),
+        ({"hf__quant_method": "awq"}, "cannot be served from awq weights"),
+        ({"hf__quant_method": "bitsandbytes", "quantization": "w4a16"}, "quant_method"),
         ({"engine__name": "tgi"}, "name"),
         ({"capabilities__audio": True}, "audio"),
         ({"surprise": 1}, "surprise"),
