@@ -108,7 +108,7 @@ than subtle drift. Each suite file repeats this table next to the tasks.
 
 ## Logprob divergence
 
-`quality/divergence.py`, against a reference endpoint serving the BF16 weights:
+`quality/divergence.py`, against a reference config serving the BF16 weights:
 
 1. The reference greedily continues each of the 48 pinned prompts
    (`quality/data/divergence_prompts.yaml`) for `max_new_tokens` tokens.
@@ -132,6 +132,23 @@ sides must use the same tokenizer; the measurement refuses otherwise.
 
 The default limits (KL 0.05 nats, top-1 95%) are initial values; the first Phase 0 GPU
 runs measure BF16 vs BF16 across engines to confirm they sit above engine noise.
+
+**Reference capture.** Steps 1-2 for the reference and steps 2-4 for the candidate are
+separate calls, so the two engines never have to be up at the same time (one GPU host runs
+one engine at a time):
+
+- `capture_reference(client, prompts, top_k, max_new_tokens) -> ReferenceLogprobs`: the
+  reference's continuation of each prompt and its top-k logprobs at every continuation
+  position, as JSON;
+- `score_against_reference(client, reference) -> DivergenceResult`: the candidate scores the
+  same texts and is compared position by position with the stored reference.
+
+`measure_divergence` (both endpoints up) is capture followed by score. In an experiment the
+baseline variant's eval job captures the reference while its engine is up; the runner
+stores it as `results/<experiment>/evals/<config hash>/reference.json` with the config hash
+and full provenance, and passes it in every candidate's eval job, which scores against it
+when that engine is up later. Prompts, top-k and the continuation length travel with the
+reference, so a candidate is always scored on exactly what the reference saw.
 
 ## Sanity checks
 
@@ -173,6 +190,26 @@ print(decision.summary())
 version, provenance including dataset source, revision and license) and `record_gate`
 writes the decision to `bench_gate_decisions`.
 
+Inside an experiment the same work is an `EvalJob` (`loom_bench.jobs`): the resolved suite,
+the task subset, the endpoint as seen from where the job runs, request extras, the seed,
+the code-execution opt-in, and `divergence: capture` (baseline) or `score` with the stored
+reference (candidates). `execute_eval_job` runs it in-process for the mock and local
+providers; `bench quality job --in job.json --out result.json` runs it on a GPU host. The
+`EvalJobResult` carries per-task ItemResults (scores and content hashes), task versions,
+per-task seconds, the sanity rates and the capture or the divergence; model outputs stay
+where the job ran.
+
+**Subsets.** A suite may name subsets of its tasks (`subsets: {phase0: [...]}`); an
+experiment picks one with `quality.subset`. Tasks in a subset keep their full pinned items,
+so the half-widths in the sample-size table still apply to them and their results pair item
+for item with a full-suite run. Tasks left out are simply not measured by that run. The
+Phase 0 subset of both pinned suites is GSM8K, IFEval, tool calling and JSON schema; MMLU-Pro,
+RULER, needle and code wait for a full-suite run.
+
+**Planning.** Each task reports how many items it will score (`planned_items`); lm-eval
+tasks without explicit `samples` cannot count their docs before the harness loads them,
+so the suite states `items` for them and `bench plan` refuses a suite that does not.
+
 - **lm-eval** is the optional `lmeval` extra (`uv sync --extra lmeval`); without it,
   `lm_eval` tasks fail with an error saying how to install it. The command line and the
   per-sample format were checked against lm_eval 0.4.13. RULER needs `transformers` (for its
@@ -185,7 +222,13 @@ writes the decision to `bench_gate_decisions`.
   address space on Linux; macOS does not enforce it), and a wall-clock timeout. It is a
   resource sandbox, not a security boundary: programs run as the current user and can
   reach the network. Run code evals in a disposable container or VM without network
-  egress or credentials. Nothing executes unless `allow_code_exec=True` is passed.
+  egress or credentials. Nothing executes unless `allow_code_exec=True` is passed. On
+  `aws_ec2` an eval job runs in the client container on a disposable host: uid 10001,
+  denied the instance metadata service (no instance-role credentials), no secrets or AWS
+  settings in its environment, a read-only virtualenv and only its job directory
+  writable, removed after the job. It shares the host network (to reach the engine on
+  loopback), so programs can reach the internet and the engine; that is why code tasks
+  still need `quality.allow_code_exec: true`.
 - The working directory keeps lm-eval's raw samples and log. Loom itself never logs
   prompts or outputs.
 

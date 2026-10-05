@@ -136,10 +136,10 @@ Fields (any field can be overridden with `LOOM_AWS_<FIELD>`, e.g.
 | `weights_dir` | | `/opt/dlami/nvme/loom-hf` | HF cache on the instance-store NVMe |
 | `spot_price_multiplier` | | 1.25 | Budget accrual = spot price x this, rounded up |
 | `max_ttl_s` | | 28800 | Longest host lifetime the provider accepts |
-| `wheel_path` | | | Bench wheel installed in the on-host load-generator container |
-| `client_image` | | `python:3.12-slim` | Load-generator container image |
+| `wheel_path` | | | Bench wheel installed in the on-host client container |
+| `client_image` | | `python:3.12-slim` | Client container image (load and eval jobs) |
 | `poll_interval_s` | | 5 | SSM / instance-state polling |
-| `job_timeout_s` | | 7200 | Run-time cap for request-count (no `duration_s`) jobs |
+| `job_timeout_s` | | 7200 | Run-time cap for request-count (no `duration_s`) load jobs and, plus 900 s, for eval jobs |
 | `presign_expiry_s` | | 21600 | Lifetime of job input/output presigned URLs |
 
 Presigned URLs stop working when the credentials that signed them expire. With
@@ -202,11 +202,37 @@ Other rails:
 
 - Hosts have no inbound ports, and IMDSv2 is required with hop limit 1, so the
   engine container cannot reach the instance role.
-- The load-generator container uses host networking, so the hop limit does not
-  apply to it. It runs as uid 10001, which user-data blocks from the metadata
-  service. Its inputs and outputs move through presigned URLs.
+- The client container uses host networking, so the hop limit does not apply
+  to it. It runs as uid 10001, which user-data blocks from the metadata service.
+  Its inputs and outputs move through presigned URLs.
 - Spot interruptions surface as `SpotInterrupted`, with the time since launch, so
   the runner can record the interruption rate.
+
+## Load and eval jobs on the host
+
+The engine listens on the host's loopback only (no inbound ports), so everything that
+talks to it runs on the host, in the client container:
+
+- **Load jobs** (`bench job run`): the runner uploads `job.json` and the bench wheel to
+  `s3://<bucket>/runs/<experiment>/<run id>/`, sends `run_job.sh` over SSM with presigned
+  GET/PUT URLs, and reads `result.json` (and `gpu.csv`) back.
+- **Eval jobs** (`bench quality job`): the same path and script with the eval
+  subcommand. The job carries the resolved suite, its task subset, the divergence mode
+  and, for candidates, the baseline's captured reference. Jobs with lm-eval tasks install
+  `loom-bench[lmeval]` (lm-eval, torch, transformers) into a separate cached virtualenv on
+  first use, about 5 minutes once per host; datasets come from the Hugging Face Hub inside
+  the container. The client container has no Hugging Face token, so tasks that need a
+  gated tokenizer (the Llama RULER task) cannot run there; the Phase 0 subsets avoid them.
+- **Isolation.** The container runs as uid 10001, which user-data denies the instance
+  metadata service, so it has no instance-role credentials; it gets no secrets or AWS
+  settings in its environment; its virtualenv is mounted read-only and only its job
+  directory is writable; it is removed when the job ends. It does share the host network,
+  which it needs to reach the engine, so it can reach the internet. Code-executing eval
+  tasks run model-written programs in it (inside the sandbox's rlimits) and stay off
+  unless the experiment sets `quality.allow_code_exec: true`.
+
+An eval job's SSM command is bounded by `job_timeout_s` + 900 s; raise `job_timeout_s` for
+a full-suite run on a large model.
 
 ## What it costs besides GPU time
 

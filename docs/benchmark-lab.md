@@ -46,6 +46,7 @@ To benchmark an endpoint you already run (vLLM, SGLang, or `bench mock-server`),
 | `bench waitlist count [--no-record]` | Signups in `waitlist_signups`, recorded in `docs/waitlist.md`. |
 | `bench db upgrade` | Applies schema migrations. |
 | `bench job run --in job.json --out result.json` | Executes one load job; cloud providers run this on the GPU host. |
+| `bench quality job --in job.json --out result.json` | Executes one eval job (suite tasks plus the divergence capture or score); cloud providers run this on the GPU host. |
 | `bench mock-server [--port] [--config mock.yaml]` | The OpenAI-compatible mock backend. |
 
 Exit codes: 0 ok, 1 failed, 2 invalid input, 3 refused by the planner, 4 stopped before a
@@ -89,7 +90,7 @@ repetitions: 3                      # 1 only with allow_single_run: true (flagge
 slo: {ttft_ms: {p95: 1000}, tpot_ms: {p95: 50}, max_error_rate: 0.01}
 cost_allocation: {method: all_output}   # all_input | weighted + output_input_ratio
 budget: {max_spend: "$40", ttl_minutes: 480, accrual_interval_s: 15}
-quality: {suite: qwen3-8b, baseline_variant: vllm}   # optional
+quality: {suite: qwen3-8b, subset: phase0, baseline_variant: vllm}   # optional
 loadgen: native                     # key in loadgen LOAD_GENERATORS
 seed: 0
 ```
@@ -143,9 +144,14 @@ it there.
    created) when the estimate exceeds the effective cap, when the worst case of every host
    living to its TTL exceeds it, when a host's estimated time exceeds its TTL, or when the
    TTL is above the AWS provider's limit. There is no override flag. Assumptions live in
-   `plan.py` (`AWS_TIMING`, `MOCK_*`, `ASSUMED_*`): boot 180 s, image pull 300 s, weights at
-   150 MB/s download and 400 MB/s load, engine init 240 s, 30 s per run on top of its
-   duration and full drain timeout (an overloaded point waits it out), 90 s teardown. Spot
+   `plan.py` (`AWS_TIMING`, `MOCK_*`, `ASSUMED_*`, `EVAL_*`): boot 180 s, image pull 300 s,
+   weights at 150 MB/s download and 400 MB/s load, engine init 240 s, 30 s per run on top
+   of its duration and full drain timeout (an overloaded point waits it out), 90 s
+   teardown. An eval job takes, per task, items x a per-kind item time / concurrency
+   (`EVAL_ITEM_S`: 24 s for lm-eval, 40 s for needle, 16 s for code, 6-8 s for tool calling
+   and JSON, i.e. an item's share of a full engine decoding at the 50 ms TPOT SLO), plus
+   60 s of harness start-up per lm-eval task, 4 s per divergence prompt over 16 slots, 60 s
+   per job and, once per AWS host, 300 s to install the eval harness. Spot
    hosts are priced like the provider accrues them: price x its safety multiplier (1.25),
    plus the root EBS volume. Warm restarts reload weights from the host's cache and pull an
    image only when it changes.
@@ -200,24 +206,34 @@ results/<experiment id>/
   goodput.json         goodput and cost at SLO per cell and workload
   runs/<run id>/requests.parquet, provenance.json
   evals/<config hash>/samples.json   per-item quality scores (for re-gating)
+  evals/<config hash>/reference.json the baseline's divergence reference (ReferenceLogprobs)
 ```
 
 ## Quality
 
-With `quality:` set, every cell runs the suite after its workloads, on the live endpoint
-(baseline variant first). Each non-baseline cell is gated against the baseline cell at the
-same sweep point; eval runs and gate decisions are stored (`bench_eval_runs`,
-`bench_gate_decisions`) and reports rank gate-failed configs last. Code execution stays off
-unless `allow_code_exec: true`. The suite is a name in `bench/evals/` or a YAML path from the
-repo root. See `docs/quality-gate.md` for the method. Quality on `aws_ec2` is refused by the
-planner for now: the endpoint listens on the host's loopback and there is no on-host eval
-job yet.
+With `quality:` set, every cell runs the suite (or its named `subset`) after its
+workloads, as an eval job where the engine is reachable: in-process for `mock` and `local`,
+in the client container on the GPU host for `aws_ec2` (`bench quality job`, see
+`docs/aws-setup.md`). Baseline variant cells run first. Their eval job also captures the
+divergence reference (greedy continuations and top-k logprobs of the pinned prompts),
+stored as `evals/<config hash>/reference.json` with its config hash and provenance. Every
+other cell's job scores its engine against the reference of the baseline cell at the same
+sweep point, so the two engines never need to be up at once, and the cell is gated against
+that baseline on task scores, divergence and sanity; eval runs and gate decisions are stored
+(`bench_eval_runs`, `bench_gate_decisions`) and reports never rank gate-failed configs.
+Code-executing tasks are refused at `bench plan` unless `allow_code_exec: true`. The suite
+is a name in `bench/evals/` or a YAML path from the repo root. See `docs/quality-gate.md`
+for the method.
 
 ## Phase 0 experiments
 
 | Experiment | Host | Estimate | Worst case (TTL) | Cap |
 |---|---|---|---|---|
-| `qwen3-8b-vllm-vs-sglang` | 1x g6e.xlarge spot, 6.1 h | $14.22 | $18.56 | $40 |
-| `llama-3.3-70b-tp4` | 1x g6e.12xlarge spot, 2.2 h | $22.38 | $35.86 | $45 |
+| `qwen3-8b-vllm-vs-sglang` | 1x g6e.xlarge spot, 7.1 h of an 8 h TTL | $16.52 | $18.56 | $40 |
+| `llama-3.3-70b-tp4` | 1x g6e.12xlarge spot, 2.7 h of a 3.5 h TTL | $27.90 | $35.86 | $45 |
 
-Estimates include cold starts and assume every searched point waits out its drain timeout.
+Estimates include cold starts, assume every searched point waits out its drain timeout,
+and include each config's eval job (the suites' `phase0` subset: GSM8K, IFEval, tool
+calling, JSON schema, divergence and sanity; about 27 min per config) and the eval harness
+install. The full suites would take about 1.8 h per config and push the Qwen host past its
+TTL.
