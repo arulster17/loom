@@ -11,6 +11,7 @@
       "license": "llama3.3",
       "gated": "manual",
       "size_bytes": 141107497872,
+      "quant_method": null,
       "trust_remote_code": false,
       "trust_remote_code_review": null
     },
