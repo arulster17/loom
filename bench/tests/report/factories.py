@@ -13,6 +13,7 @@ req/s output throughput is 100·L tok/s (within the per-repetition window jitter
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -191,3 +192,13 @@ def gate_row(baseline: str, candidate: str, decision: str) -> BenchGateDecision:
         details={},
         created_at=CREATED,
     )
+
+
+def assert_self_contained(html: str, allowed: tuple[str, ...]) -> None:
+    assert html.startswith("<!doctype html>")
+    for banned in ("<link", "<script", "<img", "<iframe", "@import", "url(", "src="):
+        assert banned not in html, banned
+    hrefs = re.findall(r'<a href="([^"]+)">', html)
+    for url in re.findall(r"https?://[^\s\"<>]+", html):
+        assert url in hrefs, f"{url} is not a link"
+        assert url.startswith(allowed), url

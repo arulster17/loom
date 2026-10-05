@@ -1,6 +1,5 @@
 import csv
 import io
-import re
 
 import pytest
 
@@ -21,7 +20,7 @@ from loom_bench.report.leaderboard import (
     render_markdown,
 )
 
-from .factories import SLO, TTFT_SGLANG, eval_row, gate_row, make_runs
+from .factories import SLO, TTFT_SGLANG, assert_self_contained, eval_row, gate_row, make_runs
 
 
 @pytest.fixture(scope="module")
@@ -183,16 +182,6 @@ ALLOWED_URL_PREFIXES = (
     "https://instances.vantage.sh/",
     "https://huggingface.co/datasets/",
 )
-
-
-def assert_self_contained(html: str, allowed: tuple[str, ...]) -> None:
-    assert html.startswith("<!doctype html>")
-    for banned in ("<link", "<script", "<img", "<iframe", "@import", "url(", "src="):
-        assert banned not in html, banned
-    hrefs = re.findall(r'<a href="([^"]+)">', html)
-    for url in re.findall(r"https?://[^\s\"<>]+", html):
-        assert url in hrefs, f"{url} is not a link"
-        assert url.startswith(allowed), url
 
 
 def test_html_is_self_contained_with_dark_mode(report):
