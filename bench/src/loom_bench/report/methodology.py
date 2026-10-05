@@ -11,9 +11,9 @@ from pydantic import BaseModel, ConfigDict
 from loom_bench.metrics.aggregate import ci_rule_summary
 from loom_bench.money import Micros
 from loom_bench.prices import PriceBook
-from loom_bench.records import Market
+from loom_bench.records import LoadMode, Market
 from loom_bench.registry import Cloud
-from loom_bench.report.analyze import ConfigResult
+from loom_bench.report.analyze import ConfigResult, SweepKey
 from loom_bench.report.format import describe_slo, load_mode_label, usd
 
 ALLOCATION_TEXT = {
@@ -52,8 +52,12 @@ class DatasetRef(BaseModel):
 
 
 class ConfigProvenance(BaseModel):
+    """Provenance of one result: a config on one workload and load mode."""
+
     name: str
     config_hash: str
+    workload: str
+    load_mode: LoadMode
     label: str
     engine: str
     image: str | None
@@ -69,6 +73,14 @@ class ConfigProvenance(BaseModel):
     runs: int
     provenance_digests: list[str]
     reproduce: str
+
+    @property
+    def key(self) -> SweepKey:
+        return SweepKey(self.config_hash, self.workload, self.load_mode)
+
+    @property
+    def title(self) -> str:
+        return f"{self.name} · {self.workload}, {self.load_mode.value.replace('_', ' ')}"
 
 
 class CiMethodRow(BaseModel):
@@ -170,6 +182,8 @@ def _config_provenance(result: ConfigResult, price_book: PriceBook | None) -> Co
     return ConfigProvenance(
         name=result.name,
         config_hash=result.config_hash,
+        workload=result.workload,
+        load_mode=result.load_mode,
         label=result.label.text,
         engine=engine_text or "unknown",
         image=engine.get("image"),
@@ -268,7 +282,7 @@ def methodology_markdown(m: Methodology) -> str:
         shas = ", ".join(_code(s) for s in c.git_shas) or "not recorded"
         lines += [
             "",
-            f"### {c.name} (`{c.config_hash}`)",
+            f"### {c.title} (`{c.config_hash}`)",
             "",
             f"- **Config:** {c.label}",
             f"- **Engine:** {c.engine}; image {_code(c.image)}; digest {_code(c.image_digest)}",

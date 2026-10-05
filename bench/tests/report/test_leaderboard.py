@@ -10,11 +10,13 @@ from loom_bench.report.analyze import (
     default_price_resolver,
     with_quality,
 )
+from loom_bench.report.format import UNBRACKETED_NOTE
 from loom_bench.report.leaderboard import (
     CSV_COLUMNS,
     MD_HEADERS,
     RowStatus,
     build_leaderboard,
+    cold_text,
     render_csv,
     render_html,
     render_markdown,
@@ -235,3 +237,43 @@ def test_all_input_ranks_by_input_cost(all_runs, price_book):
     assert all(r.result.cost.output_per_mtok.na_reason for r in rows)
     costs = [r.result.cost.input_per_mtok.value for r in ranked]
     assert costs == sorted(costs)
+
+
+def test_unbracketed_goodput_is_marked_and_explained_once(report):
+    md = render_markdown(report)
+    rows = {
+        cells[1].split("**")[1]: cells
+        for line in md.splitlines()
+        if line.startswith("| ") and "**" in line
+        for cells in [[c.strip() for c in line.strip("|").split(" | ")]]
+    }
+    assert rows["sglang-bf16"][6] == "6 req/s"  # bracketed: a failing load above it
+    assert rows["sglang-1rep"][6] == "8+ req/s"  # every tested load met the SLO
+    assert md.count(UNBRACKETED_NOTE) == 1
+    assert render_html(report).count(UNBRACKETED_NOTE) == 1
+
+
+def test_cold_start_keeps_two_significant_figures():
+    assert cold_text(ColdStartStat(median_s=0.23, n=1)) == "0.23 s (median of 1)"
+    assert cold_text(ColdStartStat(median_s=1.3282, n=2)) == "1.3 s (median of 2)"
+    assert cold_text(ColdStartStat(median_s=95.4, n=3)) == "95 s (median of 3)"
+    assert cold_text(ColdStartStat(median_s=123.4, n=1)) == "123 s (median of 1)"
+
+
+def test_provenance_is_per_workload_not_per_config(price_book):
+    runs = [*make_runs("vllm-bf16"), *make_runs("vllm-bf16", workload="code")]
+    results = analyze_runs(
+        runs,
+        slo=SLO,
+        allocation=CostAllocation.all_output(),
+        hourly_price=default_price_resolver(price_book),
+    )
+    assert len({r.config_hash for r in results}) == 1 and len(results) == 2
+    report = build_leaderboard(results, price_book=price_book)
+    rows = list(csv.DictReader(io.StringIO(render_csv(report))))
+    by_workload = {r["workload"]: r["reproduce_command"] for r in rows}
+    expected = {r.workload: f"bench reproduce {r.reproduce_run_id()}" for r in results}
+    assert by_workload == expected and len(set(by_workload.values())) == 2
+    md = render_markdown(report)
+    assert "### vllm-bf16 · chat, open loop (`" in md
+    assert "### vllm-bf16 · code, open loop (`" in md

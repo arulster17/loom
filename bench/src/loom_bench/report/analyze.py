@@ -183,10 +183,22 @@ class ConfigResult(BaseModel):
         return self.cell_key or self.config_hash[:12]
 
     @property
+    def key(self) -> SweepKey:
+        """One result per key: a config can be benchmarked on several workloads."""
+        return SweepKey(self.config_hash, self.workload, self.load_mode)
+
+    @property
     def trusted(self) -> bool:
         if any(w.kind in UNTRUSTING for w in self.warnings):
             return False
         return self.goodput.max_load is None or self.goodput.trusted
+
+    @property
+    def main_warning(self) -> ResultWarning | None:
+        """The warning that best explains the verdict: the first one that makes the result
+        untrusted, else the first of any kind (no goodput, no price, ...)."""
+        untrusting = (w for w in self.warnings if w.kind in UNTRUSTING)
+        return next(untrusting, self.warnings[0] if self.warnings else None)
 
     @property
     def goodput_point(self) -> LoadPoint | None:

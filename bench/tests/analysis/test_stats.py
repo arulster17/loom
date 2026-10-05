@@ -199,3 +199,15 @@ def test_log_mean_ci_of_identical_values_is_exact():
     est = log_mean_ci([0.3, 0.3, 0.3])
     assert est.mean == est.lo == est.hi == 0.3
     assert est.cv == 0.0
+
+
+def test_est_shows_small_values_with_two_significant_figures():
+    from loom_bench.report.format import est, sig
+    from loom_bench.stats import Estimate
+
+    tpot = Estimate(mean=0.13, lo=0.091, hi=0.19, n=2, std=0.03, method="log_t")
+    assert est(tpot, 1, "ms") == "0.130 [0.091, 0.190] ms"
+    ttft = Estimate(mean=413.2, lo=392.6, hi=434.0, n=3, std=10.0, method="log_t")
+    assert est(ttft, 0, "ms") == "413 [393, 434] ms"  # large values keep the fixed places
+    assert est(Estimate(mean=0.004, lo=None, hi=None, n=1, std=None)) == "0.0040 (n=1, no CI)"
+    assert sig(0.0) == "0" and sig(None) == "n/a"

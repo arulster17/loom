@@ -26,17 +26,20 @@ from loom_bench.provenance import ContentKind
 from loom_bench.records import LoadMode
 from loom_bench.report.analyze import ColdStartStat, ConfigResult, WarningKind
 from loom_bench.report.format import (
+    UNBRACKETED_NOTE,
+    any_unbracketed,
     describe_slo,
     est,
     estimate_column_names,
     estimate_columns,
+    goodput_load,
     html_env,
-    load_mode_label,
     load_value,
     md_table,
     micros_column_names,
     micros_columns,
     pct,
+    sig,
     to_csv,
     usd,
     usd_ci,
@@ -258,7 +261,7 @@ def quality_text(r: ConfigResult) -> str:
 
 
 def cold_text(c: ColdStartStat | None) -> str:
-    return "n/a" if c is None else f"{c.median_s:.0f} s (median of {c.n})"
+    return "n/a" if c is None else f"{sig(c.median_s)} s (median of {c.n})"
 
 
 def board_title(b: Leaderboard) -> str:
@@ -294,7 +297,7 @@ def _md_row(row: LeaderboardRow) -> list[Any]:
         usd_ci(cost.input_per_mtok if cost else None),
         est(r.goodput.output_tok_s, 1),
         est(r.goodput_output_tok_s_per_gpu, 1),
-        load_value(r.goodput.max_load, r.load_mode),
+        goodput_load(r.goodput),
         est(r.ttft_p95_ms, 0, "ms"),
         est(r.tpot_p95_ms, 1, "ms"),
         f"{est(r.peak_output_tok_s, 1)} at {load_value(r.peak_load, r.load_mode)}",
@@ -308,11 +311,15 @@ def _md_row(row: LeaderboardRow) -> list[Any]:
 def render_markdown(report: LeaderboardReport) -> str:
     parts = [f"# {report.title}", ""]
     parts.append(
-        "Ranked by $/1M output tokens at SLO, cheapest first. Values are means with "
-        "95% confidence intervals in brackets. Goodput is the highest tested load that met "
-        "the SLO; raw peak throughput ignores the SLO and is not goodput. Unranked rows "
-        "(quality gate failed, untrusted, or no cost) are listed last."
+        "Ranked by $/1M output tokens at SLO (input tokens under the all_input cost "
+        "allocation), cheapest first. Values are point estimates (geometric means for "
+        "latency and throughput) with 95% confidence intervals in brackets; the methodology "
+        "below says how each is computed. Goodput is the highest tested load that met the "
+        "SLO; raw peak throughput ignores the SLO and is not goodput. Unranked rows (quality "
+        "gate failed, untrusted, or no cost) are listed last."
     )
+    if any_unbracketed(row.result.goodput for b in report.boards for row in b.rows):
+        parts += ["", UNBRACKETED_NOTE]
     for b in report.boards:
         parts += ["", f"## {board_title(b)}", "", md_table(MD_HEADERS, map(_md_row, b.rows))]
         warned = [row.result for row in b.rows if row.result.warnings]
@@ -331,10 +338,11 @@ def render_html(report: LeaderboardReport) -> str:
         .render(
             report=report,
             board_title=board_title,
-            load_value=load_value,
             quality_text=quality_text,
             cold_text=cold_text,
-            load_mode_label=load_mode_label,
+            unbracketed=any_unbracketed(
+                row.result.goodput for b in report.boards for row in b.rows
+            ),
         )
     )
 
@@ -394,7 +402,7 @@ CSV_COLUMNS = [
 
 def _csv_row(b: Leaderboard, row: LeaderboardRow, m: Methodology) -> dict[str, Any]:
     r = row.result
-    prov = next(c for c in m.configs if c.config_hash == r.config_hash)
+    prov = next(c for c in m.configs if c.key == r.key)
     q = r.quality
     worst = q.worst() if q else None
     dataset = DatasetRef.model_validate(r.provenance.get("dataset") or {})

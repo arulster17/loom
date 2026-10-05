@@ -100,6 +100,7 @@ def make_runs(
     rep_jitter: float = 0.02,
     missing_usage: int = 0,
     engine_args: dict[str, Any] | None = None,
+    workload: str = "chat",
 ) -> list[BenchRun]:
     args = engine_args if engine_args is not None else {"max_num_seqs": 256}
     config: dict[str, Any] = {
@@ -143,7 +144,7 @@ def make_runs(
                 cloud=cloud,
                 region=region,
                 market=market,
-                workload=WorkloadInfo(name="chat", content=ContentKind.REALISTIC),
+                workload=WorkloadInfo(name=workload, content=ContentKind.REALISTIC),
                 dataset=DatasetInfo(
                     name="ShareGPT_V3",
                     source="https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered",
@@ -155,11 +156,18 @@ def make_runs(
             )
             runs.append(
                 BenchRun(
-                    id=_id(experiment_id, cell_key, load, rep, latency_scale),
+                    id=_id(
+                        experiment_id,
+                        cell_key,
+                        load,
+                        rep,
+                        latency_scale,
+                        *([] if workload == "chat" else [workload]),
+                    ),
                     experiment_id=experiment_id,
                     cell_key=cell_key,
                     config_hash=prov.config_hash,
-                    workload="chat",
+                    workload=workload,
                     load_mode=LoadMode.OPEN_LOOP.value,
                     load_value=load,
                     repetition=rep,

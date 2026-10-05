@@ -40,7 +40,7 @@
 </table>
 {% endcall %}
 {% else %}
-<p class="section-note">The cheapest configuration at SLO on each benchmarked workload, ranked among configs that passed every check. Values are means; the line under each is its {{ (manifest.confidence * 100)|round|int }}% confidence interval. SLO: {{ describe_slo(manifest.slo) if manifest.slo else 'not recorded' }}.</p>
+<p class="section-note">The cheapest configuration at SLO on each benchmarked workload, ranked among configs that passed every check. Values are point estimates (geometric means for latency and throughput); the line under each is its {{ (manifest.confidence * 100)|round|int }}% confidence interval. SLO: {{ describe_slo(manifest.slo) if manifest.slo else 'not recorded' }}.</p>
 {% call scroll_table("models-h") %}
 <table>
 <thead>

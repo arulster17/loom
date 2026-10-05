@@ -4,7 +4,8 @@
 {% block content %}
 <header>
 <h1>{{ report.title }}</h1>
-<p class="lede">Ranked by $/1M output tokens at SLO, cheapest first. Values are means; the smaller line under each is its 95% confidence interval. Goodput is the highest tested load that met the SLO; raw peak throughput ignores the SLO and is not goodput. Unranked rows (quality gate failed, untrusted, or no cost) are listed last.</p>
+<p class="lede">Ranked by $/1M output tokens at SLO (input tokens under the all_input cost allocation), cheapest first. Values are point estimates (geometric means for latency and throughput); the smaller line under each is its 95% confidence interval, computed as the methodology below describes. Goodput is the highest tested load that met the SLO; raw peak throughput ignores the SLO and is not goodput. Unranked rows (quality gate failed, untrusted, or no cost) are listed last.</p>
+{% if unbracketed %}<p class="lede">{{ unbracketed_note }}</p>{% endif %}
 </header>
 {% for b in report.boards %}
 <section>
@@ -24,7 +25,7 @@
 <td class="num">{{ money(r.cost.input_per_mtok if r.cost else none) }}</td>
 <td class="num">{{ estimate(r.goodput.output_tok_s, 1) }}</td>
 <td class="num">{{ estimate(r.goodput_output_tok_s_per_gpu, 1) }}</td>
-<td class="num">{{ load_value(r.goodput.max_load, r.load_mode) }}</td>
+<td class="num">{{ goodput_load(r.goodput) }}</td>
 <td class="num">{{ estimate(r.ttft_p95_ms, 0, 'ms') }}</td>
 <td class="num">{{ estimate(r.tpot_p95_ms, 1, 'ms') }}</td>
 <td class="num">{{ estimate(r.peak_output_tok_s, 1) }}<span class="sub">at {{ load_value(r.peak_load, r.load_mode) }}</span></td>
