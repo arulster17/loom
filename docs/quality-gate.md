@@ -210,8 +210,10 @@ RULER, needle and code wait for a full-suite run.
 tasks without explicit `samples` cannot count their docs before the harness loads them,
 so the suite states `items` for them and `bench plan` refuses a suite that does not.
 
-- **lm-eval** is the optional `lmeval` extra (`uv sync --extra lmeval`); without it,
-  `lm_eval` tasks fail with an error saying how to install it. The command line and the
+- **lm-eval** is the optional `lmeval` extra of the `loom-bench` workspace package:
+  `uv sync --all-packages --extra lmeval` from the repo root (plain `uv sync --extra
+  lmeval` fails there: the root project has no extras). Without it, `lm_eval` tasks fail
+  with an error saying how to install it. The command line and the
   per-sample format were checked against lm_eval 0.4.13. RULER needs `transformers` (for its
   tokenizer) and lm-eval's humaneval needs `evaluate`. lm-eval loads its datasets from the
   Hub without a pinned revision; each item's `doc_hash` is stored as its content hash, so

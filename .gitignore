@@ -11,7 +11,10 @@ build/
 .coverage
 htmlcov/
 
-# Bench outputs (results live in Postgres/Parquet/S3, not git)
+# Bench outputs (results live in Postgres/Parquet/S3, not git). `bench run` and
+# `bench report` default to results/ and reports/ in the current directory.
+/results/
+/reports/
 bench/results/
 bench/.cache/
 site/_build/

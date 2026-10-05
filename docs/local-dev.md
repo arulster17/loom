@@ -95,9 +95,9 @@ uv run bench reap --dry-run           # expired resources (none for finished moc
 `-e/--experiment`, reports cover every completed experiment except reproductions; the
 selected experiments must share one `slo` and `cost_allocation`.
 
-`results/` and `reports/` are written to the current directory and are not in
-`.gitignore`; pass `--out` (on `run`, `reproduce`, `report`) to put them elsewhere, or
-delete them before committing.
+`results/` and `reports/` are written to the current directory (the defaults of `--out`
+on `run`, `reproduce`, `report` and `competitiveness`); at the repo root both are in
+`.gitignore`, so the quick start never leaves files to commit.
 
 ## The mock backend
 

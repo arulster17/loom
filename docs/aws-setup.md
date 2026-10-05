@@ -179,11 +179,16 @@ look at `/var/log/loom/` on the host through Session Manager.
 
 Each layer covers the failure of the one before it.
 
-1. **Budget guard (runner).** Each host reports `hourly_micros`. For spot, that is
-   the current spot price in its AZ x 1.25, rounded up. On-demand, and spot AZs
-   with no price, use the on-demand price from `prices.yaml`. The root EBS volume
-   is added in both cases. The runner accrues spend while the host lives, aborts
-   the experiment and tears hosts down before the budget is crossed.
+1. **Budget guard (runner).** Each host reports an accrual rate, `hourly_micros`. For
+   spot, that is the current spot price in its AZ x 1.25, rounded up. On-demand, and
+   spot AZs with no price, use the on-demand price from `prices.yaml`. The root EBS
+   volume is added in both cases. The runner records spend every
+   `budget.accrual_interval_s` while the host lives. Before each step it stops
+   gracefully if spend so far plus the step's estimate would pass the cap (exit 4).
+   When recorded spend reaches the cap it trips: the in-flight call is cancelled, every
+   host is torn down and the experiment is aborted (exit 5). The cap can therefore be
+   overshot by up to one accrual interval of every live host's rate, plus the teardown
+   time, which is still recorded ([benchmark-lab.md](benchmark-lab.md)).
 2. **Instance self-shutdown at TTL.** User-data runs `shutdown -h` at the host's
    TTL. Instances launch with shutdown behaviour `terminate`, so this ends the
    instance and deletes its root volume even if the laptop running `bench` sleeps,

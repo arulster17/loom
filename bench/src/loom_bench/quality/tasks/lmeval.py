@@ -21,7 +21,7 @@ checked against lm_eval 0.4.13 (`lm_eval/_cli/run.py`, `evaluator.py`,
   several filters (gsm8k: strict-match / flexible-extract) log one row per
   filter, so `filter` must pick one.
 
-lm_eval is the optional `lmeval` extra (``uv sync --extra lmeval``). RULER
+lm_eval is the optional `lmeval` extra (``uv sync --all-packages --extra lmeval``). RULER
 tasks also need `transformers` for their tokenizer, humaneval needs
 `evaluate`. The working directory keeps lm_eval's raw samples (prompts and
 outputs) and its log; nothing from them is logged by Loom.
@@ -267,7 +267,7 @@ def ensure_installed() -> None:
     if importlib.util.find_spec("lm_eval") is None:
         raise LmEvalNotInstalled(
             "lm-evaluation-harness is not installed; install the optional extra with "
-            "`uv sync --extra lmeval` (or `pip install 'loom-bench[lmeval]'`), "
+            "`uv sync --all-packages --extra lmeval` (or `pip install 'loom-bench[lmeval]'`), "
             f"verified with lm_eval=={VERIFIED_VERSION}"
         )
 
