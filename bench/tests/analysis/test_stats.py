@@ -5,7 +5,13 @@ import numpy as np
 import pytest
 from scipy import stats as sps
 
-from loom_bench.stats import bootstrap_ci, mean_ci, paired_bootstrap_delta, percentile
+from loom_bench.stats import (
+    bootstrap_ci,
+    log_mean_ci,
+    mean_ci,
+    paired_bootstrap_delta,
+    percentile,
+)
 
 
 def test_percentile_linear_interpolation():
@@ -120,3 +126,76 @@ def test_paired_delta_deterministic_and_validates_lengths():
     assert paired_bootstrap_delta(a, b, seed=4) == paired_bootstrap_delta(a, b, seed=4)
     with pytest.raises(ValueError):
         paired_bootstrap_delta([1, 2], [1, 2, 3])
+
+
+def test_log_mean_ci_hand_computed():
+    # ln 100 = 4.605170, ln 400 = 5.991465: m = 5.298317 (= ln 200), s_log = ln 4 / sqrt 2
+    # t(0.975, df=1) = 12.706205; half = 12.706205 * (ln 4 / sqrt 2) / sqrt 2 = 6.353102 * ln 4
+    est = log_mean_ci([100.0, 400.0])
+    half = 12.706204736174698 * math.log(4) / 2
+    assert est.method == "log_t"
+    assert est.mean == pytest.approx(200.0)  # geometric mean, not 250
+    assert est.lo == pytest.approx(200.0 * math.exp(-half))
+    assert est.hi == pytest.approx(200.0 * math.exp(half))
+    assert est.lo * est.hi == pytest.approx(est.mean**2)  # multiplicative: GM ×/÷ factor
+    assert est.log_std == pytest.approx(math.log(4) / math.sqrt(2))
+    assert est.std == pytest.approx(math.sqrt(2) * 150)  # raw-scale spread is kept
+    assert est.cv == pytest.approx(math.sqrt(math.expm1(est.log_std**2)))
+
+
+def test_log_mean_ci_matches_scipy_on_logs():
+    values = [3.1, 2.7, 3.9, 3.3, 2.95, 3.6]
+    est = log_mean_ci(values, 0.9)
+    logs = np.log(values)
+    lo, hi = sps.t.interval(0.9, len(values) - 1, loc=logs.mean(), scale=sps.sem(logs))
+    assert (est.lo, est.hi) == (pytest.approx(math.exp(lo)), pytest.approx(math.exp(hi)))
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [2.9, 41.7],  # one fast and one slow repetition: arithmetic lo is about -230
+        [1152.0 * 0.6, 1152.0 * 1.4],
+        [5e-3, 4.0, 0.2],
+    ],
+)
+def test_log_interval_bounds_stay_positive_where_t_goes_negative(values):
+    assert mean_ci(values).lo < 0
+    est = log_mean_ci(values)
+    assert 0 < est.lo <= est.mean <= est.hi
+
+
+def test_log_mean_ci_rejects_non_positive_and_single_value_has_no_interval():
+    with pytest.raises(ValueError, match="strictly positive"):
+        log_mean_ci([1.0, 0.0])
+    one = log_mean_ci([7.0])
+    assert (one.mean, one.lo, one.hi, one.method, one.trusted) == (7.0, None, None, "log_t", False)
+
+
+def test_clipped_t_interval():
+    est = mean_ci([0.0, 0.02], lower=0.0, upper=1.0)
+    assert est.method == "t_clipped"
+    assert est.lo == 0.0 and est.hi == pytest.approx(0.01 + 12.706204736174698 * 0.01)
+    full = mean_ci([0.9, 1.0, 1.0], lower=0.0, upper=1.0)
+    assert full.hi == 1.0
+    assert mean_ci([1.0, 2.0]).method == "t"
+
+
+def test_scaled_keeps_method_and_relative_width():
+    est = log_mean_ci([100.0, 120.0, 90.0]).scaled(0.5)
+    base = log_mean_ci([50.0, 60.0, 45.0])
+    assert est.method == "log_t"
+    assert (est.mean, est.lo, est.hi) == (
+        pytest.approx(base.mean),
+        pytest.approx(base.lo),
+        pytest.approx(base.hi),
+    )
+    assert est.cv == pytest.approx(base.cv)
+    with pytest.raises(ValueError):
+        est.scaled(0)
+
+
+def test_log_mean_ci_of_identical_values_is_exact():
+    est = log_mean_ci([0.3, 0.3, 0.3])
+    assert est.mean == est.lo == est.hi == 0.3
+    assert est.cv == 0.0

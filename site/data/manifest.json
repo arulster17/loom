@@ -1,10 +1,10 @@
 {
-  "schema_version": 1,
-  "generated_at": "2026-10-05T06:21:55.800158Z",
+  "schema_version": 2,
+  "generated_at": "2026-10-05T06:43:38.784498Z",
   "git": {
-    "sha": "7a7a1f0684f909a8285dc92da9489025a2ade79c",
-    "dirty": false,
-    "branch": "main"
+    "sha": "d444ce0979eaf6d3f8dd65e44fc6293c1c807c0d",
+    "dirty": true,
+    "branch": "worktree-agent-a62b06bb7a2674abb"
   },
   "bench_version": "0.1.0",
   "experiment_ids": [],

@@ -84,7 +84,7 @@ def test_markdown_states_public_list_prices_only(report):
     md = render_markdown(report)
     assert "> Public list prices only" in md
     assert (
-        "| chat (open loop) | sglang-bf16 | $0.0000 [0.0000, 0.0000] | $0.8615 [0.8406, 0.8835]"
+        "| chat (open loop) | sglang-bf16 | $0.0000 [0.0000, 0.0000] | $0.8615 [0.8404, 0.8832]"
         in md
     )
     assert "| OpenRouter (aggregator) | qwen/qwen3-8b | $0.1170 | $0.4550 |" in md

@@ -118,11 +118,11 @@ def test_markdown_table_and_footer(report):
     row = next(line for line in md.splitlines() if line.startswith("| 1 |"))
     cells = [c.strip() for c in row.strip("|").split(" | ")]
     assert cells[1].startswith("**sglang-bf16**<br>sglang 0.5.21 · unquantized · 1×L40S")
-    assert cells[2] == "$0.8615 [0.8406, 0.8835]"
-    assert cells[4] == "600.0 [585.1, 614.9]"
+    assert cells[2] == "$0.8615 [0.8404, 0.8832]"
+    assert cells[4] == "600.0 [585.3, 615.1]"  # geometric mean, log-t CI
     assert cells[6] == "6 req/s"
-    assert cells[7] == "413 [392, 434] ms"
-    assert cells[9] == "800.1 [780.2, 819.9] at 8 req/s"
+    assert cells[7] == "413 [393, 434] ms"
+    assert cells[9] == "800.0 [780.4, 820.2] at 8 req/s"
     assert cells[10] == "-0.010 (gsm8k) · pass"
     assert cells[11] == "95 s (median of 3)"
     assert "- sglang-1rep: load 2 req/s: 1 completed repetition; no confidence interval" in md
@@ -133,7 +133,12 @@ def test_markdown_table_and_footer(report):
         "- **Content:** realistic",
         "- **Dataset:** ShareGPT_V3 (license: apache-2.0)",
         "- **Repetitions:** 1–3 per load point",
-        "Student-t 95% confidence interval",
+        "two-sided 95% Student-t interval",
+        "the value shown is the geometric mean",
+        "  - latency percentiles and means (ms): geometric mean, Student-t interval on the "
+        "log scale (log_t)",
+        "  - error rate, SLO attainment, cache fractions and hit rates: arithmetic mean of "
+        "per-run proportions, Student-t interval clipped to [0, 1] (t_clipped)",
         "- **Cost allocation:** all_output",
         "- **Price book last checked:** 2026-10-04",
         "aws/us-east-1 g6e.xlarge spot: $1.8386/h",

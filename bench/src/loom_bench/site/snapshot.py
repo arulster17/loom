@@ -54,7 +54,7 @@ from loom_bench.store.models import (
     ExperimentStatus,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: Estimate.method (log-scale CIs), Methodology.ci_methods
 
 MANIFEST = "manifest.json"
 COMPETITIVENESS = "competitiveness.json"

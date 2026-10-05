@@ -6,7 +6,7 @@ from loom_bench.cost import CostAllocation, cost_at_slo, cost_from_goodput
 from loom_bench.money import SECONDS_PER_HOUR, TOKENS_PER_MTOK
 from loom_bench.records import LoadMode
 from loom_bench.slo import GoodputResult, Slo
-from loom_bench.stats import Estimate
+from loom_bench.stats import Estimate, log_mean_ci, mean_ci
 
 HOURLY = 3_600_000  # $3.60 / h
 
@@ -183,3 +183,23 @@ def test_cost_from_goodput():
     assert c is not None
     assert c.output_per_mtok.value == 1_000_000
     assert c.per_1k_requests.value == 100_000
+
+
+def test_log_scale_throughput_gives_finite_cost_bounds():
+    # Two noisy repetitions: the arithmetic interval of throughput reaches below zero
+    # (cost unbounded); the log-scale one cannot.
+    reps = [691.2, 1612.8]
+    assert mean_ci(reps).lo < 0
+    arith = cost_at_slo(HOURLY, input_tok_s=mean_ci(reps), output_tok_s=mean_ci(reps))
+    assert arith.output_per_mtok.hi is None
+
+    tps = log_mean_ci(reps)
+    c = cost_at_slo(HOURLY, input_tok_s=tps, output_tok_s=tps)
+    out = c.output_per_mtok
+    assert out.lo is not None and out.hi is not None
+    assert 0 < out.lo < out.value < out.hi
+    # cost = hourly / (tok/s x 3600) per token: exactly the reciprocal of the throughput CI
+    per_mtok = HOURLY * TOKENS_PER_MTOK / SECONDS_PER_HOUR
+    assert out.value == round(per_mtok / tps.mean)
+    assert out.lo == round(per_mtok / tps.hi)
+    assert out.hi == round(per_mtok / tps.lo)

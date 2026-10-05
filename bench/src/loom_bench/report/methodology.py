@@ -8,6 +8,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict
 
+from loom_bench.metrics.aggregate import ci_rule_summary
 from loom_bench.money import Micros
 from loom_bench.prices import PriceBook
 from loom_bench.records import Market
@@ -69,6 +70,11 @@ class ConfigProvenance(BaseModel):
     reproduce: str
 
 
+class CiMethodRow(BaseModel):
+    metrics: str  # metric family
+    method: str
+
+
 class Methodology(BaseModel):
     slos: list[str]
     allocations: list[str]
@@ -77,6 +83,7 @@ class Methodology(BaseModel):
     datasets: list[DatasetRef]
     repetitions: str
     ci_method: str
+    ci_methods: list[CiMethodRow]
     price_book_last_checked: dt.date | None
     configs: list[ConfigProvenance]
 
@@ -201,11 +208,20 @@ def methodology(results: Sequence[ConfigResult], price_book: PriceBook | None) -
         repetitions = "none"
     conf = ", ".join(f"{c:.0%}" for c in confidences) or "95%"
     ci_method = (
-        f"Each metric is the mean across repetitions with a two-sided Student-t {conf} "
-        "confidence interval. A load meets the SLO only if the CI upper bound of every target "
-        "is within it; goodput is the highest passing load below the first failing one. Cost "
-        "CI bounds come from the goodput throughput CI (low cost from high throughput). "
-        "Results with a single repetition have no CI and are never trusted."
+        "Repetitions of a load point are combined per metric, with a two-sided "
+        f"{conf} Student-t interval on the scale that fits the metric. Latencies, "
+        "throughputs and rates are strictly positive and right-skewed: the value shown is "
+        "the geometric mean and the interval is the t-interval of ln(value), exponentiated "
+        "(geometric mean ×/÷ a factor), so both bounds are positive. Proportions such as "
+        "error rate and SLO attainment use the arithmetic mean of the per-run proportions "
+        "with the t-interval clipped to [0, 1]; it measures run-to-run variation, not "
+        "binomial sampling, so it is [0, 0] when no repetition saw an error. Counts use the "
+        "arithmetic t-interval clipped at 0, as does a positive metric when a repetition "
+        "measured 0. A load meets the SLO only if the CI upper bound of every target is "
+        "within it; goodput is the highest passing load below the first failing one. Cost "
+        "CI bounds come from the goodput throughput CI (low cost from high throughput), so "
+        "they are finite whenever the throughput lower bound is above zero. Results with a "
+        "single repetition have no CI and are never trusted."
     )
     return Methodology(
         slos=_distinct([describe_slo(r.goodput.slo) for r in results]),
@@ -215,6 +231,7 @@ def methodology(results: Sequence[ConfigResult], price_book: PriceBook | None) -
         datasets=datasets,
         repetitions=repetitions,
         ci_method=ci_method,
+        ci_methods=[CiMethodRow(metrics=m, method=t) for m, t in ci_rule_summary()],
         price_book_last_checked=price_book.last_checked if price_book else None,
         configs=[_config_provenance(r, price_book) for r in results],
     )
@@ -234,6 +251,7 @@ def methodology_markdown(m: Methodology) -> str:
         lines.append(f"- **Dataset:** {d.text}{source}")
     lines.append(f"- **Repetitions:** {m.repetitions}")
     lines.append(f"- **Confidence intervals:** {m.ci_method}")
+    lines += [f"  - {row.metrics}: {row.method}" for row in m.ci_methods]
     lines += [f"- **Cost allocation:** {a}" for a in m.allocations]
     checked = m.price_book_last_checked.isoformat() if m.price_book_last_checked else "n/a"
     lines.append(f"- **Price book last checked:** {checked}")

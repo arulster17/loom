@@ -195,7 +195,41 @@
     "content_kinds": [],
     "datasets": [],
     "repetitions": "none",
-    "ci_method": "Each metric is the mean across repetitions with a two-sided Student-t 95% confidence interval. A load meets the SLO only if the CI upper bound of every target is within it; goodput is the highest passing load below the first failing one. Cost CI bounds come from the goodput throughput CI (low cost from high throughput). Results with a single repetition have no CI and are never trusted.",
+    "ci_method": "Repetitions of a load point are combined per metric, with a two-sided 95% Student-t interval on the scale that fits the metric. Latencies, throughputs and rates are strictly positive and right-skewed: the value shown is the geometric mean and the interval is the t-interval of ln(value), exponentiated (geometric mean ×/÷ a factor), so both bounds are positive. Proportions such as error rate and SLO attainment use the arithmetic mean of the per-run proportions with the t-interval clipped to [0, 1]; it measures run-to-run variation, not binomial sampling, so it is [0, 0] when no repetition saw an error. Counts use the arithmetic t-interval clipped at 0, as does a positive metric when a repetition measured 0. A load meets the SLO only if the CI upper bound of every target is within it; goodput is the highest passing load below the first failing one. Cost CI bounds come from the goodput throughput CI (low cost from high throughput), so they are finite whenever the throughput lower bound is above zero. Results with a single repetition have no CI and are never trusted.",
+    "ci_methods": [
+      {
+        "metrics": "request counts and sample sizes",
+        "method": "arithmetic mean, Student-t interval clipped at 0 (t_clipped)"
+      },
+      {
+        "metrics": "latency percentiles and means (ms)",
+        "method": "geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0"
+      },
+      {
+        "metrics": "throughput and goodput (tok/s, req/s)",
+        "method": "geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0"
+      },
+      {
+        "metrics": "server queue time, measurement window",
+        "method": "geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0"
+      },
+      {
+        "metrics": "error rate, SLO attainment, cache fractions and hit rates",
+        "method": "arithmetic mean of per-run proportions, Student-t interval clipped to [0, 1] (t_clipped)"
+      },
+      {
+        "metrics": "GPU utilization (%)",
+        "method": "arithmetic mean, Student-t interval clipped to [0, 100] (t_clipped)"
+      },
+      {
+        "metrics": "other server and GPU gauges",
+        "method": "arithmetic mean, Student-t interval clipped at 0 (t_clipped)"
+      },
+      {
+        "metrics": "anything else",
+        "method": "arithmetic mean, Student-t interval (t)"
+      }
+    ],
     "price_book_last_checked": "2026-10-04",
     "configs": []
   }

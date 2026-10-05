@@ -10,7 +10,9 @@ Verdict per metric, on the repetition means (delta = B - A):
 1. within tolerance: |delta| <= rel_tol * |A| (absolute tolerance for metrics in
    `abs_tol`, e.g. error rate) → within normal variance;
 2. otherwise, Welch's t-test on the two sets of repetitions: p >= alpha means the
-   difference is not distinguishable from run-to-run noise → within normal variance;
+   difference is not distinguishable from run-to-run noise → within normal variance.
+   Metrics aggregated on the log scale (latency, throughput: `Estimate.method`
+   "log_t") are tested on ln(values), i.e. on the ratio of geometric means;
 3. otherwise, or with fewer than two repetitions on either side → outside.
 
 Cost at SLO has no per-run samples, so rule 2 is replaced by overlap of the two
@@ -170,21 +172,43 @@ def _index(sweeps: list[_Sweep], by: MatchBy, label: str) -> dict[tuple[str, ...
     return out
 
 
-def _welch(
-    a: Estimate, b: Estimate, confidence: float
-) -> tuple[float | None, float | None, float | None]:
-    """(delta_lo, delta_hi, p) for b - a; all None without two repetitions per side."""
-    if a.n < 2 or b.n < 2 or a.std is None or b.std is None:
-        return None, None, None
-    va, vb = a.std**2 / a.n, b.std**2 / b.n
-    d = b.mean - a.mean
+def _welch_moments(
+    ma: float, sa: float, na: int, mb: float, sb: float, nb: int, confidence: float
+) -> tuple[float, float, float]:
+    """(lo, hi, p) of Welch's test and interval for mb - ma."""
+    va, vb = sa**2 / na, sb**2 / nb
+    d = mb - ma
     se = math.sqrt(va + vb)
     if se == 0:
         return d, d, 1.0 if d == 0 else 0.0
-    df = (va + vb) ** 2 / (va**2 / (a.n - 1) + vb**2 / (b.n - 1))
+    df = (va + vb) ** 2 / (va**2 / (na - 1) + vb**2 / (nb - 1))
     p = float(2 * sps.t.sf(abs(d) / se, df))
     half = float(sps.t.ppf((1 + confidence) / 2, df)) * se
     return d - half, d + half, p
+
+
+def _welch(
+    a: Estimate, b: Estimate, confidence: float
+) -> tuple[float | None, float | None, float | None]:
+    """(delta_lo, delta_hi, p) for b - a; all None without two repetitions per side.
+
+    Estimates are compared on the scale their intervals use. Two "log_t" estimates
+    are tested on ln(values), i.e. on the ratio of geometric means; the ratio's
+    interval [r_lo, r_hi] is reported as the difference a.mean x (r - 1). Estimates
+    combined by different methods (one side had a zero) are not tested.
+    """
+    if a.n < 2 or b.n < 2 or a.std is None or b.std is None:
+        return None, None, None
+    if (a.method == "log_t") != (b.method == "log_t"):
+        return None, None, None
+    if a.method == "log_t":
+        if a.log_std is None or b.log_std is None:
+            return None, None, None
+        lo, hi, p = _welch_moments(
+            math.log(a.mean), a.log_std, a.n, math.log(b.mean), b.log_std, b.n, confidence
+        )
+        return a.mean * math.expm1(lo), a.mean * math.expm1(hi), p
+    return _welch_moments(a.mean, a.std, a.n, b.mean, b.std, b.n, confidence)
 
 
 def _within_tol(
@@ -229,7 +253,12 @@ def compare_metric(
     if ok:
         within, reason = True, f"within tolerance ({tol_text})"
     elif p is None:
-        within, reason = False, f"outside tolerance ({tol_text}); fewer than 2 repetitions, no test"
+        why = (
+            "CI methods differ"
+            if a.n >= 2 and b.n >= 2 and a.method != b.method
+            else "fewer than 2 repetitions"
+        )
+        within, reason = False, f"outside tolerance ({tol_text}); {why}, no test"
     elif p >= alpha:
         within, reason = (
             True,
@@ -471,7 +500,8 @@ def render_markdown(c: Comparison) -> str:
         "",
         f"Matched by {c.match_by}. A metric is within normal variance when |B − A| is within "
         f"{pct(c.rel_tol)} of A (absolute: {abs_tol or 'none'}), or otherwise when Welch's "
-        f"t-test on the repetitions gives p ≥ {c.alpha:g}. Cost at SLO uses CI overlap instead "
+        f"t-test on the repetitions gives p ≥ {c.alpha:g} (on ln(values), the ratio of "
+        "geometric means, for latency and throughput). Cost at SLO uses CI overlap instead "
         f"of the t-test. Intervals are {c.confidence:.0%} CIs."
         + ("" if c.match_by == "workload" else " Config hashes must match exactly."),
     ]

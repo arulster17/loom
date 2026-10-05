@@ -25,7 +25,7 @@
 <dt>Dataset</dt><dd>{{ d.text }}{% if d.source %}; source: {{ link_list([d.source]) }}{% endif %}</dd>
 {% endfor %}
 <dt>Repetitions</dt><dd>{{ m.repetitions }}</dd>
-<dt>Confidence intervals</dt><dd>{{ m.ci_method }}</dd>
+<dt>Confidence intervals</dt><dd>{{ m.ci_method }}<ul class="ci-methods">{% for row in m.ci_methods %}<li>{{ row.metrics }}: {{ row.method }}</li>{% endfor %}</ul></dd>
 {% for a in m.allocations %}
 <dt>Cost allocation</dt><dd>{{ a }}</dd>
 {% endfor %}

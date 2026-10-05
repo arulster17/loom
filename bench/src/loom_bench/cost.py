@@ -17,8 +17,12 @@ All prices are computed exactly with Fraction and rounded once, half-up, to micr
 Confidence intervals: cost falls monotonically as throughput rises, so the low cost
 bound comes from the throughput CI's upper bound and vice versa. Where a cost
 depends on both input and output throughput, both are taken at the same end of
-their CIs. A throughput bound at or below zero makes the cost bound unbounded
-(None), and so does a missing CI (single run).
+their CIs. Throughput intervals are computed on the log scale (`Estimate.method`
+"log_t"), so their lower bound is positive and both cost bounds are finite; the
+cost interval is then exactly the reciprocal of the throughput interval, scaled.
+Only a throughput bound at or below zero (an arithmetic fallback when a repetition
+measured zero) makes the cost bound unbounded (None), and a missing CI (single run)
+gives no bounds.
 """
 
 from __future__ import annotations
