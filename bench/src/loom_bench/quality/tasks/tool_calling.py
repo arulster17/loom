@@ -199,6 +199,9 @@ class ToolCallingTask(ParamTask[ToolCallingParams]):
     Params = ToolCallingParams
     version: ClassVar[str] = "1"
 
+    def planned_items(self) -> int:
+        return sum(i.category in self.params.categories for i in load_data().items)
+
     async def run(self, ctx: EvalContext) -> TaskOutput:
         data = load_data()
         items = [i for i in data.items if i.category in self.params.categories]

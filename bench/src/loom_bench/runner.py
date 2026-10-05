@@ -396,7 +396,7 @@ class _Executor:
     async def _run_quality(self, host: Host, cell: Cell, endpoint: Endpoint, suite: Suite) -> None:
         quality = self.exp.quality
         assert quality is not None
-        self.guard.check_next(self.est.eval_s(), what=f"quality suite on {cell.key}")
+        self.guard.check_next(self.est.eval_s(cell), what=f"quality suite on {cell.key}")
         workdir = self.run_dir / "evals" / cell.config_hash[:16]
         result = await self.guard.guarded(
             run_suite(

@@ -262,6 +262,12 @@ class LmEvalTask(ParamTask[LmEvalParams]):
     Params = LmEvalParams
     version: ClassVar[str] = "1"
 
+    def planned_items(self) -> int | None:
+        """Known only for explicit `samples`: doc counts live in the harness's datasets."""
+        if self.params.samples is None:
+            return None
+        return sum(len(set(idx)) for idx in self.params.samples.values())
+
     async def run(self, ctx: EvalContext) -> TaskOutput:
         ensure_installed()
         out_dir = ctx.workdir / f"lm_eval-{self.name}"

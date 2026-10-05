@@ -3,7 +3,9 @@
 A suite fixes everything that decides which items are scored and how: task
 list and parameters, sample counts, seeds, chat-template kwargs, gate
 thresholds and divergence / sanity limits. Baseline and candidate must run the
-same suite for the gate to compare them.
+same suite for the gate to compare them. Named `subsets` pick some of its
+tasks, unchanged, for runs that cannot afford all of them; a subset's results
+pair item for item with a full run of the same tasks.
 """
 
 from __future__ import annotations
@@ -11,7 +13,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PositiveInt,
+    StringConstraints,
+    model_validator,
+)
 
 from loom_bench.quality.gate import GatePolicy, MinSamples, TaskPolicy, Threshold
 from loom_bench.quality.sanity import SanityConfig, SanityLimits
@@ -33,6 +42,15 @@ class SuiteTask(_Strict):
     params: dict[str, Any] = Field(default_factory=dict)
     threshold: Threshold | None = None
     min_samples: MinSamples | None = None
+    # Items the task scores, for the planner's time estimate; only needed when the task
+    # cannot count them itself (lm_eval docs without explicit `samples`).
+    items: PositiveInt | None = None
+
+    def planned_items(self) -> int | None:
+        """Items a run scores, when known before it runs."""
+        if self.items is not None:
+            return self.items
+        return build_task(self.kind, self.name, self.params).planned_items()
 
 
 class GateSpec(_Strict):
@@ -61,6 +79,9 @@ class Suite(_Strict):
     divergence: DivergenceSpec | None = None
     sanity_limits: SanityLimits = Field(default_factory=SanityLimits)
     sanity_checks: SanityConfig = Field(default_factory=SanityConfig)
+    subsets: dict[TaskName, Annotated[list[TaskName], Field(min_length=1)]] = Field(
+        default_factory=dict
+    )
 
     @model_validator(mode="after")
     def _check(self) -> Self:
@@ -69,8 +90,22 @@ class Suite(_Strict):
         if dupes:
             raise ValueError(f"duplicate task names: {dupes}")
         for t in self.tasks:
-            build_task(t.kind, t.name, t.params)  # validates kind and params
+            counted = build_task(t.kind, t.name, t.params).planned_items()  # validates params
+            if t.items is not None and counted is not None and t.items != counted:
+                raise ValueError(f"task {t.name}: items {t.items} but its params give {counted}")
+        for subset, members in self.subsets.items():
+            unknown = sorted(set(members) - set(names))
+            if unknown or len(set(members)) != len(members):
+                raise ValueError(f"subset {subset}: unknown or repeated tasks in {members}")
         return self
+
+    def select(self, subset: str | None) -> list[SuiteTask]:
+        """The tasks a run of `subset` (None: the whole suite) executes, in suite order."""
+        if subset is None:
+            return list(self.tasks)
+        if subset not in self.subsets:
+            raise ValueError(f"suite {self.suite} has no subset {subset!r}: {sorted(self.subsets)}")
+        return [t for t in self.tasks if t.name in self.subsets[subset]]
 
     def policy(self) -> GatePolicy:
         div = self.divergence

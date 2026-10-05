@@ -126,6 +126,10 @@ class NeedleTask(ParamTask[NeedleParams]):
     Params = NeedleParams
     version: ClassVar[str] = "1"
 
+    def planned_items(self) -> int:
+        p = self.params
+        return len(p.context_tokens) * len(p.depths) * p.samples_per_cell
+
     async def run(self, ctx: EvalContext) -> TaskOutput:
         async def score(item: NeedleItem) -> tuple[ItemResult, Completion | None]:
             content = item_hash({"prompt": item.prompt, "code": item.code})

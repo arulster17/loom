@@ -76,6 +76,10 @@ class EvalTask(Protocol):
         """Bumped whenever items, prompts or scoring change; stored with every eval run."""
         ...
 
+    def planned_items(self) -> int | None:
+        """Items a run will score, when known before it runs (the planner's eval estimate)."""
+        ...
+
     async def run(self, ctx: EvalContext) -> TaskOutput: ...
 
 

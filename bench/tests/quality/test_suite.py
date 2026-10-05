@@ -62,3 +62,62 @@ def test_suite_validation():
         _suite(gate={"threshold": 1.5})
     with pytest.raises(ValueError):
         _suite(extra_key=1)
+
+
+GSM8K = {
+    "name": "gsm8k",
+    "kind": "lm_eval",
+    "params": {"tasks": ["gsm8k"], "metric": "exact_match"},
+}
+
+
+def test_planned_items_per_kind():
+    tasks = [
+        {"name": "a", "kind": "toy_arithmetic", "params": {"n": 10}},
+        {
+            "name": "n",
+            "kind": "needle",
+            "params": {"context_tokens": [4096], "samples_per_cell": 3},
+        },
+        {"name": "c", "kind": "code_exec", "params": {"datasets": ["humaneval", "mbpp"]}},
+        {"name": "c2", "kind": "code_exec", "params": {"datasets": ["mbpp"], "limit": 20}},
+        {"name": "j", "kind": "json_schema", "params": {"limit": 7}},
+        {"name": "t", "kind": "tool_calling"},
+        GSM8K,
+        {**GSM8K, "name": "g2", "items": 1319},
+        {**GSM8K, "name": "g3", "params": {**GSM8K["params"], "samples": {"gsm8k": [3, 1, 1]}}},
+    ]
+    got = {t.name: t.planned_items() for t in _suite(tasks=tasks).tasks}
+    assert got == {
+        "a": 10,
+        "n": 15,
+        "c": 664,
+        "c2": 20,
+        "j": 7,
+        "t": 60,
+        "gsm8k": None,
+        "g2": 1319,
+        "g3": 2,
+    }
+
+
+def test_items_must_agree_with_what_params_give():
+    with pytest.raises(ValueError, match="items 11 but its params give 10"):
+        _suite(tasks=[{"name": "a", "kind": "toy_arithmetic", "params": {"n": 10}, "items": 11}])
+
+
+def test_subsets_select_tasks_in_suite_order():
+    tasks = [
+        {"name": "a", "kind": "toy_arithmetic"},
+        {"name": "b", "kind": "json_schema"},
+        {"name": "c", "kind": "tool_calling"},
+    ]
+    s = _suite(tasks=tasks, subsets={"quick": ["c", "a"]})
+    assert [t.name for t in s.select("quick")] == ["a", "c"]
+    assert [t.name for t in s.select(None)] == ["a", "b", "c"]
+    with pytest.raises(ValueError, match="no subset 'slow'"):
+        s.select("slow")
+    with pytest.raises(ValueError, match="unknown or repeated"):
+        _suite(tasks=tasks, subsets={"x": ["a", "zzz"]})
+    with pytest.raises(ValueError, match="unknown or repeated"):
+        _suite(tasks=tasks, subsets={"x": ["a", "a"]})

@@ -76,6 +76,9 @@ class ArithmeticTask(ParamTask[ArithmeticParams]):
     Params = ArithmeticParams
     version: ClassVar[str] = "1"
 
+    def planned_items(self) -> int:
+        return self.params.n
+
     async def run(self, ctx: EvalContext) -> TaskOutput:
         p = self.params
 

@@ -46,6 +46,7 @@ class DatasetSource:
     revision: str
     filename: str
     license: str
+    problems: int  # rows in the pinned file
 
 
 SOURCES: dict[str, DatasetSource] = {
@@ -54,12 +55,14 @@ SOURCES: dict[str, DatasetSource] = {
         revision="7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544",
         filename="openai_humaneval/test-00000-of-00001.parquet",
         license="MIT",
+        problems=164,
     ),
     "mbpp": DatasetSource(
         repo="google-research-datasets/mbpp",
         revision="4bb6404fdc6cacfda99d4ac4205087b89d32030c",
         filename="full/test-00000-of-00001.parquet",
         license="CC-BY-4.0",
+        problems=500,
     ),
 }
 
@@ -163,6 +166,13 @@ class CodeExecTask(ParamTask[CodeExecParams]):
         """`problems` replaces the Hub download (tests and local fixtures)."""
         super().__init__(name, params)
         self._problems = list(problems) if problems is not None else None
+
+    def planned_items(self) -> int:
+        if self._problems is not None:
+            return len(self._problems)
+        limit = self.params.limit
+        sizes = [SOURCES[d].problems for d in self.params.datasets]
+        return sum(n if limit is None else min(n, limit) for n in sizes)
 
     async def run(self, ctx: EvalContext) -> TaskOutput:
         if not ctx.allow_code_exec:

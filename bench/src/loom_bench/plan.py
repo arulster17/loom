@@ -2,7 +2,7 @@
 
 Cells with identical hardware share one host; after the first (cold) start the
 host switches configs with warm restarts. Every timing assumption is in
-`AWS_TIMING`, `LOCAL_TIMING`, `MOCK_*` and the `ASSUMED_*` constants below.
+`AWS_TIMING`, `LOCAL_TIMING`, `MOCK_*`, `ASSUMED_*` and `EVAL_*` below.
 `bench run` refuses to start when `Plan.refusals` is non-empty.
 """
 
@@ -26,6 +26,8 @@ from loom_bench.experiment import (
 )
 from loom_bench.money import Micros, cost_for_seconds, format_usd
 from loom_bench.prices import HOURS_PER_MONTH, PriceBook
+from loom_bench.quality.divergence import load_prompts
+from loom_bench.quality.suite import SuiteTask
 from loom_bench.records import LoadMode, Market
 from loom_bench.workloads import WorkloadProfile
 
@@ -39,7 +41,8 @@ class Timing:
     engine_init_s: float  # CUDA graph capture, compilation, KV-cache allocation
     run_overhead_s: float  # per run, beyond duration and drain: job upload, result download
     teardown_s: float  # terminate call -> billing stops
-    eval_s: float  # quality suite, per cell
+    eval_setup_s: float  # once per host: eval harness installed into the client environment
+    eval_job_s: float  # per eval job, beyond its requests: staging, container start, upload
 
 
 # EC2 with a GPU DLAMI and Docker over SSM. Bandwidths are deliberately low: HF
@@ -54,7 +57,8 @@ AWS_TIMING = Timing(
     engine_init_s=240.0,
     run_overhead_s=30.0,
     teardown_s=90.0,
-    eval_s=1800.0,
+    eval_setup_s=300.0,  # loom-bench[lmeval]: lm-eval, torch and transformers wheels
+    eval_job_s=60.0,
 )
 LOCAL_TIMING = Timing(
     boot_s=0.0,
@@ -64,12 +68,13 @@ LOCAL_TIMING = Timing(
     engine_init_s=0.0,
     run_overhead_s=1.0,
     teardown_s=0.0,
-    eval_s=600.0,
+    eval_setup_s=0.0,
+    eval_job_s=1.0,
 )
 # The mock starts a uvicorn thread, then waits startup_delay_s * time_scale.
 MOCK_SERVER_START_S = 0.5
 MOCK_RUN_OVERHEAD_S = 0.3
-MOCK_EVAL_S = 5.0
+MOCK_EVAL_JOB_S = 0.5
 
 # Closed-loop runs bounded by request count (not duration) on a real engine assume
 # these per-request costs: a modest prefill rate and decode at the 50 ms TPOT SLO.
@@ -78,6 +83,27 @@ ASSUMED_DECODE_S_PER_TOKEN = 0.05
 # Shape used when a profile gives no length (datasets, traces without clamps).
 DEFAULT_INPUT_TOKENS = 1024
 DEFAULT_OUTPUT_TOKENS = 512
+
+# Quality evals. An eval job takes, summed over its tasks,
+#   items x EVAL_ITEM_S[kind] / concurrency
+# plus EVAL_HARNESS_TASK_S per lm_eval task, the divergence prompts and the
+# provider's per-job overhead. EVAL_ITEM_S is how long one item holds one of the
+# task's concurrent request slots on a real engine decoding at the 50 ms TPOT SLO
+# (ASSUMED_DECODE_S_PER_TOKEN) with every slot busy; concurrency is the lm_eval
+# task's num_concurrent, else EVAL_CONCURRENCY. The mock scales item time by its
+# time_scale.
+EVAL_ITEM_S: dict[str, float] = {
+    "lm_eval": 24.0,  # MMLU-Pro / GSM8K chain of thought, IFEval: ~400 tokens + few-shot prefill
+    "code_exec": 16.0,  # ~300-token program, then the sandboxed tests
+    "needle": 40.0,  # 8k-28k-token prompts: prefill-bound while every slot holds one
+    "tool_calling": 6.0,  # one call, ~60 tokens
+    "json_schema": 8.0,  # one object, ~100 tokens, under a grammar
+    "toy_arithmetic": 2.0,  # one short sentence
+}
+EVAL_DIVERGENCE_PROMPT_S = 4.0  # 64-token greedy continuation, then one echo scoring request
+EVAL_HARNESS_TASK_S = 60.0  # per lm_eval task: harness start-up and dataset download
+EVAL_CONCURRENCY = 16  # EvalJob.concurrency the runner sets
+LMEVAL_DEFAULT_CONCURRENCY = 16  # LmEvalParams.num_concurrent default
 
 
 def profile_shape(p: WorkloadProfile) -> tuple[int, int]:
@@ -102,6 +128,7 @@ class Estimator:
 
     def __init__(self, exp: Experiment) -> None:
         self.exp = exp
+        self.suite = exp.quality.load() if exp.quality is not None else None
         p = exp.provider
         self.timing = (
             AWS_TIMING
@@ -181,10 +208,40 @@ class Estimator:
             per_point = [self.run_s(cell, load, profile, self.max_load(load))] * load_points(load)
         return sum(per_point) * self.exp.repetitions
 
-    def eval_s(self) -> float:
-        if self.exp.quality is None:
+    def eval_tasks(self) -> list[SuiteTask]:
+        if self.suite is None or self.exp.quality is None:
+            return []
+        return self.suite.select(self.exp.quality.subset)
+
+    def uncounted_tasks(self) -> list[str]:
+        """Eval tasks whose item count is unknown before they run (lm_eval without `items`)."""
+        return [t.name for t in self.eval_tasks() if t.planned_items() is None]
+
+    def eval_s(self, cell: Cell) -> float:
+        """One cell's eval job: its suite tasks, its divergence half and the job overhead."""
+        if self.suite is None:
             return 0.0
-        return MOCK_EVAL_S if self.timing is None else self.timing.eval_s
+        busy = 0.0
+        for t in self.eval_tasks():
+            concurrency = (
+                t.params.get("num_concurrent", LMEVAL_DEFAULT_CONCURRENCY)
+                if t.kind == "lm_eval"
+                else EVAL_CONCURRENCY
+            )
+            busy += (t.planned_items() or 0) * EVAL_ITEM_S[t.kind] / concurrency
+        div = self.suite.divergence
+        if div is not None:
+            busy += (
+                (div.prompts or len(load_prompts())) * EVAL_DIVERGENCE_PROMPT_S / EVAL_CONCURRENCY
+            )
+        if cell.mock is not None:
+            return busy * cell.mock.time_scale + MOCK_EVAL_JOB_S
+        assert self.timing is not None
+        harness = EVAL_HARNESS_TASK_S * sum(t.kind == "lm_eval" for t in self.eval_tasks())
+        return busy + harness + self.timing.eval_job_s
+
+    def eval_setup_s(self) -> float:
+        return 0.0 if self.suite is None or self.timing is None else self.timing.eval_setup_s
 
     def teardown_s(self) -> float:
         return 0.0 if self.timing is None else self.timing.teardown_s
@@ -192,7 +249,7 @@ class Estimator:
 
 @dataclass
 class Step:
-    kind: str  # cold_start | warm_start | workload | eval | teardown
+    kind: str  # cold_start | eval_setup | warm_start | workload | eval | teardown
     label: str
     seconds: float
 
@@ -336,11 +393,11 @@ def build_plan(
         max_ttl = aws_accrual_terms().max_ttl_s
         if ttl_s > max_ttl:
             refusals.append(f"budget.ttl_minutes is above the AWS host limit of {max_ttl / 60:g}")
-        if exp.quality is not None:
-            refusals.append(
-                "quality suites need the endpoint reachable from the runner; aws_ec2 serves "
-                "on the host's loopback and has no on-host eval job yet"
-            )
+    if est.uncounted_tasks():
+        refusals.append(
+            f"quality tasks {est.uncounted_tasks()} have no item count to estimate their "
+            "time from; set `items` on them in the suite"
+        )
     notes: list[str] = []
     hosts: dict[str, HostPlan] = {}
     prev: dict[str, Cell] = {}
@@ -361,6 +418,8 @@ def build_plan(
                 ttl_s=ttl_s,
             )
             host.steps.append(Step("cold_start", cell.key, est.cold_start_s(cell)))
+            if est.eval_setup_s():
+                host.steps.append(Step("eval_setup", host.key, est.eval_setup_s()))
         else:
             host.steps.append(
                 Step("warm_start", cell.key, est.warm_start_s(prev[cell.host_key], cell))
@@ -374,7 +433,9 @@ def build_plan(
             host.steps.append(Step("workload", label, est.workload_s(cell, entry, profile)))
             n_runs += load_points(entry.load) * exp.repetitions
         if exp.quality is not None:
-            host.steps.append(Step("eval", f"{cell.key} / {exp.quality.suite}", est.eval_s()))
+            q = exp.quality
+            label = f"{cell.key} / {q.suite}" + (f" [{q.subset}]" if q.subset else "")
+            host.steps.append(Step("eval", label, est.eval_s(cell)))
 
     for host in hosts.values():
         host.steps.append(Step("teardown", host.key, est.teardown_s()))

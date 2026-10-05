@@ -280,14 +280,20 @@ class CostAllocationSpec(_Strict):
 
 class QualitySpec(_Strict):
     """Pinned eval suite run on every cell; non-baseline cells are gated against the
-    baseline variant's cell with the same sweep point (policy from the suite)."""
+    baseline variant's cell with the same sweep point (policy from the suite). The
+    baseline cell also captures the divergence reference each candidate is scored on."""
 
     suite: str  # `bench/evals/<name>.yaml` by name, or a suite YAML path from the repo root
+    subset: Slug | None = None  # a named subset of the suite's tasks; None runs them all
     baseline_variant: Slug
     allow_code_exec: bool = False  # code_exec tasks run model output in the sandbox
 
     def load(self) -> Suite:
         return load_quality_suite(self.suite)
+
+    def task_names(self, suite: Suite) -> list[str] | None:
+        """The EvalJob task list: None for the whole suite."""
+        return None if self.subset is None else [t.name for t in suite.select(self.subset)]
 
 
 def load_quality_suite(ref: str) -> Suite:
@@ -630,6 +636,20 @@ def expand(exp: Experiment, registry: Registry) -> list[Cell]:
             raise ExpansionError(f"quality suite {exp.quality.suite}: {e}") from None
         if suite.model != exp.model:
             raise ExpansionError(f"quality suite {suite.suite} is pinned for {suite.model}")
+        try:
+            selected = suite.select(exp.quality.subset)
+        except ValueError as e:
+            raise ExpansionError(str(e)) from None
+        runs_code = [
+            t.name
+            for t in selected
+            if t.kind == "code_exec" or (t.kind == "lm_eval" and t.params.get("unsafe_code"))
+        ]
+        if runs_code and not exp.quality.allow_code_exec:
+            raise ExpansionError(
+                f"quality tasks {runs_code} execute model-written code; set "
+                "quality.allow_code_exec: true or pick a subset without them"
+            )
     return cells
 
 

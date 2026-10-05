@@ -3,11 +3,21 @@ from typer.testing import CliRunner
 
 from loom_bench.budget import BudgetConfig, caps_for, load_budget
 from loom_bench.cli import app
-from loom_bench.experiment import expand, load_experiment
+from loom_bench.experiment import ExpansionError, Experiment, expand, load_experiment
 from loom_bench.money import parse_usd
-from loom_bench.plan import AWS_TIMING, Estimator, build_plan
+from loom_bench.plan import (
+    AWS_TIMING,
+    EVAL_CONCURRENCY,
+    EVAL_DIVERGENCE_PROMPT_S,
+    EVAL_HARNESS_TASK_S,
+    EVAL_ITEM_S,
+    MOCK_EVAL_JOB_S,
+    Estimator,
+    build_plan,
+)
 from loom_bench.prices import load_prices
 from loom_bench.provenance import GitInfo
+from loom_bench.quality.tasks import TASKS
 from loom_bench.registry import load_registry
 from loom_bench.runner import EXIT_REFUSED, plan_experiment
 from loom_bench.store import repo
@@ -150,3 +160,80 @@ def test_dry_run_prints_the_plan_and_stops(db, tmp_path):
     assert "Plan: mock-smoke" in result.output
     with session_scope(db) as s:
         assert s.query(BenchExperiment).count() == 0
+
+
+def _quality_suite(tmp_path, tasks, **over):
+    doc = {"suite": "plan-test", "model": "qwen3-8b", "tasks": tasks, **over}
+    return str(write_yaml(tmp_path / "suite.yaml", doc))
+
+
+JSON_TASK = {"name": "json_schema", "kind": "json_schema"}
+GSM8K = {
+    "name": "gsm8k",
+    "kind": "lm_eval",
+    "params": {"tasks": ["gsm8k"], "metric": "exact_match", "num_concurrent": 32},
+}
+
+
+def _with_quality(exp, suite_path, **quality):
+    q = {"suite": suite_path, "baseline_variant": exp.variants[0].name, **quality}
+    return Experiment.model_validate({**exp.model_dump(mode="json"), "quality": q})
+
+
+def test_aws_eval_time_comes_from_the_suite(tmp_path):
+    path = _quality_suite(
+        tmp_path, [JSON_TASK, {**GSM8K, "items": 100}], divergence={"prompts": 10}
+    )
+    exp = _with_quality(load_experiment(QWEN), path)
+    plan = _plan(exp)
+    assert plan.ok, plan.refusals
+    steps = plan.hosts[0].steps
+    evals = [s for s in steps if s.kind == "eval"]
+    expected = (
+        60 * EVAL_ITEM_S["json_schema"] / EVAL_CONCURRENCY
+        + 100 * EVAL_ITEM_S["lm_eval"] / 32
+        + 10 * EVAL_DIVERGENCE_PROMPT_S / EVAL_CONCURRENCY
+        + EVAL_HARNESS_TASK_S
+        + AWS_TIMING.eval_job_s
+    )
+    assert [s.seconds for s in evals] == [pytest.approx(expected)] * 2
+    assert [s.kind for s in steps].count("eval_setup") == 1
+    assert steps[1].kind == "eval_setup" and steps[1].seconds == AWS_TIMING.eval_setup_s
+    without = _plan(load_experiment(QWEN))
+    assert plan.total_seconds - without.total_seconds == pytest.approx(
+        2 * expected + AWS_TIMING.eval_setup_s
+    )
+    assert plan.total_micros > without.total_micros
+
+
+def test_eval_subset_and_mock_time_scale(tmp_path):
+    path = _quality_suite(
+        tmp_path, [JSON_TASK, {**GSM8K, "items": 100}], subsets={"q": ["json_schema"]}
+    )
+    exp = mock_experiment(quality={"suite": path, "baseline_variant": "a", "subset": "q"})
+    (step,) = [s for s in _plan(exp).hosts[0].steps if s.kind == "eval"]
+    scale = exp.provider.time_scale
+    assert step.label.endswith("[q]")
+    assert step.seconds == pytest.approx(
+        60 * EVAL_ITEM_S["json_schema"] / EVAL_CONCURRENCY * scale + MOCK_EVAL_JOB_S
+    )
+
+
+def test_every_task_kind_has_an_eval_time_constant():
+    assert set(EVAL_ITEM_S) == set(TASKS)
+
+
+def test_uncounted_lm_eval_task_is_refused(tmp_path):
+    exp = _with_quality(load_experiment(QWEN), _quality_suite(tmp_path, [GSM8K]))
+    assert any("no item count" in r for r in _plan(exp).refusals)
+
+
+def test_code_exec_tasks_need_the_opt_in(tmp_path):
+    code = {"name": "code", "kind": "code_exec", "params": {"datasets": ["mbpp"]}}
+    path = _quality_suite(tmp_path, [JSON_TASK, code], subsets={"safe": ["json_schema"]})
+    with pytest.raises(ExpansionError, match="allow_code_exec"):
+        expand(_with_quality(load_experiment(QWEN), path), REGISTRY)
+    assert expand(_with_quality(load_experiment(QWEN), path, subset="safe"), REGISTRY)
+    assert expand(_with_quality(load_experiment(QWEN), path, allow_code_exec=True), REGISTRY)
+    with pytest.raises(ExpansionError, match="no subset"):
+        expand(_with_quality(load_experiment(QWEN), path, subset="nope"), REGISTRY)

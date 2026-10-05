@@ -78,6 +78,10 @@ class JsonSchemaTask(ParamTask[JsonSchemaParams]):
     Params = JsonSchemaParams
     version: ClassVar[str] = "1"
 
+    def planned_items(self) -> int:
+        n = len(load_items()[0])
+        return n if self.params.limit is None else min(n, self.params.limit)
+
     async def run(self, ctx: EvalContext) -> TaskOutput:
         items, data_version = load_items()
         if self.params.limit is not None:
