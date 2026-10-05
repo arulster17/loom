@@ -63,7 +63,8 @@ tasks:
       num_concurrent: 32
 
   # RULER niah_single_2 at 4k and 16k tokens, 500 docs per length = 1000 items.
-  # d=2% -> ±0.88 pts. The tokenizer comes from the gated meta-llama repo (HF token needed).
+  # d=2% -> ±0.88 pts. The tokenizer comes from the gated meta-llama repo: an HF token
+  # locally; on aws_ec2 the host's read-only snapshot of the model (docs/aws-setup.md).
   # Lengths stay inside the served window (max_context 32768 in config/models.yaml); a
   # context-extension change extends this list.
   - name: ruler_niah

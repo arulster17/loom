@@ -422,6 +422,7 @@ class _Executor:
             served_model=endpoint.served_model,
             extra_body=suite.extra_body(),
             allow_code_exec=quality.allow_code_exec,
+            tokenizer=cell.tokenizer,
             seed=suite.seed,
             concurrency=EVAL_CONCURRENCY,
             divergence=divergence,

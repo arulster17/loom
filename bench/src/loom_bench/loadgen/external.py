@@ -77,9 +77,12 @@ class ToolRun:
 
     @property
     def tokenizer(self) -> str | None:
-        """HF repo the tool loads to size prompts (the tools take no revision)."""
+        """HF repo the tool loads to size prompts (the tools take no revision), or the
+        job's local snapshot of it (pinned, and loads without a token)."""
         spec = self.ctx.job.tokenizer
-        return spec.repo if spec.kind == "hf" else None
+        if spec.kind != "hf":
+            return None
+        return spec.local_dir or spec.repo
 
     @property
     def dataset_path(self) -> Path:

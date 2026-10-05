@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -64,6 +64,8 @@ class EvalContext:
     workdir: Path
     # Code-executing tasks refuse to run unless this is set explicitly.
     allow_code_exec: bool = False
+    # HF repo -> local snapshot directory to load its tokenizer from instead of the Hub.
+    local_tokenizers: Mapping[str, str] = field(default_factory=dict)
 
 
 @runtime_checkable

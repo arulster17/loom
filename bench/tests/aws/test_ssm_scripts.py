@@ -52,6 +52,9 @@ JOB_VARS: dict[str, Any] = {
     "RESULT_URL": "https://b.s3.amazonaws.com/result.json?sig=2",
     "GPU_CSV_URL": "",
     "SAMPLE_GPU": 0,
+    "MODEL_CACHE_DIR": "",
+    "MODEL_CACHE_MOUNT": "",
+    "MODEL_REVISION": "",
 }
 RENDERED = {
     "start_engine": START_VARS,
@@ -139,6 +142,82 @@ def test_job_script_installs_extras_into_their_own_env(tmp_path: Any) -> None:
     ).stdout
     assert out == f"/var/lib/loom/clientenv/{'c' * 64}-lmeval|quality job"
     assert '--no-cache-dir "/work/$1${2:+[$2]}"' in script
+
+
+STUBS = {
+    "curl": 'out=""\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done\n'
+    '[ -z "$out" ] || : >"$out"',
+    "sha256sum": "cat >/dev/null",
+    "install": 'for a; do last="$a"; done\nmkdir -p "$last"',
+    "chown": "true",
+    "docker": 'printf \'%s|\' "$@" >>"$DOCKER_LOG"\necho >>"$DOCKER_LOG"',
+}
+
+
+def run_job_on_stubbed_host(tmp_path: Any, **over: Any) -> tuple[Any, list[str]]:
+    """Run the rendered run_job.sh with curl, docker and friends stubbed; return the
+    process and one `|`-joined argv per docker call."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for name, body in STUBS.items():
+        (bin_dir / name).write_text(f"#!/bin/sh\n{body}\n")
+        (bin_dir / name).chmod(0o755)
+    log = tmp_path / "docker.log"
+    variables = {
+        **JOB_VARS,
+        "WORK_DIR": str(tmp_path / "jobs" / "r1"),
+        "ENV_ROOT": str(tmp_path / "env"),
+        **over,
+    }
+    proc = subprocess.run(
+        [BASH],
+        input=render_script("run_job", **variables),
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "DOCKER_LOG": str(log)},
+    )
+    calls = log.read_text().splitlines() if log.exists() else []
+    return proc, calls
+
+
+@needs_bash
+def test_job_mounts_the_model_snapshot_read_only(tmp_path: Any) -> None:
+    rev = "b" * 40
+    cache = tmp_path / "hf" / "hub" / "models--Qwen--Qwen3-8B"
+    (cache / "snapshots" / rev).mkdir(parents=True)
+    (cache / "snapshots" / rev / "tokenizer.json").write_text("{}")
+    mount = "/models/models--Qwen--Qwen3-8B"
+    proc, calls = run_job_on_stubbed_host(
+        tmp_path, MODEL_CACHE_DIR=str(cache), MODEL_CACHE_MOUNT=mount, MODEL_REVISION=rev
+    )
+    assert proc.returncode == 0, proc.stderr
+    bench = calls[-1]
+    assert f"|--volume|{cache}:{mount}:ro|python:3.12-slim|/env/bin/bench|job|run|" in bench
+    assert "HF_TOKEN" not in bench
+
+
+@needs_bash
+def test_job_fails_before_running_without_the_pinned_snapshot(tmp_path: Any) -> None:
+    cache = tmp_path / "hf" / "hub" / "models--Qwen--Qwen3-8B"
+    (cache / "snapshots" / ("a" * 40)).mkdir(parents=True)  # another revision only
+    (cache / "snapshots" / ("a" * 40) / "tokenizer.json").write_text("{}")
+    proc, calls = run_job_on_stubbed_host(
+        tmp_path,
+        MODEL_CACHE_DIR=str(cache),
+        MODEL_CACHE_MOUNT="/models/models--Qwen--Qwen3-8B",
+        MODEL_REVISION="b" * 40,
+    )
+    assert proc.returncode == 1
+    assert f"loom-error no tokenizer.json in snapshot {'b' * 40}" in proc.stderr
+    assert calls == []
+
+
+@needs_bash
+def test_job_without_an_hf_tokenizer_mounts_no_model(tmp_path: Any) -> None:
+    proc, calls = run_job_on_stubbed_host(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert f"|--volume|{tmp_path}/jobs/r1:/work|python:3.12-slim|/env/bin/bench|" in calls[-1]
+    assert ":ro|python" not in calls[-1]
 
 
 def test_user_data_arms_ttl_shutdown() -> None:

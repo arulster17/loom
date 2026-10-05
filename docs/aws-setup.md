@@ -221,12 +221,19 @@ talks to it runs on the host, in the client container:
   and, for candidates, the baseline's captured reference. Jobs with lm-eval tasks install
   `loom-bench[lmeval]` (lm-eval, torch, transformers) into a separate cached virtualenv on
   first use, about 5 minutes once per host; datasets come from the Hugging Face Hub inside
-  the container. The client container has no Hugging Face token, so tasks that need a
-  gated tokenizer (the Llama RULER task) cannot run there; the Phase 0 subsets avoid them.
+  the container.
+- **Tokenizers.** The client container has no Hugging Face token. Instead, the model's
+  cache folder that the engine start downloaded (`<weights_dir>/hub/models--<org>--<name>`)
+  is mounted read-only at `/models/models--<org>--<name>`. Jobs load the tokenizer from its
+  `snapshots/<revision>` directory: load generation, external tools and lm-eval tasks that
+  name the model repo (RULER). This works for gated models (Llama) and pins the RULER
+  tokenizer to the model's revision. The job fails before it starts if the host has no
+  snapshot at that revision, and the client checks that the path is that repo and revision.
 - **Isolation.** The container runs as uid 10001, which user-data denies the instance
   metadata service, so it has no instance-role credentials; it gets no secrets or AWS
-  settings in its environment; its virtualenv is mounted read-only and only its job
-  directory is writable; it is removed when the job ends. It does share the host network,
+  settings in its environment; its virtualenv and the model cache are mounted read-only and
+  only its job directory is writable; it is removed when the job ends. It does share the
+  host network,
   which it needs to reach the engine, so it can reach the internet. Code-executing eval
   tasks run model-written programs in it (inside the sandbox's rlimits) and stay off
   unless the experiment sets `quality.allow_code_exec: true`.

@@ -87,6 +87,8 @@ def _make_tokenizer(spec: TokenizerSpec) -> Tokenizer:
         return SimpleTokenizer()
     if spec.repo is None or spec.revision is None:
         raise ValueError("hf tokenizer needs repo and a pinned revision")
+    if spec.local_dir is not None:
+        return HFTokenizer(spec.repo, spec.revision, local_dir=spec.local_dir)
     return HFTokenizer(spec.repo, spec.revision, token=os.environ.get("HF_TOKEN"))
 
 

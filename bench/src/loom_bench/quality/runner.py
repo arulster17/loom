@@ -33,6 +33,7 @@ from loom_bench.quality.tasks.base import Completion, EvalContext, ItemResult
 from loom_bench.stats import Estimate, mean_ci
 from loom_bench.store.models import BenchEvalRun, BenchGateDecision
 from loom_bench.store.repo import record_eval_run, record_gate_decision
+from loom_bench.tokenize import verify_snapshot
 
 
 @dataclass(slots=True)
@@ -72,12 +73,14 @@ async def run_suite(
     only: Sequence[str] | None = None,
     extra_body: Mapping[str, Any] | None = None,
     seed: int | None = None,
+    local_tokenizers: Mapping[str, str] | None = None,
 ) -> SuiteResult:
     """Run every task of `suite` (or the `only` subset) against one endpoint.
 
     `base_url` includes the API prefix (``http://host:8000/v1``). Tasks run one
     after another, each with up to `concurrency` requests in flight. Requests
     carry `extra_body` (default: the suite's) and `seed` (default: the suite's).
+    `local_tokenizers` maps HF repos to snapshot directories tasks load them from.
     """
     selected = [t for t in suite.tasks if only is None or t.name in only]
     if only is not None and len(selected) != len(set(only)):
@@ -97,7 +100,10 @@ async def run_suite(
         for spec in selected:
             task = build_task(spec.kind, spec.name, spec.params)
             ctx = EvalContext(
-                client=client, workdir=workdir / spec.name, allow_code_exec=allow_code_exec
+                client=client,
+                workdir=workdir / spec.name,
+                allow_code_exec=allow_code_exec,
+                local_tokenizers=dict(local_tokenizers or {}),
             )
             ctx.workdir.mkdir(parents=True, exist_ok=True)
             t0 = time.monotonic()
@@ -171,6 +177,11 @@ async def execute_eval_job(job: EvalJob, workdir: Path | None = None) -> EvalJob
         with tempfile.TemporaryDirectory(prefix="loom-eval-") as tmp:
             return await execute_eval_job(job, Path(tmp))
     suite = job.suite
+    local_tokenizers: dict[str, str] = {}
+    tok = job.tokenizer
+    if tok is not None and tok.local_dir is not None:
+        assert tok.repo is not None and tok.revision is not None  # TokenizerSpec validates it
+        local_tokenizers[tok.repo] = str(verify_snapshot(tok.local_dir, tok.repo, tok.revision))
     started = datetime.now(UTC)
     result = await run_suite(
         suite,
@@ -183,6 +194,7 @@ async def execute_eval_job(job: EvalJob, workdir: Path | None = None) -> EvalJob
         only=job.tasks,
         extra_body=job.extra_body,
         seed=job.seed,
+        local_tokenizers=local_tokenizers,
     )
     reference: ReferenceLogprobs | None = None
     divergence: DivergenceResult | None = None

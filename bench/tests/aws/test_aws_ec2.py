@@ -467,6 +467,82 @@ async def test_run_job_round_trip_through_s3(aws: dict[str, Any], tmp_path: Path
     assert ssm.sent[0]["Parameters"]["executionTimeout"] == [str(60 + 600 + 60 + 900)]
 
 
+LLAMA_REPO = "meta-llama/Llama-3.3-70B-Instruct"
+LLAMA_REV = "6f6073b423013f6a7d4d9f39144961bfbfbc386b"
+LLAMA_CACHE = "/opt/dlami/nvme/loom-hf/hub/models--meta-llama--Llama-3.3-70B-Instruct"
+LLAMA_MOUNT = "/models/models--meta-llama--Llama-3.3-70B-Instruct"
+
+
+def host_writes(s3: Any, prefix: str, result_json: str) -> Any:
+    """FakeSsm `on_command` for a job that succeeds and uploads `result_json`."""
+
+    def host_side(script: str) -> list[dict[str, Any]]:
+        s3.put_object(Bucket="loom-bench-test", Key=prefix + "result.json", Body=result_json)
+        return [{"Status": "Success", "StandardOutputContent": "loom-job-done\n"}]
+
+    return host_side
+
+
+def assert_mounts_the_snapshot(script: str, stored_tokenizer: TokenizerSpec) -> None:
+    assert f"MODEL_CACHE_DIR={LLAMA_CACHE}" in script
+    assert f"MODEL_CACHE_MOUNT={LLAMA_MOUNT}" in script
+    assert f"MODEL_REVISION={LLAMA_REV}" in script
+    assert '--volume "$WORK_DIR:/work" ${MODEL_MOUNT:+--volume "$MODEL_MOUNT"}' in script
+    assert 'MODEL_MOUNT="$MODEL_CACHE_DIR:$MODEL_CACHE_MOUNT:ro"' in script
+    assert stored_tokenizer == TokenizerSpec(
+        kind="hf",
+        repo=LLAMA_REPO,
+        revision=LLAMA_REV,
+        local_dir=f"{LLAMA_MOUNT}/snapshots/{LLAMA_REV}",
+    )
+    assert "HF_TOKEN" not in script and "loom/hf-token" not in script
+
+
+async def test_run_job_loads_a_gated_tokenizer_from_the_host_snapshot(
+    aws: dict[str, Any], tmp_path: Path
+) -> None:
+    wheel = tmp_path / "w.whl"
+    wheel.write_bytes(b"x")
+    result = LoadJobResult(
+        run_id="run-7",
+        mode=LoadMode.CLOSED_LOOP,
+        load_value=8,
+        t_measure_start_s=0,
+        t_measure_end_s=60,
+        records=[],
+        started_at="2026-10-04T00:00:00Z",
+        finished_at="2026-10-04T00:01:00Z",
+    )
+    ssm = FakeSsm(host_writes(aws["s3"], "runs/exp-1/run-7/", result.model_dump_json()))
+    p = provider(aws, ssm=ssm, wheel_path=wheel)
+    host = await p.provision(request())
+    tok = TokenizerSpec(kind="hf", repo=LLAMA_REPO, revision=LLAMA_REV)
+    await p.run_job(host, load_job(tokenizer=tok, sample_gpu=False))
+    stored = aws["s3"].get_object(Bucket="loom-bench-test", Key="runs/exp-1/run-7/job.json")
+    job = LoadJob.model_validate_json(stored["Body"].read())
+    assert_mounts_the_snapshot(ssm.scripts[0], job.tokenizer)
+
+    _, simple = p._stage_job(host, load_job())
+    assert "MODEL_CACHE_DIR=''" in simple
+
+
+@pytest.mark.parametrize(
+    ("repo", "revision", "match"),
+    [(LLAMA_REPO, "main", "pinned commit"), ("../x", LLAMA_REV, "org/name")],
+)
+async def test_host_tokenizer_needs_a_pinned_commit(
+    aws: dict[str, Any], tmp_path: Path, repo: str, revision: str, match: str
+) -> None:
+    wheel = tmp_path / "w.whl"
+    wheel.write_bytes(b"x")
+    p = provider(aws, ssm=FakeSsm(), wheel_path=wheel)
+    host = await p.provision(request())
+    with pytest.raises(ValueError, match=match):
+        p._stage_job(
+            host, load_job(tokenizer=TokenizerSpec(kind="hf", repo=repo, revision=revision))
+        )
+
+
 async def test_run_job_requires_wheel_and_safe_run_id(aws: dict[str, Any], tmp_path: Path) -> None:
     p = provider(aws, ssm=FakeSsm())
     host = await p.provision(request())
@@ -563,8 +639,34 @@ async def test_run_eval_without_harness_tasks_skips_the_lmeval_extra(
     host = await p.provision(request())
     _, script = p._stage_eval(host, eval_job(tasks=["json_schema"]))
     assert "PIP_EXTRAS=''" in script
+    assert "MODEL_CACHE_DIR=''" in script
     with pytest.raises(ValueError, match="run_id"):
         p._stage_eval(host, eval_job(run_id="../x"))
+
+
+async def test_run_eval_loads_a_gated_tokenizer_from_the_host_snapshot(
+    aws: dict[str, Any], tmp_path: Path
+) -> None:
+    wheel = tmp_path / "w.whl"
+    wheel.write_bytes(b"x")
+    result = EvalJobResult(
+        run_id="eval-3",
+        suite="s",
+        model="qwen3-8b",
+        tasks={},
+        sanity=SanityResult(n=0, counts={}),
+        started_at="2026-10-04T00:00:00+00:00",
+        finished_at="2026-10-04T00:01:00+00:00",
+    )
+    ssm = FakeSsm(host_writes(aws["s3"], "runs/exp-1/eval-3/", result.model_dump_json()))
+    p = provider(aws, ssm=ssm, wheel_path=wheel)
+    host = await p.provision(request())
+    tok = TokenizerSpec(kind="hf", repo=LLAMA_REPO, revision=LLAMA_REV)
+    assert await p.run_eval(host, eval_job(tokenizer=tok)) == result
+    stored = aws["s3"].get_object(Bucket="loom-bench-test", Key="runs/exp-1/eval-3/job.json")
+    job = EvalJob.model_validate_json(stored["Body"].read())
+    assert job.tokenizer is not None
+    assert_mounts_the_snapshot(ssm.scripts[0], job.tokenizer)
 
 
 def test_load_settings_yaml_then_env(tmp_path: Path) -> None:

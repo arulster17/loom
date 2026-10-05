@@ -27,13 +27,28 @@ Timeline = Literal["measured", "unavailable"]
 
 
 class TokenizerSpec(BaseModel):
-    """`simple` = loom_bench.tokenize.SimpleTokenizer; `hf` = HF tokenizer at a pinned revision."""
+    """`simple` = loom_bench.tokenize.SimpleTokenizer; `hf` = HF tokenizer at a pinned revision.
+
+    `local_dir` points an `hf` tokenizer at a Hugging Face cache snapshot of `repo` at
+    `revision` (`.../models--<org>--<name>/snapshots/<revision>`) instead of the Hub, so
+    a gated model's tokenizer loads without a token. A cloud provider sets it to the
+    snapshot the host downloaded for the engine; loading checks the path matches.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: str = Field(pattern="^(simple|hf)$")
     repo: str | None = None
     revision: str | None = None
+    local_dir: str | None = None
+
+    @model_validator(mode="after")
+    def _local_dir_needs_a_pinned_hf_repo(self) -> Self:
+        if self.local_dir is not None and (
+            self.kind != "hf" or self.repo is None or self.revision is None
+        ):
+            raise ValueError("local_dir needs an hf tokenizer with repo and revision")
+        return self
 
 
 class LoadJob(BaseModel):
@@ -112,6 +127,9 @@ class EvalJob(BaseModel):
     served_model: str
     extra_body: dict[str, Any] = Field(default_factory=dict)  # e.g. chat_template_kwargs
     allow_code_exec: bool = False  # code_exec tasks run model-written programs
+    # The served model's tokenizer; harness tasks that name its repo (RULER) load it from
+    # `tokenizer.local_dir` when set.
+    tokenizer: TokenizerSpec | None = None
     seed: int = 0
     concurrency: PositiveInt = 16  # in-flight requests for native tasks and divergence
     request_timeout_s: PositiveFloat = 300.0

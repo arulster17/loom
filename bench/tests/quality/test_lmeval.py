@@ -102,6 +102,30 @@ def test_completions_command_with_samples_and_metadata():
     assert "--limit" not in argv and "--apply_chat_template" not in argv
 
 
+def test_tokenizer_named_by_repo_loads_from_its_local_snapshot():
+    local = "/models/models--meta-llama--Llama-3.3-70B-Instruct/snapshots/" + "6" * 40
+    p = LmEvalParams(
+        tasks=("niah_single_2",),
+        api="completions",
+        apply_chat_template=False,
+        metric_from_doc="max_length",
+        metadata={"max_seq_lengths": [4096], "tokenizer": "meta-llama/Llama-3.3-70B-Instruct"},
+        model_args={"tokenizer": "meta-llama/Llama-3.3-70B-Instruct", "max_length": 32768},
+    )
+    common = {"base_url": "http://h/v1", "model": "m", "seed": 0, "output_path": Path("/o")}
+    argv = build_command(
+        p,
+        **common,
+        local_tokenizers={"meta-llama/Llama-3.3-70B-Instruct": local, "other/repo": "/x"},
+    )
+    assert json.loads(opt(argv, "--metadata"))["tokenizer"] == local
+    assert json.loads(opt(argv, "--model_args"))["tokenizer"] == local
+    # Without a local snapshot of that repo, the Hub name stays.
+    hub = build_command(p, **common, local_tokenizers={"other/repo": "/x"})
+    assert json.loads(opt(hub, "--metadata"))["tokenizer"] == "meta-llama/Llama-3.3-70B-Instruct"
+    assert json.loads(opt(hub, "--model_args"))["tokenizer"] == "meta-llama/Llama-3.3-70B-Instruct"
+
+
 def test_unsafe_code_needs_permission():
     p = LmEvalParams(tasks=("humaneval",), api="completions", metric="pass_at_k", unsafe_code=True)
     with pytest.raises(LmEvalError, match="allow_code_exec"):

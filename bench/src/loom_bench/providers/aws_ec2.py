@@ -33,7 +33,7 @@ from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from loom_bench.engines import docker_run_argv
-from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult
+from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult, TokenizerSpec
 from loom_bench.money import MICROS_PER_USD, Micros
 from loom_bench.prices import HOURS_PER_MONTH, PriceBook, load_prices
 from loom_bench.providers import aws_reaper
@@ -48,6 +48,7 @@ from loom_bench.providers.base import (
 )
 from loom_bench.records import Market
 from loom_bench.registry import read_yaml
+from loom_bench.tokenize import hf_cache_folder
 
 PROVIDER_NAME = "aws_ec2"
 DLAMI_PARAMETER = (
@@ -67,6 +68,8 @@ LOG_DIR = "/var/log/loom"
 JOBS_DIR = "/var/lib/loom/jobs"
 CLIENT_ENV_ROOT = "/var/lib/loom/clientenv"
 CLIENT_UID = 10001
+# Where the client container sees the model's HF cache folder (read-only).
+CLIENT_MODEL_CACHE = "/models"
 # Weight download allowance on top of the engine's ready timeout (Llama 70B is ~141 GB).
 DOWNLOAD_ALLOWANCE_S = 3600
 # Run-time allowance for a job on top of its own time budget (wheel install, drain).
@@ -94,6 +97,8 @@ GONE_STATES = frozenset({"shutting-down", "terminated", "stopping", "stopped"})
 _SAFE_ID = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 SafeId = Annotated[str, StringConstraints(pattern=_SAFE_ID)]
 _SAFE_ID_RE = re.compile(_SAFE_ID)
+_HF_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def utcnow() -> datetime:
@@ -598,6 +603,7 @@ class AwsEc2Provider:
         body: str,
         *,
         command: tuple[str, ...],
+        model_cache: Mapping[str, str],
         extras: str = "",
         sample_gpu: bool = False,
     ) -> tuple[str, str]:
@@ -628,26 +634,58 @@ class AwsEc2Provider:
             RESULT_URL=self._presign("put_object", prefix + "result.json"),
             GPU_CSV_URL=self._presign("put_object", prefix + "gpu.csv") if sample_gpu else "",
             SAMPLE_GPU=int(sample_gpu),
+            **model_cache,
         )
         return prefix, script
 
+    def _host_tokenizer(
+        self, spec: TokenizerSpec | None
+    ) -> tuple[TokenizerSpec | None, dict[str, str]]:
+        """`spec` pointed at the model snapshot the engine start downloaded on the host,
+        and the run_job.sh variables that mount its cache folder read-only into the
+        client container.
+
+        The client container has no Hugging Face token, so an `hf` tokenizer (gated or
+        not) always loads from that snapshot; the script fails if the host lacks it.
+        """
+        if spec is None or spec.kind != "hf":
+            return spec, {"MODEL_CACHE_DIR": "", "MODEL_CACHE_MOUNT": "", "MODEL_REVISION": ""}
+        repo, revision = spec.repo, spec.revision
+        if repo is None or not _HF_REPO_RE.match(repo):
+            raise ValueError(f"hf tokenizer repo must be org/name, got {repo!r}")
+        if revision is None or not _COMMIT_RE.match(revision):
+            raise ValueError(f"hf tokenizer {repo} needs a pinned commit, got {revision!r}")
+        folder = hf_cache_folder(repo)
+        mount = f"{CLIENT_MODEL_CACHE}/{folder}"
+        local = spec.model_copy(update={"local_dir": f"{mount}/snapshots/{revision}"})
+        return local, {
+            # The engine start downloads with HF_HOME=weights_dir: the hub cache is hub/.
+            "MODEL_CACHE_DIR": f"{self.settings.weights_dir}/hub/{folder}",
+            "MODEL_CACHE_MOUNT": mount,
+            "MODEL_REVISION": revision,
+        }
+
     def _stage_job(self, host: Host, job: LoadJob) -> tuple[str, str]:
+        tokenizer, model_cache = self._host_tokenizer(job.tokenizer)
         return self._stage(
             host,
             job.run_id,
-            job.model_dump_json(),
+            job.model_copy(update={"tokenizer": tokenizer}).model_dump_json(),
             command=LOAD_JOB_CMD,
+            model_cache=model_cache,
             sample_gpu=job.sample_gpu,
         )
 
     def _stage_eval(self, host: Host, job: EvalJob) -> tuple[str, str]:
         selected = [t for t in job.suite.tasks if job.tasks is None or t.name in job.tasks]
         lmeval = any(t.kind == "lm_eval" for t in selected)
+        tokenizer, model_cache = self._host_tokenizer(job.tokenizer)
         return self._stage(
             host,
             job.run_id,
-            job.model_dump_json(),
+            job.model_copy(update={"tokenizer": tokenizer}).model_dump_json(),
             command=EVAL_JOB_CMD,
+            model_cache=model_cache,
             extras=LMEVAL_EXTRA if lmeval else "",
         )
 

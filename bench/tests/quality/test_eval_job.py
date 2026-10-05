@@ -7,12 +7,19 @@ import pytest
 from typer.testing import CliRunner
 
 from loom_bench.cli import app
-from loom_bench.jobs import EvalJob, EvalJobResult
+from loom_bench.jobs import EvalJob, EvalJobResult, TokenizerSpec
 from loom_bench.providers.base import HostRequest
 from loom_bench.providers.mock import MockProvider
+from loom_bench.quality import runner as quality_runner
 from loom_bench.quality.gate import Verdict
-from loom_bench.quality.runner import execute_eval_job, gate_against_baseline, suite_result_of
+from loom_bench.quality.runner import (
+    execute_eval_job,
+    gate_against_baseline,
+    run_suite,
+    suite_result_of,
+)
 from loom_bench.quality.suite import Suite
+from loom_bench.tokenize import SnapshotMismatch
 
 from .mock_serve import MODEL, serve
 
@@ -124,3 +131,23 @@ def test_in_process_providers_run_eval_jobs(clean_url):
             await p.teardown(host)
 
     assert asyncio.run(go()).tasks["arithmetic"].items
+
+
+async def test_local_tokenizer_snapshot_reaches_the_tasks(clean_url, tmp_path, monkeypatch):
+    repo, rev = "meta-llama/Llama-3.3-70B-Instruct", "6" * 40
+    local = tmp_path / "models--meta-llama--Llama-3.3-70B-Instruct" / "snapshots" / rev
+    local.mkdir(parents=True)
+    seen: dict[str, str] = {}
+
+    async def spy(*args, **kwargs):
+        seen.update(kwargs["local_tokenizers"])
+        return await run_suite(*args, **kwargs)
+
+    monkeypatch.setattr(quality_runner, "run_suite", spy)
+    tok = TokenizerSpec(kind="hf", repo=repo, revision=rev, local_dir=str(local))
+    await execute_eval_job(job(clean_url, tasks=["json_schema"], tokenizer=tok))
+    assert seen == {repo: str(local)}
+
+    stale = tok.model_copy(update={"revision": "7" * 40})
+    with pytest.raises(SnapshotMismatch, match="is not the snapshot of"):
+        await execute_eval_job(job(clean_url, tasks=["json_schema"], tokenizer=stale))

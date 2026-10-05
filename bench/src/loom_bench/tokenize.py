@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import random
 import re
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 # Every character falls into exactly one alternative, so "".join(pieces) == text.
@@ -65,14 +66,46 @@ class SimpleTokenizer:
         return words[0] + "".join(" " + w for w in words[1:])
 
 
-class HFTokenizer:
-    """Wraps a `tokenizers.Tokenizer` loaded from a pinned HF revision."""
+class SnapshotMismatch(ValueError):
+    """A local tokenizer directory is not the expected repo's snapshot at the pinned revision."""
 
-    def __init__(self, repo: str, revision: str, token: str | None = None) -> None:
-        from huggingface_hub import hf_hub_download
+
+def hf_cache_folder(repo: str) -> str:
+    """The Hugging Face cache folder of a model repo: `org/name` -> `models--org--name`."""
+    return "models--" + repo.replace("/", "--")
+
+
+def verify_snapshot(local_dir: str | Path, repo: str, revision: str) -> Path:
+    """`local_dir` if it is the HF cache snapshot of `repo` at `revision`.
+
+    The cache names each snapshot directory after the commit it was downloaded at
+    (`<cache>/models--org--name/snapshots/<commit>`), so the path itself says which
+    repo and revision the files belong to.
+    """
+    path = Path(local_dir)
+    expected = f"{hf_cache_folder(repo)}/snapshots/{revision}"
+    if path.parts[-3:] != tuple(expected.split("/")):
+        raise SnapshotMismatch(f"{path} is not the snapshot of {repo}@{revision} (…/{expected})")
+    if not path.is_dir():
+        raise SnapshotMismatch(f"snapshot of {repo}@{revision} not found at {path}")
+    return path
+
+
+class HFTokenizer:
+    """Wraps a `tokenizers.Tokenizer` loaded from a pinned HF revision: from the Hub,
+    or from `local_dir`, a cache snapshot of that revision (checked, never the Hub)."""
+
+    def __init__(
+        self, repo: str, revision: str, token: str | None = None, local_dir: str | None = None
+    ) -> None:
         from tokenizers import Tokenizer as _Tok
 
-        path = hf_hub_download(repo, "tokenizer.json", revision=revision, token=token)
+        if local_dir is not None:
+            path = str(verify_snapshot(local_dir, repo, revision) / "tokenizer.json")
+        else:
+            from huggingface_hub import hf_hub_download
+
+            path = hf_hub_download(repo, "tokenizer.json", revision=revision, token=token)
         self._tok = _Tok.from_file(path)
         self.name = f"{repo}@{revision}"
         vocab = self._tok.get_vocab()

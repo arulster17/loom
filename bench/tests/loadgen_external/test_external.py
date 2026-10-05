@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sys
+from dataclasses import replace
 
 import pytest
 from ext_support import (
@@ -81,6 +82,12 @@ def test_tool_loads_the_hf_tokenizer_repo_only(tmp_path):
     assert run.tokenizer == TOKENIZER
     run, _ = tool_run(profile("synthetic"), closed_plan(), tmp_path, tokenizer=None)
     assert run.tokenizer is None
+    # On a GPU host the job points at the engine's snapshot: the tool gets that path.
+    local = f"/models/models--{TOKENIZER.replace('/', '--')}/snapshots/{'0' * 40}"
+    ctx = load_context(profile("synthetic"), closed_plan())
+    spec = ctx.job.tokenizer.model_copy(update={"local_dir": local})
+    ctx = replace(ctx, job=ctx.job.model_copy(update={"tokenizer": spec}))
+    assert ToolRun.resolve(ctx, tmp_path).tokenizer == local
 
 
 def test_split_base_url():

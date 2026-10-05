@@ -35,7 +35,7 @@ import json
 import os
 import re
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal, Self
 
@@ -103,6 +103,16 @@ class LmEvalParams(TaskParams):
         return self
 
 
+def _local_tokenizer(
+    args: Mapping[str, Any], local_tokenizers: Mapping[str, str] | None
+) -> dict[str, Any]:
+    local = local_tokenizers or {}
+    tokenizer = args.get("tokenizer")
+    if isinstance(tokenizer, str) and tokenizer in local:
+        return {**args, "tokenizer": local[tokenizer]}
+    return dict(args)
+
+
 def build_command(
     params: LmEvalParams,
     *,
@@ -112,13 +122,16 @@ def build_command(
     output_path: Path,
     allow_code_exec: bool = False,
     extra_body: dict[str, Any] | None = None,
+    local_tokenizers: Mapping[str, str] | None = None,
     python: str = sys.executable,
 ) -> list[str]:
     """The `lm_eval run` argv for one task entry. The API key goes in the env, never here.
 
     `extra_body` (the client's per-request extras, e.g. chat_template_kwargs) is
     merged under `gen_kwargs` for the chat API, which forwards gen_kwargs into
-    every request body.
+    every request body. A `tokenizer` in `model_args` or `metadata` (RULER reads
+    `model_args | metadata`) naming a repo in `local_tokenizers` is replaced by its
+    local snapshot directory, which transformers loads without the Hub.
     """
     if params.unsafe_code and not allow_code_exec:
         raise LmEvalError(
@@ -131,7 +144,7 @@ def build_command(
         "num_concurrent": params.num_concurrent,
         "max_retries": params.max_retries,
         "seed": seed,
-        **params.model_args,
+        **_local_tokenizer(params.model_args, local_tokenizers),
     }
     argv = [
         python, "-m", "lm_eval", "run",
@@ -159,7 +172,8 @@ def build_command(
     if gen_kwargs:
         argv += ["--gen_kwargs", json.dumps(gen_kwargs, sort_keys=True)]
     if params.metadata:
-        argv += ["--metadata", json.dumps(params.metadata, sort_keys=True)]
+        metadata = _local_tokenizer(params.metadata, local_tokenizers)
+        argv += ["--metadata", json.dumps(metadata, sort_keys=True)]
     if params.unsafe_code:
         argv.append("--confirm_run_unsafe_code")
     return argv
@@ -282,6 +296,7 @@ class LmEvalTask(ParamTask[LmEvalParams]):
             output_path=out_dir,
             allow_code_exec=ctx.allow_code_exec,
             extra_body=ctx.client.extra_body,
+            local_tokenizers=ctx.local_tokenizers,
         )
         env = dict(os.environ)
         if ctx.client.api_key:
