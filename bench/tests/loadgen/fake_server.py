@@ -57,6 +57,7 @@ class FakeServer:
     async def _stream(self) -> AsyncIterator[bytes]:
         self.inflight += 1
         self.max_inflight = max(self.max_inflight, self.inflight)
+        finished = False
         try:
             await asyncio.sleep(self.ttft_s)
             if self.stall:
@@ -67,9 +68,13 @@ class FakeServer:
                 last = i == self.tokens - 1
                 yield chat_chunk("tok", "length" if last else None)
             yield usage_chunk(10, self.tokens)
+            # The client stops reading at [DONE], so code after the last yield never runs.
+            finished = True
+            self.inflight -= 1
             yield DONE
         finally:
-            self.inflight -= 1
+            if not finished:
+                self.inflight -= 1
 
 
 def scripted(chunks: list[bytes | float], status: int = 200) -> Callable[[httpx.Request], Any]:
