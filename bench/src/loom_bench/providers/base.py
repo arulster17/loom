@@ -1,0 +1,101 @@
+"""Provider contract: where benchmark pools come from.
+
+Implementations: `mock` (in-process simulated GPU), `local` (an endpoint you
+already run), `aws_ec2` (tagged spot/on-demand VM running the engine in Docker).
+A Phase 1 `k8s` provider will reuse the Helm chart.
+
+Lifecycle per host: provision -> start_engine (cold) -> run jobs ->
+[stop_engine -> start_engine (warm) -> run jobs]* -> teardown.
+Providers report spend inputs (hourly price, market, start time); the runner's
+budget guard decides when to abort. Every provisioned resource carries a TTL
+and is recorded so the reaper can remove it if the runner dies.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Protocol
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from loom_bench.jobs import LoadJob, LoadJobResult
+from loom_bench.records import Market
+
+
+class HostRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cloud: str | None = None  # aws | gcp | None for mock/local
+    region: str | None = None
+    instance_type: str | None = None
+    market: Market = Market.LOCAL
+    gpus: int = 1
+    disk_gb: int = 0
+    ttl_s: int  # hard lifetime; the host must not outlive this even if the runner dies
+    tags: dict[str, str] = Field(default_factory=dict)  # loom:experiment, loom:owner, ...
+
+
+class Host(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    host_id: str
+    request: HostRequest
+    hourly_micros: int  # price used for budget accrual (0 for local/mock unless configured)
+    launched_at: datetime  # UTC; billing starts here
+    ttl_at: datetime
+    info: dict[str, Any] = Field(default_factory=dict)  # az, ami, private ip, ...
+
+
+class EngineLaunch(BaseModel):
+    """Fully rendered engine invocation (see loom_bench.engines)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    engine: str  # vllm | sglang | mock
+    image: str  # repo@sha256:... (ignored by mock)
+    model_repo: str
+    model_revision: str
+    served_model: str
+    args: list[str]  # engine CLI args after the entrypoint
+    env: dict[str, str] = Field(default_factory=dict)
+    port: int = 8000
+    gpus: int = 1
+    ready_timeout_s: float = 1800.0
+
+
+class Endpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str  # reachable from where LoadJobs execute for this provider
+    metrics_url: str | None
+    engine: str
+    served_model: str
+    # Stage name -> seconds since the stage clock started (provisioning for cold,
+    # engine start for warm), e.g. instance_running, image_pulled, weights_ready,
+    # engine_healthy, first_token.
+    start_stages: dict[str, float] = Field(default_factory=dict)
+    warm: bool = False
+    system: dict[str, Any] = Field(default_factory=dict)  # cuda, driver, gpu names, image digest
+
+
+class Provider(Protocol):
+    name: str
+
+    async def provision(self, req: HostRequest) -> Host: ...
+
+    async def start_engine(self, host: Host, launch: EngineLaunch, *, warm: bool) -> Endpoint: ...
+
+    async def stop_engine(self, host: Host) -> None: ...
+
+    async def run_job(self, host: Host, job: LoadJob) -> LoadJobResult:
+        """Execute where latency is measured correctly for this provider."""
+        ...
+
+    async def teardown(self, host: Host) -> None:
+        """Idempotent. Must succeed even if the host already self-terminated."""
+        ...
+
+    async def reap(self, now: datetime) -> list[str]:
+        """Delete this provider's resources whose TTL passed; return their ids."""
+        ...

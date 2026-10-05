@@ -25,7 +25,7 @@ from uuid import UUID
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 from loom_bench import __version__
-from loom_bench.records import LoadMode
+from loom_bench.records import LoadMode, Market
 
 SCHEMA_VERSION = 1
 
@@ -137,12 +137,6 @@ def git_info(repo_dir: str | Path = ".") -> GitInfo:
     status = _git(repo, "status", "--porcelain", "--untracked-files=no")
     branch = _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD")
     return GitInfo(sha=sha, dirty=None if status is None else status != "", branch=branch or None)
-
-
-class Market(StrEnum):
-    SPOT = "spot"
-    ON_DEMAND = "on_demand"
-    LOCAL = "local"
 
 
 class ContentKind(StrEnum):

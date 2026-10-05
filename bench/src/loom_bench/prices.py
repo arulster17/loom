@@ -7,7 +7,6 @@ source URL and the date it was checked. All money is integer micro-dollars.
 from __future__ import annotations
 
 import datetime as dt
-from enum import StrEnum
 from fractions import Fraction
 from pathlib import Path
 from typing import Annotated, Literal, NamedTuple, Self
@@ -15,6 +14,7 @@ from typing import Annotated, Literal, NamedTuple, Self
 from pydantic import Field, HttpUrl, model_validator
 
 from loom_bench.money import Micros, round_half_up
+from loom_bench.records import Market
 from loom_bench.registry import (
     REPO_ROOT,
     Cloud,
@@ -30,12 +30,6 @@ DEFAULT_COMPETITORS_YAML = REPO_ROOT / "bench" / "competitors.yaml"
 
 # AWS converts GB-month storage prices to hourly at 730 hours per month.
 HOURS_PER_MONTH = 730
-
-
-class Market(StrEnum):
-    ON_DEMAND = "on_demand"
-    SPOT = "spot"
-    COMMITTED_1Y = "committed_1y"
 
 
 class UnverifiedPriceError(ValueError):

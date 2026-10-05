@@ -15,6 +15,15 @@ class RequestStatus(StrEnum):
     ABORTED = "aborted"  # client cancelled mid-stream (e.g. run deadline)
 
 
+class Market(StrEnum):
+    """How a GPU host is billed. `local` = not billed by Loom (your own box, mock)."""
+
+    ON_DEMAND = "on_demand"
+    SPOT = "spot"
+    COMMITTED_1Y = "committed_1y"
+    LOCAL = "local"
+
+
 class LoadMode(StrEnum):
     OPEN_LOOP = "open_loop"  # fixed arrival schedule, for latency SLOs
     CLOSED_LOOP = "closed_loop"  # fixed concurrency, for saturation
