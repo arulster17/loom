@@ -48,7 +48,7 @@ tr.unranked td { color: var(--muted); }
 .sub, .ci { display: block; color: var(--muted); font-size: 12px; }
 .badge { display: inline-block; padding: 0 .45rem; border-radius: 999px; border: 1px solid currentColor; font-size: 12px; white-space: nowrap; }
 .badge.ranked, .badge.pass, .badge.within { color: var(--good); }
-.badge.untrusted, .badge.inconclusive, .badge.no_cost, .badge.baseline { color: var(--warn); }
+.badge.untrusted, .badge.inconclusive, .badge.review, .badge.no_cost, .badge.baseline { color: var(--warn); }
 .badge.gate_failed, .badge.fail, .badge.outside { color: var(--bad); }
 ul.warnings, ul.flags { padding-left: 1.2rem; }
 ul.warnings li { color: var(--warn); }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import math
 import random
@@ -156,6 +157,7 @@ class MockServer:
         self.engine = AsyncEngine(config)
         self.ready_at = math.inf
         self._faults = random.Random(config.seed)
+        self._jitter_draws = itertools.count()
 
     def check_ready(self) -> None:
         if time.monotonic() < self.ready_at:
@@ -281,6 +283,8 @@ class MockServer:
             start=start,
             k=k,
             noise=self.config.logprob_noise,
+            jitter=self.config.logprob_jitter,
+            draw=next(self._jitter_draws),
         )
         return entries
 

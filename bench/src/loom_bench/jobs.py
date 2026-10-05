@@ -113,10 +113,18 @@ class LoadJobResult(BaseModel):
         return [RequestRecord.from_row(r) for r in self.records]
 
 
+DivergenceMode = Literal["capture", "capture_and_floor", "score"]
+
+
 class EvalJob(BaseModel):
     """A pinned eval suite (or a subset of its tasks) against one endpoint, plus this
     config's half of the logprob divergence: capture the reference (the baseline) or
-    score against a captured one (a candidate)."""
+    score against a captured one (a candidate).
+
+    `capture_and_floor` captures, then scores this same endpoint against its own capture
+    at the suite's `floor_concurrency` (different batches than at capture), and returns
+    that self-divergence with the reference as its noise floor.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -133,7 +141,7 @@ class EvalJob(BaseModel):
     seed: int = 0
     concurrency: PositiveInt = 16  # in-flight requests for native tasks and divergence
     request_timeout_s: PositiveFloat = 300.0
-    divergence: Literal["capture", "score"] | None = None
+    divergence: DivergenceMode | None = None
     reference: ReferenceLogprobs | None = None  # what "score" compares against
 
     @model_validator(mode="after")
@@ -146,6 +154,13 @@ class EvalJob(BaseModel):
             raise ValueError(f"suite {self.suite.suite} has no divergence section")
         if (self.divergence == "score") != (self.reference is not None):
             raise ValueError("a reference is needed by, and only by, divergence 'score'")
+        if self.divergence == "capture_and_floor":
+            assert self.suite.divergence is not None
+            if self.suite.divergence.floor_concurrency == self.concurrency:
+                raise ValueError(
+                    "the noise floor needs different batching than the capture: "
+                    f"floor_concurrency equals the job's concurrency ({self.concurrency})"
+                )
         return self
 
 
@@ -170,7 +185,8 @@ class EvalJobResult(BaseModel):
     model: str
     tasks: dict[str, EvalTaskResult]
     sanity: SanityResult
-    reference: ReferenceLogprobs | None = None  # after divergence "capture"
+    # after "capture" / "capture_and_floor" (the latter with its self_divergence)
+    reference: ReferenceLogprobs | None = None
     divergence: DivergenceResult | None = None  # after divergence "score"
     started_at: str  # ISO-8601 UTC wall clock
     finished_at: str

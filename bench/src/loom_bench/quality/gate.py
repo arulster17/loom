@@ -17,11 +17,25 @@ With threshold t (default 0.01 = one point absolute) and CI [lo, hi]:
 
 A two-sided 95% CI makes the PASS rule a one-sided test at 2.5%.
 
-Divergence and sanity checks FAIL the gate on their own: mean KL(ref || cand)
-above `max_kl`, top-1 agreement below `min_top1`, or any sanity rate above its
-limit. The overall decision is the worst one (FAIL > INCONCLUSIVE > PASS); the
-change is blocked on FAIL, and on INCONCLUSIVE unless `inconclusive_blocks` is
-off.
+Logprob divergence is judged against the noise floor measured on the baseline
+(`self_divergence`: the baseline scored against its own reference under
+different batching). The limits are
+
+    KL limit      = max(max_kl, noise_multiple x self-KL CI upper bound)
+    disagreement  = max(1 - min_top1, noise_multiple x self-disagreement CI upper bound)
+
+and, whatever the floor, a hard ceiling (`ceiling_kl`, `ceiling_top1`):
+
+- divergence beyond the ceiling                              -> FAIL
+- divergence beyond the limits, every task PASS               -> REVIEW
+- divergence beyond the limits, any task FAIL / INCONCLUSIVE  -> FAIL
+- otherwise                                                   -> PASS
+
+Without a self-divergence the absolute `max_kl` / `min_top1` are the limits and
+the reason says the check is uncalibrated. A sanity rate above its limit FAILs.
+The overall decision is the worst part (FAIL > INCONCLUSIVE > REVIEW > PASS);
+the change is blocked on FAIL, on INCONCLUSIVE unless `inconclusive_blocks` is
+off, and on REVIEW only when `review_blocks` is on.
 """
 
 from __future__ import annotations
@@ -38,17 +52,21 @@ from loom_bench.quality.tasks.base import ItemResult
 from loom_bench.stats import paired_bootstrap_delta
 
 Threshold = Annotated[float, Field(ge=0.0, lt=1.0)]
+Nats = Annotated[float, Field(ge=0.0)]
+Share = Annotated[float, Field(ge=0.0, le=1.0)]
+NoiseMultiple = Annotated[float, Field(ge=1.0)]
 MinSamples = Annotated[int, Field(ge=2)]
 RESOLUTION_FACTOR = 3.0
 
 
 class Verdict(StrEnum):
     PASS = "pass"
+    REVIEW = "review"  # divergence beyond the calibrated limits while every task passes
     FAIL = "fail"
     INCONCLUSIVE = "inconclusive"
 
 
-_SEVERITY = {Verdict.PASS: 0, Verdict.INCONCLUSIVE: 1, Verdict.FAIL: 2}
+_SEVERITY = {Verdict.PASS: 0, Verdict.REVIEW: 1, Verdict.INCONCLUSIVE: 2, Verdict.FAIL: 3}
 
 
 def worst(verdicts: Sequence[Verdict]) -> Verdict:
@@ -72,9 +90,25 @@ class GatePolicy(_Strict):
     seed: int = 0
     inconclusive_blocks: bool = True
     tasks: dict[str, TaskPolicy] = Field(default_factory=dict)
-    max_kl: Annotated[float, Field(ge=0.0)] | None = 0.05
-    min_top1: Annotated[float, Field(ge=0.0, le=1.0)] | None = 0.95
+    # Divergence: absolute limits (the calibrated ones are never stricter), the multiple of
+    # the baseline's measured self-divergence the limits widen to, and the hard ceiling.
+    max_kl: Nats | None = 0.05
+    min_top1: Share | None = 0.95
+    noise_multiple: NoiseMultiple = 5.0
+    ceiling_kl: Nats | None = 0.5
+    ceiling_top1: Share | None = 0.80
+    review_blocks: bool = False
     sanity: SanityLimits = Field(default_factory=SanityLimits)
+
+    @model_validator(mode="after")
+    def _ceiling_beyond_limits(self) -> Self:
+        lim_kl, ceil_kl = self.max_kl, self.ceiling_kl
+        if lim_kl is not None and ceil_kl is not None and ceil_kl <= lim_kl:
+            raise ValueError("ceiling_kl must be above max_kl")
+        lim_top1, ceil_top1 = self.min_top1, self.ceiling_top1
+        if lim_top1 is not None and ceil_top1 is not None and ceil_top1 >= lim_top1:
+            raise ValueError("ceiling_top1 must be below min_top1")
+        return self
 
     def threshold_for(self, task: str) -> float:
         tp = self.tasks.get(task)
@@ -109,11 +143,29 @@ class CheckVerdict(_Strict):
     result: dict[str, Any] | None = None
 
 
+class DivergenceLimits(_Strict):
+    """The divergence limits one decision applied, and where they came from."""
+
+    calibrated: bool  # False: no self-divergence, the absolute limits were used
+    noise_multiple: float
+    self_kl: float | None  # CI upper bound of the baseline's self-KL
+    self_top1: float | None  # CI lower bound of the baseline's self top-1 agreement
+    max_kl: float | None
+    min_top1: float | None
+    ceiling_kl: float | None
+    ceiling_top1: float | None
+
+
+class DivergenceVerdict(CheckVerdict):
+    limits: DivergenceLimits | None = None
+    self_divergence: dict[str, Any] | None = None
+
+
 class GateDecision(_Strict):
     decision: Verdict
     blocked: bool
     tasks: list[TaskVerdict]
-    divergence: CheckVerdict
+    divergence: DivergenceVerdict
     sanity: CheckVerdict
     policy: GatePolicy
 
@@ -136,7 +188,11 @@ class GateDecision(_Strict):
         return self.model_dump(mode="json")
 
     def summary(self) -> str:
-        head = f"gate {self.decision.value.upper()}" + (" (blocked)" if self.blocked else "")
+        head = f"gate {self.decision.value.upper()}"
+        if self.blocked:
+            head += " (blocked)"
+        elif self.decision is Verdict.REVIEW:
+            head += " (needs review, not blocking)"
         return "\n".join([head, *(f"  {r}" for r in self.reasons)])
 
 
@@ -226,22 +282,107 @@ def evaluate_task(
     )
 
 
-def _divergence_verdict(div: DivergenceResult | None, policy: GatePolicy) -> CheckVerdict:
-    if div is None:
-        return CheckVerdict(verdict=Verdict.PASS, reason="not measured")
-    problems = []
-    if policy.max_kl is not None and div.kl.point > policy.max_kl:
-        problems.append(f"mean KL {div.kl.point:.4f} nats exceeds {policy.max_kl:.4f}")
-    if policy.min_top1 is not None and div.top1.point < policy.min_top1:
-        problems.append(f"top-1 agreement {div.top1.point:.2%} is below {policy.min_top1:.2%}")
-    summary = (
-        f"KL {div.kl.point:.4f} nats, top-1 {div.top1.point:.2%} "
-        f"({div.n_prompts} prompts, {div.n_positions} positions)"
+def divergence_limits(
+    policy: GatePolicy, self_divergence: DivergenceResult | None
+) -> DivergenceLimits:
+    """Limits for a candidate's divergence: the absolute ones, widened to
+    `noise_multiple` x the baseline's self-divergence when it was measured."""
+    common: dict[str, Any] = {
+        "noise_multiple": policy.noise_multiple,
+        "ceiling_kl": policy.ceiling_kl,
+        "ceiling_top1": policy.ceiling_top1,
+    }
+    if self_divergence is None:
+        return DivergenceLimits(
+            calibrated=False,
+            self_kl=None,
+            self_top1=None,
+            max_kl=policy.max_kl,
+            min_top1=policy.min_top1,
+            **common,
+        )
+    kl, top1 = self_divergence.kl, self_divergence.top1
+    self_kl = kl.point if kl.hi is None else kl.hi
+    self_top1 = top1.point if top1.lo is None else top1.lo
+    m = policy.noise_multiple
+    max_kl = None if policy.max_kl is None else max(policy.max_kl, m * self_kl)
+    min_top1 = (
+        None
+        if policy.min_top1 is None
+        else max(0.0, 1.0 - max(1.0 - policy.min_top1, m * (1.0 - self_top1)))
     )
-    return CheckVerdict(
-        verdict=Verdict.FAIL if problems else Verdict.PASS,
-        reason="; ".join(problems) if problems else summary,
-        result=div.model_dump(mode="json"),
+    return DivergenceLimits(
+        calibrated=True,
+        self_kl=self_kl,
+        self_top1=self_top1,
+        max_kl=max_kl,
+        min_top1=min_top1,
+        **common,
+    )
+
+
+def limits_text(lim: DivergenceLimits) -> str:
+    kl = "none" if lim.max_kl is None else f"{lim.max_kl:.4f} nats"
+    top1 = "none" if lim.min_top1 is None else f"{lim.min_top1:.2%}"
+    if not lim.calibrated:
+        return f"uncalibrated (no self-divergence measured): absolute limits KL {kl}, top-1 {top1}"
+    assert lim.self_kl is not None and lim.self_top1 is not None
+    return (
+        f"limits KL {kl}, top-1 {top1}: the looser of the absolute limits and "
+        f"{lim.noise_multiple:g}x the baseline's noise floor "
+        f"(self-KL <= {lim.self_kl:.4f} nats, self top-1 >= {lim.self_top1:.2%})"
+    )
+
+
+def _divergence_verdict(
+    div: DivergenceResult | None,
+    self_div: DivergenceResult | None,
+    tasks: Sequence[TaskVerdict],
+    policy: GatePolicy,
+) -> DivergenceVerdict:
+    if div is None:
+        return DivergenceVerdict(verdict=Verdict.PASS, reason="not measured")
+    lim = divergence_limits(policy, self_div)
+    kl, top1 = div.kl.point, div.top1.point
+    record: dict[str, Any] = {
+        "result": div.model_dump(mode="json"),
+        "limits": lim,
+        "self_divergence": None if self_div is None else self_div.model_dump(mode="json"),
+    }
+    broken = []
+    if lim.ceiling_kl is not None and kl > lim.ceiling_kl:
+        broken.append(f"mean KL {kl:.4f} nats is above the hard ceiling {lim.ceiling_kl:.4f}")
+    if lim.ceiling_top1 is not None and top1 < lim.ceiling_top1:
+        broken.append(
+            f"top-1 agreement {top1:.2%} is below the hard ceiling {lim.ceiling_top1:.2%}"
+        )
+    if broken:
+        return DivergenceVerdict(verdict=Verdict.FAIL, reason="; ".join(broken), **record)
+    over = []
+    if lim.max_kl is not None and kl > lim.max_kl:
+        over.append(f"mean KL {kl:.4f} nats exceeds {lim.max_kl:.4f}")
+    if lim.min_top1 is not None and top1 < lim.min_top1:
+        over.append(f"top-1 agreement {top1:.2%} is below {lim.min_top1:.2%}")
+    if not over:
+        measured = f"{div.n_prompts} prompts, {div.n_positions} positions"
+        return DivergenceVerdict(
+            verdict=Verdict.PASS,
+            reason=f"KL {kl:.4f} nats, top-1 {top1:.2%} ({measured}); {limits_text(lim)}",
+            **record,
+        )
+    undecided = [t.task for t in tasks if t.verdict is not Verdict.PASS]
+    if undecided:
+        return DivergenceVerdict(
+            verdict=Verdict.FAIL,
+            reason=f"{'; '.join(over)}, and {', '.join(undecided)} did not pass "
+            f"non-inferiority; {limits_text(lim)}",
+            **record,
+        )
+    return DivergenceVerdict(
+        verdict=Verdict.REVIEW,
+        reason=f"needs review: {'; '.join(over)} while every task passed non-inferiority; "
+        f"{limits_text(lim)}",
+        **record,
     )
 
 
@@ -263,19 +404,27 @@ def evaluate_gate(
     divergence: DivergenceResult | None,
     sanity: SanityResult | None,
     policy: GatePolicy | None = None,
+    *,
+    self_divergence: DivergenceResult | None = None,
 ) -> GateDecision:
-    """Decide whether `candidate` may replace `baseline`; see the module docstring."""
+    """Decide whether `candidate` may replace `baseline`; see the module docstring.
+
+    `self_divergence` is the baseline scored against its own divergence reference under
+    different batching: the noise floor the divergence limits are calibrated on.
+    """
     policy = policy or GatePolicy()
     if baseline.keys() != candidate.keys():
         raise ValueError(
             f"task sets differ: baseline {sorted(baseline)}, candidate {sorted(candidate)}"
         )
     tasks = [evaluate_task(name, baseline[name], candidate[name], policy) for name in baseline]
-    div = _divergence_verdict(divergence, policy)
+    div = _divergence_verdict(divergence, self_divergence, tasks, policy)
     san = _sanity_verdict(sanity, policy)
     decision = worst([t.verdict for t in tasks] + [div.verdict, san.verdict])
-    blocked = decision is Verdict.FAIL or (
-        decision is Verdict.INCONCLUSIVE and policy.inconclusive_blocks
+    blocked = (
+        decision is Verdict.FAIL
+        or (decision is Verdict.INCONCLUSIVE and policy.inconclusive_blocks)
+        or (decision is Verdict.REVIEW and policy.review_blocks)
     )
     return GateDecision(
         decision=decision, blocked=blocked, tasks=tasks, divergence=div, sanity=san, policy=policy

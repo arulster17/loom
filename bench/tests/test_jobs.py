@@ -12,11 +12,17 @@ from loom_bench.jobs import (
     TokenizerSpec,
 )
 from loom_bench.providers.base import Host, HostRequest
-from loom_bench.quality.divergence import ReferenceLogprobs, ReferencePosition, ReferencePrompt
+from loom_bench.quality.divergence import (
+    DivergenceResult,
+    ReferenceLogprobs,
+    ReferencePosition,
+    ReferencePrompt,
+)
 from loom_bench.quality.sanity import SanityResult
 from loom_bench.quality.suite import Suite
 from loom_bench.quality.tasks.base import ItemResult
 from loom_bench.records import LoadMode, Market, RequestRecord, RequestStatus
+from loom_bench.stats import Interval
 
 
 def test_load_job_json_round_trip():
@@ -132,8 +138,31 @@ def eval_job(**kw) -> EvalJob:
     return EvalJob(**{**base, **kw})
 
 
+def _interval(x: float) -> Interval:
+    return Interval(point=x, lo=x, hi=x, n=1, confidence=0.95, n_boot=100, seed=0)
+
+
+FLOORED = REFERENCE.model_copy(
+    update={
+        "self_divergence": DivergenceResult(
+            n_prompts=1,
+            n_positions=1,
+            n_skipped=1,
+            top_k=3,
+            kl=_interval(0.001),
+            top1=_interval(1.0),
+        )
+    }
+)
+
+
 def test_eval_job_json_round_trip():
-    for job in (eval_job(divergence="capture"), eval_job(divergence="score", reference=REFERENCE)):
+    for job in (
+        eval_job(divergence="capture"),
+        eval_job(divergence="capture_and_floor"),
+        eval_job(divergence="score", reference=REFERENCE),
+        eval_job(divergence="score", reference=FLOORED),
+    ):
         again = EvalJob.model_validate_json(job.model_dump_json())
         assert again == job
         assert again.suite.policy() == job.suite.policy()
@@ -150,6 +179,11 @@ def test_eval_job_validates_tasks_and_divergence():
     no_div = Suite.model_validate({k: v for k, v in SUITE.items() if k != "divergence"})
     with pytest.raises(ValueError, match="no divergence"):
         eval_job(suite=no_div, divergence="capture")
+    with pytest.raises(ValueError, match="reference"):
+        eval_job(divergence="capture_and_floor", reference=REFERENCE)
+    with pytest.raises(ValueError, match="different batching"):
+        eval_job(divergence="capture_and_floor", concurrency=1)
+    assert eval_job(divergence="capture", concurrency=1).concurrency == 1
 
 
 def test_eval_job_result_json_round_trip():
@@ -167,7 +201,7 @@ def test_eval_job_result_json_round_trip():
             )
         },
         sanity=SanityResult(n=1, counts={"empty": 0}),
-        reference=REFERENCE,
+        reference=FLOORED,
         divergence=None,
         started_at="2026-10-04T00:00:00+00:00",
         finished_at="2026-10-04T00:00:02+00:00",

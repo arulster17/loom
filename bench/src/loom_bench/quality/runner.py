@@ -201,29 +201,32 @@ async def execute_eval_job(job: EvalJob, workdir: Path | None = None) -> EvalJob
     if job.divergence is not None:
         spec = suite.divergence
         assert spec is not None  # EvalJob validates it
+        stats: dict[str, Any] = {
+            "confidence": suite.gate.confidence,
+            "n_boot": suite.gate.n_boot,
+            "seed": job.seed,
+        }
+        client_opts: dict[str, Any] = {"timeout_s": job.request_timeout_s, "seed": job.seed}
         async with EvalClient(
-            job.base_url,
-            job.served_model,
-            concurrency=job.concurrency,
-            timeout_s=job.request_timeout_s,
-            seed=job.seed,
+            job.base_url, job.served_model, concurrency=job.concurrency, **client_opts
         ) as client:
-            if job.divergence == "capture":
+            if job.divergence == "score":
+                assert job.reference is not None  # EvalJob validates it
+                divergence = await score_against_reference(client, job.reference, **stats)
+            else:
                 reference = await capture_reference(
                     client,
                     load_prompts()[: spec.prompts],
                     top_k=spec.top_k,
                     max_new_tokens=spec.max_new_tokens,
                 )
-            else:
-                assert job.reference is not None  # EvalJob validates it
-                divergence = await score_against_reference(
-                    client,
-                    job.reference,
-                    confidence=suite.gate.confidence,
-                    n_boot=suite.gate.n_boot,
-                    seed=job.seed,
-                )
+        if job.divergence == "capture_and_floor":
+            assert reference is not None
+            async with EvalClient(
+                job.base_url, job.served_model, concurrency=spec.floor_concurrency, **client_opts
+            ) as client:
+                floor = await score_against_reference(client, reference, **stats)
+            reference = reference.model_copy(update={"self_divergence": floor})
     return EvalJobResult(
         run_id=job.run_id,
         suite=result.suite,
@@ -274,13 +277,21 @@ def gate_against_baseline(
     candidate: SuiteResult,
     policy: Suite | GatePolicy,
     divergence: DivergenceResult | None = None,
+    *,
+    self_divergence: DivergenceResult | None = None,
 ) -> GateDecision:
-    """Gate decision for `candidate` vs `baseline`; both must come from the same suite."""
+    """Gate decision for `candidate` vs `baseline`; both must come from the same suite.
+    `self_divergence` is the baseline's noise floor (`ReferenceLogprobs.self_divergence`)."""
     if baseline.suite != candidate.suite:
         raise ValueError(f"suites differ: {baseline.suite} vs {candidate.suite}")
     gate_policy = policy.policy() if isinstance(policy, Suite) else policy
     return evaluate_gate(
-        baseline.scores(), candidate.scores(), divergence, candidate.sanity, gate_policy
+        baseline.scores(),
+        candidate.scores(),
+        divergence,
+        candidate.sanity,
+        gate_policy,
+        self_divergence=self_divergence,
     )
 
 

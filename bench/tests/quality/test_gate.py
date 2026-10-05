@@ -4,7 +4,15 @@ import numpy as np
 import pytest
 
 from loom_bench.quality.divergence import DivergenceResult
-from loom_bench.quality.gate import GatePolicy, TaskPolicy, Verdict, evaluate_gate, evaluate_task
+from loom_bench.quality.gate import (
+    GatePolicy,
+    TaskPolicy,
+    Verdict,
+    divergence_limits,
+    evaluate_gate,
+    evaluate_task,
+    worst,
+)
 from loom_bench.quality.sanity import SanityLimits, SanityResult
 from loom_bench.quality.tasks.base import ItemResult
 from loom_bench.stats import Interval
@@ -171,16 +179,134 @@ def test_inconclusive_blocks_unless_disabled():
     assert d.decision is Verdict.INCONCLUSIVE and not d.blocked
 
 
-def test_divergence_failures():
-    base = {"a": items(binary(1000, 0.8, 12))}
-    ok = evaluate_gate(base, base, _div(0.01, 0.99), None, FAST)
-    assert ok.decision is Verdict.PASS and not ok.blocked
-    high_kl = evaluate_gate(base, base, _div(0.2, 0.99), None, FAST)
-    assert high_kl.decision is Verdict.FAIL
-    assert "KL" in high_kl.divergence.reason
-    low_top1 = evaluate_gate(base, base, _div(0.01, 0.9), None, FAST)
-    assert low_top1.decision is Verdict.FAIL
+def _floor(kl_hi, top1_lo, *, kl=None, top1=None):
+    """A self-divergence whose CI bounds are what the gate calibrates on."""
+
+    def iv(point, lo, hi):
+        return Interval(point=point, lo=lo, hi=hi, n=40, confidence=0.95, n_boot=100, seed=0)
+
+    kl = kl_hi / 2 if kl is None else kl
+    top1 = (1 + top1_lo) / 2 if top1 is None else top1
+    return DivergenceResult(
+        n_prompts=40,
+        n_positions=2000,
+        n_skipped=0,
+        top_k=5,
+        kl=iv(kl, 0.0, kl_hi),
+        top1=iv(top1, top1_lo, 1.0),
+    )
+
+
+PASSING = {"a": items(binary(1000, 0.8, 12))}
+
+
+def gate(div, floor=None, policy=FAST, candidate=None):
+    return evaluate_gate(PASSING, candidate or PASSING, div, None, policy, self_divergence=floor)
+
+
+def test_calibrated_limits_widen_to_the_noise_multiple():
+    lim = divergence_limits(FAST, _floor(0.02, 0.98))
+    assert lim.calibrated
+    assert (lim.self_kl, lim.self_top1) == (0.02, 0.98)
+    assert lim.max_kl == pytest.approx(5 * 0.02)  # above the absolute 0.05
+    assert lim.min_top1 == pytest.approx(1 - 5 * 0.02)  # disagreement 2% -> 10%
+    assert (lim.ceiling_kl, lim.ceiling_top1) == (0.5, 0.8)
+
+
+def test_calibrated_limits_never_stricter_than_the_absolute_ones():
+    lim = divergence_limits(FAST, _floor(0.001, 0.999))
+    assert lim.calibrated
+    assert lim.max_kl == 0.05 and lim.min_top1 == 0.95
+    zero = divergence_limits(FAST, _floor(0.0, 1.0))
+    assert zero.max_kl == 0.05 and zero.min_top1 == 0.95
+
+
+def test_calibration_uses_the_conservative_ci_bound():
+    lim = divergence_limits(FAST, _floor(0.03, 0.97, kl=0.01, top1=0.995))
+    assert lim.max_kl == pytest.approx(0.15) and lim.min_top1 == pytest.approx(0.85)
+    tripled = divergence_limits(FAST.model_copy(update={"noise_multiple": 3.0}), _floor(0.03, 0.97))
+    assert tripled.max_kl == pytest.approx(0.09) and tripled.min_top1 == pytest.approx(0.91)
+
+
+def test_divergence_within_the_calibrated_limits_passes():
+    # Above the old fixed 0.05 / 95%, inside 5x a 0.02 / 98% floor.
+    d = gate(_div(0.08, 0.92), _floor(0.02, 0.98))
+    assert d.divergence.verdict is Verdict.PASS
+    assert d.decision is Verdict.PASS and not d.blocked
+    assert d.divergence.limits.calibrated
+    assert "noise floor" in d.divergence.reason
+
+
+def test_divergence_beyond_the_limits_with_passing_tasks_needs_review():
+    d = gate(_div(0.2, 0.92), _floor(0.02, 0.98))
+    assert d.divergence.verdict is Verdict.REVIEW
+    assert d.decision is Verdict.REVIEW and not d.blocked
+    assert "needs review" in d.divergence.reason
+    assert "0.2000 nats exceeds 0.1000" in d.divergence.reason
+    assert "self-KL <= 0.0200" in d.divergence.reason
+    assert "(needs review, not blocking)" in d.summary()
+    low_top1 = gate(_div(0.01, 0.85), _floor(0.02, 0.98))
+    assert low_top1.decision is Verdict.REVIEW
+    assert "top-1 agreement 85.00% is below 90.00%" in low_top1.divergence.reason
+
+
+def test_review_blocks_when_the_policy_says_so():
+    strict = FAST.model_copy(update={"review_blocks": True})
+    d = gate(_div(0.2, 0.92), _floor(0.02, 0.98), policy=strict)
+    assert d.decision is Verdict.REVIEW and d.blocked
+    assert "(blocked)" in d.summary()
+
+
+def test_divergence_beyond_the_limits_with_a_failing_task_fails():
+    base = PASSING["a"]
+    dropped = {"a": items(flip([s.score for s in base], 60))}
+    d = gate(_div(0.2, 0.92), _floor(0.02, 0.98), candidate=dropped)
+    assert d.tasks[0].verdict is Verdict.FAIL
+    assert d.divergence.verdict is Verdict.FAIL
+    assert "a did not pass non-inferiority" in d.divergence.reason
+
+
+def test_divergence_beyond_the_limits_with_an_inconclusive_task_fails():
+    small = {"a": items([1.0] * 10)}
+    d = evaluate_gate(small, small, _div(0.2, 0.92), None, FAST, self_divergence=_floor(0.02, 0.98))
+    assert d.tasks[0].verdict is Verdict.INCONCLUSIVE
+    assert d.divergence.verdict is Verdict.FAIL
+    assert d.decision is Verdict.FAIL and d.blocked
+
+
+def test_hard_ceiling_fails_whatever_the_floor():
+    noisy = _floor(0.2, 0.7)  # a floor so high its 5x limits are beyond the ceiling
+    for div, what in ((_div(0.6, 0.99), "KL"), (_div(0.01, 0.75), "top-1")):
+        d = gate(div, noisy)
+        assert d.divergence.verdict is Verdict.FAIL, what
+        assert "hard ceiling" in d.divergence.reason and what in d.divergence.reason
+        assert d.decision is Verdict.FAIL and d.blocked
+
+
+def test_uncalibrated_divergence_uses_the_absolute_limits_and_says_so():
+    ok = gate(_div(0.01, 0.99))
+    assert ok.decision is Verdict.PASS
+    assert "uncalibrated" in ok.divergence.reason
+    assert not ok.divergence.limits.calibrated
+    high_kl = gate(_div(0.2, 0.99))
+    assert high_kl.decision is Verdict.REVIEW
+    assert "KL" in high_kl.divergence.reason and "uncalibrated" in high_kl.divergence.reason
+    low_top1 = gate(_div(0.01, 0.9))
+    assert low_top1.decision is Verdict.REVIEW
     assert "top-1" in low_top1.divergence.reason
+
+
+def test_ceiling_must_lie_beyond_the_limits():
+    with pytest.raises(ValueError, match="ceiling_kl"):
+        GatePolicy(max_kl=0.5, ceiling_kl=0.5)
+    with pytest.raises(ValueError, match="ceiling_top1"):
+        GatePolicy(min_top1=0.8, ceiling_top1=0.9)
+
+
+def test_review_ranks_between_pass_and_inconclusive():
+    assert worst([Verdict.PASS, Verdict.REVIEW]) is Verdict.REVIEW
+    assert worst([Verdict.REVIEW, Verdict.INCONCLUSIVE]) is Verdict.INCONCLUSIVE
+    assert worst([Verdict.REVIEW, Verdict.FAIL]) is Verdict.FAIL
 
 
 def test_sanity_failures():
@@ -206,9 +332,17 @@ def test_task_sets_must_match():
 
 def test_decision_is_json_able_for_store():
     base = {"a": items(binary(1000, 0.8, 14))}
-    d = evaluate_gate(base, base, _div(0.01, 0.99), None, FAST)
+    d = evaluate_gate(base, base, _div(0.2, 0.99), None, FAST, self_divergence=_floor(0.02, 0.98))
     doc = json.loads(json.dumps(d.details()))
-    assert doc["decision"] == "pass"
+    assert doc["decision"] == "review" and doc["blocked"] is False
     assert doc["tasks"][0]["task"] == "a"
     assert doc["policy"]["threshold"] == 0.01
-    assert "gate PASS" in d.summary()
+    assert doc["policy"]["noise_multiple"] == 5.0 and doc["policy"]["review_blocks"] is False
+    div = doc["divergence"]
+    assert div["verdict"] == "review"
+    assert div["result"]["kl"]["point"] == 0.2
+    assert div["self_divergence"]["kl"]["hi"] == 0.02
+    assert div["limits"]["calibrated"] is True
+    assert div["limits"]["max_kl"] == pytest.approx(0.1)
+    assert (div["limits"]["ceiling_kl"], div["limits"]["ceiling_top1"]) == (0.5, 0.8)
+    assert "gate REVIEW" in d.summary()

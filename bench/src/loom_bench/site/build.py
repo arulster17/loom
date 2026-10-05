@@ -27,7 +27,7 @@ from loom_bench.money import SECONDS_PER_HOUR, TOKENS_PER_MTOK, Micros
 from loom_bench.prices import BlockStorage, InstanceType, PriceBook, UnverifiedPriceError
 from loom_bench.records import LoadMode, Market
 from loom_bench.registry import Cloud, ModelSpec
-from loom_bench.report.analyze import ConfigResult, LoadPoint
+from loom_bench.report.analyze import ConfigResult, LoadPoint, gate_label
 from loom_bench.report.competitiveness import (
     CompetitivenessRow,
     comparison_scope,
@@ -107,6 +107,7 @@ def _env() -> Environment:
     env.filters.update(yaml=to_yaml, short_sha=short_sha, sentence=sentence)
     env.globals.update(
         cold_text=cold_text,
+        gate_label=gate_label,
         margin_text=margin_text,
         price_text=price_text,
         price_header=price_header,

@@ -2,7 +2,9 @@
 
 Exit codes: 0 ok, 1 failed, 2 invalid input, 3 refused by the planner (over a
 cap), 4 stopped before a step that would pass the cap, 5 hard budget abort,
-6 reproduction outside normal variance, 7 quality gate blocked.
+6 reproduction outside normal variance, 7 quality gate blocked. A gate that needs
+review (divergence above the calibrated limits while every task passes) exits 0 unless
+the suite sets `gate.review_blocks`, in which case it is blocked and exits 7.
 """
 
 from __future__ import annotations
@@ -271,7 +273,12 @@ def render_outcome(outcome: Outcome, results: list[ConfigResult] | None = None) 
     if outcome.reason:
         console.print(f"[{color}]reason:[/] {outcome.reason}")
     for g in outcome.gates:
-        verdict = "[red]BLOCKED" if g.blocked else "[green]allowed"
+        if g.blocked:
+            verdict = "[red]BLOCKED"
+        elif g.decision == "review":
+            verdict = "[yellow]allowed, needs review"
+        else:
+            verdict = "[green]allowed"
         console.print(f"quality gate {g.cell} vs {g.baseline}: {g.decision} ({verdict}[/])")
     render_goodput(results or [])
 
@@ -666,7 +673,8 @@ def quality_gate(
     ] = None,
     db: DbOpt = None,
 ) -> None:
-    """Re-decide the gate from stored per-item samples; exit 7 when blocked."""
+    """Re-decide the gate from stored per-item samples; exit 7 when blocked (REVIEW
+    exits 0 unless the suite makes it block)."""
     from loom_bench.runner import gate_stored
 
     with _invalid_input("cannot re-decide the gate"):

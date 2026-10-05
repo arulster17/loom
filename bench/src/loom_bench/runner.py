@@ -22,7 +22,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -52,7 +52,7 @@ from loom_bench.experiment import (
     mock_config_from_launch,
     tokenizer_for,
 )
-from loom_bench.jobs import EvalJob, LoadJob, LoadJobResult
+from loom_bench.jobs import DivergenceMode, EvalJob, LoadJob, LoadJobResult
 from loom_bench.metrics.aggregate import AggregateSummary, aggregate_runs
 from loom_bench.metrics.gpu import parse_nvidia_smi, summarize_gpu
 from loom_bench.metrics.prometheus import summarize_scrapes
@@ -88,7 +88,7 @@ from loom_bench.providers.base import (
     Provider,
     SpotInterrupted,
 )
-from loom_bench.quality.divergence import ReferenceLogprobs
+from loom_bench.quality.divergence import DivergenceResult, ReferenceLogprobs
 from loom_bench.quality.gate import GateDecision
 from loom_bench.quality.runner import (
     SuiteResult,
@@ -187,7 +187,7 @@ class _Baseline:
 class GateRow(BaseModel):
     cell: str
     baseline: str
-    decision: str  # pass | fail | inconclusive
+    decision: str  # pass | review | fail | inconclusive
     blocked: bool
 
 
@@ -419,11 +419,11 @@ class _Executor:
     def _eval_job(self, cell: Cell, endpoint: Endpoint, suite: Suite) -> EvalJob:
         quality = self.exp.quality
         assert quality is not None
-        divergence: Literal["capture", "score"] | None = None
+        divergence: DivergenceMode | None = None
         reference = None
         if suite.divergence is not None:
             if cell.variant == quality.baseline_variant:
-                divergence = "capture"
+                divergence = "capture_and_floor"
             else:
                 divergence, reference = "score", self._baseline(cell).reference
         return EvalJob(
@@ -458,7 +458,14 @@ class _Executor:
         self.eval_hosts.add(host.host_id)
         result = suite_result_of(out)
         evals_dir = self.run_dir / "evals" / cell.config_hash[:16]
-        samples = write_samples(evals_dir / "samples.json", quality.suite, result)
+        samples = write_samples(
+            evals_dir / "samples.json",
+            quality.suite,
+            result,
+            divergence=out.divergence,
+            reference_config_hash=job.reference.config_hash if job.reference else None,
+            self_divergence=out.reference.self_divergence if out.reference else None,
+        )
         prov = build_provenance(cell.config, **self._serving_sections(host, cell, endpoint))
         with session_scope(self.ctx.db_url) as s:
             record_suite_result(
@@ -487,17 +494,25 @@ class _Executor:
                 )
                 path = evals_dir / "reference.json"
                 path.write_text(reference.model_dump_json())
+                floor = reference.self_divergence
                 self.event(
                     "reference_captured",
                     cell=cell.key,
                     config_hash=cell.config_hash,
                     prompts=len(reference.prompts),
                     path=str(path),
+                    self_divergence=None if floor is None else floor.model_dump(mode="json"),
                 )
             self.baselines[canonical_json(cell.knobs)] = _Baseline(cell, result, reference)
             return
         base = self._baseline(cell)
-        decision = gate_against_baseline(base.result, result, suite, out.divergence)
+        decision = gate_against_baseline(
+            base.result,
+            result,
+            suite,
+            out.divergence,
+            self_divergence=base.reference.self_divergence if base.reference else None,
+        )
         with session_scope(self.ctx.db_url) as s:
             record_gate(
                 s,
@@ -981,8 +996,18 @@ async def _execute(
 # --- quality -----------------------------------------------------------------------
 
 
-def write_samples(path: Path, suite_ref: str, result: SuiteResult) -> Path:
-    """Per-item scores of one suite run, so a gate can be re-decided later."""
+def write_samples(
+    path: Path,
+    suite_ref: str,
+    result: SuiteResult,
+    *,
+    divergence: DivergenceResult | None = None,
+    reference_config_hash: str | None = None,
+    self_divergence: DivergenceResult | None = None,
+) -> Path:
+    """Per-item scores of one suite run, so a gate can be re-decided later, with the
+    candidate's divergence (from the reference captured on `reference_config_hash`) or
+    the baseline's self-divergence."""
     path.parent.mkdir(parents=True, exist_ok=True)
     doc = {
         "suite": result.suite,
@@ -991,6 +1016,11 @@ def write_samples(path: Path, suite_ref: str, result: SuiteResult) -> Path:
         "started_at": result.started_at.isoformat(),
         "finished_at": result.finished_at.isoformat(),
         "sanity": result.sanity.model_dump(mode="json"),
+        "divergence": None if divergence is None else divergence.model_dump(mode="json"),
+        "divergence_reference": reference_config_hash,
+        "self_divergence": (
+            None if self_divergence is None else self_divergence.model_dump(mode="json")
+        ),
         "tasks": {
             name: {
                 "kind": run.kind,
@@ -1033,6 +1063,24 @@ def read_samples(path: str | Path) -> tuple[str, SuiteResult]:
 
 
 @dataclass
+class SampleDivergences:
+    divergence: DivergenceResult | None
+    reference_config_hash: str | None  # the config whose reference `divergence` is from
+    self_divergence: DivergenceResult | None
+
+
+def read_sample_divergences(path: str | Path) -> SampleDivergences:
+    """Divergences stored with `write_samples`; None where absent (older samples too)."""
+    doc = json.loads(Path(path).read_text())
+    div, floor = doc.get("divergence"), doc.get("self_divergence")
+    return SampleDivergences(
+        divergence=None if div is None else DivergenceResult.model_validate(div),
+        reference_config_hash=doc.get("divergence_reference"),
+        self_divergence=None if floor is None else DivergenceResult.model_validate(floor),
+    )
+
+
+@dataclass
 class _EvalRef:
     experiment_id: uuid.UUID
     config_hash: str
@@ -1063,14 +1111,21 @@ def _latest_eval(s: Session, ref: str) -> _EvalRef:
 def gate_stored(
     db_url: str | None, baseline: str, candidate: str, *, suite: str | None = None
 ) -> tuple[GateDecision, str, str]:
-    """Re-decide the gate from stored per-item samples and record it on the candidate's
-    experiment. Returns (decision, baseline config hash, candidate config hash)."""
+    """Re-decide the gate from stored per-item samples (and the stored divergence and
+    noise floor, where present) and record it on the candidate's experiment. Returns
+    (decision, baseline config hash, candidate config hash)."""
     with session_scope(db_url) as s:
         base, cand = _latest_eval(s, baseline), _latest_eval(s, candidate)
     _, base_result = read_samples(base.samples_uri)
     suite_ref, cand_result = read_samples(cand.samples_uri)
     policy = load_quality_suite(suite or suite_ref)
-    decision = gate_against_baseline(base_result, cand_result, policy)
+    floor = read_sample_divergences(base.samples_uri).self_divergence
+    measured = read_sample_divergences(cand.samples_uri)
+    # A candidate's divergence only applies against the baseline whose reference it used.
+    divergence = measured.divergence if measured.reference_config_hash == base.config_hash else None
+    decision = gate_against_baseline(
+        base_result, cand_result, policy, divergence, self_divergence=floor
+    )
     with session_scope(db_url) as s:
         record_gate(
             s,

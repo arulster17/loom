@@ -38,8 +38,12 @@ from loom_bench.provenance import (
     WorkloadInfo,
     build_provenance,
 )
+from loom_bench.quality.divergence import DivergenceResult
+from loom_bench.quality.gate import GatePolicy, evaluate_gate
+from loom_bench.quality.tasks.base import ItemResult
 from loom_bench.records import LoadMode, Market, RequestRecord, RequestStatus
 from loom_bench.slo import Slo
+from loom_bench.stats import Interval
 from loom_bench.store.models import BenchEvalRun, BenchGateDecision, BenchRun
 
 SLO = Slo(ttft_ms={"p95": 600}, tpot_ms={"p95": 60}, max_error_rate=0.01)
@@ -237,16 +241,55 @@ def eval_row(config_hash: str, task: str, score: float) -> BenchEvalRun:
     )
 
 
-def gate_row(baseline: str, candidate: str, decision: str) -> BenchGateDecision:
+def gate_row(
+    baseline: str, candidate: str, decision: str, details: dict[str, Any] | None = None
+) -> BenchGateDecision:
     return BenchGateDecision(
         id=_id("gate", baseline, candidate),
         experiment_id=EXPERIMENT,
         baseline_config_hash=baseline,
         candidate_config_hash=candidate,
         decision=decision,
-        details={},
+        details=details or {},
         created_at=CREATED,
     )
+
+
+# How the report describes `review_details()`'s divergence.
+REVIEW_DIVERGENCE = (
+    "KL 0.2000 nats (limit 0.1000), top-1 93.0% (limit 90.0%); limits 5x the "
+    "baseline's noise floor of KL 0.0200, top-1 98.0%, or the absolute ones"
+)
+
+
+def review_details() -> dict[str, Any]:
+    """`details` of a real REVIEW decision: divergence beyond 5x a measured noise floor
+    (KL 0.2 vs 5 x 0.02) while every task passes."""
+
+    def iv(point: float, lo: float, hi: float) -> Interval:
+        return Interval(point=point, lo=lo, hi=hi, n=48, confidence=0.95, n_boot=100, seed=0)
+
+    def div(kl: float, top1: float, kl_hi: float, top1_lo: float) -> DivergenceResult:
+        return DivergenceResult(
+            n_prompts=48,
+            n_positions=3000,
+            n_skipped=0,
+            top_k=5,
+            kl=iv(kl, 0.0, kl_hi),
+            top1=iv(top1, top1_lo, 1.0),
+        )
+
+    same = {"gsm8k": [ItemResult(item_id=str(i), score=float(i % 2)) for i in range(400)]}
+    decision = evaluate_gate(
+        same,
+        same,
+        div(0.2, 0.93, 0.2, 0.93),
+        None,
+        GatePolicy(n_boot=200),
+        self_divergence=div(0.01, 0.99, 0.02, 0.98),
+    )
+    assert decision.decision.value == "review"
+    return decision.details()
 
 
 def assert_self_contained(html: str, allowed: tuple[str, ...]) -> None:

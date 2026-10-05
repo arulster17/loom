@@ -156,13 +156,63 @@ class TaskQuality(BaseModel):
     delta: float | None  # score - baseline score on the same task
 
 
-GateStatus = Literal["pass", "fail", "inconclusive", "baseline"]
+GateStatus = Literal["pass", "review", "fail", "inconclusive", "baseline"]
+GATE_LABELS: dict[str, str] = {"review": "needs review"}
+
+
+def gate_label(gate: str) -> str:
+    return GATE_LABELS.get(gate, gate)
+
+
+class GateDivergence(BaseModel):
+    """A gate decision's logprob divergence and the limits it was held to."""
+
+    kl: float  # mean KL(reference || candidate), nats
+    top1: float  # top-1 agreement
+    max_kl: float | None
+    min_top1: float | None
+    calibrated: bool  # limits from the baseline's measured noise floor
+    noise_multiple: float
+    self_kl: float | None
+    self_top1: float | None
+
+    @classmethod
+    def from_details(cls, details: Mapping[str, Any]) -> GateDivergence | None:
+        """From `GateDecision.details()`; None when divergence was not measured or the
+        decision predates calibrated limits."""
+        div = details.get("divergence") or {}
+        result, limits = div.get("result"), div.get("limits")
+        if result is None or limits is None:
+            return None
+        return cls(
+            kl=result["kl"]["point"],
+            top1=result["top1"]["point"],
+            max_kl=limits["max_kl"],
+            min_top1=limits["min_top1"],
+            calibrated=limits["calibrated"],
+            noise_multiple=limits["noise_multiple"],
+            self_kl=limits["self_kl"],
+            self_top1=limits["self_top1"],
+        )
+
+    def text(self) -> str:
+        kl_lim = "" if self.max_kl is None else f" (limit {self.max_kl:.4f})"
+        top1_lim = "" if self.min_top1 is None else f" (limit {self.min_top1:.1%})"
+        if self.calibrated and self.self_kl is not None and self.self_top1 is not None:
+            floor = (
+                f"limits {self.noise_multiple:g}x the baseline's noise floor of "
+                f"KL {self.self_kl:.4f}, top-1 {self.self_top1:.1%}, or the absolute ones"
+            )
+        else:
+            floor = "uncalibrated: absolute limits, no noise floor measured"
+        return f"KL {self.kl:.4f} nats{kl_lim}, top-1 {self.top1:.1%}{top1_lim}; {floor}"
 
 
 class Quality(BaseModel):
     gate: GateStatus | None  # None: no gate decision involves this config
     baseline_config_hash: str | None
     tasks: list[TaskQuality]
+    divergence: GateDivergence | None = None  # of the latest gate decision on this config
 
     def worst(self) -> TaskQuality | None:
         """The task with the most negative delta vs baseline."""
@@ -583,9 +633,11 @@ def quality_for(
             )
         )
     status: GateStatus | None = "baseline" if is_baseline else None
+    divergence = None
     if gate is not None:
         status = cast(GateStatus, gate.decision)
-    return Quality(gate=status, baseline_config_hash=baseline, tasks=tasks)
+        divergence = GateDivergence.from_details(gate.details)
+    return Quality(gate=status, baseline_config_hash=baseline, tasks=tasks, divergence=divergence)
 
 
 def with_quality(

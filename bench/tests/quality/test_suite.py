@@ -35,6 +35,8 @@ def test_policy_from_suite():
     assert policy.threshold_for("ifeval") == 0.02
     assert policy.min_samples_for("json_schema") == 50
     assert policy.max_kl == suite.divergence.max_kl
+    assert (policy.noise_multiple, policy.ceiling_kl, policy.ceiling_top1) == (5.0, 0.5, 0.8)
+    assert suite.divergence.floor_concurrency == 1 and not policy.review_blocks
     assert policy.seed == suite.seed
     assert suite.extra_body() == {"chat_template_kwargs": {"enable_thinking": False}}
 
@@ -52,6 +54,8 @@ def _suite(**over):
 def test_suite_validation():
     assert _suite().extra_body() == {}
     assert _suite().policy().max_kl is None
+    with pytest.raises(ValueError, match="ceiling_kl must be above max_kl"):
+        _suite(divergence={"max_kl": 0.6})
     with pytest.raises(ValueError, match="duplicate task names"):
         _suite(tasks=[{"name": "a", "kind": "toy_arithmetic"}] * 2)
     with pytest.raises(ValueError, match="unknown eval task kind"):

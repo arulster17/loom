@@ -17,9 +17,15 @@ TESTS_DIR = str(Path(__file__).resolve().parents[1])
 if TESTS_DIR not in sys.path:
     sys.path.insert(0, TESTS_DIR)
 
-from report.factories import SLO, TTFT_SGLANG, make_runs  # noqa: E402
+from report.factories import (  # noqa: E402
+    REVIEW_DIVERGENCE,
+    SLO,
+    TTFT_SGLANG,
+    make_runs,
+    review_details,
+)
 
-__all__ = ["SLO", "TTFT_SGLANG", "make_runs"]
+__all__ = ["REVIEW_DIVERGENCE", "SLO", "TTFT_SGLANG", "make_runs", "review_details"]
 
 EXPORT_GIT = GitInfo(sha="fedcba9876543210fedcba9876543210fedcba98", dirty=False, branch="main")
 GENERATED_AT = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)

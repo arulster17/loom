@@ -154,7 +154,13 @@
 <li><strong>fail</strong>: on at least one task, the interval lies entirely below that margin. Failing configs are listed with the reason and never ranked, however cheap.</li>
 <li><strong>inconclusive</strong>: otherwise; the interval is too wide to decide. The config is shown with that status.</li>
 </ul>
-<p>Each model page shows every task's score, its interval and the difference from the baseline. A config with no gate decision is shown as "not evaluated".</p>
+<p>The gate also compares next-token probabilities: the baseline and the candidate score the same text token by token, and we measure how far apart their distributions are (mean KL divergence, and how often their most likely next token agrees). Two healthy engines running the same weights never agree exactly, because their GPU kernels add numbers in a different order. So in every run the baseline also scores its own reference a second time with requests batched differently, which measures that numerical noise for this model on this hardware. The candidate's divergence may be up to five times that noise floor; the limit is never stricter than 0.05 nats KL and 95% top-1 agreement.</p>
+<ul>
+<li>A divergence above that limit while every task passed is marked <strong>needs review</strong>: the config is still ranked, with the measured divergence and the noise floor on its model page.</li>
+<li>Above the limit with any task failing or inconclusive, the gate fails.</li>
+<li>Beyond a hard ceiling (KL above 0.5 nats or top-1 agreement below 80%) the gate fails regardless of the noise floor: those outputs are broken, not noisy.</li>
+</ul>
+<p>Each model page shows every task's score, its interval and the difference from the baseline, and the divergence with the limit it was held to. A config with no gate decision is shown as "not evaluated".</p>
 </section>
 
 <section aria-labelledby="content">
@@ -175,7 +181,7 @@
 <ul>
 <li>We do not benchmark other providers' APIs. Several providers' terms restrict benchmarking their services, so the harness ships no tooling, credentials or presets for third-party endpoints. Competitor numbers are public list prices only, entered by hand with their source and check date. See the <a href="{{ legal_url }}">competitor benchmarking note</a>.</li>
 <li>We do not publish raw peak throughput as capacity. Cost is always computed at goodput under the stated SLO.</li>
-<li>We do not rank a result that is untrusted or failed the quality gate. It stays on the page with the reason.</li>
+<li>We do not rank a result that is untrusted or failed the quality gate. It stays on the page with the reason. A result whose gate needs review is ranked and carries that flag.</li>
 </ul>
 </section>
 

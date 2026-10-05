@@ -43,7 +43,7 @@ def test_run_summary_is_the_report_analysis(populated, tmp_path):
 
     assert verdicts(results) == verdicts(report_results) == verdicts(snapshot)
     assert manifest.run_count == sum(len(r.run_ids) for r in results)
-    assert {r.quality.gate for r in results if r.quality} == {"baseline", "pass", "fail"}
+    assert {r.quality.gate for r in results if r.quality} == {"baseline", "review", "fail"}
 
 
 def test_summary_shows_trust_and_main_warning(monkeypatch):

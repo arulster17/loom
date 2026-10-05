@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
 import pytest
-from site_helpers import SPEC, TTFT_SGLANG, Store, make_runs, new_db, store_runs
+from site_helpers import SPEC, TTFT_SGLANG, Store, make_runs, new_db, review_details, store_runs
 
 from loom_bench.provenance import GitInfo
 from loom_bench.records import Market
@@ -22,7 +22,8 @@ def empty_db(tmp_path) -> str:
 
 @pytest.fixture(scope="module")
 def populated(tmp_path_factory) -> Store:
-    """One completed experiment: three Qwen3-8B configs on chat, evals, gates, a cold start."""
+    """One completed experiment: three Qwen3-8B configs on chat, evals, gates (sglang-bf16
+    needs review, vllm-awq fails), a cold start."""
     url = new_db(tmp_path_factory.mktemp("db") / "loom.db")
     runs = [
         *make_runs("vllm-bf16"),
@@ -60,14 +61,17 @@ def populated(tmp_path_factory) -> Store:
                 ci_high=score + 0.02,
                 provenance={},
             )
-        for cell, decision in (("sglang-bf16", "pass"), ("vllm-awq", "fail")):
+        for cell, decision, details in (
+            ("sglang-bf16", "review", review_details()),
+            ("vllm-awq", "fail", {}),
+        ):
             record_gate_decision(
                 s,
                 experiment_id=exp.id,
                 baseline_config_hash=hashes["vllm-bf16"],
                 candidate_config_hash=hashes[cell],
                 decision=decision,
-                details={},
+                details=details,
             )
         update_experiment_status(s, exp.id, "completed")
         exp_id = exp.id

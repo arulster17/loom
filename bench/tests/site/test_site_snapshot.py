@@ -54,7 +54,7 @@ def test_export_round_trips(populated, tmp_path):
     assert set(qwen.cold_starts) == {populated.hashes["vllm-bf16"]}
     assert {r.name: r.quality.gate for r in qwen.results} == {
         "vllm-bf16": "baseline",
-        "sglang-bf16": "pass",
+        "sglang-bf16": "review",
         "vllm-awq": "fail",
     }
     llama = next(m for m in snap.models if m.model_id == "llama-3.3-70b-instruct")

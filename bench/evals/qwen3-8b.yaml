@@ -34,6 +34,7 @@ gate:
   confidence: 0.95
   n_boot: 10000
   inconclusive_blocks: true
+  review_blocks: false     # REVIEW is reported, not blocking
 
 tasks:
   # General knowledge: MMLU-Pro, first 150 docs of each of the 14 subjects = 2100 items.
@@ -121,14 +122,34 @@ tasks:
     min_samples: 50
 
 # Teacher-forced logprob divergence vs the BF16 reference on the 48 pinned prompts,
-# 64 continuation tokens each (~3000 positions), top-5 logprobs. The limits are initial
-# values, not yet calibrated on GPUs: the first Phase 0 runs measure BF16 vs BF16 across
-# engines (vLLM vs SGLang) to confirm they sit above engine and kernel noise.
+# 64 continuation tokens each (~3000 positions), top-5 logprobs.
+#
+# Limits are calibrated in every run (docs/quality-gate.md): after capturing the reference
+# the baseline scores its own capture again at floor_concurrency 1 (each request alone,
+# vs 16 at capture), which changes batch composition and therefore kernel numerics. That
+# self-divergence is the noise floor of this model on this engine.
+#   - KL limit = max(max_kl, noise_multiple x self-KL CI upper bound); top-1 likewise on
+#     the disagreement rate. Above it with every task passing -> REVIEW (not blocking);
+#     with any task failing or inconclusive -> FAIL.
+#   - noise_multiple 5: a different engine's BF16 kernels perturb logits the same way
+#     batch-variance does (another reduction order in BF16), not by orders of magnitude
+#     more; 5x leaves room for that while staying far below a broken config.
+#   - max_kl 0.05 / min_top1 0.95: the limits never get stricter than this, so a
+#     bit-exact baseline (zero noise floor) does not flag every last-ulp difference.
+#   - Hard ceiling, FAIL whatever the floor: mean KL above 0.5 nats (the candidate gives
+#     the reference's confident token ~60% of its probability on average) or top-1 below
+#     80% (one teacher-forced token in five changes). Kernel noise and a sound
+#     quantization stay well inside it; a wrong chat template, RoPE scaling or broken
+#     weights do not.
 divergence:
   top_k: 5
   max_new_tokens: 64
+  floor_concurrency: 1
+  noise_multiple: 5.0
   max_kl: 0.05
   min_top1: 0.95
+  ceiling_kl: 0.5
+  ceiling_top1: 0.80
 
 sanity_limits:
   max_empty: 0.01

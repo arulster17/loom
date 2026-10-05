@@ -50,6 +50,10 @@ class MockConfig(BaseModel):
     # Quality knobs: share of prompts answered wrongly / with broken JSON, and logit noise.
     degrade: Probability = 0.0
     logprob_noise: NonNegativeFloat = 0.0
+    # Logit noise drawn afresh for every request, like a batch-variant engine whose
+    # numerics depend on what shares the batch: scoring the same text twice differs a
+    # little, which gives the divergence noise floor something to measure.
+    logprob_jitter: NonNegativeFloat = 0.0
 
     # Faults.
     error_rate: Probability = 0.0

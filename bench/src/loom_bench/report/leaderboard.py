@@ -27,7 +27,7 @@ from loom_bench.cost import PRICE_COLUMN_LABELS, MicrosRange, PriceColumn
 from loom_bench.prices import PriceBook
 from loom_bench.provenance import ContentKind
 from loom_bench.records import LoadMode
-from loom_bench.report.analyze import UNTRUSTING, ColdStartStat, ConfigResult
+from loom_bench.report.analyze import UNTRUSTING, ColdStartStat, ConfigResult, gate_label
 from loom_bench.report.format import (
     UNBRACKETED_NOTE,
     any_unbracketed,
@@ -165,6 +165,9 @@ def _quality_clause(r: ConfigResult, names: Mapping[str, str]) -> str:
     base = names.get(q.baseline_config_hash or "", (q.baseline_config_hash or "?")[:12])
     if q.gate == "pass":
         return f"passed the quality gate vs {base}"
+    if q.gate == "review":
+        why = f" ({q.divergence.text()})" if q.divergence else ""
+        return f"quality needs review vs {base}: tasks pass but logprob divergence{why}"
     worst = q.worst()
     detail = f" (worst: {worst.task} {worst.delta:+.3f})" if worst and worst.delta else ""
     if q.gate == "fail":
@@ -282,8 +285,8 @@ def quality_text(r: ConfigResult) -> str:
         return "not evaluated"
     worst = q.worst()
     if worst is None or worst.delta is None:
-        return q.gate
-    return f"{worst.delta:+.3f} ({worst.task}) · {q.gate}"
+        return gate_label(q.gate)
+    return f"{worst.delta:+.3f} ({worst.task}) · {gate_label(q.gate)}"
 
 
 def cold_text(c: ColdStartStat | None) -> str:
@@ -372,6 +375,7 @@ def render_html(report: LeaderboardReport) -> str:
             price_header=price_header,
             ranking_cost=ranking_cost,
             quality_text=quality_text,
+            gate_label=gate_label,
             cold_text=cold_text,
             unbracketed=any_unbracketed(
                 row.result.goodput for b in report.boards for row in b.rows
@@ -416,6 +420,7 @@ CSV_COLUMNS = [
     "quality_baseline_config_hash",
     "quality_worst_task",
     "quality_worst_delta",
+    "quality_divergence",
     "cold_start_median_s",
     "cold_start_n",
     "trusted",
@@ -484,6 +489,7 @@ def _csv_row(b: Leaderboard, row: LeaderboardRow, m: Methodology) -> dict[str, A
         "quality_baseline_config_hash": q.baseline_config_hash if q else None,
         "quality_worst_task": worst.task if worst else None,
         "quality_worst_delta": worst.delta if worst else None,
+        "quality_divergence": q.divergence.text() if q and q.divergence else None,
         "cold_start_median_s": row.cold_start.median_s if row.cold_start else None,
         "cold_start_n": row.cold_start.n if row.cold_start else None,
         "trusted": r.trusted,

@@ -22,7 +22,16 @@ from loom_bench.report.leaderboard import (
     render_markdown,
 )
 
-from .factories import SLO, TTFT_SGLANG, assert_self_contained, eval_row, gate_row, make_runs
+from .factories import (
+    REVIEW_DIVERGENCE,
+    SLO,
+    TTFT_SGLANG,
+    assert_self_contained,
+    eval_row,
+    gate_row,
+    make_runs,
+    review_details,
+)
 
 
 @pytest.fixture(scope="module")
@@ -227,6 +236,30 @@ def test_html_is_self_contained_with_dark_mode(report):
     assert "Methodology and provenance" in html
     for row in report.boards[0].rows:
         assert f"<code>bench reproduce {row.result.reproduce_run_id()}</code>" in html
+
+
+def test_review_is_ranked_and_flagged(results, price_book):
+    h = {r.name: r.config_hash for r in results}
+    gates = [
+        gate_row(h["vllm-bf16"], h["sglang-bf16"], "review", review_details()),
+        gate_row(h["vllm-bf16"], h["vllm-awq"], "fail"),
+    ]
+    evals = [eval_row(h["vllm-bf16"], "gsm8k", 0.80), eval_row(h["sglang-bf16"], "gsm8k", 0.80)]
+    report = build_leaderboard(with_quality(results, evals, gates), price_book=price_book)
+    rows = {r.result.name: r for r in report.boards[0].rows}
+    sglang = rows["sglang-bf16"]
+    assert (sglang.rank, sglang.status) == (1, RowStatus.RANKED)
+    divergence = REVIEW_DIVERGENCE
+    assert sglang.recommendation.endswith(
+        f"quality needs review vs vllm-bf16: tasks pass but logprob divergence ({divergence})"
+    )
+    assert "+0.000 (gsm8k) · needs review" in render_markdown(report)
+    html = render_html(report)
+    assert '<span class="badge review">needs review</span>' in html
+    csv_rows = {r["config"]: r for r in csv.DictReader(io.StringIO(render_csv(report)))}
+    assert csv_rows["sglang-bf16"]["quality_gate"] == "review"
+    assert csv_rows["sglang-bf16"]["quality_divergence"] == divergence
+    assert csv_rows["vllm-awq"]["quality_divergence"] == ""
 
 
 def test_html_escapes_untrusted_text(results, price_book):

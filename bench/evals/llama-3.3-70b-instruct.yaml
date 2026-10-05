@@ -26,6 +26,7 @@ gate:
   confidence: 0.95
   n_boot: 10000
   inconclusive_blocks: true
+  review_blocks: false     # REVIEW is reported, not blocking
 
 tasks:
   # MMLU-Pro: 150 docs per subject x 14 = 2100 items. d=5% -> ±0.96 pts.
@@ -111,12 +112,17 @@ tasks:
     min_samples: 50
 
 # Teacher-forced divergence vs the BF16 reference: 48 pinned prompts x 64 tokens, top-5.
-# Initial limits, not yet calibrated on GPUs (see qwen3-8b.yaml).
+# Limits calibrated on the baseline's own noise floor, measured each run at
+# floor_concurrency 1; the reasoning behind each value is in qwen3-8b.yaml.
 divergence:
   top_k: 5
   max_new_tokens: 64
+  floor_concurrency: 1
+  noise_multiple: 5.0
   max_kl: 0.05
   min_top1: 0.95
+  ceiling_kl: 0.5
+  ceiling_top1: 0.80
 
 sanity_limits:
   max_empty: 0.01

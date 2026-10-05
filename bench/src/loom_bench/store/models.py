@@ -84,6 +84,7 @@ class GateDecision(StrEnum):
     PASS = "pass"
     FAIL = "fail"
     INCONCLUSIVE = "inconclusive"
+    REVIEW = "review"
 
 
 class TerminatedBy(StrEnum):

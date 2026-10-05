@@ -32,7 +32,7 @@
 <td class="num">{{ estimate(r.ttft_p95_ms, 0, 'ms') }}</td>
 <td class="num">{{ estimate(r.tpot_p95_ms, 1, 'ms') }}</td>
 <td class="num">{{ estimate(r.peak_output_tok_s, 1) }}<span class="sub">at {{ load_value(r.peak_load, r.load_mode) }}</span></td>
-<td>{% if r.quality and r.quality.gate %}<span class="badge {{ r.quality.gate }}">{{ r.quality.gate }}</span>{% endif %}<span class="sub">{{ quality_text(r) }}</span></td>
+<td>{% if r.quality and r.quality.gate %}<span class="badge {{ r.quality.gate }}">{{ gate_label(r.quality.gate) }}</span>{% endif %}<span class="sub">{{ quality_text(r) }}</span></td>
 <td class="num">{{ cold_text(row.cold_start) }}</td>
 <td><span class="badge {{ row.status.name|lower }}">{{ row.status.value }}</span></td>
 <td>{{ row.recommendation }}</td>

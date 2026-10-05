@@ -9,6 +9,7 @@ from loom_bench.plan import (
     AWS_TIMING,
     EVAL_CONCURRENCY,
     EVAL_DIVERGENCE_PROMPT_S,
+    EVAL_FLOOR_PROMPT_S,
     EVAL_HARNESS_TASK_S,
     EVAL_ITEM_S,
     MOCK_EVAL_JOB_S,
@@ -213,12 +214,14 @@ def test_aws_eval_time_comes_from_the_suite(tmp_path):
         + EVAL_HARNESS_TASK_S
         + AWS_TIMING.eval_job_s
     )
-    assert [s.seconds for s in evals] == [pytest.approx(expected)] * 2
+    floor = 10 * EVAL_FLOOR_PROMPT_S / 1  # the baseline's noise-floor pass, floor_concurrency 1
+    assert [s.seconds for s in evals] == [pytest.approx(expected + floor), pytest.approx(expected)]
+    assert exp.quality.baseline_variant in evals[0].label
     assert [s.kind for s in steps].count("eval_setup") == 1
     assert steps[1].kind == "eval_setup" and steps[1].seconds == AWS_TIMING.eval_setup_s
     without = _plan(load_experiment(QWEN).model_copy(update={"quality": None}))
     assert plan.total_seconds - without.total_seconds == pytest.approx(
-        2 * expected + AWS_TIMING.eval_setup_s
+        2 * expected + floor + AWS_TIMING.eval_setup_s
     )
     assert plan.total_micros > without.total_micros
 

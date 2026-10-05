@@ -70,7 +70,7 @@
 <td class="num">{{ goodput_load(r.goodput) }}</td>
 <td class="num">{{ estimate(r.ttft_p95_ms, 0, 'ms') }}</td>
 <td class="num">{{ estimate(r.tpot_p95_ms, 1, 'ms') }}</td>
-<td>{% if r.quality and r.quality.gate %}<span class="badge {{ r.quality.gate }}">{{ r.quality.gate }}</span>{% set worst = r.quality.worst() %}{% if worst %}<span class="sub">worst Δ {{ '%+.3f'|format(worst.delta) }} ({{ worst.task }})</span>{% endif %}{% else %}<span class="muted">not evaluated</span>{% endif %}</td>
+<td>{% if r.quality and r.quality.gate %}<span class="badge {{ r.quality.gate }}">{{ gate_label(r.quality.gate) }}</span>{% if r.quality.gate == 'review' %}<span class="sub">logprob divergence above the noise floor; <a href="#{{ c.anchor }}-quality">details</a></span>{% endif %}{% set worst = r.quality.worst() %}{% if worst %}<span class="sub">worst Δ {{ '%+.3f'|format(worst.delta) }} ({{ worst.task }})</span>{% endif %}{% else %}<span class="muted">not evaluated</span>{% endif %}</td>
 <td class="num">{{ cold_text(row.cold_start) }}</td>
 <td><span class="badge {{ row.status.name|lower }}">{{ row.status.value }}</span></td>
 </tr>
@@ -117,6 +117,9 @@
 </tbody>
 </table>
 {% endcall %}
+{% if r.quality.divergence %}
+<p class="section-note">Logprob divergence from the baseline{% if r.quality.gate == 'review' %} (needs review: every task passed, but the divergence is above its limit){% endif %}: {{ r.quality.divergence.text() }}. <a href="{{ root }}methodology.html#quality">How the limits are set</a></p>
+{% endif %}
 {% endif %}
 <h4 id="{{ c.anchor }}-points">Load sweep</h4>
 {% call scroll_table(c.anchor ~ '-points') %}

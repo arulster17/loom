@@ -22,7 +22,15 @@ from pydantic import (
     model_validator,
 )
 
-from loom_bench.quality.gate import GatePolicy, MinSamples, TaskPolicy, Threshold
+from loom_bench.quality.gate import (
+    GatePolicy,
+    MinSamples,
+    Nats,
+    NoiseMultiple,
+    Share,
+    TaskPolicy,
+    Threshold,
+)
 from loom_bench.quality.sanity import SanityConfig, SanityLimits
 from loom_bench.quality.tasks import build_task
 from loom_bench.registry import REPO_ROOT, read_yaml
@@ -59,14 +67,24 @@ class GateSpec(_Strict):
     confidence: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.95
     n_boot: Annotated[int, Field(ge=100)] = 10_000
     inconclusive_blocks: bool = True
+    review_blocks: bool = False  # REVIEW (divergence beyond the noise floor) blocks too
 
 
 class DivergenceSpec(_Strict):
     prompts: Annotated[int, Field(ge=2)] | None = None  # first N pinned prompts; None = all
     top_k: Annotated[int, Field(ge=1, le=20)] = 5
     max_new_tokens: Annotated[int, Field(ge=1)] = 64
-    max_kl: Annotated[float, Field(ge=0.0)] = 0.05
-    min_top1: Annotated[float, Field(ge=0.0, le=1.0)] = 0.95
+    # Absolute limits; the noise-calibrated limits are never stricter than these.
+    max_kl: Nats = 0.05
+    min_top1: Share = 0.95
+    # Limits widen to this multiple of the baseline's self-divergence (its noise floor).
+    noise_multiple: NoiseMultiple = 5.0
+    # Hard ceiling: divergence beyond it FAILs whatever the noise floor and task scores.
+    ceiling_kl: Nats = 0.5
+    ceiling_top1: Share = 0.80
+    # Concurrency of the baseline's second scoring pass (the noise floor); it must differ
+    # from the eval job's, so requests land in different batches than at capture.
+    floor_concurrency: PositiveInt = 1
 
 
 class Suite(_Strict):
@@ -97,6 +115,7 @@ class Suite(_Strict):
             unknown = sorted(set(members) - set(names))
             if unknown or len(set(members)) != len(members):
                 raise ValueError(f"subset {subset}: unknown or repeated tasks in {members}")
+        self.policy()  # validates the divergence limits against the ceiling
         return self
 
     def select(self, subset: str | None) -> list[SuiteTask]:
@@ -121,8 +140,12 @@ class Suite(_Strict):
                 for t in self.tasks
                 if t.threshold is not None or t.min_samples is not None
             },
+            review_blocks=self.gate.review_blocks,
             max_kl=div.max_kl if div else None,
             min_top1=div.min_top1 if div else None,
+            noise_multiple=div.noise_multiple if div else GatePolicy().noise_multiple,
+            ceiling_kl=div.ceiling_kl if div else None,
+            ceiling_top1=div.ceiling_top1 if div else None,
             sanity=self.sanity_limits,
         )
 

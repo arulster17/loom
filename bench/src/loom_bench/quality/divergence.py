@@ -208,7 +208,10 @@ class ReferenceLogprobs(BaseModel):
     so the two engines never need to run at the same time.
 
     `config_hash` and `provenance` identify the reference config; the runner fills them in
-    when it stores the capture.
+    when it stores the capture. `self_divergence` is the reference engine scored against
+    this capture a second time under different batching (an eval job's
+    `capture_and_floor`): its numerical noise floor, which the gate calibrates its
+    divergence limits on. None when it was not measured.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -219,6 +222,7 @@ class ReferenceLogprobs(BaseModel):
     prompts: list[ReferencePrompt]
     config_hash: str | None = None
     provenance: dict[str, Any] = Field(default_factory=dict)
+    self_divergence: DivergenceResult | None = None
 
 
 async def capture_reference(
@@ -228,22 +232,29 @@ async def capture_reference(
     top_k: int = 5,
     max_new_tokens: int = 64,
 ) -> ReferenceLogprobs:
-    """Greedy continuations and teacher-forced top-k logprobs from the reference endpoint."""
+    """Greedy continuations and teacher-forced top-k logprobs from the reference endpoint.
 
-    async def one(prompt: str) -> ReferencePrompt:
-        cont = await reference.complete(prompt, max_tokens=max_new_tokens)
-        if not cont.text:
+    All continuations are generated first, then all scored, so the scoring requests are
+    batched together as a candidate's are (up to the client's concurrency).
+    """
+
+    async def continuation(prompt: str) -> str:
+        return (await reference.complete(prompt, max_tokens=max_new_tokens)).text
+
+    async def scored(prompt: str, cont: str) -> ReferencePrompt:
+        if not cont:
             return ReferencePrompt(prompt=prompt, continuation="", positions=[])
-        text = prompt + cont.text
+        text = prompt + cont
         logprobs = await _score(reference, text, top_k)
         positions = scored_positions(logprobs, len(prompt), len(text))
         return ReferencePrompt(
             prompt=prompt,
-            continuation=cont.text,
+            continuation=cont,
             positions=[ReferencePosition(token=p.token, top=p.top) for p in positions],
         )
 
-    captured = await asyncio.gather(*(one(p) for p in prompts))
+    conts = await asyncio.gather(*(continuation(p) for p in prompts))
+    captured = await asyncio.gather(*(scored(p, c) for p, c in zip(prompts, conts, strict=True)))
     return ReferenceLogprobs(
         model=reference.model, top_k=top_k, max_new_tokens=max_new_tokens, prompts=captured
     )

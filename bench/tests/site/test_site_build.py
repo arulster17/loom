@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from site_helpers import REPO_URL, export, is_external, parse, resolve
+from site_helpers import REPO_URL, REVIEW_DIVERGENCE, export, is_external, parse, resolve
 
 from loom_bench.registry import REPO_ROOT, load_registry
 from loom_bench.site import SiteConfig, WaitlistConfig, build_site, load_snapshot
@@ -119,6 +119,9 @@ def test_populated_snapshot_renders_results(full_site, populated):
     for run_id in best.run_ids + awq.run_ids:
         assert f"../data/provenance/{run_id}.json" in model
     assert "quality gate failed" in model
+    assert '<span class="badge review">needs review</span>' in model
+    assert REVIEW_DIVERGENCE.replace("'", "&#39;") in model
+    assert '<span class="badge review">needs review</span>' in index
     assert "100 s (median of 1)" in model
     assert "$0.8503 – $0.8936" in model  # on-demand cost CI, storage included
     assert "$/1M out at SLO, spot" in model and "$/1M out at SLO, as run" in model
@@ -134,6 +137,7 @@ def test_populated_snapshot_renders_results(full_site, populated):
     assert "Illustrative" not in methodology
     assert "TTFT p95 ≤ 600 ms" in methodology
     assert "data/experiments/" in methodology
+    assert "needs review" in methodology and "noise floor" in methodology
 
 
 def test_provenance_files_are_published(full_site):

@@ -62,9 +62,13 @@ def job(url: str, **kw) -> EvalJob:
 
 
 async def test_capture_on_the_baseline_then_score_the_candidate(clean_url, broken_url):
-    base = await execute_eval_job(job(clean_url, divergence="capture"))
+    base = await execute_eval_job(job(clean_url, divergence="capture_and_floor"))
     assert base.reference is not None and base.divergence is None
     assert len(base.reference.prompts) == 12
+    # The deterministic mock scores its own capture identically at any concurrency.
+    floor = base.reference.self_divergence
+    assert floor is not None and floor.n_prompts == 12
+    assert floor.kl.point == pytest.approx(0.0, abs=1e-9) and floor.top1.point == 1.0
     assert base.tasks["arithmetic"].kind == "toy_arithmetic"
     assert all(i.content_hash for t in base.tasks.values() for i in t.items)
     assert all(t.seconds > 0 for t in base.tasks.values())
@@ -77,10 +81,20 @@ async def test_capture_on_the_baseline_then_score_the_candidate(clean_url, broke
     assert cand.divergence.kl.point > SUITE.divergence.max_kl
 
     decision = gate_against_baseline(
-        suite_result_of(base), suite_result_of(cand), SUITE, cand.divergence
+        suite_result_of(base),
+        suite_result_of(cand),
+        SUITE,
+        cand.divergence,
+        self_divergence=base.reference.self_divergence,
     )
     assert decision.divergence.verdict is Verdict.FAIL
+    assert "hard ceiling" in decision.divergence.reason
     assert decision.blocked
+
+
+async def test_plain_capture_measures_no_floor(clean_url):
+    base = await execute_eval_job(job(clean_url, divergence="capture", tasks=["json_schema"]))
+    assert base.reference is not None and base.reference.self_divergence is None
 
 
 async def test_task_subset_and_no_divergence(clean_url):

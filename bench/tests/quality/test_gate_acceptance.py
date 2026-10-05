@@ -4,6 +4,12 @@ The mock backend stands in for the engine. "Over-aggressive quantization" is
 the mock with `degrade=0.3` (30% of prompts get wrong arithmetic or truncated
 JSON) and heavy logit noise; the baseline is the clean mock. Every request goes
 over HTTP through the real client, tasks, divergence measurement and gate.
+
+Healthy engines are not bit-identical: `logprob_jitter` gives the mock
+per-request logit noise (batch-variant kernels), which the baseline's noise
+floor measures, and a little `logprob_noise` on top stands in for another
+engine's kernels. Such a candidate diverges by more than the old fixed 0.05
+nats yet passes against the measured floor.
 """
 
 import asyncio
@@ -14,14 +20,17 @@ import pytest
 pytest.importorskip("loom_bench.mock")
 uvicorn = pytest.importorskip("uvicorn")
 
+from loom_bench.jobs import EvalJob  # noqa: E402
 from loom_bench.provenance import build_provenance  # noqa: E402
 from loom_bench.quality.gate import Verdict  # noqa: E402
 from loom_bench.quality.runner import (  # noqa: E402
+    execute_eval_job,
     gate_against_baseline,
     record_gate,
     record_suite_result,
     run_divergence,
     run_suite,
+    suite_result_of,
 )
 from loom_bench.quality.suite import Suite  # noqa: E402
 from loom_bench.store.db import session_scope, upgrade  # noqa: E402
@@ -32,6 +41,11 @@ from .mock_serve import MODEL, serve  # noqa: E402
 
 CLEAN = {"time_scale": 0.001}
 BROKEN = {"time_scale": 0.001, "degrade": 0.3, "logprob_noise": 3.0}
+# Same weights with batch-variant numerics; the candidate's other kernels add a little more.
+JITTERY = {"time_scale": 0.001, "logprob_jitter": 0.25}
+OTHER_KERNELS = {**JITTERY, "logprob_noise": 0.3}
+# Drifted further than a bit-exact baseline's (zero) noise floor allows, answers unchanged.
+DRIFTED = {"time_scale": 0.001, "logprob_noise": 0.4}
 
 
 def suite(n: int, *, min_samples: int = 300) -> Suite:
@@ -81,6 +95,26 @@ async def _gate(suite_: Suite, baseline_url: str, candidate_url: str, tmp_path):
     return base, cand, div, gate_against_baseline(base, cand, suite_, div)
 
 
+async def _job_gate(suite_: Suite, baseline_url: str, candidate_url: str):
+    """The experiment path: the baseline's eval job captures the reference and its noise
+    floor, the candidate's is scored against that reference."""
+
+    def job(url, **kw):
+        return EvalJob(
+            run_id="acceptance", suite=suite_, base_url=url, served_model=MODEL, seed=1234, **kw
+        )
+
+    base = await execute_eval_job(job(baseline_url, divergence="capture_and_floor"))
+    assert base.reference is not None
+    cand = await execute_eval_job(job(candidate_url, divergence="score", reference=base.reference))
+    return (
+        suite_result_of(base),
+        suite_result_of(cand),
+        base.reference.self_divergence,
+        cand.divergence,
+    )
+
+
 # The tests reading `broken_gate` share one xdist worker, so the gate runs once.
 shares_broken_gate = pytest.mark.xdist_group("broken-gate")
 
@@ -105,6 +139,7 @@ def test_gate_blocks_over_aggressive_quantization(broken_gate):
     assert by_task["json_schema"].regressed > 0 and by_task["json_schema"].improved == 0
     assert div.kl.point > 0.05 and div.top1.point < 0.95
     assert decision.divergence.verdict is Verdict.FAIL
+    assert "hard ceiling" in decision.divergence.reason
     assert decision.decision is Verdict.FAIL
     assert decision.blocked
 
@@ -119,6 +154,45 @@ async def test_identical_config_passes(baseline_url, same_url, tmp_path):
     assert decision.sanity.verdict is Verdict.PASS
     assert decision.decision is Verdict.PASS
     assert not decision.blocked
+
+
+async def test_engine_noise_passes_against_the_measured_floor():
+    s = suite(400)
+    with serve(**JITTERY) as base_url, serve(**OTHER_KERNELS) as cand_url:
+        base, cand, floor, div = await _job_gate(s, base_url, cand_url)
+    decision = gate_against_baseline(base, cand, s, div, self_divergence=floor)
+
+    assert floor is not None and floor.kl.point > 0.01 and floor.top1.point < 1.0
+    # Beyond the old fixed limits (0.05 nats, 95% top-1) ...
+    assert div is not None and div.kl.point > 0.05 and div.top1.point < 0.95
+    # ... but within 5x the baseline's own noise, and every task passes.
+    limits = decision.divergence.limits
+    assert limits is not None and limits.calibrated
+    assert limits.max_kl > div.kl.point and limits.min_top1 < div.top1.point
+    assert [t.verdict for t in decision.tasks] == [Verdict.PASS, Verdict.PASS]
+    assert decision.divergence.verdict is Verdict.PASS
+    assert decision.decision is Verdict.PASS and not decision.blocked
+
+    # Gated on the absolute limits alone, the same candidate is flagged for review,
+    # never failed, because its tasks pass.
+    uncalibrated = gate_against_baseline(base, cand, s, div)
+    assert uncalibrated.decision is Verdict.REVIEW and not uncalibrated.blocked
+    assert "uncalibrated" in uncalibrated.divergence.reason
+
+
+async def test_drift_beyond_a_bit_exact_floor_needs_review():
+    s = suite(400)
+    with serve(**CLEAN) as base_url, serve(**DRIFTED) as cand_url:
+        base, cand, floor, div = await _job_gate(s, base_url, cand_url)
+    decision = gate_against_baseline(base, cand, s, div, self_divergence=floor)
+
+    assert floor is not None and floor.kl.point == pytest.approx(0.0, abs=1e-9)
+    assert div is not None and 0.80 < div.top1.point < 0.95
+    assert [t.verdict for t in decision.tasks] == [Verdict.PASS, Verdict.PASS]
+    assert decision.divergence.verdict is Verdict.REVIEW
+    assert decision.decision is Verdict.REVIEW and not decision.blocked
+    assert "needs review" in decision.divergence.reason
+    assert "self top-1 >= 100.00%" in decision.divergence.reason
 
 
 async def test_small_sample_is_inconclusive(baseline_url, same_url, tmp_path):

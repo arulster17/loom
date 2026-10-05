@@ -87,7 +87,8 @@ DEFAULT_OUTPUT_TOKENS = 512
 
 # Quality evals. An eval job takes, summed over its tasks,
 #   items x EVAL_ITEM_S[kind] / concurrency
-# plus EVAL_HARNESS_TASK_S per lm_eval task, the divergence prompts and the
+# plus EVAL_HARNESS_TASK_S per lm_eval task, the divergence prompts (on the baseline
+# also their noise-floor pass, scored again at the suite's floor_concurrency) and the
 # provider's per-job overhead. EVAL_ITEM_S is how long one item holds one of the
 # task's concurrent request slots on a real engine decoding at the 50 ms TPOT SLO
 # (ASSUMED_DECODE_S_PER_TOKEN) with every slot busy; concurrency is the lm_eval
@@ -102,6 +103,9 @@ EVAL_ITEM_S: dict[str, float] = {
     "toy_arithmetic": 2.0,  # one short sentence
 }
 EVAL_DIVERGENCE_PROMPT_S = 4.0  # 64-token greedy continuation, then one echo scoring request
+# One echo scoring request (prefill of prompt + continuation, ~150 tokens, max_tokens 1) with
+# the engine to itself at floor_concurrency 1: well under a second on any Phase 0 GPU.
+EVAL_FLOOR_PROMPT_S = 1.0
 EVAL_HARNESS_TASK_S = 60.0  # per lm_eval task: harness start-up and dataset download
 EVAL_CONCURRENCY = 16  # EvalJob.concurrency the runner sets
 LMEVAL_DEFAULT_CONCURRENCY = 16  # LmEvalParams.num_concurrent default
@@ -219,7 +223,8 @@ class Estimator:
         return [t.name for t in self.eval_tasks() if t.planned_items() is None]
 
     def eval_s(self, cell: Cell) -> float:
-        """One cell's eval job: its suite tasks, its divergence half and the job overhead."""
+        """One cell's eval job: its suite tasks, its divergence half (with the noise-floor
+        pass on the baseline) and the job overhead."""
         if self.suite is None:
             return 0.0
         busy = 0.0
@@ -232,14 +237,19 @@ class Estimator:
             busy += (t.planned_items() or 0) * EVAL_ITEM_S[t.kind] / concurrency
         div = self.suite.divergence
         if div is not None:
-            busy += (
-                (div.prompts or len(load_prompts())) * EVAL_DIVERGENCE_PROMPT_S / EVAL_CONCURRENCY
-            )
+            prompts = div.prompts or len(load_prompts())
+            busy += prompts * EVAL_DIVERGENCE_PROMPT_S / EVAL_CONCURRENCY
+            if self.is_quality_baseline(cell):
+                busy += prompts * EVAL_FLOOR_PROMPT_S / div.floor_concurrency
         if cell.mock is not None:
             return busy * cell.mock.time_scale + MOCK_EVAL_JOB_S
         assert self.timing is not None
         harness = EVAL_HARNESS_TASK_S * sum(t.kind == "lm_eval" for t in self.eval_tasks())
         return busy + harness + self.timing.eval_job_s
+
+    def is_quality_baseline(self, cell: Cell) -> bool:
+        q = self.exp.quality
+        return q is not None and cell.variant == q.baseline_variant
 
     def eval_setup_s(self) -> float:
         return 0.0 if self.suite is None or self.timing is None else self.timing.eval_setup_s
