@@ -157,6 +157,12 @@ LOAD_GENERATORS: dict[str, Callable[[], LoadGenerator]] = {
     "vllm_bench": lambda: import_module("loom_bench.loadgen.vllm_bench").generator(),
     "sglang_bench": lambda: import_module("loom_bench.loadgen.sglang_bench").generator(),
 }
+# Generators that run an engine's benchmark CLI as a subprocess: the tool must be
+# installed where the job runs (`loadgen/external.py`).
+EXTERNAL_TOOLS: dict[str, str] = {
+    "vllm_bench": "vllm bench serve",
+    "sglang_bench": "python -m sglang.benchmark.serving",
+}
 
 
 def get_load_generator(name: str) -> LoadGenerator:

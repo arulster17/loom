@@ -24,6 +24,7 @@ from loom_bench.experiment import (
     MockProviderSpec,
     WorkloadEntry,
 )
+from loom_bench.loadgen.base import EXTERNAL_TOOLS
 from loom_bench.money import Micros, cost_for_seconds, format_usd
 from loom_bench.prices import HOURS_PER_MONTH, BlockStorage, InstanceType, PriceBook
 from loom_bench.quality.divergence import load_prompts
@@ -418,6 +419,13 @@ def build_plan(
         max_ttl = aws_accrual_terms().max_ttl_s
         if ttl_s > max_ttl:
             refusals.append(f"budget.ttl_minutes is above the AWS host limit of {max_ttl / 60:g}")
+        if exp.loadgen in EXTERNAL_TOOLS:
+            refusals.append(
+                f"loadgen {exp.loadgen} runs `{EXTERNAL_TOOLS[exp.loadgen]}`, which the "
+                "aws_ec2 job container (loom-bench on the client image) does not have, so "
+                "every run would fail: use loadgen native on aws_ec2, or run the wrapper "
+                "against a local endpoint (docs/load-generators.md)"
+            )
     if est.uncounted_tasks():
         refusals.append(
             f"quality tasks {est.uncounted_tasks()} have no item count to estimate their "

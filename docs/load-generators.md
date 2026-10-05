@@ -128,6 +128,15 @@ request:
 
 ## Running a wrapper
 
+**Not on `aws_ec2`.** A wrapped tool must be installed where the load job runs. On
+`aws_ec2` jobs run in the client container (`client_image` with the loom-bench wheel and
+its locked dependencies), which has neither vLLM nor SGLang, and `run_job.sh` has no
+`command_prefix` to run the tool inside the engine image. So `bench plan` and `bench run`
+refuse an `aws_ec2` experiment with `loadgen: vllm_bench` or `sglang_bench` (exit 3)
+instead of letting every run fail. Use `native` for cloud runs. To cross-check against a
+tool, run the same workload with the `local` provider (or the mock) from a machine where
+the tool is installed and the engine is reachable, as below.
+
 ```python
 from pathlib import Path
 

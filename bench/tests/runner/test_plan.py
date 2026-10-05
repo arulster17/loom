@@ -113,6 +113,20 @@ def test_aws_ttl_above_the_provider_limit_is_refused():
     assert any("AWS host limit" in r for r in _plan(exp).refusals)
 
 
+@pytest.mark.parametrize("loadgen", ["vllm_bench", "sglang_bench"])
+def test_external_load_generators_are_refused_on_aws(loadgen, tmp_path, db):
+    exp = load_experiment(QWEN).model_copy(update={"loadgen": loadgen})
+    (refusal,) = [r for r in _plan(exp).refusals if "loadgen" in r]
+    assert f"loadgen {loadgen} runs `" in refusal and "use loadgen native" in refusal
+    # the same wrapper is fine where the tool can be installed: mock and local runs
+    assert _plan(mock_experiment(loadgen=loadgen)).ok
+    path = write_yaml(tmp_path / "exp.yaml", exp.model_dump(mode="json"))
+    for command in ("plan", "run"):
+        result = CliRunner().invoke(app, [command, str(path), "--db", db])
+        assert result.exit_code == EXIT_REFUSED, result.output
+        assert "REFUSED" in result.output
+
+
 def _prior(db, kind, spent):
     with session_scope(db) as s:
         e = repo.create_experiment(

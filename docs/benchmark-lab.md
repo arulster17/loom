@@ -95,7 +95,7 @@ slo: {ttft_ms: {p95: 1000}, tpot_ms: {p95: 50}, max_error_rate: 0.01}
 cost_allocation: {method: all_output}   # all_input | weighted + output_input_ratio
 budget: {max_spend: "$40", ttl_minutes: 480, accrual_interval_s: 15}
 quality: {suite: qwen3-8b, subset: phase0, baseline_variant: vllm}   # optional
-loadgen: native                     # key in loadgen LOAD_GENERATORS
+loadgen: native                     # key in LOAD_GENERATORS; aws_ec2 takes native only
 seed: 0
 ```
 
