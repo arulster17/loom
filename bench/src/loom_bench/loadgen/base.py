@@ -76,6 +76,7 @@ def _native() -> LoadGenerator:
 LOAD_GENERATORS: dict[str, Callable[[], LoadGenerator]] = {
     "native": _native,
     "vllm_bench": lambda: import_module("loom_bench.loadgen.vllm_bench").generator(),
+    "sglang_bench": lambda: import_module("loom_bench.loadgen.sglang_bench").generator(),
 }
 
 
