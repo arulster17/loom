@@ -1,0 +1,23 @@
+{
+  "results": {
+    "gsm8k": {
+      "alias": "gsm8k",
+      "exact_match,strict-match": 0.6667
+    }
+  },
+  "versions": {
+    "gsm8k": 3.0,
+    "ifeval": 4.0,
+    "niah_single_2": 1.0
+  },
+  "n-samples": {
+    "gsm8k": {
+      "original": 1319,
+      "effective": 3
+    }
+  },
+  "lm_eval_version": "0.4.13",
+  "task_hashes": {
+    "gsm8k": "abc"
+  }
+}

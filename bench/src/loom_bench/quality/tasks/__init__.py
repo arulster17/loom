@@ -9,6 +9,7 @@ from loom_bench.quality.tasks.arithmetic import ArithmeticTask
 from loom_bench.quality.tasks.base import EvalTask, ItemResult, TaskOutput
 from loom_bench.quality.tasks.code_exec import CodeExecTask
 from loom_bench.quality.tasks.json_schema import JsonSchemaTask
+from loom_bench.quality.tasks.lmeval import LmEvalTask
 from loom_bench.quality.tasks.needle import NeedleTask
 from loom_bench.quality.tasks.tool_calling import ToolCallingTask
 
@@ -20,6 +21,7 @@ TASKS: dict[str, TaskFactory] = {
     "tool_calling": ToolCallingTask.from_params,
     "needle": NeedleTask.from_params,
     "code_exec": CodeExecTask.from_params,
+    "lm_eval": LmEvalTask.from_params,
 }
 
 
