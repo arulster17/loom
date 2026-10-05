@@ -1,10 +1,19 @@
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from pydantic import ValidationError
 
-from loom_bench.engines import docker_run_argv, quantization_flag, render_args, render_launch
-from loom_bench.registry import CHECKPOINT_PRECISIONS, ModelSpec, load_registry
+from loom_bench.engines import (
+    _RESERVED_FLAGS,
+    ARG_RENDERERS,
+    ENTRYPOINTS,
+    docker_run_argv,
+    quantization_flag,
+    render_args,
+    render_launch,
+)
+from loom_bench.experiment import ExpansionError, Experiment, expand
+from loom_bench.registry import CHECKPOINT_PRECISIONS, Engine, ModelSpec, load_registry
 
 VLLM_IMAGE = (
     "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90"
@@ -291,3 +300,49 @@ def test_docker_run_argv_sglang_entrypoint(qwen: ModelSpec) -> None:
         "-m",
         "sglang.launch_server",
     ]
+
+
+def test_every_engine_has_a_renderer() -> None:
+    names = set(get_args(Engine.model_fields["name"].annotation))
+    assert names == set(ARG_RENDERERS) == set(ENTRYPOINTS) == set(_RESERVED_FLAGS)
+
+
+def test_unknown_engine_is_an_error(qwen: ModelSpec) -> None:
+    # The registry schema rejects it; a spec that skipped validation must not get
+    # another engine's flags either.
+    tgi = qwen.model_copy(update={"engine": qwen.engine.model_copy(update={"name": "tgi"})})
+    with pytest.raises(ValueError, match="no launch renderer for engine 'tgi'"):
+        render_launch(tgi)
+
+
+def test_each_engine_renders_its_own_flags(qwen: ModelSpec) -> None:
+    vllm = render_launch(qwen).args
+    sglang = render_launch(on_sglang(qwen)).args
+    assert vllm[0] == qwen.hf.repo and "--tensor-parallel-size" in vllm
+    assert "--model-path" not in vllm and "--tp-size" not in vllm
+    assert sglang[:2] == ["--model-path", qwen.hf.repo] and "--tp-size" in sglang
+    assert "--tensor-parallel-size" not in sglang
+
+
+def test_expansion_reports_an_unrenderable_engine(qwen: ModelSpec, monkeypatch) -> None:
+    from loom_bench import engines
+
+    monkeypatch.delitem(engines.ARG_RENDERERS, "vllm")
+    exp = Experiment.model_validate(
+        {
+            "name": "x",
+            "description": "x",
+            "model": "qwen3-8b",
+            "provider": {"kind": "aws_ec2"},
+            "variants": [{"name": "a"}],
+            "workloads": [
+                {
+                    "profile": "fixed-128-128",
+                    "load": {"mode": "closed_loop", "values": [1], "num_requests": 4},
+                }
+            ],
+            "budget": {"max_spend": "$1", "ttl_minutes": 10},
+        }
+    )
+    with pytest.raises(ExpansionError, match="no launch renderer for engine 'vllm'"):
+        expand(exp, load_registry())

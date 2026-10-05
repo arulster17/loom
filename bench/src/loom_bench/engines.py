@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from typing import Any
 
 from loom_bench.providers.base import EngineLaunch
@@ -212,10 +213,22 @@ def _validate_env(env: dict[str, str]) -> dict[str, str]:
     return dict(env)
 
 
+# Each engine's CLI renderer: (spec, rendered engine.args) -> args after the entrypoint.
+ARG_RENDERERS: dict[str, Callable[[ModelSpec, list[str]], list[str]]] = {
+    "vllm": _vllm_args,
+    "sglang": _sglang_args,
+}
+
+
 def render_launch(spec: ModelSpec) -> EngineLaunch:
-    """Render the engine invocation for `spec`."""
-    extra = render_args(spec.engine.name, spec.engine.args)
-    args = _vllm_args(spec, extra) if spec.engine.name == "vllm" else _sglang_args(spec, extra)
+    """Render the engine invocation for `spec`; an engine without a renderer is an error."""
+    renderer = ARG_RENDERERS.get(spec.engine.name)
+    if renderer is None:
+        raise ValueError(
+            f"no launch renderer for engine {spec.engine.name!r} "
+            f"(known: {', '.join(sorted(ARG_RENDERERS))}); see docs/how-to/add-engine.md"
+        )
+    args = renderer(spec, render_args(spec.engine.name, spec.engine.args))
     return EngineLaunch(
         engine=spec.engine.name,
         image=spec.engine.image,

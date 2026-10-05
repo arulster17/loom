@@ -37,9 +37,9 @@ writing code:
      `quantization_flag(spec)` or the engine's own mapping, KV-cache dtype (see
      `_SGLANG_KV_CACHE_DTYPE` for a name mapping), `--trust-remote-code` only via
      `_trust_remote_code(spec)`, metrics enabled, host `0.0.0.0`, port `ENGINE_PORT`.
-   - `render_launch`: today it picks `_vllm_args` for `vllm` and `_sglang_args` for
-     anything else. Make the dispatch explicit, or a new engine silently gets SGLang
-     flags.
+   - `ARG_RENDERERS[name] = _<name>_args`: `render_launch` dispatches on the engine
+     name through this table and raises for an engine with no entry, so a new engine
+     never gets another engine's flags.
    - `docker_run_argv` assumes `--gpus N --ipc host`, the HF cache mount and offline
      mode; change it only if the engine needs something else.
 3. **Engine metrics** (`bench/src/loom_bench/metrics/prometheus.py`): an
@@ -73,7 +73,9 @@ writing code:
 
 - `bench/tests/aws/test_engines.py`: an exact-argv test like
   `test_vllm_qwen_exact_argv`, reserved-flag rejection, the quantization table, and
-  `docker_run_argv` with the new entrypoint.
+  `docker_run_argv` with the new entrypoint. `test_every_engine_has_a_renderer` checks
+  that `ARG_RENDERERS`, `ENTRYPOINTS` and `_RESERVED_FLAGS` cover every registry engine
+  name; `test_unknown_engine_is_an_error` uses `tgi` as its unknown engine.
 - `bench/tests/analysis/test_prometheus.py`: a scrape captured from the real engine,
   parsed into every `ServerMetrics` field.
 - `bench/tests/config/test_registry.py`: `test_rejects_bad_model` uses
