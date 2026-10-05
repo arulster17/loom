@@ -4,8 +4,8 @@ Implementations: `mock` (in-process simulated GPU), `local` (an endpoint you
 already run), `aws_ec2` (tagged spot/on-demand VM running the engine in Docker).
 A Phase 1 `k8s` provider will reuse the Helm chart.
 
-Lifecycle per host: provision -> start_engine (cold) -> run jobs ->
-[stop_engine -> start_engine (warm) -> run jobs]* -> teardown.
+Lifecycle per host: provision -> start_engine (cold) -> run jobs and evals ->
+[stop_engine -> start_engine (warm) -> run jobs and evals]* -> teardown.
 Providers report spend inputs (hourly price, market, start time); the runner's
 budget guard decides when to abort. Every provisioned resource carries a TTL
 and is recorded so the reaper can remove it if the runner dies.
@@ -18,7 +18,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from loom_bench.jobs import LoadJob, LoadJobResult
+from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult
 from loom_bench.records import Market
 
 
@@ -67,7 +67,7 @@ class EngineLaunch(BaseModel):
 class Endpoint(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    base_url: str  # reachable from where LoadJobs execute for this provider
+    base_url: str  # with the API prefix, reachable from where this provider runs jobs
     metrics_url: str | None
     engine: str
     served_model: str
@@ -121,6 +121,10 @@ class Provider(Protocol):
 
     async def run_job(self, host: Host, job: LoadJob) -> LoadJobResult:
         """Execute where latency is measured correctly for this provider."""
+        ...
+
+    async def run_eval(self, host: Host, job: EvalJob) -> EvalJobResult:
+        """Execute where `Endpoint.base_url` is reachable (on the host for cloud providers)."""
         ...
 
     async def teardown(self, host: Host) -> None:

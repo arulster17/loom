@@ -14,8 +14,9 @@ import httpx
 
 from loom_bench.experiment import LocalProviderSpec
 from loom_bench.jobexec import execute_load_job
-from loom_bench.jobs import LoadJob, LoadJobResult
+from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult
 from loom_bench.providers.base import Endpoint, EngineLaunch, Host, HostRequest
+from loom_bench.quality.runner import execute_eval_job
 from loom_bench.records import Market
 
 
@@ -69,6 +70,9 @@ class LocalProvider:
 
     async def run_job(self, host: Host, job: LoadJob) -> LoadJobResult:
         return await execute_load_job(job)
+
+    async def run_eval(self, host: Host, job: EvalJob) -> EvalJobResult:
+        return await execute_eval_job(job)
 
     async def teardown(self, host: Host) -> None:
         return None

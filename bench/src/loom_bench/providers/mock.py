@@ -20,9 +20,10 @@ import httpx
 from loom_bench import __version__
 from loom_bench.experiment import mock_config_from_launch
 from loom_bench.jobexec import execute_load_job
-from loom_bench.jobs import LoadJob, LoadJobResult
+from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult
 from loom_bench.mock.config import MockConfig
 from loom_bench.providers.base import Endpoint, EngineLaunch, Host, HostRequest
+from loom_bench.quality.runner import execute_eval_job
 
 SERVER_START_TIMEOUT_S = 10.0
 
@@ -156,6 +157,10 @@ class MockProvider:
     async def run_job(self, host: Host, job: LoadJob) -> LoadJobResult:
         self._state(host)
         return await execute_load_job(job)
+
+    async def run_eval(self, host: Host, job: EvalJob) -> EvalJobResult:
+        self._state(host)
+        return await execute_eval_job(job)
 
     async def teardown(self, host: Host) -> None:
         state = _LIVE.pop(host.host_id, None)

@@ -914,6 +914,7 @@ def write_samples(path: Path, suite_ref: str, result: SuiteResult) -> Path:
                 "kind": run.kind,
                 "version": run.version,
                 "provenance": run.provenance,
+                "seconds": run.seconds,
                 "items": [i.model_dump(mode="json") for i in run.items],
             }
             for name, run in result.tasks.items()
@@ -936,6 +937,7 @@ def read_samples(path: str | Path) -> tuple[str, SuiteResult]:
             items=items,
             estimate=mean_ci([i.score for i in items]),
             provenance=t["provenance"],
+            seconds=t.get("seconds", 0.0),
         )
     result = SuiteResult(
         suite=doc["suite"],

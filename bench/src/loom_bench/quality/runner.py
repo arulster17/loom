@@ -3,6 +3,8 @@ and persist both."""
 
 from __future__ import annotations
 
+import tempfile
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -12,9 +14,17 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from loom_bench.jobs import EvalJob, EvalJobResult, EvalTaskResult
 from loom_bench.provenance import to_jsonable
 from loom_bench.quality.client import EvalClient
-from loom_bench.quality.divergence import DivergenceResult, load_prompts, measure_divergence
+from loom_bench.quality.divergence import (
+    DivergenceResult,
+    ReferenceLogprobs,
+    capture_reference,
+    load_prompts,
+    measure_divergence,
+    score_against_reference,
+)
 from loom_bench.quality.gate import GateDecision, GatePolicy, evaluate_gate
 from loom_bench.quality.sanity import SanityResult, check_completions
 from loom_bench.quality.suite import Suite
@@ -33,6 +43,7 @@ class TaskRun:
     items: list[ItemResult]
     estimate: Estimate  # mean score with a Student-t CI over items
     provenance: dict[str, Any] = field(default_factory=dict)
+    seconds: float = 0.0
 
 
 @dataclass(slots=True)
@@ -59,11 +70,14 @@ async def run_suite(
     timeout_s: float = 300.0,
     allow_code_exec: bool = False,
     only: Sequence[str] | None = None,
+    extra_body: Mapping[str, Any] | None = None,
+    seed: int | None = None,
 ) -> SuiteResult:
     """Run every task of `suite` (or the `only` subset) against one endpoint.
 
     `base_url` includes the API prefix (``http://host:8000/v1``). Tasks run one
-    after another, each with up to `concurrency` requests in flight.
+    after another, each with up to `concurrency` requests in flight. Requests
+    carry `extra_body` (default: the suite's) and `seed` (default: the suite's).
     """
     selected = [t for t in suite.tasks if only is None or t.name in only]
     if only is not None and len(selected) != len(set(only)):
@@ -77,8 +91,8 @@ async def run_suite(
         api_key=api_key,
         concurrency=concurrency,
         timeout_s=timeout_s,
-        seed=suite.seed,
-        extra_body=suite.extra_body(),
+        seed=suite.seed if seed is None else seed,
+        extra_body=suite.extra_body() if extra_body is None else extra_body,
     ) as client:
         for spec in selected:
             task = build_task(spec.kind, spec.name, spec.params)
@@ -86,7 +100,9 @@ async def run_suite(
                 client=client, workdir=workdir / spec.name, allow_code_exec=allow_code_exec
             )
             ctx.workdir.mkdir(parents=True, exist_ok=True)
+            t0 = time.monotonic()
             out = await task.run(ctx)
+            seconds = time.monotonic() - t0
             if not out.items:
                 raise RuntimeError(f"{spec.name}: task produced no items")
             version = out.version or task.version
@@ -97,6 +113,7 @@ async def run_suite(
                 items=out.items,
                 estimate=mean_ci([i.score for i in out.items]),
                 provenance=out.provenance,
+                seconds=seconds,
             )
             completions += out.completions
     return SuiteResult(
@@ -145,6 +162,99 @@ async def run_divergence(
             n_boot=suite.gate.n_boot,
             seed=suite.seed,
         )
+
+
+async def execute_eval_job(job: EvalJob, workdir: Path | None = None) -> EvalJobResult:
+    """Run an EvalJob where its endpoint is reachable (in-process, or on the GPU host via
+    `bench quality job`). `workdir` keeps harness output; default: a temporary directory."""
+    if workdir is None:
+        with tempfile.TemporaryDirectory(prefix="loom-eval-") as tmp:
+            return await execute_eval_job(job, Path(tmp))
+    suite = job.suite
+    started = datetime.now(UTC)
+    result = await run_suite(
+        suite,
+        job.base_url,
+        job.served_model,
+        workdir=workdir,
+        concurrency=job.concurrency,
+        timeout_s=job.request_timeout_s,
+        allow_code_exec=job.allow_code_exec,
+        only=job.tasks,
+        extra_body=job.extra_body,
+        seed=job.seed,
+    )
+    reference: ReferenceLogprobs | None = None
+    divergence: DivergenceResult | None = None
+    if job.divergence is not None:
+        spec = suite.divergence
+        assert spec is not None  # EvalJob validates it
+        async with EvalClient(
+            job.base_url,
+            job.served_model,
+            concurrency=job.concurrency,
+            timeout_s=job.request_timeout_s,
+            seed=job.seed,
+        ) as client:
+            if job.divergence == "capture":
+                reference = await capture_reference(
+                    client,
+                    load_prompts()[: spec.prompts],
+                    top_k=spec.top_k,
+                    max_new_tokens=spec.max_new_tokens,
+                )
+            else:
+                assert job.reference is not None  # EvalJob validates it
+                divergence = await score_against_reference(
+                    client,
+                    job.reference,
+                    confidence=suite.gate.confidence,
+                    n_boot=suite.gate.n_boot,
+                    seed=job.seed,
+                )
+    return EvalJobResult(
+        run_id=job.run_id,
+        suite=result.suite,
+        model=result.model,
+        tasks={
+            name: EvalTaskResult(
+                kind=run.kind,
+                version=run.version,
+                items=run.items,
+                provenance=run.provenance,
+                seconds=run.seconds,
+            )
+            for name, run in result.tasks.items()
+        },
+        sanity=result.sanity,
+        reference=reference,
+        divergence=divergence,
+        started_at=started.isoformat(),
+        finished_at=datetime.now(UTC).isoformat(),
+    )
+
+
+def suite_result_of(result: EvalJobResult) -> SuiteResult:
+    """The SuiteResult an EvalJob's result describes (for the gate and the records)."""
+    return SuiteResult(
+        suite=result.suite,
+        model=result.model,
+        tasks={
+            name: TaskRun(
+                name=name,
+                kind=t.kind,
+                version=t.version,
+                items=t.items,
+                estimate=mean_ci([i.score for i in t.items]),
+                provenance=t.provenance,
+                seconds=t.seconds,
+            )
+            for name, t in result.tasks.items()
+        },
+        sanity=result.sanity,
+        started_at=datetime.fromisoformat(result.started_at),
+        finished_at=datetime.fromisoformat(result.finished_at),
+    )
 
 
 def gate_against_baseline(

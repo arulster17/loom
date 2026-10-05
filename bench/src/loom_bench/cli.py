@@ -567,6 +567,26 @@ def quality_run(
     console.print(f"wrote {write_samples(out, suite, result)}")
 
 
+@quality_app.command("job")
+def quality_job(
+    in_: Annotated[Path, typer.Option("--in", help="EvalJob JSON.")],
+    out: Annotated[Path, typer.Option("--out", help="Where to write the EvalJobResult JSON.")],
+) -> None:
+    """Execute one EvalJob here (used on GPU hosts); harness output goes next to --out."""
+    from loom_bench.jobs import EvalJob
+    from loom_bench.quality.runner import execute_eval_job
+
+    job = EvalJob.model_validate_json(in_.read_text())
+    workdir = out.parent / f"eval-{job.run_id}"
+    try:
+        result = asyncio.run(execute_eval_job(job, workdir))
+    except Exception as e:
+        err.print(f"[red]eval job {job.run_id} failed:[/red] {type(e).__name__}: {e}")
+        raise typer.Exit(EXIT_FAILED) from None
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(result.model_dump_json())
+
+
 @quality_app.command("gate")
 def quality_gate(
     baseline: Annotated[str, typer.Option(help="Experiment id or config hash of the baseline.")],
