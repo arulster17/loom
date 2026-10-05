@@ -1,6 +1,7 @@
 """Acceptance: the whole Lab end to end on the mock backend, through the CLI."""
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,8 +11,10 @@ import pytest
 from sqlalchemy import select
 from typer.testing import CliRunner
 
+from loom_bench import runner as runner_module
 from loom_bench.cli import EXIT_MISMATCH, app
 from loom_bench.experiment import load_experiment, mock_launch
+from loom_bench.jobs import LoadJob, LoadJobResult
 from loom_bench.metrics.summary import RunSummary
 from loom_bench.mock.config import MockConfig
 from loom_bench.money import parse_usd
@@ -252,31 +255,45 @@ def test_reaper_removes_expired_resources_of_a_dead_runner(tmp_path):
     assert rows["still-alive"].terminated_at is None
 
 
-def _reproducible_doc() -> dict:
-    # Slow simulated steps (20 ms real) so latencies dwarf HTTP and scheduler jitter.
-    return {
-        "provider": {"kind": "mock", "hourly_price": "$1", "time_scale": 0.5, "step_base_ms": 40},
-        "workloads": [
-            {
-                "profile": "fixed-128-128",
-                "overrides": {"input_len": 64, "output_len": 16},
-                "load": {
-                    "mode": "closed_loop",
-                    "values": [2],
-                    "num_requests": 6,
-                    "warmup_requests": 1,
-                    "scrape_interval_s": 0.05,
-                },
-            }
-        ],
-    }
+def _job_identity(job: LoadJob) -> dict:
+    """What a LoadJob asks for, apart from its id and this engine start's port."""
+    return job.model_dump(mode="json", exclude={"run_id", "base_url", "metrics_url"})
 
 
-def test_reproduce_a_run_from_its_provenance(ctx, db, tmp_path):
-    exp = mock_experiment(**_reproducible_doc())
-    outcome = asyncio.run(run_experiment(exp, ctx))
+class PointReplay(MockProvider):
+    """Measures each load point once on the mock and replays that measurement for every
+    later job at the point (other repetitions, reproductions). A reproduction's verdict
+    then depends on which runs it compares, not on wall-clock latency of an in-process
+    mock (GC pauses and engine-step phase move a 6-request p95 by more than any useful
+    tolerance). Records every job it is given."""
+
+    def __init__(self) -> None:
+        super().__init__(hourly_micros=1_000_000)
+        self.jobs: list[LoadJob] = []
+        self.measured: dict[str, LoadJobResult] = {}
+
+    async def run_job(self, host, job):
+        self.jobs.append(job)
+        point = {k: v for k, v in _job_identity(job).items() if k != "seed"}
+        key = json.dumps(point, sort_keys=True)
+        if key not in self.measured:
+            self.measured[key] = await super().run_job(host, job)
+        return self.measured[key].model_copy(update={"run_id": job.run_id})
+
+
+@pytest.fixture
+def replay(ctx, monkeypatch) -> PointReplay:
+    """One PointReplay for the experiment and for `bench reproduce` (which makes its own)."""
+    provider = PointReplay()
+    ctx.provider = provider
+    monkeypatch.setattr(runner_module, "make_provider", lambda *a, **k: provider)
+    return provider
+
+
+def test_reproduce_a_run_from_its_provenance(ctx, db, tmp_path, replay):
+    outcome = asyncio.run(run_experiment(mock_experiment(), ctx))
     assert outcome.status.value == "completed"
-    run_id = outcome.run_ids[1]
+    run_id = outcome.run_ids[1]  # repetition 1: its own seed
 
     result = invoke("reproduce", run_id, "--db", db, "--out", tmp_path / "repro")
     assert result.exit_code == 0, result.output
@@ -291,14 +308,20 @@ def test_reproduce_a_run_from_its_provenance(ctx, db, tmp_path):
     assert new[0].config_hash == old.config_hash
     assert new[0].provenance["load"] == old.provenance["load"]
     assert new[0].repetition == old.repetition
+    # The reproduction asked the engine for exactly what repetition 1 did.
+    original, reproduction = replay.jobs[1], replay.jobs[2]
+    assert original.run_id != reproduction.run_id
+    assert _job_identity(reproduction) == _job_identity(original)
+    assert reproduction.seed != replay.jobs[0].seed
 
     prov_file = ctx.out_dir / str(outcome.experiment_id) / "runs" / str(run_id) / "provenance.json"
     by_file = invoke("reproduce", prov_file, "--db", db, "--out", tmp_path / "repro2")
     assert by_file.exit_code == 0, by_file.output
+    assert _job_identity(replay.jobs[3]) == _job_identity(original)
 
 
-def test_reproduce_reports_a_real_difference(ctx, db, tmp_path):
-    outcome = asyncio.run(run_experiment(mock_experiment(**_reproducible_doc()), ctx))
+def test_reproduce_reports_a_real_difference(ctx, db, tmp_path, replay):
+    outcome = asyncio.run(run_experiment(mock_experiment(), ctx))
     run_id = outcome.run_ids[0]
     with session_scope(db) as s:  # pretend the original was 3x faster
         run = repo.get_run(s, run_id)
@@ -335,7 +358,7 @@ class FlakySpot(MockProvider):
 def test_spot_interruption_is_recorded_and_the_cell_retried_on_a_new_host(ctx, db):
     provider = FlakySpot()
     ctx.provider = provider
-    outcome = asyncio.run(run_experiment(mock_experiment(**_reproducible_doc()), ctx))
+    outcome = asyncio.run(run_experiment(mock_experiment(), ctx))
     assert outcome.status.value == "completed", outcome.reason
     with session_scope(db) as s:
         runs = list(s.scalars(select(BenchRun)))
@@ -353,7 +376,7 @@ def test_second_spot_interruption_fails_the_experiment(ctx, db):
             return await super().run_job(host, job)
 
     ctx.provider = AlwaysReclaimed()
-    outcome = asyncio.run(run_experiment(mock_experiment(**_reproducible_doc()), ctx))
+    outcome = asyncio.run(run_experiment(mock_experiment(), ctx))
     assert outcome.status.value == "failed"
     assert "SpotInterrupted" in outcome.reason
     assert not live_host_ids()
