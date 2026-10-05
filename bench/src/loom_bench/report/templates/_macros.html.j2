@@ -1,0 +1,50 @@
+{% macro money(rng) -%}
+{% if rng is none or rng.value is none %}n/a{% else %}{{ rng.value|usd }}<span class="ci">{% if rng.lo is none and rng.hi is none %}no CI{% else %}{{ rng.lo|usd if rng.lo is not none else 'n/a' }} – {{ rng.hi|usd if rng.hi is not none else 'unbounded' }}{% endif %}</span>{% endif %}
+{%- endmacro %}
+
+{% macro estimate(e, places=0, unit='') -%}
+{% if e is none %}n/a{% else %}{{ e.mean|num(places) }}{{ ' ' ~ unit if unit }}<span class="ci">{% if e.lo is none %}n={{ e.n }}, no CI{% else %}{{ e.lo|num(places) }} – {{ e.hi|num(places) }}{% endif %}</span>{% endif %}
+{%- endmacro %}
+
+{% macro link_list(urls) -%}
+{% for u in urls %}<a href="{{ u }}">{{ u }}</a>{{ ', ' if not loop.last }}{% endfor %}
+{%- endmacro %}
+
+{% macro methodology_footer(m) %}
+<footer class="method">
+<h2>Methodology and provenance</h2>
+<dl>
+{% for slo in m.slos %}
+<dt>SLO</dt><dd>{{ slo }}</dd>
+{% endfor %}
+{% for mode in m.load_modes %}
+<dt>Load generation</dt><dd>{{ mode }}</dd>
+{% endfor %}
+<dt>Content</dt><dd>{{ m.content_kinds|join(', ') }}</dd>
+{% for d in m.datasets %}
+<dt>Dataset</dt><dd>{{ d.text }}{% if d.source %}; source: {{ link_list([d.source]) }}{% endif %}</dd>
+{% endfor %}
+<dt>Repetitions</dt><dd>{{ m.repetitions }}</dd>
+<dt>Confidence intervals</dt><dd>{{ m.ci_method }}</dd>
+{% for a in m.allocations %}
+<dt>Cost allocation</dt><dd>{{ a }}</dd>
+{% endfor %}
+<dt>Price book last checked</dt><dd>{{ m.price_book_last_checked or 'n/a' }}</dd>
+</dl>
+{% for c in m.configs %}
+<details>
+<summary>{{ c.name }} <code>{{ c.config_hash }}</code></summary>
+<dl>
+<dt>Config</dt><dd>{{ c.label }}</dd>
+<dt>Engine</dt><dd>{{ c.engine }}; image <code>{{ c.image or 'not recorded' }}</code>; digest <code>{{ c.image_digest or 'not recorded' }}</code></dd>
+<dt>Model</dt><dd>{{ c.model }}</dd>
+<dt>Hardware</dt><dd>{{ c.gpu }} · {{ c.location }}; CUDA {{ c.cuda_version or 'not recorded' }}, driver {{ c.driver_version or 'not recorded' }}</dd>
+<dt>Code</dt><dd>commit {% for s in c.git_shas %}<code>{{ s }}</code>{{ ', ' if not loop.last }}{% else %}not recorded{% endfor %}; loom-bench {{ c.bench_version or 'not recorded' }}</dd>
+<dt>Price</dt><dd>{{ c.price.basis }}{% if c.price.urls %}; source: {{ link_list(c.price.urls) }}{% endif %}{% if c.price.last_checked %}; last checked {{ c.price.last_checked }}{% endif %}{% if c.price.note %}; {{ c.price.note }}{% endif %}</dd>
+<dt>Runs</dt><dd>{{ c.runs }}; provenance digests: {% for d in c.provenance_digests %}<code>{{ d }}</code>{{ ', ' if not loop.last }}{% endfor %}</dd>
+<dt>Reproduce</dt><dd><code>{{ c.reproduce }}</code></dd>
+</dl>
+</details>
+{% endfor %}
+</footer>
+{% endmacro %}

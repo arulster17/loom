@@ -1,0 +1,54 @@
+{% extends "base.html.j2" %}
+{% from "_macros.html.j2" import money, estimate, methodology_footer %}
+{% set title = report.title %}
+{% block content %}
+<header>
+<h1>{{ report.title }}</h1>
+<p class="lede">Ranked by $/1M output tokens at SLO, cheapest first. Values are means; the smaller line under each is its 95% confidence interval. Goodput is the highest tested load that met the SLO; raw peak throughput ignores the SLO and is not goodput. Unranked rows (quality gate failed, untrusted, or no cost) are listed last.</p>
+</header>
+{% for b in report.boards %}
+<section>
+<h2>{{ board_title(b) }}</h2>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th class="num">#</th><th>Config</th><th class="num">$/1M out at SLO</th><th class="num">$/1M in at SLO</th><th class="num">Goodput out tok/s<br>per replica</th><th class="num">per GPU</th><th class="num">Load at goodput</th><th class="num">p95 TTFT<br>at goodput</th><th class="num">p95 TPOT<br>at goodput</th><th class="num">Raw peak out tok/s<br>(no SLO)</th><th>Quality Δ / gate</th><th class="num">Cold start</th><th>Status</th><th>Recommendation</th></tr>
+</thead>
+<tbody>
+{% for row in b.rows %}
+{% set r = row.result %}
+<tr class="{{ 'ranked' if row.rank is not none else 'unranked' }}">
+<td class="num">{{ row.rank if row.rank is not none else '–' }}</td>
+<td><strong>{{ r.name }}</strong><span class="sub">{{ r.label.text }}</span></td>
+<td class="num">{{ money(r.cost.output_per_mtok if r.cost else none) }}</td>
+<td class="num">{{ money(r.cost.input_per_mtok if r.cost else none) }}</td>
+<td class="num">{{ estimate(r.goodput.output_tok_s, 1) }}</td>
+<td class="num">{{ estimate(r.goodput_output_tok_s_per_gpu, 1) }}</td>
+<td class="num">{{ load_value(r.goodput.max_load, r.load_mode) }}</td>
+<td class="num">{{ estimate(r.ttft_p95_ms, 0, 'ms') }}</td>
+<td class="num">{{ estimate(r.tpot_p95_ms, 1, 'ms') }}</td>
+<td class="num">{{ estimate(r.peak_output_tok_s, 1) }}<span class="sub">at {{ load_value(r.peak_load, r.load_mode) }}</span></td>
+<td>{% if r.quality and r.quality.gate %}<span class="badge {{ r.quality.gate }}">{{ r.quality.gate }}</span>{% endif %}<span class="sub">{{ quality_text(r) }}</span></td>
+<td class="num">{{ cold_text(row.cold_start) }}</td>
+<td><span class="badge {{ row.status.name|lower }}">{{ row.status.value }}</span></td>
+<td>{{ row.recommendation }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% set warned = b.rows|map(attribute='result')|selectattr('warnings')|list %}
+{% if warned %}
+<h3>Warnings</h3>
+<ul class="warnings">
+{% for r in warned %}
+{% for w in r.warnings %}
+<li><strong>{{ r.name }}</strong>: {{ w.message }}</li>
+{% endfor %}
+{% endfor %}
+</ul>
+{% endif %}
+</section>
+{% endfor %}
+{{ methodology_footer(report.methodology) }}
+{% endblock %}

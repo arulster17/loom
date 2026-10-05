@@ -500,9 +500,11 @@ def analyze_runs(
     ]
 
 
-def _latest[T: (BenchEvalRun, BenchGateDecision)](rows: Iterable[T]) -> T | None:
-    epoch = dt.datetime.min.replace(tzinfo=dt.UTC)
-    return max(rows, key=lambda r: (r.created_at or epoch, str(r.id)), default=None)
+_EPOCH = dt.datetime.min.replace(tzinfo=dt.UTC)
+
+
+def _recency(row: BenchEvalRun | BenchGateDecision) -> tuple[dt.datetime, str]:
+    return (row.created_at or _EPOCH, str(row.id))
 
 
 def _latest_scores(config: str, eval_runs: Sequence[BenchEvalRun]) -> dict[str, BenchEvalRun]:
@@ -510,7 +512,7 @@ def _latest_scores(config: str, eval_runs: Sequence[BenchEvalRun]) -> dict[str, 
     for row in eval_runs:
         if row.config_hash == config:
             by_task[row.task].append(row)
-    return {task: row for task, rows in by_task.items() if (row := _latest(rows)) is not None}
+    return {task: max(rows, key=_recency) for task, rows in by_task.items()}
 
 
 def quality_for(
@@ -525,7 +527,7 @@ def quality_for(
     """
     evals = list(eval_runs)
     gates = list(gate_decisions)
-    gate = _latest(g for g in gates if g.candidate_config_hash == config)
+    gate = max((g for g in gates if g.candidate_config_hash == config), key=_recency, default=None)
     is_baseline = any(g.baseline_config_hash == config for g in gates)
     scores = _latest_scores(config, evals)
     if not scores and gate is None and not is_baseline:
