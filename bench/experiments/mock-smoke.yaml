@@ -1,5 +1,6 @@
 # CI smoke test of the whole Lab on the mock backend: 2 variants x 2 workloads x
-# 3 load points x 2 repetitions, one host with a warm restart between variants.
+# 3 load points x 2 repetitions, one host with a warm restart between variants,
+# then a small quality suite per variant with small-batch gated against baseline.
 # time_scale 0.01 makes the simulated GPU 100x faster than real time, so it runs
 # in well under a minute. Numbers are not meaningful; the plumbing is.
 name: mock-smoke
@@ -39,6 +40,9 @@ slo:
   ttft_ms: {p95: 1000}
   tpot_ms: {p95: 50}
   max_error_rate: 0.01
+quality:
+  suite: bench/experiments/suites/mock-smoke.yaml
+  baseline_variant: baseline
 budget:
   max_spend: "$1"
   ttl_minutes: 10

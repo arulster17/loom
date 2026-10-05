@@ -336,6 +336,11 @@ def build_plan(
         max_ttl = aws_accrual_terms().max_ttl_s
         if ttl_s > max_ttl:
             refusals.append(f"budget.ttl_minutes is above the AWS host limit of {max_ttl / 60:g}")
+        if exp.quality is not None:
+            refusals.append(
+                "quality suites need the endpoint reachable from the runner; aws_ec2 serves "
+                "on the host's loopback and has no on-host eval job yet"
+            )
     notes: list[str] = []
     hosts: dict[str, HostPlan] = {}
     prev: dict[str, Cell] = {}

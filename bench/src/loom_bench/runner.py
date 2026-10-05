@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from loom_bench import __version__
@@ -44,6 +45,7 @@ from loom_bench.experiment import (
     derive_seed,
     expand,
     hardware_for,
+    load_quality_suite,
     mock_config_from_launch,
     tokenizer_for,
 )
@@ -81,13 +83,32 @@ from loom_bench.providers.base import (
     Provider,
     SpotInterrupted,
 )
+from loom_bench.quality.gate import GateDecision
+from loom_bench.quality.runner import (
+    SuiteResult,
+    TaskRun,
+    gate_against_baseline,
+    record_gate,
+    record_suite_result,
+    run_suite,
+)
+from loom_bench.quality.sanity import SanityResult
+from loom_bench.quality.suite import Suite
+from loom_bench.quality.tasks.base import ItemResult
 from loom_bench.records import LoadMode, Market
 from loom_bench.registry import REPO_ROOT, ModelSpec, Registry, read_yaml
 from loom_bench.report.compare import Comparison, compare
 from loom_bench.slo import bisect_next_load, find_goodput, slo_met
+from loom_bench.stats import mean_ci
 from loom_bench.store import repo
 from loom_bench.store.db import session_scope
-from loom_bench.store.models import BenchExperiment, BenchRun, ExperimentStatus, TerminatedBy
+from loom_bench.store.models import (
+    BenchEvalRun,
+    BenchExperiment,
+    BenchRun,
+    ExperimentStatus,
+    TerminatedBy,
+)
 from loom_bench.store.parquet import write_requests
 from loom_bench.workloads import WorkloadProfile
 
@@ -141,6 +162,13 @@ class GoodputRow(BaseModel):
     total_per_mtok_micros: int | None
 
 
+class GateRow(BaseModel):
+    cell: str
+    baseline: str
+    decision: str  # pass | fail | inconclusive
+    blocked: bool
+
+
 @dataclass
 class Outcome:
     experiment_id: uuid.UUID
@@ -152,6 +180,7 @@ class Outcome:
     goodput: list[GoodputRow]
     exit_code: int
     events: list[dict[str, Any]] = field(default_factory=list)
+    gates: list[GateRow] = field(default_factory=list)
 
 
 def _now() -> datetime:
@@ -233,6 +262,9 @@ class _Executor:
         self.run_ids: list[uuid.UUID] = []
         self.goodput: list[GoodputRow] = []
         self.events: list[dict[str, Any]] = []
+        self.suite = exp.quality.load() if exp.quality is not None else None
+        self.baselines: dict[str, tuple[Cell, SuiteResult]] = {}
+        self.gates: list[GateRow] = []
 
     def event(self, kind: str, **data: Any) -> None:
         entry = {"at": _now().isoformat(), "kind": kind, **data}
@@ -296,6 +328,9 @@ class _Executor:
     # --- cells -----------------------------------------------------------------
 
     async def run(self, cells: Sequence[Cell]) -> None:
+        if self.exp.quality is not None:  # baselines are evaluated before their candidates
+            base = self.exp.quality.baseline_variant
+            cells = sorted(cells, key=lambda c: c.variant != base)
         groups: dict[str, list[Cell]] = {}
         for cell in cells:
             groups.setdefault(cell.host_key, []).append(cell)
@@ -355,6 +390,58 @@ class _Executor:
         self.event("engine_started", host=host.host_id, cell=cell.key, warm=warm, stages=stages)
         for entry, profile in self.workloads:
             await self._run_workload(host, cell, endpoint, entry, profile)
+        if self.suite is not None:
+            await self._run_quality(host, cell, endpoint, self.suite)
+
+    async def _run_quality(self, host: Host, cell: Cell, endpoint: Endpoint, suite: Suite) -> None:
+        quality = self.exp.quality
+        assert quality is not None
+        self.guard.check_next(self.est.eval_s(), what=f"quality suite on {cell.key}")
+        workdir = self.run_dir / "evals" / cell.config_hash[:16]
+        result = await self.guard.guarded(
+            run_suite(
+                suite,
+                endpoint.base_url,
+                endpoint.served_model,
+                workdir=workdir,
+                allow_code_exec=quality.allow_code_exec,
+            )
+        )
+        samples = write_samples(workdir / "samples.json", quality.suite, result)
+        prov = build_provenance(cell.config, **self._serving_sections(host, cell, endpoint))
+        with session_scope(self.ctx.db_url) as s:
+            record_suite_result(
+                s,
+                experiment_id=self.experiment_id,
+                config_hash=cell.config_hash,
+                result=result,
+                provenance=prov,
+                samples_uri=str(samples),
+            )
+        scores = {name: run.estimate.mean for name, run in result.tasks.items()}
+        self.event("quality", cell=cell.key, suite=result.suite, scores=scores)
+        point = canonical_json(cell.knobs)
+        if cell.variant == quality.baseline_variant:
+            self.baselines[point] = (cell, result)
+            return
+        base_cell, base_result = self.baselines[point]
+        decision = gate_against_baseline(base_result, result, suite)
+        with session_scope(self.ctx.db_url) as s:
+            record_gate(
+                s,
+                experiment_id=self.experiment_id,
+                baseline_config_hash=base_cell.config_hash,
+                candidate_config_hash=cell.config_hash,
+                decision=decision,
+            )
+        row = GateRow(
+            cell=cell.key,
+            baseline=base_cell.key,
+            decision=decision.decision.value,
+            blocked=decision.blocked,
+        )
+        self.gates.append(row)
+        self.event("gate", **row.model_dump())
 
     async def _run_workload(
         self,
@@ -478,6 +565,23 @@ class _Executor:
         seed: int,
         rep: int,
     ) -> Provenance:
+        dataset = DatasetInfo(**profile.dataset.model_dump()) if profile.dataset else DatasetInfo()
+        return build_provenance(
+            cell.config,
+            **self._serving_sections(host, cell, endpoint),
+            loadgen=LoadgenInfo(
+                name=self.exp.loadgen, version=__version__ if self.exp.loadgen == "native" else None
+            ),
+            workload=WorkloadInfo(
+                name=entry.name, profile_hash=config_hash(profile), content=profile.content
+            ),
+            dataset=dataset,
+            load=LoadInfo(mode=mode, value=value, seed=seed),
+            repetition=rep,
+        )
+
+    def _serving_sections(self, host: Host, cell: Cell, endpoint: Endpoint) -> dict[str, Any]:
+        """Provenance sections describing what served: git, engine, model, hardware, price."""
         system = endpoint.system
         launch, hw = cell.launch, cell.hardware
         image = launch.image or None
@@ -492,13 +596,8 @@ class _Executor:
         gpu_type = system.get("gpu_name") or (
             cell.spec.hardware.gpu if hw.get("instance_type") else None
         )
-        dataset = DatasetInfo(**profile.dataset.model_dump()) if profile.dataset else DatasetInfo()
-        return build_provenance(
-            cell.config,
+        return dict(
             git=self.git,
-            loadgen=LoadgenInfo(
-                name=self.exp.loadgen, version=__version__ if self.exp.loadgen == "native" else None
-            ),
             engine=EngineInfo(
                 name=engine,
                 version=version,
@@ -527,12 +626,6 @@ class _Executor:
             region=hw.get("region"),
             market=host.request.market,
             hourly_micros=host.hourly_micros,
-            workload=WorkloadInfo(
-                name=entry.name, profile_hash=config_hash(profile), content=profile.content
-            ),
-            dataset=dataset,
-            load=LoadInfo(mode=mode, value=value, seed=seed),
-            repetition=rep,
         )
 
     def _summarize(self, cell: Cell, endpoint: Endpoint, result: LoadJobResult) -> RunSummary:
@@ -789,7 +882,110 @@ async def _execute(
         goodput=ex.goodput,
         exit_code=code,
         events=ex.events,
+        gates=ex.gates,
     )
+
+
+# --- quality -----------------------------------------------------------------------
+
+
+def write_samples(path: Path, suite_ref: str, result: SuiteResult) -> Path:
+    """Per-item scores of one suite run, so a gate can be re-decided later."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "suite": result.suite,
+        "suite_ref": suite_ref,
+        "model": result.model,
+        "started_at": result.started_at.isoformat(),
+        "finished_at": result.finished_at.isoformat(),
+        "sanity": result.sanity.model_dump(mode="json"),
+        "tasks": {
+            name: {
+                "kind": run.kind,
+                "version": run.version,
+                "provenance": run.provenance,
+                "items": [i.model_dump(mode="json") for i in run.items],
+            }
+            for name, run in result.tasks.items()
+        },
+    }
+    path.write_text(json.dumps(doc))
+    return path
+
+
+def read_samples(path: str | Path) -> tuple[str, SuiteResult]:
+    """(suite reference, SuiteResult) from `write_samples` output."""
+    doc = json.loads(Path(path).read_text())
+    tasks = {}
+    for name, t in doc["tasks"].items():
+        items = [ItemResult.model_validate(i) for i in t["items"]]
+        tasks[name] = TaskRun(
+            name=name,
+            kind=t["kind"],
+            version=t["version"],
+            items=items,
+            estimate=mean_ci([i.score for i in items]),
+            provenance=t["provenance"],
+        )
+    result = SuiteResult(
+        suite=doc["suite"],
+        model=doc["model"],
+        tasks=tasks,
+        sanity=SanityResult.model_validate(doc["sanity"]),
+        started_at=datetime.fromisoformat(doc["started_at"]),
+        finished_at=datetime.fromisoformat(doc["finished_at"]),
+    )
+    return doc["suite_ref"], result
+
+
+@dataclass
+class _EvalRef:
+    experiment_id: uuid.UUID
+    config_hash: str
+    samples_uri: str
+
+
+def _latest_eval(s: Session, ref: str) -> _EvalRef:
+    """Latest recorded suite run for a config hash, or for an experiment's only config."""
+    exp_id = _uuid(ref)
+    column = BenchEvalRun.experiment_id if exp_id is not None else BenchEvalRun.config_hash
+    rows = list(
+        s.scalars(
+            select(BenchEvalRun)
+            .where(column == (exp_id if exp_id is not None else ref))
+            .order_by(BenchEvalRun.created_at.desc())
+        )
+    )
+    if not rows:
+        raise LookupError(f"no eval runs for {ref}")
+    configs = {r.config_hash for r in rows}
+    if len(configs) > 1:
+        raise LookupError(f"experiment {ref} evaluated {len(configs)} configs; pass a config hash")
+    if rows[0].samples_uri is None:
+        raise LookupError(f"eval runs for {ref} have no per-item samples")
+    return _EvalRef(rows[0].experiment_id, rows[0].config_hash, rows[0].samples_uri)
+
+
+def gate_stored(
+    db_url: str | None, baseline: str, candidate: str, *, suite: str | None = None
+) -> tuple[GateDecision, str, str]:
+    """Re-decide the gate from stored per-item samples and record it on the candidate's
+    experiment. Returns (decision, baseline config hash, candidate config hash)."""
+    with session_scope(db_url) as s:
+        base, cand = _latest_eval(s, baseline), _latest_eval(s, candidate)
+    _, base_result = read_samples(base.samples_uri)
+    suite_ref, cand_result = read_samples(cand.samples_uri)
+    policy = load_quality_suite(suite or suite_ref)
+    decision = gate_against_baseline(base_result, cand_result, policy)
+    with session_scope(db_url) as s:
+        record_gate(
+            s,
+            experiment_id=cand.experiment_id,
+            baseline_config_hash=base.config_hash,
+            candidate_config_hash=cand.config_hash,
+            decision=decision,
+        )
+    return decision, base.config_hash, cand.config_hash
 
 
 # --- reproduce -------------------------------------------------------------------

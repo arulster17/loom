@@ -2,7 +2,7 @@
 
 Exit codes: 0 ok, 1 failed, 2 invalid input, 3 refused by the planner (over a
 cap), 4 stopped before a step that would pass the cap, 5 hard budget abort,
-6 reproduction outside normal variance.
+6 reproduction outside normal variance, 7 quality gate blocked.
 """
 
 from __future__ import annotations
@@ -45,6 +45,7 @@ from loom_bench.runner import (
 
 EXIT_INVALID = 2
 EXIT_MISMATCH = 6
+EXIT_GATE_BLOCKED = 7
 
 app = typer.Typer(
     name="bench",
@@ -56,6 +57,8 @@ db_app = typer.Typer(help="Results database.", no_args_is_help=True)
 job_app = typer.Typer(help="Load jobs (run on the GPU host by cloud providers).")
 app.add_typer(db_app, name="db")
 app.add_typer(job_app, name="job")
+quality_app = typer.Typer(help="Quality suites and the regression gate.", no_args_is_help=True)
+app.add_typer(quality_app, name="quality")
 
 console = Console()
 err = Console(stderr=True)
@@ -164,6 +167,9 @@ def render_outcome(outcome: Outcome) -> None:
     )
     if outcome.reason:
         console.print(f"[{color}]reason:[/] {outcome.reason}")
+    for g in outcome.gates:
+        verdict = "[red]BLOCKED" if g.blocked else "[green]allowed"
+        console.print(f"quality gate {g.cell} vs {g.baseline}: {g.decision} ({verdict}[/])")
     if not outcome.goodput:
         return
     table = Table(title="Goodput at SLO")
@@ -515,3 +521,65 @@ def compare_cmd(
     if out is not None:
         _written(write_reports(out, compare={"md": md, "json": render_json(c)}))
     raise typer.Exit(EXIT_OK if c.within_normal_variance else EXIT_MISMATCH)
+
+
+@quality_app.command("run")
+def quality_run(
+    suite: Annotated[str, typer.Argument(help="Suite name (bench/evals/<name>.yaml) or path.")],
+    base_url: Annotated[str, typer.Option(help="OpenAI-compatible base URL, with /v1.")],
+    model: Annotated[str, typer.Option(help="Served model name.")],
+    out: Annotated[Path, typer.Option("--out", help="Per-item samples JSON.")] = Path(
+        "quality-samples.json"
+    ),
+    only: Annotated[list[str] | None, typer.Option(help="Run only these tasks.")] = None,
+    allow_code_exec: Annotated[
+        bool, typer.Option(help="Run code_exec tasks (executes model output in the sandbox).")
+    ] = False,
+) -> None:
+    """Run a pinned suite against one endpoint and print per-task scores."""
+    from loom_bench.experiment import load_quality_suite
+    from loom_bench.quality.runner import run_suite
+    from loom_bench.runner import write_samples
+
+    s = load_quality_suite(suite)
+    result = asyncio.run(
+        run_suite(
+            s,
+            base_url,
+            model,
+            workdir=out.parent / f"{out.stem}-work",
+            allow_code_exec=allow_code_exec,
+            only=only,
+        )
+    )
+    table = Table(title=f"Suite {result.suite} on {model}")
+    for col in ("task", "n", "score", "95% CI"):
+        table.add_column(col)
+    for name, run in result.tasks.items():
+        est = run.estimate
+        ci = "-" if est.lo is None else f"{est.lo:.3f} .. {est.hi:.3f}"
+        table.add_row(name, str(est.n), f"{est.mean:.3f}", ci)
+    console.print(table)
+    console.print(f"wrote {write_samples(out, suite, result)}")
+
+
+@quality_app.command("gate")
+def quality_gate(
+    baseline: Annotated[str, typer.Option(help="Experiment id or config hash of the baseline.")],
+    candidate: Annotated[str, typer.Option(help="Experiment id or config hash to gate.")],
+    suite: Annotated[
+        str | None, typer.Option(help="Suite for the policy (default: the one recorded).")
+    ] = None,
+    db: DbOpt = None,
+) -> None:
+    """Re-decide the gate from stored per-item samples; exit 7 when blocked."""
+    from loom_bench.runner import gate_stored
+
+    try:
+        decision, base_hash, cand_hash = gate_stored(db, baseline, candidate, suite=suite)
+    except LookupError as e:
+        err.print(f"[red]{e}")
+        raise typer.Exit(EXIT_INVALID) from None
+    console.print(f"baseline {base_hash[:12]} -> candidate {cand_hash[:12]}")
+    console.print(decision.summary())
+    raise typer.Exit(EXIT_GATE_BLOCKED if decision.blocked else EXIT_OK)

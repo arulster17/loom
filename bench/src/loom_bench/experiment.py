@@ -38,6 +38,7 @@ from loom_bench.mock.config import MockConfig
 from loom_bench.money import parse_usd
 from loom_bench.provenance import canonical_json, config_hash
 from loom_bench.providers.base import EngineLaunch
+from loom_bench.quality.suite import Suite, load_suite
 from loom_bench.records import LoadMode
 from loom_bench.registry import REPO_ROOT, ModelSpec, Registry, read_yaml
 from loom_bench.slo import Slo
@@ -278,9 +279,23 @@ class CostAllocationSpec(_Strict):
 
 
 class QualitySpec(_Strict):
-    suite: str
+    """Pinned eval suite run on every cell; non-baseline cells are gated against the
+    baseline variant's cell with the same sweep point (policy from the suite)."""
+
+    suite: str  # `bench/evals/<name>.yaml` by name, or a suite YAML path from the repo root
     baseline_variant: Slug
-    gate: dict[str, Any] = Field(default_factory=dict)
+    allow_code_exec: bool = False  # code_exec tasks run model output in the sandbox
+
+    def load(self) -> Suite:
+        return load_quality_suite(self.suite)
+
+
+def load_quality_suite(ref: str) -> Suite:
+    """A suite by name (`bench/evals/<name>.yaml`) or by YAML path from the repo root."""
+    path = Path(ref)
+    if path.suffix in (".yaml", ".yml") and not path.is_absolute():
+        return load_suite(REPO_ROOT / path)
+    return load_suite(ref)
 
 
 # --- experiment -----------------------------------------------------------------
@@ -608,6 +623,13 @@ def expand(exp: Experiment, registry: Registry) -> list[Cell]:
             w.resolve()
         except (FileNotFoundError, ValidationError) as e:
             raise ExpansionError(f"workload {w.name}: {e}") from None
+    if exp.quality is not None:
+        try:
+            suite = exp.quality.load()
+        except (FileNotFoundError, ValidationError) as e:
+            raise ExpansionError(f"quality suite {exp.quality.suite}: {e}") from None
+        if suite.model != exp.model:
+            raise ExpansionError(f"quality suite {suite.suite} is pinned for {suite.model}")
     return cells
 
 

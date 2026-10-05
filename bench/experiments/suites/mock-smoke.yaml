@@ -1,0 +1,16 @@
+# Tiny quality suite for the mock smoke experiment: generated arithmetic and the
+# pinned JSON-schema items, both scored natively (no lm-eval, no code execution).
+# 60 items per task can only decide a 6-point margin (rule-of-three floor 3/60).
+suite: mock-smoke
+model: qwen3-8b
+seed: 1234
+gate:
+  threshold: 0.06
+  min_samples: 50
+  n_boot: 1000
+tasks:
+  - name: arithmetic
+    kind: toy_arithmetic
+    params: {n: 60, seed: 7}
+  - name: json_schema
+    kind: json_schema
