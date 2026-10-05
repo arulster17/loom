@@ -79,6 +79,37 @@ class Endpoint(BaseModel):
     system: dict[str, Any] = Field(default_factory=dict)  # cuda, driver, gpu names, image digest
 
 
+class HostLost(RuntimeError):
+    """The instance is gone or going (TTL self-shutdown, manual termination, ...).
+
+    Raised by any provider; the runner records it and may retry the cell elsewhere.
+    """
+
+    def __init__(
+        self,
+        host_id: str,
+        *,
+        state: str,
+        reason_code: str | None,
+        reason_message: str | None,
+        detected_at: datetime,
+        seconds_since_launch: float,
+    ) -> None:
+        super().__init__(
+            f"{host_id} is {state} ({reason_code or 'no reason'}) after {seconds_since_launch:.0f}s"
+        )
+        self.host_id = host_id
+        self.state = state
+        self.reason_code = reason_code
+        self.reason_message = reason_message
+        self.detected_at = detected_at
+        self.seconds_since_launch = seconds_since_launch
+
+
+class SpotInterrupted(HostLost):
+    """EC2 reclaimed the spot instance. The runner records it for the interruption rate."""
+
+
 class Provider(Protocol):
     name: str
 

@@ -38,7 +38,14 @@ from loom_bench.money import MICROS_PER_USD, Micros
 from loom_bench.prices import HOURS_PER_MONTH, PriceBook, load_prices
 from loom_bench.providers import aws_reaper
 from loom_bench.providers.aws_ssm import parse_markers, render_script, run_script, stage_offsets
-from loom_bench.providers.base import Endpoint, EngineLaunch, Host, HostRequest
+from loom_bench.providers.base import (
+    Endpoint,
+    EngineLaunch,
+    Host,
+    HostLost,
+    HostRequest,
+    SpotInterrupted,
+)
 from loom_bench.records import Market
 from loom_bench.registry import read_yaml
 
@@ -137,34 +144,6 @@ def load_aws_settings(
             [s.strip() for s in value.split(",") if s.strip()] if field == "subnet_ids" else value
         )
     return AwsSettings.model_validate(data)
-
-
-class HostLost(RuntimeError):
-    """The instance is gone or going (TTL self-shutdown, manual termination, ...)."""
-
-    def __init__(
-        self,
-        host_id: str,
-        *,
-        state: str,
-        reason_code: str | None,
-        reason_message: str | None,
-        detected_at: datetime,
-        seconds_since_launch: float,
-    ) -> None:
-        super().__init__(
-            f"{host_id} is {state} ({reason_code or 'no reason'}) after {seconds_since_launch:.0f}s"
-        )
-        self.host_id = host_id
-        self.state = state
-        self.reason_code = reason_code
-        self.reason_message = reason_message
-        self.detected_at = detected_at
-        self.seconds_since_launch = seconds_since_launch
-
-
-class SpotInterrupted(HostLost):
-    """EC2 reclaimed the spot instance. The runner records it for the interruption rate."""
 
 
 def host_loss(
