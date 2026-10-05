@@ -382,10 +382,14 @@ def _merge(base: dict[str, Any], over: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _set_path(doc: dict[str, Any], path: str, value: Any) -> dict[str, Any]:
+    """Set dotted `path` in a copy of `doc`; a null value removes the key (default applies)."""
     head, _, rest = path.partition(".")
     out = dict(doc)
     if not rest:
-        out[head] = value
+        if value is None:
+            out.pop(head, None)
+        else:
+            out[head] = value
         return out
     child = out.get(head)
     if child is None:
