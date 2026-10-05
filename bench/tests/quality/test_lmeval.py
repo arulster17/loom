@@ -42,7 +42,12 @@ def test_chat_command():
         num_concurrent=32,
     )
     argv = build_command(
-        p, base_url="http://h:8000/v1/", model="qwen3-8b", seed=1234, output_path=Path("/o")
+        p,
+        base_url="http://h:8000/v1/",
+        model="qwen3-8b",
+        seed=1234,
+        output_path=Path("/o"),
+        extra_body={"chat_template_kwargs": {"enable_thinking": True}, "top_k": 1},
     )
     assert argv[:5] == [sys.executable, "-m", "lm_eval", "run", "--model"]
     assert opt(argv, "--model") == "local-chat-completions"
@@ -58,8 +63,10 @@ def test_chat_command():
     assert opt(argv, "--num_fewshot") == "5"
     assert opt(argv, "--seed") == "1234"
     assert opt(argv, "--output_path") == "/o"
+    # Task gen_kwargs override the client's extra body.
     assert json.loads(opt(argv, "--gen_kwargs")) == {
-        "chat_template_kwargs": {"enable_thinking": False}
+        "chat_template_kwargs": {"enable_thinking": False},
+        "top_k": 1,
     }
     assert "--log_samples" in argv and "--apply_chat_template" in argv
     assert "--samples" not in argv and "--confirm_run_unsafe_code" not in argv
@@ -75,8 +82,16 @@ def test_completions_command_with_samples_and_metadata():
         metadata={"max_seq_lengths": [4096, 16384], "tokenizer": "Qwen/Qwen3-8B"},
         model_args={"tokenized_requests": False, "tokenizer_backend": None},
     )
-    argv = build_command(p, base_url="http://h/v1", model="m", seed=0, output_path=Path("/o"))
+    argv = build_command(
+        p,
+        base_url="http://h/v1",
+        model="m",
+        seed=0,
+        output_path=Path("/o"),
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
     assert opt(argv, "--model") == "local-completions"
+    assert "--gen_kwargs" not in argv
     margs = json.loads(opt(argv, "--model_args"))
     assert margs["base_url"] == "http://h/v1/completions"
     assert margs["tokenized_requests"] is False and margs["tokenizer_backend"] is None

@@ -147,7 +147,7 @@ def _fake_client():
 
 async def test_task_requires_explicit_enable(tmp_path):
     task = CodeExecTask(
-        "he", CodeExecParams(dataset="humaneval"), humaneval_problems(HUMANEVAL_ROWS)
+        "he", CodeExecParams(datasets=("humaneval",)), humaneval_problems(HUMANEVAL_ROWS)
     )
     async with _fake_client() as c:
         with pytest.raises(CodeExecDisabled):
@@ -155,11 +155,11 @@ async def test_task_requires_explicit_enable(tmp_path):
 
 
 async def test_task_scores_fixture(tmp_path):
-    params = CodeExecParams(dataset="humaneval", sandbox=FAST)
+    params = CodeExecParams(datasets=("humaneval",), sandbox=FAST)
     task = CodeExecTask("he", params, humaneval_problems(HUMANEVAL_ROWS))
     async with _fake_client() as c:
         out = await task.run(EvalContext(client=c, workdir=tmp_path, allow_code_exec=True))
     assert [(r.item_id, r.score) for r in out.items] == [("Fixture/0", 1.0), ("Fixture/1", 0.0)]
     assert out.items[1].meta["status"] == "failed"
-    assert out.provenance["dataset"]["license"] == "MIT"
-    assert out.provenance["dataset"]["revision"] == "7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544"
+    assert out.provenance["datasets"][0]["license"] == "MIT"
+    assert out.provenance["datasets"][0]["revision"] == "7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544"

@@ -111,9 +111,15 @@ def build_command(
     seed: int,
     output_path: Path,
     allow_code_exec: bool = False,
+    extra_body: dict[str, Any] | None = None,
     python: str = sys.executable,
 ) -> list[str]:
-    """The `lm_eval run` argv for one task entry. The API key goes in the env, never here."""
+    """The `lm_eval run` argv for one task entry. The API key goes in the env, never here.
+
+    `extra_body` (the client's per-request extras, e.g. chat_template_kwargs) is
+    merged under `gen_kwargs` for the chat API, which forwards gen_kwargs into
+    every request body.
+    """
     if params.unsafe_code and not allow_code_exec:
         raise LmEvalError(
             f"{','.join(params.tasks)} executes model-written code; "
@@ -147,8 +153,11 @@ def build_command(
     if params.samples is not None:
         ordered = {task: sorted(set(idx)) for task, idx in sorted(params.samples.items())}
         argv += ["--samples", json.dumps(ordered)]
-    if params.gen_kwargs:
-        argv += ["--gen_kwargs", json.dumps(params.gen_kwargs, sort_keys=True)]
+    gen_kwargs = (
+        {**(extra_body or {}), **params.gen_kwargs} if params.api == "chat" else (params.gen_kwargs)
+    )
+    if gen_kwargs:
+        argv += ["--gen_kwargs", json.dumps(gen_kwargs, sort_keys=True)]
     if params.metadata:
         argv += ["--metadata", json.dumps(params.metadata, sort_keys=True)]
     if params.unsafe_code:
@@ -266,6 +275,7 @@ class LmEvalTask(ParamTask[LmEvalParams]):
             seed=ctx.client.seed,
             output_path=out_dir,
             allow_code_exec=ctx.allow_code_exec,
+            extra_body=ctx.client.extra_body,
         )
         env = dict(os.environ)
         if ctx.client.api_key:

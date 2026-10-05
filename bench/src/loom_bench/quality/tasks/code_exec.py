@@ -135,9 +135,19 @@ def load_problems(dataset: Dataset) -> list[CodeProblem]:
     return humaneval_problems(rows) if dataset == "humaneval" else mbpp_problems(rows)
 
 
+def _provenance(dataset: Dataset) -> dict[str, str]:
+    src = SOURCES[dataset]
+    return {
+        "name": dataset,
+        "source": f"hf://datasets/{src.repo}/{src.filename}",
+        "revision": src.revision,
+        "license": src.license,
+    }
+
+
 class CodeExecParams(TaskParams):
-    dataset: Dataset
-    limit: Annotated[int, Field(ge=1)] | None = None
+    datasets: Annotated[tuple[Dataset, ...], Field(min_length=1)]
+    limit: Annotated[int, Field(ge=1)] | None = None  # per dataset
     max_tokens: Annotated[int, Field(ge=1)] = 1024
     parallelism: Annotated[int, Field(ge=1)] = 4
     sandbox: SandboxLimits = Field(default_factory=SandboxLimits)
@@ -150,6 +160,7 @@ class CodeExecTask(ParamTask[CodeExecParams]):
     def __init__(
         self, name: str, params: CodeExecParams, problems: Sequence[CodeProblem] | None = None
     ) -> None:
+        """`problems` replaces the Hub download (tests and local fixtures)."""
         super().__init__(name, params)
         self._problems = list(problems) if problems is not None else None
 
@@ -161,9 +172,10 @@ class CodeExecTask(ParamTask[CodeExecParams]):
             )
         problems = self._problems
         if problems is None:
-            problems = await asyncio.to_thread(load_problems, self.params.dataset)
-        if self.params.limit is not None:
-            problems = problems[: self.params.limit]
+            problems = []
+            for dataset in self.params.datasets:
+                loaded = await asyncio.to_thread(load_problems, dataset)
+                problems += loaded[: self.params.limit]
         sem = asyncio.Semaphore(self.params.parallelism)
 
         async def score(p: CodeProblem) -> tuple[ItemResult, Completion | None]:
@@ -195,13 +207,5 @@ class CodeExecTask(ParamTask[CodeExecParams]):
             )
 
         out = await score_items(problems, score)
-        src = SOURCES[self.params.dataset]
-        out.provenance = {
-            "dataset": {
-                "name": self.params.dataset,
-                "source": f"hf://datasets/{src.repo}/{src.filename}",
-                "revision": src.revision,
-                "license": src.license,
-            }
-        }
+        out.provenance = {"datasets": [_provenance(name) for name in self.params.datasets]}
         return out
