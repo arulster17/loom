@@ -9,7 +9,14 @@ import boto3
 import pytest
 
 from loom_bench.engines import render_launch
-from loom_bench.jobs import LoadJob, LoadJobResult, TokenizerSpec
+from loom_bench.jobs import (
+    EvalJob,
+    EvalJobResult,
+    EvalTaskResult,
+    LoadJob,
+    LoadJobResult,
+    TokenizerSpec,
+)
 from loom_bench.prices import load_prices
 from loom_bench.providers.aws_ec2 import (
     AwsEc2Provider,
@@ -21,6 +28,10 @@ from loom_bench.providers.aws_ec2 import (
     spot_hourly_micros,
 )
 from loom_bench.providers.base import Host, HostRequest
+from loom_bench.quality.divergence import ReferenceLogprobs
+from loom_bench.quality.sanity import SanityResult
+from loom_bench.quality.suite import Suite
+from loom_bench.quality.tasks.base import ItemResult
 from loom_bench.records import LoadMode, Market
 from loom_bench.registry import load_registry
 
@@ -328,7 +339,7 @@ async def test_start_engine_cold_reports_stages_and_system(aws: dict[str, Any]) 
     launch = render_launch(load_registry().get("qwen3-8b"))
     ep = await p.start_engine(host, launch, warm=False)
 
-    assert ep.base_url == "http://127.0.0.1:8000"
+    assert ep.base_url == "http://127.0.0.1:8000/v1"
     assert ep.metrics_url == "http://127.0.0.1:8000/metrics"
     assert ep.engine == "vllm"
     assert ep.served_model == "qwen3-8b"
@@ -466,6 +477,94 @@ async def test_run_job_requires_wheel_and_safe_run_id(aws: dict[str, Any], tmp_p
     p.wheel_path = wheel
     with pytest.raises(ValueError, match="run_id"):
         await p.run_job(host, load_job(run_id="../escape"))
+
+
+def eval_job(**kw: Any) -> EvalJob:
+    suite = Suite.model_validate(
+        {
+            "suite": "s",
+            "model": "qwen3-8b",
+            "tasks": [
+                {"name": "json_schema", "kind": "json_schema"},
+                {
+                    "name": "gsm8k",
+                    "kind": "lm_eval",
+                    "params": {"tasks": ["gsm8k"], "metric": "exact_match"},
+                },
+            ],
+            "divergence": {},
+        }
+    )
+    base: dict[str, Any] = {
+        "run_id": "eval-3",
+        "suite": suite,
+        "base_url": "http://127.0.0.1:8000/v1",
+        "served_model": "qwen3-8b",
+        "divergence": "capture",
+    }
+    return EvalJob(**{**base, **kw})
+
+
+async def test_run_eval_round_trip_through_s3(aws: dict[str, Any], tmp_path: Path) -> None:
+    wheel = tmp_path / "loom_bench-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"wheel-bytes")
+    s3 = aws["s3"]
+    job = eval_job()
+    result = EvalJobResult(
+        run_id="eval-3",
+        suite="s",
+        model="qwen3-8b",
+        tasks={
+            "json_schema": EvalTaskResult(
+                kind="json_schema",
+                version="1",
+                items=[ItemResult(item_id="a", score=1.0, content_hash="h")],
+                seconds=2.0,
+            )
+        },
+        sanity=SanityResult(n=1, counts={"empty": 0}),
+        reference=ReferenceLogprobs(model="qwen3-8b", top_k=5, max_new_tokens=64, prompts=[]),
+        started_at="2026-10-04T00:00:00+00:00",
+        finished_at="2026-10-04T00:01:00+00:00",
+    )
+    prefix = "runs/exp-1/eval-3/"
+
+    def host_side(script: str) -> list[dict[str, Any]]:
+        s3.put_object(
+            Bucket="loom-bench-test", Key=prefix + "result.json", Body=result.model_dump_json()
+        )
+        return [{"Status": "Success", "StandardOutputContent": "loom-job-done\n"}]
+
+    ssm = FakeSsm(host_side)
+    p = provider(aws, ssm=ssm, wheel_path=wheel)
+    host = await p.provision(request())
+    got = await p.run_eval(host, job)
+
+    assert got == result
+    stored = s3.get_object(Bucket="loom-bench-test", Key=prefix + "job.json")["Body"].read()
+    assert EvalJob.model_validate_json(stored) == job
+    script = ssm.scripts[0]
+    assert "BENCH_CMD=(quality job)" in script
+    assert "PIP_EXTRAS=lmeval" in script
+    assert "SAMPLE_GPU=0" in script and "GPU_CSV_URL=''" in script
+    for var in ("JOB_URL", "WHEEL_URL", "RESULT_URL"):
+        m = re.search(rf"^{var}='(https://[^']+)'$", script, re.MULTILINE)
+        assert m and "Signature" in m.group(1), var
+    assert ssm.sent[0]["Parameters"]["executionTimeout"] == [str(7200 + 900)]
+    assert ssm.sent[0]["Comment"] == "loom eval eval-3"
+
+
+async def test_run_eval_without_harness_tasks_skips_the_lmeval_extra(
+    aws: dict[str, Any], tmp_path: Path
+) -> None:
+    wheel = tmp_path / "w.whl"
+    wheel.write_bytes(b"x")
+    p = provider(aws, ssm=FakeSsm(), wheel_path=wheel)
+    host = await p.provision(request())
+    _, script = p._stage_eval(host, eval_job(tasks=["json_schema"]))
+    assert "PIP_EXTRAS=''" in script
+    with pytest.raises(ValueError, match="run_id"):
+        p._stage_eval(host, eval_job(run_id="../x"))
 
 
 def test_load_settings_yaml_then_env(tmp_path: Path) -> None:

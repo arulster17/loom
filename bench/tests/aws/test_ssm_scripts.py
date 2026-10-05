@@ -47,6 +47,8 @@ JOB_VARS: dict[str, Any] = {
     "WHEEL_URL": "https://b.s3.amazonaws.com/w.whl?sig=1",
     "WHEEL_NAME": "loom_bench-0.1.0-py3-none-any.whl",
     "WHEEL_SHA256": "c" * 64,
+    "PIP_EXTRAS": "",
+    "BENCH_CMD": ["job", "run"],
     "RESULT_URL": "https://b.s3.amazonaws.com/result.json?sig=2",
     "GPU_CSV_URL": "",
     "SAMPLE_GPU": 0,
@@ -118,8 +120,25 @@ def test_job_script_gpu_sampling_and_isolation() -> None:
         "power.draw \\\n    --format=csv,noheader,nounits -lms 1000"
     ) in script
     assert '--network host --user "$CLIENT_UID:$CLIENT_UID"' in script
-    assert "/env/bin/bench job run --in /work/job.json --out /work/result.json" in script
+    assert '/env/bin/bench "${BENCH_CMD[@]}" --in /work/job.json --out /work/result.json' in script
+    assert "BENCH_CMD=(job run)" in script
+    assert '--volume "$ENV_DIR:/env:ro"' in script
     assert "JOB_URL='https://b.s3.amazonaws.com/runs/e/r1/job.json?X-Amz-Signature=1&b=2'" in script
+
+
+@needs_bash
+def test_job_script_installs_extras_into_their_own_env(tmp_path: Any) -> None:
+    script = render_script(
+        "run_job", **{**JOB_VARS, "PIP_EXTRAS": "lmeval", "BENCH_CMD": ["quality", "job"]}
+    )
+    assert "BENCH_CMD=(quality job)" in script
+    header = script.split("\n\n", 1)[0]
+    probe = 'printf "%s|%s" "$ENV_ROOT/$WHEEL_SHA256${PIP_EXTRAS:+-$PIP_EXTRAS}" "${BENCH_CMD[*]}"'
+    out = subprocess.run(
+        [BASH, "-c", header + "\n" + probe], capture_output=True, text=True, check=True
+    ).stdout
+    assert out == f"/var/lib/loom/clientenv/{'c' * 64}-lmeval|quality job"
+    assert '--no-cache-dir "/work/$1${2:+[$2]}"' in script
 
 
 def test_user_data_arms_ttl_shutdown() -> None:

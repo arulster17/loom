@@ -33,7 +33,7 @@ from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from loom_bench.engines import docker_run_argv
-from loom_bench.jobs import LoadJob, LoadJobResult
+from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult
 from loom_bench.money import MICROS_PER_USD, Micros
 from loom_bench.prices import HOURS_PER_MONTH, PriceBook, load_prices
 from loom_bench.providers import aws_reaper
@@ -69,8 +69,12 @@ CLIENT_ENV_ROOT = "/var/lib/loom/clientenv"
 CLIENT_UID = 10001
 # Weight download allowance on top of the engine's ready timeout (Llama 70B is ~141 GB).
 DOWNLOAD_ALLOWANCE_S = 3600
-# Run-time allowance for a LoadJob on top of its own time budget (wheel install, drain).
+# Run-time allowance for a job on top of its own time budget (wheel install, drain).
 JOB_ALLOWANCE_S = 900
+LOAD_JOB_CMD = ("job", "run")
+EVAL_JOB_CMD = ("quality", "job")
+# Package extra the eval client needs when a job runs lm-evaluation-harness tasks.
+LMEVAL_EXTRA = "lmeval"
 BOOT_TIMEOUT_S = 900
 SSM_ONLINE_TIMEOUT_S = 900
 CAPACITY_ERRORS = frozenset(
@@ -548,7 +552,7 @@ class AwsEc2Provider:
             info["gpus"] = [g.strip() for g in str(info["gpus"]).split(",") if g.strip()]
         base = f"http://127.0.0.1:{launch.port}"
         return Endpoint(
-            base_url=base,
+            base_url=f"{base}/v1",
             metrics_url=f"{base}/metrics",
             engine=launch.engine,
             served_model=launch.served_model,
@@ -587,22 +591,31 @@ class AwsEc2Provider:
             raise ValueError(f"run_id must match {_SAFE_ID}")
         return f"runs/{host.request.tags[EXPERIMENT_TAG]}/{run_id}/"
 
-    def _stage_job(self, host: Host, job: LoadJob) -> tuple[str, str]:
-        """Upload job.json and the wheel; return (key prefix, rendered script)."""
+    def _stage(
+        self,
+        host: Host,
+        run_id: str,
+        body: str,
+        *,
+        command: tuple[str, ...],
+        extras: str = "",
+        sample_gpu: bool = False,
+    ) -> tuple[str, str]:
+        """Upload the job JSON and the wheel; return (key prefix, rendered script)."""
         if self.wheel_path is None:
             raise ValueError("no bench wheel: set AwsSettings.wheel_path or pass wheel_path")
         wheel = Path(self.wheel_path)
-        prefix = self.job_prefix(host, job.run_id)
+        prefix = self.job_prefix(host, run_id)
         self.s3.put_object(
             Bucket=self.settings.bucket,
             Key=prefix + "job.json",
-            Body=job.model_dump_json().encode(),
+            Body=body.encode(),
             ContentType="application/json",
         )
         self.s3.upload_file(str(wheel), self.settings.bucket, prefix + wheel.name)
         script = render_script(
             "run_job",
-            WORK_DIR=f"{JOBS_DIR}/{job.run_id}",
+            WORK_DIR=f"{JOBS_DIR}/{run_id}",
             ENV_ROOT=CLIENT_ENV_ROOT,
             CLIENT_IMAGE=self.settings.client_image,
             CLIENT_UID=CLIENT_UID,
@@ -610,11 +623,33 @@ class AwsEc2Provider:
             WHEEL_URL=self._presign("get_object", prefix + wheel.name),
             WHEEL_NAME=wheel.name,
             WHEEL_SHA256=hashlib.sha256(wheel.read_bytes()).hexdigest(),
+            PIP_EXTRAS=extras,
+            BENCH_CMD=command,
             RESULT_URL=self._presign("put_object", prefix + "result.json"),
-            GPU_CSV_URL=self._presign("put_object", prefix + "gpu.csv") if job.sample_gpu else "",
-            SAMPLE_GPU=int(job.sample_gpu),
+            GPU_CSV_URL=self._presign("put_object", prefix + "gpu.csv") if sample_gpu else "",
+            SAMPLE_GPU=int(sample_gpu),
         )
         return prefix, script
+
+    def _stage_job(self, host: Host, job: LoadJob) -> tuple[str, str]:
+        return self._stage(
+            host,
+            job.run_id,
+            job.model_dump_json(),
+            command=LOAD_JOB_CMD,
+            sample_gpu=job.sample_gpu,
+        )
+
+    def _stage_eval(self, host: Host, job: EvalJob) -> tuple[str, str]:
+        selected = [t for t in job.suite.tasks if job.tasks is None or t.name in job.tasks]
+        lmeval = any(t.kind == "lm_eval" for t in selected)
+        return self._stage(
+            host,
+            job.run_id,
+            job.model_dump_json(),
+            command=EVAL_JOB_CMD,
+            extras=LMEVAL_EXTRA if lmeval else "",
+        )
 
     def _fetch_result(self, prefix: str, job: LoadJob) -> LoadJobResult:
         body = self.s3.get_object(Bucket=self.settings.bucket, Key=prefix + "result.json")["Body"]
@@ -633,6 +668,22 @@ class AwsEc2Provider:
             comment=f"loom job {job.run_id}",
         )
         return await asyncio.to_thread(self._fetch_result, prefix, job)
+
+    def _fetch_eval_result(self, prefix: str) -> EvalJobResult:
+        body = self.s3.get_object(Bucket=self.settings.bucket, Key=prefix + "result.json")["Body"]
+        return EvalJobResult.model_validate_json(body.read())
+
+    async def run_eval(self, host: Host, job: EvalJob) -> EvalJobResult:
+        """Run the eval in the client container on the host, where the engine listens.
+        Bounded by `job_timeout_s` like a request-count load job."""
+        prefix, script = await asyncio.to_thread(self._stage_eval, host, job)
+        await self._run(
+            host,
+            script,
+            timeout_s=self.settings.job_timeout_s + JOB_ALLOWANCE_S,
+            comment=f"loom eval {job.run_id}",
+        )
+        return await asyncio.to_thread(self._fetch_eval_result, prefix)
 
     # -- teardown ------------------------------------------------------------------
 

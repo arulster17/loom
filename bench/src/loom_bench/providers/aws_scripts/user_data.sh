@@ -13,8 +13,9 @@ if [ "$remaining_min" -lt 1 ]; then
 fi
 shutdown -h "+$remaining_min"
 
-# The load-generator container uses host networking, so the IMDS hop limit does
-# not stop it; deny its uid the metadata service (and with it the instance role).
+# The client container (load and eval jobs) uses host networking, so the IMDS hop
+# limit does not stop it; deny its uid the metadata service (and with it the
+# instance role). Eval jobs may run model-written code under this uid.
 iptables -I OUTPUT -d 169.254.169.254 -m owner --uid-owner "$CLIENT_UID" -j REJECT
 
 stage user_data_done
