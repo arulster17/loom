@@ -284,12 +284,12 @@ class _Executor:
         host = await self.provider.provision(_host_request(self.exp, cell, self.experiment_id))
         self.live[host.host_id] = host
         self.guard.add_host(host)
-        if is_billable(host.provider) or host.provider == "mock":
+        if host.provider in RESOURCE_TYPES:  # local endpoints are not ours to reap
             with session_scope(self.ctx.db_url) as s:
                 repo.record_resource(
                     s,
                     provider=host.provider,
-                    resource_type=RESOURCE_TYPES.get(host.provider, "host"),
+                    resource_type=RESOURCE_TYPES[host.provider],
                     resource_id=host.host_id,
                     region=host.request.region,
                     experiment_id=self.experiment_id,

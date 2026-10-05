@@ -15,8 +15,6 @@ if TYPE_CHECKING:
     from loom_bench.prices import PriceBook
     from loom_bench.providers.base import Provider
 
-PROVIDER_KINDS = ("mock", "local", "aws_ec2")
-
 
 def build_wheel(out_dir: Path) -> Path:
     """Build the loom-bench wheel that GPU hosts install to run `bench job run`."""
