@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -19,7 +20,9 @@ from loom_bench.jobs import (
 )
 from loom_bench.prices import load_prices
 from loom_bench.provenance import PriceBasis
+from loom_bench.providers import export_requirements
 from loom_bench.providers.aws_ec2 import (
+    CLIENT_IMAGE,
     AwsEc2Provider,
     AwsSettings,
     HostLost,
@@ -74,8 +77,13 @@ def aws(moto_aws: None) -> dict[str, Any]:
     return {"ec2": ec2, "ssm": ssm, "s3": s3, "settings": settings, "subnets": subnets}
 
 
+def locked(extra: str) -> str:
+    """Stands in for `export_requirements` (a `uv export` of uv.lock)."""
+    return f"pkg-{extra or 'base'}==1.0 --hash=sha256:{'0' * 64}\n"
+
+
 def provider(aws: dict[str, Any], **kw: Any) -> AwsEc2Provider:
-    clients = {"ec2": aws["ec2"], "ssm": aws["ssm"], "s3": aws["s3"], **kw}
+    clients = {"ec2": aws["ec2"], "ssm": aws["ssm"], "s3": aws["s3"], "requirements": locked, **kw}
     if isinstance(clients["ssm"], FakeSsm):
         clients["ssm"].params = aws["ssm"]
     return AwsEc2Provider(aws["settings"], prices=load_prices(), sleep=no_sleep, **clients)
@@ -478,13 +486,18 @@ async def test_run_job_round_trip_through_s3(aws: dict[str, Any], tmp_path: Path
         == b"wheel-bytes"
     )
 
+    reqs = s3.get_object(Bucket="loom-bench-test", Key=prefix + "requirements.txt")["Body"]
+    assert reqs.read().decode() == locked("")
+
     script = ssm.scripts[0]
-    for var in ("JOB_URL", "WHEEL_URL", "RESULT_URL", "GPU_CSV_URL"):
+    for var in ("JOB_URL", "WHEEL_URL", "REQS_URL", "RESULT_URL", "GPU_CSV_URL"):
         m = re.search(rf"^{var}='(https://[^']+)'$", script, re.MULTILINE)
         assert m, var
         assert "Signature" in m.group(1)
     assert "SAMPLE_GPU=1" in script
     assert "WHEEL_SHA256=" in script
+    assert f"REQS_SHA256={hashlib.sha256(locked('').encode()).hexdigest()}" in script
+    assert f"CLIENT_IMAGE={aws['settings'].client_image}" in script
     assert ssm.sent[0]["Parameters"]["executionTimeout"] == [str(60 + 600 + 60 + 900)]
 
 
@@ -643,7 +656,8 @@ async def test_run_eval_round_trip_through_s3(aws: dict[str, Any], tmp_path: Pat
     assert EvalJob.model_validate_json(stored) == job
     script = ssm.scripts[0]
     assert "BENCH_CMD=(quality job)" in script
-    assert "PIP_EXTRAS=lmeval" in script
+    reqs = s3.get_object(Bucket="loom-bench-test", Key=prefix + "requirements.txt")["Body"]
+    assert reqs.read().decode() == locked("lmeval")  # harness tasks: the lmeval extra
     assert "SAMPLE_GPU=0" in script and "GPU_CSV_URL=''" in script
     for var in ("JOB_URL", "WHEEL_URL", "RESULT_URL"):
         m = re.search(rf"^{var}='(https://[^']+)'$", script, re.MULTILINE)
@@ -659,8 +673,9 @@ async def test_run_eval_without_harness_tasks_skips_the_lmeval_extra(
     wheel.write_bytes(b"x")
     p = provider(aws, ssm=FakeSsm(), wheel_path=wheel)
     host = await p.provision(request())
-    _, script = p._stage_eval(host, eval_job(tasks=["json_schema"]))
-    assert "PIP_EXTRAS=''" in script
+    prefix, script = p._stage_eval(host, eval_job(tasks=["json_schema"]))
+    reqs = aws["s3"].get_object(Bucket="loom-bench-test", Key=prefix + "requirements.txt")
+    assert reqs["Body"].read().decode() == locked("")
     assert "MODEL_CACHE_DIR=''" in script
     with pytest.raises(ValueError, match="run_id"):
         p._stage_eval(host, eval_job(run_id="../x"))
@@ -709,3 +724,57 @@ def test_load_settings_yaml_then_env(tmp_path: Path) -> None:
     assert s.region == "us-east-1"
     with pytest.raises(ValueError):
         load_aws_settings(env={**env, "LOOM_AWS_SPOT_PRICE_MULTIPLIER": "0.9"})
+
+
+@pytest.mark.parametrize(
+    "image",
+    ["python:3.12-slim", "python:3.12-slim@sha256:abc", "python@sha256:" + "A" * 64],
+)
+def test_settings_reject_an_unpinned_client_image(tmp_path: Path, image: str) -> None:
+    cfg = tmp_path / "aws.yaml"
+    cfg.write_text(
+        "bucket: b-1\ninstance_profile_name: p\nsecurity_group_id: sg-0abc\n"
+        "subnet_ids: [subnet-0a]\nhf_token_secret_name: loom/hf\nowner: arul\n"
+    )
+    env = {"LOOM_AWS_CONFIG": str(cfg)}
+    assert load_aws_settings(env=env).client_image == CLIENT_IMAGE
+    with pytest.raises(ValueError, match="client_image"):
+        load_aws_settings(env={**env, "LOOM_AWS_CLIENT_IMAGE": image})
+
+
+async def test_requirements_are_exported_once_per_extra(
+    aws: dict[str, Any], tmp_path: Path
+) -> None:
+    wheel = tmp_path / "w.whl"
+    wheel.write_bytes(b"x")
+    exported: list[str] = []
+
+    def export(extra: str) -> str:
+        exported.append(extra)
+        return locked(extra)
+
+    p = provider(aws, ssm=FakeSsm(), wheel_path=wheel, requirements=export)
+    host = await p.provision(request())
+    for run_id in ("a", "b"):
+        p._stage_job(host, load_job(run_id=run_id))
+    p._stage_eval(host, eval_job())
+    p._stage_eval(host, eval_job(run_id="eval-4"))
+    assert exported == ["", "lmeval"]
+
+
+def requirement_blocks(text: str) -> dict[str, str]:
+    """`name==version` -> its block (the pin line and its hash lines)."""
+    blocks = re.split(r"\n(?=[A-Za-z0-9])", text)
+    return {b.split(" ", 1)[0]: b for b in blocks if "==" in b.split("\n", 1)[0]}
+
+
+def test_exported_requirements_are_the_locked_hash_pinned_set() -> None:
+    base, lmeval = export_requirements(""), export_requirements("lmeval")
+    for text in (base, lmeval):
+        blocks = requirement_blocks(text)
+        assert blocks and all("--hash=sha256:" in b for b in blocks.values())
+        assert not any(pin.startswith(("loom-bench==", "loom_bench==")) for pin in blocks)
+    base_names = {pin.split("==")[0] for pin in requirement_blocks(base)}
+    lmeval_names = {pin.split("==")[0] for pin in requirement_blocks(lmeval)}
+    assert {"pydantic", "httpx", "numpy"} <= base_names < lmeval_names
+    assert "lm-eval" in lmeval_names and "lm-eval" not in base_names

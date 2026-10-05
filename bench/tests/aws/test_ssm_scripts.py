@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from loom_bench.providers.aws_ec2 import CLIENT_IMAGE
 from loom_bench.providers.aws_ssm import (
     SsmCommandError,
     parse_markers,
@@ -41,13 +42,14 @@ START_VARS: dict[str, Any] = {
 JOB_VARS: dict[str, Any] = {
     "WORK_DIR": "/var/lib/loom/jobs/r1",
     "ENV_ROOT": "/var/lib/loom/clientenv",
-    "CLIENT_IMAGE": "python:3.12-slim",
+    "CLIENT_IMAGE": CLIENT_IMAGE,
     "CLIENT_UID": 10001,
     "JOB_URL": "https://b.s3.amazonaws.com/runs/e/r1/job.json?X-Amz-Signature=1&b=2",
     "WHEEL_URL": "https://b.s3.amazonaws.com/w.whl?sig=1",
     "WHEEL_NAME": "loom_bench-0.1.0-py3-none-any.whl",
     "WHEEL_SHA256": "c" * 64,
-    "PIP_EXTRAS": "",
+    "REQS_URL": "https://b.s3.amazonaws.com/requirements.txt?sig=3",
+    "REQS_SHA256": "d" * 64,
     "BENCH_CMD": ["job", "run"],
     "RESULT_URL": "https://b.s3.amazonaws.com/result.json?sig=2",
     "GPU_CSV_URL": "",
@@ -130,18 +132,31 @@ def test_job_script_gpu_sampling_and_isolation() -> None:
 
 
 @needs_bash
-def test_job_script_installs_extras_into_their_own_env(tmp_path: Any) -> None:
-    script = render_script(
-        "run_job", **{**JOB_VARS, "PIP_EXTRAS": "lmeval", "BENCH_CMD": ["quality", "job"]}
-    )
+def test_job_script_installs_only_locked_hash_pinned_dependencies(tmp_path: Any) -> None:
+    script = render_script("run_job", **{**JOB_VARS, "BENCH_CMD": ["quality", "job"]})
     assert "BENCH_CMD=(quality job)" in script
     header = script.split("\n\n", 1)[0]
-    probe = 'printf "%s|%s" "$ENV_ROOT/$WHEEL_SHA256${PIP_EXTRAS:+-$PIP_EXTRAS}" "${BENCH_CMD[*]}"'
+    probe = 'printf "%s|%s" "$ENV_ROOT/$WHEEL_SHA256-$REQS_SHA256" "${BENCH_CMD[*]}"'
     out = subprocess.run(
         [BASH, "-c", header + "\n" + probe], capture_output=True, text=True, check=True
     ).stdout
-    assert out == f"/var/lib/loom/clientenv/{'c' * 64}-lmeval|quality job"
-    assert '--no-cache-dir "/work/$1${2:+[$2]}"' in script
+    # one virtualenv per wheel and requirements file (an extra changes the file)
+    assert out == f"/var/lib/loom/clientenv/{'c' * 64}-{'d' * 64}|quality job"
+    assert 'echo "$REQS_SHA256  $WORK_DIR/requirements.txt" | sha256sum --check' in script
+    assert "--require-hashes --no-deps -r /work/requirements.txt" in script
+    assert '--no-cache-dir --no-deps "/work/$1"' in script
+    assert "/env/bin/pip check" in script
+    assert "PIP_EXTRAS" not in script
+
+
+@needs_bash
+def test_job_installs_the_env_in_the_pinned_image(tmp_path: Any) -> None:
+    proc, calls = run_job_on_stubbed_host(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    install, _ = calls
+    assert f"|{CLIENT_IMAGE}|sh|-c|python -m venv /env && " in install
+    assert "--require-hashes --no-deps -r /work/requirements.txt && " in install
+    assert install.endswith(f" && /env/bin/pip check|sh|{JOB_VARS['WHEEL_NAME']}|")
 
 
 STUBS = {
@@ -192,7 +207,7 @@ def test_job_mounts_the_model_snapshot_read_only(tmp_path: Any) -> None:
     )
     assert proc.returncode == 0, proc.stderr
     bench = calls[-1]
-    assert f"|--volume|{cache}:{mount}:ro|python:3.12-slim|/env/bin/bench|job|run|" in bench
+    assert f"|--volume|{cache}:{mount}:ro|{CLIENT_IMAGE}|/env/bin/bench|job|run|" in bench
     assert "HF_TOKEN" not in bench
 
 
@@ -216,8 +231,8 @@ def test_job_fails_before_running_without_the_pinned_snapshot(tmp_path: Any) -> 
 def test_job_without_an_hf_tokenizer_mounts_no_model(tmp_path: Any) -> None:
     proc, calls = run_job_on_stubbed_host(tmp_path)
     assert proc.returncode == 0, proc.stderr
-    assert f"|--volume|{tmp_path}/jobs/r1:/work|python:3.12-slim|/env/bin/bench|" in calls[-1]
-    assert ":ro|python" not in calls[-1]
+    assert f"|--volume|{tmp_path}/jobs/r1:/work|{CLIENT_IMAGE}|/env/bin/bench|" in calls[-1]
+    assert f":ro|{CLIENT_IMAGE}" not in calls[-1]
 
 
 def test_user_data_arms_ttl_shutdown() -> None:

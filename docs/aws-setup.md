@@ -136,8 +136,8 @@ Fields (any field can be overridden with `LOOM_AWS_<FIELD>`, e.g.
 | `weights_dir` | | `/opt/dlami/nvme/loom-hf` | HF cache on the instance-store NVMe |
 | `spot_price_multiplier` | | 1.25 | Budget accrual = spot price x this, rounded up |
 | `max_ttl_s` | | 28800 | Longest host lifetime the provider accepts |
-| `wheel_path` | | | Bench wheel installed in the on-host client container |
-| `client_image` | | `python:3.12-slim` | Client container image (load and eval jobs) |
+| `wheel_path` | | | Bench wheel installed in the on-host client container; build it from the checkout you run `bench` in (its dependencies come from that checkout's `uv.lock`) |
+| `client_image` | | `python:3.12.15-slim-trixie` by digest | Client container image (load and eval jobs); must be `repo@sha256:<digest>` |
 | `poll_interval_s` | | 5 | SSM / instance-state polling |
 | `job_timeout_s` | | 7200 | Run-time cap for request-count (no `duration_s`) load jobs and, plus 900 s, for eval jobs |
 | `presign_expiry_s` | | 21600 | Lifetime of job input/output presigned URLs |
@@ -213,13 +213,16 @@ Other rails:
 The engine listens on the host's loopback only (no inbound ports), so everything that
 talks to it runs on the host, in the client container:
 
-- **Load jobs** (`bench job run`): the runner uploads `job.json` and the bench wheel to
+- **Load jobs** (`bench job run`): the runner uploads `job.json`, the bench wheel and
+  `requirements.txt` (its dependencies exported from `uv.lock`, hash-pinned) to
   `s3://<bucket>/runs/<experiment>/<run id>/`, sends `run_job.sh` over SSM with presigned
-  GET/PUT URLs, and reads `result.json` (and `gpu.csv`) back.
+  GET/PUT URLs, and reads `result.json` (and `gpu.csv`) back. The host installs the
+  requirements with `pip --require-hashes --no-deps`, then the wheel, into a virtualenv
+  cached per wheel and requirements file.
 - **Eval jobs** (`bench quality job`): the same path and script with the eval
   subcommand. The job carries the resolved suite, its task subset, the divergence mode
   and, for candidates, the baseline's captured reference. Jobs with lm-eval tasks install
-  `loom-bench[lmeval]` (lm-eval, torch, transformers) into a separate cached virtualenv on
+  the `lmeval` extra's locked requirements (lm-eval, torch, transformers) into a separate cached virtualenv on
   first use, about 5 minutes once per host; datasets come from the Hugging Face Hub inside
   the container.
 - **Tokenizers.** The client container has no Hugging Face token. Instead, the model's

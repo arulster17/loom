@@ -35,9 +35,10 @@ no customer data: prompts are synthetic or come from public datasets.
   the hop limit does not apply to it; it runs as uid 10001, and user-data adds
   `iptables -I OUTPUT -d 169.254.169.254 -m owner --uid-owner 10001 -j REJECT`. The
   engine start script refuses to run until user-data has finished.
-- **Load-generator container**: `python:3.12-slim`, non-root (uid 10001), the bench wheel
-  verified by sha256 before install and mounted read-only, inputs and outputs only
-  through presigned URLs.
+- **Load-generator container**: `python:3.12.15-slim-trixie` pinned by digest
+  (`AwsSettings.client_image`, which rejects a tag), non-root (uid 10001), the bench wheel
+  and its requirements verified by sha256 before install, the virtualenv mounted
+  read-only, inputs and outputs only through presigned URLs.
 - **Lifetime**: every instance schedules its own shutdown at its TTL with shutdown
   behaviour `terminate`; the root volume is encrypted and deleted on termination.
 - **Shell rendering**: `providers/aws_ssm.render_script` passes every value as a
@@ -110,10 +111,24 @@ egress and no credentials.
   `hf.trust_remote_code_review: {reviewer, date, notes}` in `config/models.yaml`;
   `--trust-remote-code` is rendered only from that field and cannot be passed through
   `engine.args`.
-- Not pinned today: the load-generator image (`python:3.12-slim`, a tag), the bench
-  wheel's dependencies (installed on the host from PyPI by `pip`, not from `uv.lock`), the
-  DLAMI (latest via its SSM parameter), lm-eval datasets (guarded by per-item content
-  hashes instead) and the tokenizer of the wrapped `vllm bench` / `sglang` tools.
+- **Load-generator image**: `client_image` must be `repo@sha256:<64 hex>`. The default is
+  `python@sha256:02108f5d…155d`, the multi-arch index of `python:3.12.15-slim-trixie`
+  (also tagged `3.12-slim`), read from the Docker Hub registry API
+  (`registry-1.docker.io/v2/library/python/manifests/3.12.15-slim-trixie`,
+  `Docker-Content-Digest`) on 2026-10-05.
+- **Client dependencies**: the runner exports `uv.lock` for loom-bench (plus the `lmeval`
+  extra for harness evals) with `uv export --frozen --no-dev --no-emit-workspace
+  --package loom-bench --format requirements-txt` (`providers.export_requirements`) and
+  uploads it with the wheel. The host installs it with `pip install --require-hashes
+  --no-deps`, so every package is the locked version with a locked hash and nothing is
+  resolved from PyPI; the wheel follows with `--no-deps`, and `pip check` fails the job if
+  the wheel's requirements and the lock disagree (a `wheel_path` built from another
+  commit). Three lm-eval dependencies (`rouge-score`, `sqlitedict`, `word2number`) ship
+  only as source; their sdists are hash-checked, but pip builds them with an isolated,
+  unpinned setuptools.
+- Not pinned today: the DLAMI (latest via its SSM parameter), lm-eval datasets (guarded
+  by per-item content hashes instead) and the tokenizer of the wrapped `vllm bench` /
+  `sglang` tools.
 
 ## Competitor APIs
 

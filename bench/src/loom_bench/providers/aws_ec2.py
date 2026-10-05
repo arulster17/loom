@@ -39,7 +39,7 @@ from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult, Toke
 from loom_bench.money import MICROS_PER_USD, Micros
 from loom_bench.prices import HOURS_PER_MONTH, PriceBook, load_prices
 from loom_bench.provenance import PriceBasis
-from loom_bench.providers import aws_reaper
+from loom_bench.providers import aws_reaper, export_requirements
 from loom_bench.providers.aws_ssm import parse_markers, render_script, run_script, stage_offsets
 from loom_bench.providers.base import (
     Endpoint,
@@ -50,7 +50,7 @@ from loom_bench.providers.base import (
     SpotInterrupted,
 )
 from loom_bench.records import Market
-from loom_bench.registry import read_yaml
+from loom_bench.registry import PinnedImage, read_yaml
 from loom_bench.tokenize import hf_cache_folder
 
 PROVIDER_NAME = "aws_ec2"
@@ -81,6 +81,10 @@ LOAD_JOB_CMD = ("job", "run")
 EVAL_JOB_CMD = ("quality", "job")
 # Package extra the eval client needs when a job runs lm-evaluation-harness tasks.
 LMEVAL_EXTRA = "lmeval"
+# Client container image, pinned by digest: python:3.12.15-slim-trixie (also tagged
+# 3.12-slim), the multi-arch image index. Docker-Content-Digest of
+# registry-1.docker.io/v2/library/python/manifests/3.12.15-slim-trixie, read 2026-10-05.
+CLIENT_IMAGE = "python@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d"
 BOOT_TIMEOUT_S = 900
 SSM_ONLINE_TIMEOUT_S = 900
 CAPACITY_ERRORS = frozenset(
@@ -134,7 +138,7 @@ class AwsSettings(BaseModel):
     spot_price_multiplier: Annotated[Decimal, Field(ge=1)] = Decimal("1.25")
     max_ttl_s: Annotated[int, Field(gt=0)] = 8 * 3600
     wheel_path: Path | None = None
-    client_image: str = "python:3.12-slim"
+    client_image: PinnedImage = CLIENT_IMAGE  # repo@sha256:<digest>; tags are rejected
     poll_interval_s: Annotated[float, Field(gt=0)] = 5.0
     job_timeout_s: Annotated[int, Field(gt=0)] = 7200
     presign_expiry_s: Annotated[int, Field(gt=0, le=7 * 24 * 3600)] = 6 * 3600
@@ -213,6 +217,7 @@ class AwsEc2Provider:
         ssm: Any = None,
         s3: Any = None,
         wheel_path: Path | None = None,
+        requirements: Callable[[str], str] = export_requirements,
         clock: Callable[[], datetime] = utcnow,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -222,6 +227,8 @@ class AwsEc2Provider:
         self.ssm = ssm or boto3.client("ssm", region_name=settings.region)
         self.s3 = s3 or boto3.client("s3", region_name=settings.region)
         self.wheel_path = wheel_path or settings.wheel_path
+        self.requirements = requirements
+        self._requirements: dict[str, str] = {}  # extra -> exported requirements.txt
         self.clock = clock
         self.sleep = sleep
 
@@ -648,16 +655,26 @@ class AwsEc2Provider:
         extras: str = "",
         sample_gpu: bool = False,
     ) -> tuple[str, str]:
-        """Upload the job JSON and the wheel; return (key prefix, rendered script)."""
+        """Upload the job JSON, the wheel and its locked requirements; return (key prefix,
+        rendered script)."""
         if self.wheel_path is None:
             raise ValueError("no bench wheel: set AwsSettings.wheel_path or pass wheel_path")
         wheel = Path(self.wheel_path)
         prefix = self.job_prefix(host, run_id)
+        if extras not in self._requirements:
+            self._requirements[extras] = self.requirements(extras)
+        reqs = self._requirements[extras].encode()
         self.s3.put_object(
             Bucket=self.settings.bucket,
             Key=prefix + "job.json",
             Body=body.encode(),
             ContentType="application/json",
+        )
+        self.s3.put_object(
+            Bucket=self.settings.bucket,
+            Key=prefix + "requirements.txt",
+            Body=reqs,
+            ContentType="text/plain",
         )
         self.s3.upload_file(str(wheel), self.settings.bucket, prefix + wheel.name)
         script = render_script(
@@ -670,7 +687,8 @@ class AwsEc2Provider:
             WHEEL_URL=self._presign("get_object", prefix + wheel.name),
             WHEEL_NAME=wheel.name,
             WHEEL_SHA256=hashlib.sha256(wheel.read_bytes()).hexdigest(),
-            PIP_EXTRAS=extras,
+            REQS_URL=self._presign("get_object", prefix + "requirements.txt"),
+            REQS_SHA256=hashlib.sha256(reqs).hexdigest(),
             BENCH_CMD=command,
             RESULT_URL=self._presign("put_object", prefix + "result.json"),
             GPU_CSV_URL=self._presign("put_object", prefix + "gpu.csv") if sample_gpu else "",

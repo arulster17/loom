@@ -33,6 +33,28 @@ def build_wheel(out_dir: Path) -> Path:
     return wheels[-1]
 
 
+def export_requirements(extra: str = "") -> str:
+    """The dependencies GPU hosts install next to the wheel: `uv.lock` exported for
+    loom-bench (plus `extra`), every package pinned to its locked version and hashes,
+    loom-bench itself left out. Hosts install it with `pip --require-hashes --no-deps`."""
+    from loom_bench.registry import REPO_ROOT
+
+    cmd = [
+        "uv",
+        "export",
+        "--frozen",
+        "--no-dev",
+        "--no-emit-workspace",
+        "--package",
+        "loom-bench",
+        "--format",
+        "requirements-txt",
+    ]
+    if extra:
+        cmd += ["--extra", extra]
+    return subprocess.run(cmd, cwd=REPO_ROOT, check=True, capture_output=True, text=True).stdout
+
+
 def make_provider(spec: ProviderSpec, *, prices: PriceBook, work_dir: Path) -> Provider:
     if spec.kind == "mock":
         from loom_bench.providers.mock import MockProvider
