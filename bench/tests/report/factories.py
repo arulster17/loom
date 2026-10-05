@@ -101,7 +101,13 @@ def make_runs(
     missing_usage: int = 0,
     engine_args: dict[str, Any] | None = None,
 ) -> list[BenchRun]:
-    config: dict[str, Any] = {"cell": cell_key, "engine": engine, "quantization": quantization}
+    args = engine_args if engine_args is not None else {"max_num_seqs": 256}
+    config: dict[str, Any] = {
+        "cell": cell_key,
+        "engine": engine,
+        "quantization": quantization,
+        "engine_args": args,
+    }
     if hourly_micros is not None:
         config["hourly_micros"] = hourly_micros
     runs = []
@@ -129,7 +135,7 @@ def make_runs(
                     version="0.30.0" if engine == "vllm" else "0.5.21",
                     image=f"example/{engine}@{DIGEST}",
                     image_digest=DIGEST,
-                    args=engine_args if engine_args is not None else {"max_num_seqs": 256},
+                    args=args,
                 ),
                 cuda_version="13.0",
                 driver_version="580.65",
