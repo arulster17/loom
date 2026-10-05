@@ -17,10 +17,10 @@ import math
 from collections.abc import Sequence
 from pathlib import Path
 
+from loom_bench.client.openai_stream import API_PATHS
 from loom_bench.loadgen.arrivals import ConstantArrivals, GammaArrivals, PoissonArrivals
 from loom_bench.loadgen.base import RunResult
 from loom_bench.loadgen.external import (
-    API_PATHS,
     ExternalLoadGenerator,
     ToolRun,
     UnsupportedByTool,
@@ -58,20 +58,20 @@ class VllmBench:
         self.executable = list(executable)
 
     def build_argv(self, run: ToolRun, result_path: Path) -> list[str]:
-        root, prefix = split_base_url(run.base_url)
+        root, prefix = split_base_url(run.job.base_url)
         endpoint = run.profile.endpoint
         argv = [
             *self.executable, "bench", "serve",
             "--backend", _BACKENDS[endpoint],
             "--base-url", root,
             "--endpoint", prefix + API_PATHS[endpoint],
-            "--model", run.model,
+            "--model", run.job.served_model,
         ]  # fmt: skip
-        if run.context.tokenizer:
-            argv += ["--tokenizer", run.context.tokenizer]
+        if run.tokenizer:
+            argv += ["--tokenizer", run.tokenizer]
         argv += [
             "--num-prompts", str(run.num_prompts),
-            "--seed", str(run.context.seed),
+            "--seed", str(run.job.seed),
             "--num-warmups", str(run.warmup_requests),
             *self._load_args(run),
             *self._dataset_args(run),
@@ -79,8 +79,8 @@ class VllmBench:
         if ignore_eos(run.profile):
             argv.append("--ignore-eos")
         argv += ["--temperature", str(float(run.profile.temperature))]
-        if run.context.extra_body:
-            argv += ["--extra-body", json.dumps(dict(run.context.extra_body), sort_keys=True)]
+        if run.job.extra_body:
+            argv += ["--extra-body", json.dumps(dict(run.job.extra_body), sort_keys=True)]
         argv += [
             "--percentile-metrics", "ttft,tpot,itl,e2el",
             "--metric-percentiles", "50,90,95,99",
@@ -99,7 +99,7 @@ class VllmBench:
     def _load_args(self, run: ToolRun) -> list[str]:
         if run.mode is LoadMode.CLOSED_LOOP:
             return ["--request-rate", "inf", "--max-concurrency", str(run.concurrency)]
-        arrival = run.context.arrival
+        arrival = run.ctx.arrival
         match arrival:
             case PoissonArrivals():
                 rate, burstiness = arrival.rate, 1.0

@@ -5,25 +5,21 @@ import sys
 
 import pytest
 from ext_support import (
-    BASE_URL,
-    MODEL,
     TOK,
     TOKENIZER,
     closed_plan,
+    load_context,
     open_plan,
     profile,
     tool_run,
 )
 
-from loom_bench.jobs import LoadJob, TokenizerSpec
-from loom_bench.loadgen.arrivals import GammaArrivals
 from loom_bench.loadgen.base import ClosedLoopPlan
 from loom_bench.loadgen.external import (
     ExternalLoadGenerator,
     ExternalToolError,
     ToolRun,
     UnsupportedByTool,
-    WorkloadContext,
     result_from_arrays,
     run_command,
     split_base_url,
@@ -75,31 +71,16 @@ def test_resolve_rejects_unrepresentable_plans(tmp_path):
 
 def test_resolve_needs_enough_prepared_requests(tmp_path):
     prof = profile("code_completion")
-    ctx = WorkloadContext(profile=prof)
+    ctx = load_context(prof, closed_plan(2, 5, 2), requests=build_requests(prof, TOK, 3))
     with pytest.raises(ValueError, match="need 7 prepared requests, got 3"):
-        ToolRun.resolve(
-            base_url=BASE_URL, model=MODEL, requests=build_requests(prof, TOK, 3),
-            plan=closed_plan(2, 5, 2), context=ctx, workdir=tmp_path,
-        )  # fmt: skip
+        ToolRun.resolve(ctx, tmp_path)
 
 
-def test_context_from_job():
-    job = LoadJob(
-        run_id="r1", base_url=BASE_URL, engine="sglang", served_model=MODEL,
-        loadgen="sglang_bench", workload=profile("synthetic").model_dump(mode="json"),
-        tokenizer=TokenizerSpec(kind="hf", repo=TOKENIZER, revision="abc"),
-        mode=LoadMode.OPEN_LOOP, load_value=2.0,
-        arrival={"kind": "gamma", "rate": 2.0, "burstiness": 0.5}, seed=3,
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-    )  # fmt: skip
-    ctx = WorkloadContext.from_job(job)
-    assert ctx.profile == profile("synthetic")
-    assert ctx.arrival == GammaArrivals(rate=2.0, burstiness=0.5)
-    assert (ctx.seed, ctx.engine, ctx.tokenizer) == (3, "sglang", TOKENIZER)
-    assert ctx.extra_body == {"chat_template_kwargs": {"enable_thinking": False}}
-    simple = job.model_copy(update={"tokenizer": TokenizerSpec(kind="simple"), "arrival": None})
-    assert WorkloadContext.from_job(simple).tokenizer is None
-    assert WorkloadContext.from_job(simple).arrival is None
+def test_tool_loads_the_hf_tokenizer_repo_only(tmp_path):
+    run, _ = tool_run(profile("synthetic"), closed_plan(), tmp_path)
+    assert run.tokenizer == TOKENIZER
+    run, _ = tool_run(profile("synthetic"), closed_plan(), tmp_path, tokenizer=None)
+    assert run.tokenizer is None
 
 
 def test_split_base_url():
@@ -228,18 +209,11 @@ class _EchoTool:
 async def test_generator_runs_tool_under_prefix_in_temporary_workdir(tmp_path):
     tool = _EchoTool()
     gen = ExternalLoadGenerator(tool, command_prefix=[sys.executable], workdir=tmp_path)
-    with pytest.raises(RuntimeError, match="bind"):
-        await gen.run(BASE_URL, [], closed_plan(), request_timeout_s=60, model=MODEL)
-    bound = gen.bind(WorkloadContext(profile=profile("synthetic")))
-    assert bound.command_prefix == [sys.executable] and bound.workdir == tmp_path
-    with pytest.raises(ValueError, match="served model"):
-        await bound.run(BASE_URL, [], closed_plan(), request_timeout_s=60)
-
-    plan = closed_plan(num_requests=1, warmup=0)
-    res = await bound.run(BASE_URL, [], plan, request_timeout_s=60, model=MODEL)
+    ctx = load_context(profile("synthetic"), closed_plan(num_requests=1, warmup=0))
+    res = await gen.run(ctx)
     assert [r.status for r in res.records] == [RequestStatus.OK]
     run, result_path = tool.seen[0]
-    assert run.model == MODEL and run.workdir.parent == tmp_path
+    assert run.ctx is ctx and run.workdir.parent == tmp_path
     assert result_path == run.workdir / "out.json"
     assert not run.workdir.exists()  # run files are removed afterwards
 

@@ -18,8 +18,8 @@ from loom_bench.records import RequestRecord, RequestStatus
 
 Endpoint = Literal["chat", "completions"]
 
-_PATHS: dict[str, str] = {"chat": "/chat/completions", "completions": "/completions"}
-_MAX_ERROR_CHARS = 500
+API_PATHS: dict[Endpoint, str] = {"chat": "/chat/completions", "completions": "/completions"}
+MAX_ERROR_CHARS = 500
 
 
 @dataclass(slots=True)
@@ -83,7 +83,7 @@ async def send(
     headers = {"Accept": "text/event-stream", "Accept-Encoding": "identity"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    url = base_url.rstrip("/") + _PATHS[req.endpoint]
+    url = base_url.rstrip("/") + API_PATHS[req.endpoint]
 
     rec.sent_at_s = time.perf_counter() - t0
     try:
@@ -105,7 +105,7 @@ async def send(
         rec.error = type(e).__name__
     except httpx.HTTPError as e:
         rec.status = RequestStatus.ERROR
-        rec.error = f"{type(e).__name__}: {e}"[:_MAX_ERROR_CHARS]
+        rec.error = f"{type(e).__name__}: {e}"[:MAX_ERROR_CHARS]
     except asyncio.CancelledError:
         if rec.status is not RequestStatus.OK:  # a cancel while closing a finished stream
             rec.status = RequestStatus.ABORTED
@@ -193,7 +193,7 @@ def _error_from_body(body: bytes) -> str:
     try:
         obj = json.loads(body)
     except ValueError:
-        return body.decode("utf-8", errors="replace")[:_MAX_ERROR_CHARS]
+        return body.decode("utf-8", errors="replace")[:MAX_ERROR_CHARS]
     return _error_message(obj)
 
 
@@ -210,4 +210,4 @@ def _error_message(obj: Any) -> str:
             msg = obj["message"]
         elif obj.get("detail"):
             msg = obj["detail"]
-    return str(msg)[:_MAX_ERROR_CHARS]
+    return str(msg)[:MAX_ERROR_CHARS]

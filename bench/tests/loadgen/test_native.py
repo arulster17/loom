@@ -5,15 +5,19 @@ import pytest
 from fake_server import BASE_URL, FakeServer
 
 from loom_bench.client.openai_stream import PreparedRequest
+from loom_bench.jobs import LoadJob, TokenizerSpec
 from loom_bench.loadgen.arrivals import constant
 from loom_bench.loadgen.base import (
     LOAD_GENERATORS,
     ClosedLoopPlan,
+    LoadContext,
     OpenLoopPlan,
     get_load_generator,
 )
 from loom_bench.loadgen.native import NativeLoadGenerator, run_closed_loop, run_open_loop
 from loom_bench.records import LoadMode, RequestStatus
+from loom_bench.tokenize import SimpleTokenizer
+from loom_bench.workloads import parse_profile
 
 
 def make_requests(n):
@@ -21,6 +25,32 @@ def make_requests(n):
         PreparedRequest(f"r{i}", "chat", {"messages": [], "max_tokens": 4}, 10, 4, {"i": i})
         for i in range(n)
     ]
+
+
+def load_context(requests, plan):
+    profile = parse_profile(
+        {
+            "name": "p",
+            "description": "d",
+            "content": "synthetic",
+            "kind": "synthetic",
+            "input_len": 8,
+            "output_len": 4,
+        }
+    )
+    open_loop = isinstance(plan, OpenLoopPlan)
+    job = LoadJob(
+        run_id="r",
+        base_url=BASE_URL,
+        engine="mock",
+        served_model="m",
+        workload=profile.model_dump(mode="json"),
+        tokenizer=TokenizerSpec(kind="simple"),
+        mode=LoadMode.OPEN_LOOP if open_loop else LoadMode.CLOSED_LOOP,
+        load_value=plan.load_value if open_loop else plan.concurrency,
+        request_timeout_s=5,
+    )
+    return LoadContext(job, profile, None, plan, requests, SimpleTokenizer())
 
 
 async def open_loop(server, arrivals, **kw):
@@ -157,12 +187,13 @@ async def test_registry_and_protocol_dispatch():
     with pytest.raises(KeyError, match="known: native"):
         get_load_generator("nope")
 
-    gen = NativeLoadGenerator(transport=FakeServer(tokens=2).transport())
+    server = FakeServer(tokens=2)
+    gen = NativeLoadGenerator(transport=server.transport())
     plan = OpenLoopPlan(constant(50.0, 0.1), 0.1, 0.0, 10, 1.0, load_value=50.0)
-    res = await gen.run(BASE_URL, make_requests(5), plan, request_timeout_s=5)
+    res = await gen.run(load_context(make_requests(5), plan))
     assert res.mode is LoadMode.OPEN_LOOP and res.load_value == 50.0 and len(res.records) == 5
+    assert all(b["model"] == "m" for b in server.bodies)
     res = await gen.run(
-        BASE_URL, make_requests(4), ClosedLoopPlan(concurrency=2, num_requests=4),
-        request_timeout_s=5,
-    )  # fmt: skip
+        load_context(make_requests(4), ClosedLoopPlan(concurrency=2, num_requests=4))
+    )
     assert res.mode is LoadMode.CLOSED_LOOP and len(res.records) == 4

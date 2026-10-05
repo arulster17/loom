@@ -15,7 +15,7 @@ import httpx
 import numpy as np
 
 from loom_bench.client.openai_stream import PreparedRequest, new_record, send
-from loom_bench.loadgen.base import LoadPlan, OpenLoopPlan, RunResult
+from loom_bench.loadgen.base import LoadContext, OpenLoopPlan, RunResult
 from loom_bench.records import LoadMode, RequestRecord
 
 
@@ -43,7 +43,6 @@ async def run_open_loop(
     max_inflight: int,
     drain_timeout_s: float,
     request_timeout_s: float,
-    api_key: str | None = None,
     model: str | None = None,
     keep_output: bool = False,
     load_value: float | None = None,
@@ -99,7 +98,6 @@ async def run_open_loop(
                     requests[i],
                     t0,
                     timeout_s=request_timeout_s,
-                    api_key=api_key,
                     keep_output=keep_output,
                     model=model,
                     record=rec,
@@ -139,7 +137,6 @@ async def run_closed_loop(
     duration_s: float | None = None,
     warmup_requests: int = 0,
     request_timeout_s: float,
-    api_key: str | None = None,
     model: str | None = None,
     keep_output: bool = False,
     transport: httpx.AsyncBaseTransport | None = None,
@@ -174,7 +171,6 @@ async def run_closed_loop(
                 req,
                 t0,
                 timeout_s=request_timeout_s,
-                api_key=api_key,
                 keep_output=keep_output,
                 model=model,
                 record=rec,
@@ -213,43 +209,32 @@ class NativeLoadGenerator:
     def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self._transport = transport
 
-    async def run(
-        self,
-        base_url: str,
-        requests: Sequence[PreparedRequest],
-        plan: LoadPlan,
-        *,
-        request_timeout_s: float,
-        model: str | None = None,
-        api_key: str | None = None,
-        keep_output: bool = False,
-    ) -> RunResult:
+    async def run(self, ctx: LoadContext) -> RunResult:
+        job, plan = ctx.job, ctx.plan
         if isinstance(plan, OpenLoopPlan):
             return await run_open_loop(
-                base_url,
-                requests,
+                job.base_url,
+                ctx.requests,
                 plan.arrivals,
                 duration_s=plan.duration_s,
                 warmup_s=plan.warmup_s,
                 max_inflight=plan.max_inflight,
                 drain_timeout_s=plan.drain_timeout_s,
-                request_timeout_s=request_timeout_s,
-                api_key=api_key,
-                model=model,
-                keep_output=keep_output,
+                request_timeout_s=job.request_timeout_s,
+                model=job.served_model,
+                keep_output=job.keep_output,
                 load_value=plan.load_value,
                 transport=self._transport,
             )
         return await run_closed_loop(
-            base_url,
-            requests,
+            job.base_url,
+            ctx.requests,
             concurrency=plan.concurrency,
             num_requests=plan.num_requests,
             duration_s=plan.duration_s,
             warmup_requests=plan.warmup_requests,
-            request_timeout_s=request_timeout_s,
-            api_key=api_key,
-            model=model,
-            keep_output=keep_output,
+            request_timeout_s=job.request_timeout_s,
+            model=job.served_model,
+            keep_output=job.keep_output,
             transport=self._transport,
         )

@@ -6,9 +6,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from loom_bench.client.openai_stream import PreparedRequest
+from loom_bench.jobs import LoadJob, TokenizerSpec
 from loom_bench.loadgen.arrivals import constant, parse_arrivals
-from loom_bench.loadgen.base import ClosedLoopPlan, LoadPlan, OpenLoopPlan
-from loom_bench.loadgen.external import ToolRun, WorkloadContext
+from loom_bench.loadgen.base import ClosedLoopPlan, LoadContext, LoadPlan, OpenLoopPlan
+from loom_bench.loadgen.external import ToolRun
+from loom_bench.records import LoadMode
 from loom_bench.tokenize import SimpleTokenizer
 from loom_bench.workloads import build_requests, parse_profile
 
@@ -78,33 +81,56 @@ def open_plan(rate: float = 4.0, duration_s: float = 10.0, warmup_s: float = 2.0
     return OpenLoopPlan(constant(rate, duration_s), duration_s, warmup_s, 64, 5.0)
 
 
-def tool_run(
+def load_context(
     prof,
     plan: LoadPlan,
-    tmp_path: Path,
     *,
+    requests: list[PreparedRequest] | None = None,
     arrival: dict[str, Any] | None = None,
     engine: str = "vllm",
     tokenizer: str | None = TOKENIZER,
     extra_body: dict[str, Any] | None = None,
     seed: int = 7,
     base_url: str = BASE_URL,
-):
-    """(ToolRun, the native requests it was resolved from)."""
-    n = 64 if isinstance(plan, OpenLoopPlan) else plan.warmup_requests + (plan.num_requests or 0)
-    requests = build_requests(prof, TOK, n)
-    ctx = WorkloadContext(
-        profile=prof,
-        arrival=parse_arrivals(arrival) if arrival else None,
-        seed=seed,
+    keep_output: bool = False,
+) -> LoadContext:
+    """A LoadContext for `plan`; by default with the requests the plan needs."""
+    open_loop = isinstance(plan, OpenLoopPlan)
+    if requests is None:
+        n = 64 if open_loop else plan.warmup_requests + (plan.num_requests or 0)
+        requests = build_requests(prof, TOK, n)
+    job = LoadJob(
+        run_id="r1",
+        base_url=base_url,
         engine=engine,
-        tokenizer=tokenizer,
+        served_model=MODEL,
+        workload=prof.model_dump(mode="json"),
+        tokenizer=(
+            TokenizerSpec(kind="hf", repo=tokenizer, revision="0" * 40)
+            if tokenizer
+            else TokenizerSpec(kind="simple")
+        ),
+        mode=LoadMode.OPEN_LOOP if open_loop else LoadMode.CLOSED_LOOP,
+        load_value=(plan.load_value or 0.0) if open_loop else plan.concurrency,
+        arrival=arrival,
+        seed=seed,
+        keep_output=keep_output,
         extra_body=extra_body or {},
     )
-    run = ToolRun.resolve(
-        base_url=base_url, model=MODEL, requests=requests, plan=plan, context=ctx, workdir=tmp_path
+    return LoadContext(
+        job=job,
+        profile=prof,
+        arrival=parse_arrivals(arrival) if arrival else None,
+        plan=plan,
+        requests=requests,
+        tokenizer=TOK,
     )
-    return run, requests
+
+
+def tool_run(prof, plan: LoadPlan, tmp_path: Path, **context: Any):
+    """(ToolRun, the native requests it was resolved from)."""
+    ctx = load_context(prof, plan, **context)
+    return ToolRun.resolve(ctx, tmp_path), ctx.requests
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
