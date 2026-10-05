@@ -177,6 +177,7 @@ class BenchColdStart(Base):
     id: Mapped[uuid.UUID] = _pk()
     experiment_id: Mapped[uuid.UUID] = _experiment_fk()
     resource_id: Mapped[str | None]
+    config_hash: Mapped[str | None] = mapped_column(index=True)  # engine config started
     kind: Mapped[str]
     stages: Mapped[dict[str, Any]]  # stage name -> seconds
     total_s: Mapped[float]

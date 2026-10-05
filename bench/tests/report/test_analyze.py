@@ -185,7 +185,7 @@ def test_local_market_needs_explicit_hourly_price(price_book):
     assert resolve(priced.provenance) == 500_000
     assert explicit_hourly_micros({"hourly_micros": 7}) == 7
     with pytest.raises(TypeError):
-        explicit_hourly_micros({"config": {"hourly_micros": 1.5}})
+        explicit_hourly_micros({"hourly_micros": 1.5})
 
 
 def test_price_resolver_refuses_unverified_and_unknown(price_book):
@@ -272,3 +272,26 @@ def test_cold_starts_attributed_only_when_unambiguous(results, vllm_runs, price_
     stats = cold_starts_by_config(rows, [*results, solo])
     assert list(stats) == [solo.config_hash]
     assert (stats[solo.config_hash].median_s, stats[solo.config_hash].n) == (120.0, 3)
+
+
+def test_cold_start_uses_recorded_config_hash():
+    import uuid
+
+    from loom_bench.report.analyze import cold_starts_by_config
+    from loom_bench.store.models import BenchColdStart
+
+    exp = uuid.uuid4()
+    rows = [
+        BenchColdStart(experiment_id=exp, config_hash="a", kind="cold", stages={}, total_s=10.0),
+        BenchColdStart(experiment_id=exp, config_hash="b", kind="cold", stages={}, total_s=30.0),
+        BenchColdStart(experiment_id=exp, config_hash="b", kind="warm", stages={}, total_s=1.0),
+    ]
+    stats = cold_starts_by_config(rows, [])
+    assert stats["a"].median_s == 10.0 and stats["b"].median_s == 30.0 and stats["b"].n == 1
+
+
+def test_label_prefers_recorded_parallelism():
+    from loom_bench.report.analyze import label_from_provenance
+
+    label = label_from_provenance({"parallelism": {"tp": 4}, "engine": {"args": {}}, "config": {}})
+    assert label.tp == 4

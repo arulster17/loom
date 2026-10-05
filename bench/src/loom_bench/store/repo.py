@@ -220,11 +220,13 @@ def record_cold_start(
     stages: Mapping[str, float],
     total_s: float,
     resource_id: str | None = None,
+    config_hash: str | None = None,
     created_at: datetime | None = None,
 ) -> BenchColdStart:
     row = BenchColdStart(
         experiment_id=experiment_id,
         resource_id=resource_id,
+        config_hash=config_hash,
         kind=_enum(ColdStartKind, kind),
         stages=_doc(stages),
         total_s=total_s,

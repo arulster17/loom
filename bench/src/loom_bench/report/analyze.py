@@ -227,7 +227,12 @@ def _section(prov: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _tp(engine_args: Mapping[str, Any], config: Mapping[str, Any]) -> int | None:
+def _tp(
+    engine_args: Mapping[str, Any], config: Mapping[str, Any], prov: Mapping[str, Any]
+) -> int | None:
+    recorded = _section(prov, "parallelism").get("tp")
+    if recorded is not None:
+        return int(recorded)
     for key in TP_ARG_KEYS:
         if key in engine_args:
             return int(engine_args[key])
@@ -243,7 +248,7 @@ def label_from_provenance(prov: Mapping[str, Any]) -> ConfigLabel:
         engine=engine.get("name"),
         engine_version=engine.get("version"),
         quantization=_section(prov, "model").get("quantization"),
-        tp=_tp(args, _section(prov, "config")),
+        tp=_tp(args, _section(prov, "config"), prov),
         gpu_type=hardware.get("gpu_type"),
         gpu_count=hardware.get("gpu_count"),
         instance_type=hardware.get("instance_type"),
@@ -260,8 +265,8 @@ def provenance_digest(prov: Mapping[str, Any]) -> str:
 
 
 def explicit_hourly_micros(prov: Mapping[str, Any]) -> Micros | None:
-    """`hourly_micros` recorded in the provenance (top level, or in the resolved config)."""
-    value = prov.get("hourly_micros", _section(prov, "config").get("hourly_micros"))
+    """`hourly_micros` recorded in the provenance."""
+    value = prov.get("hourly_micros")
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
@@ -573,8 +578,8 @@ def cold_starts_by_config(
 ) -> dict[str, ColdStartStat]:
     """Median cold-start time per config_hash.
 
-    bench_cold_starts rows carry no config hash, so a row is attributed to a config
-    only when its experiment benchmarked exactly one config.
+    Rows recorded without a config hash are attributed only when their experiment
+    benchmarked exactly one config.
     """
     configs_by_exp: dict[str, set[str]] = defaultdict(set)
     for r in results:
@@ -582,7 +587,12 @@ def cold_starts_by_config(
             configs_by_exp[exp].add(r.config_hash)
     totals: dict[str, list[float]] = defaultdict(list)
     for row in cold_starts:
+        if row.kind != ColdStartKind.COLD.value:
+            continue
+        if row.config_hash is not None:
+            totals[row.config_hash].append(row.total_s)
+            continue
         configs = configs_by_exp.get(str(row.experiment_id), set())
-        if row.kind == ColdStartKind.COLD.value and len(configs) == 1:
+        if len(configs) == 1:
             totals[next(iter(configs))].append(row.total_s)
     return {h: ColdStartStat(median_s=median(v), n=len(v)) for h, v in sorted(totals.items())}

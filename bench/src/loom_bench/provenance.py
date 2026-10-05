@@ -173,6 +173,12 @@ class HardwareInfo(_Section):
     instance_type: str | None = None
 
 
+class ParallelismInfo(_Section):
+    tp: int | None = None
+    pp: int | None = None
+    ep: int | None = None
+
+
 class WorkloadInfo(_Section):
     name: str | None = None
     profile_hash: str | None = None
@@ -209,9 +215,13 @@ class Provenance(_Section):
     driver_version: str | None = None
     model: ModelInfo = Field(default_factory=ModelInfo)
     hardware: HardwareInfo = Field(default_factory=HardwareInfo)
+    parallelism: ParallelismInfo = Field(default_factory=ParallelismInfo)
     cloud: str | None = None
     region: str | None = None
     market: Market | None = None
+    # Hourly price (micro-dollars) the cost math used for this host; recorded so a
+    # report never has to guess, and set explicitly for mock/local runs.
+    hourly_micros: int | None = Field(default=None, ge=0, strict=True)
     config_hash: str
     config: dict[str, Any]
     workload: WorkloadInfo = Field(default_factory=WorkloadInfo)

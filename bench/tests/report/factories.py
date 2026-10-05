@@ -108,8 +108,6 @@ def make_runs(
         "quantization": quantization,
         "engine_args": args,
     }
-    if hourly_micros is not None:
-        config["hourly_micros"] = hourly_micros
     runs = []
     for load in loads:
         for rep in reps:
@@ -128,6 +126,7 @@ def make_runs(
             prov = build_provenance(
                 config,
                 created_at=CREATED,
+                hourly_micros=hourly_micros,
                 git=GitInfo(sha=GIT_SHA, dirty=False, branch="main"),
                 loadgen={"name": "native", "version": "0.1.0"},
                 engine=EngineInfo(

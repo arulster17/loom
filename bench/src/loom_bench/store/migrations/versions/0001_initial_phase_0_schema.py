@@ -64,6 +64,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("experiment_id", sa.Uuid(), nullable=False),
         sa.Column("resource_id", sa.Text(), nullable=True),
+        sa.Column("config_hash", sa.Text(), nullable=True),
         sa.Column("kind", sa.Text(), nullable=False),
         sa.Column("stages", JSON, nullable=False),
         sa.Column("total_s", sa.Double(), nullable=False),
@@ -80,6 +81,12 @@ def upgrade() -> None:
         op.f("ix_bench_cold_starts_experiment_id"),
         "bench_cold_starts",
         ["experiment_id"],
+        unique=False,
+    )
+    op.create_index(
+        op.f("ix_bench_cold_starts_config_hash"),
+        "bench_cold_starts",
+        ["config_hash"],
         unique=False,
     )
     op.create_table(
