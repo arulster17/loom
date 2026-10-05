@@ -63,8 +63,8 @@ Step by step (`runner.run_experiment`):
    TTL, exceeds the effective cap, or a host's time exceeds its TTL.
 3. **Budget guard** (`budget.BudgetGuard`). Accrues `Σ host.hourly_micros × elapsed` into
    `bench_spend` every `accrual_interval_s`, checks each next step against the cap
-   (graceful stop, exit 4) and trips at the cap (in-flight call cancelled, all hosts torn
-   down, exit 5).
+   (graceful stop, exit 4) and trips at the experiment's cap or the overall cap across
+   experiments (in-flight call cancelled, all hosts torn down, exit 5).
 4. **Provider** (`providers/`). Provisions a host, starts and stops the engine, runs
    load jobs where latency is measured correctly, tears down, reaps.
 5. **Load** (`jobexec.execute_load_job`). Builds the requests from the workload profile

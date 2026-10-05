@@ -37,6 +37,7 @@ Run through all of it before every real run.
 - [ ] **Settings from Terraform outputs** are current and load:
 
   ```sh
+  mkdir -p ~/.config/loom
   terraform -chdir=infra/aws/bench output -raw aws_settings_yaml > ~/.config/loom/aws.yaml
   export LOOM_AWS_CONFIG=~/.config/loom/aws.yaml
   uv run python -c "from loom_bench.providers.aws_ec2 import load_aws_settings as s; print(s())"

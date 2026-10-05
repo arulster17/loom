@@ -53,8 +53,9 @@ Markers (`pyproject.toml`): `postgres`, `slow`. Default per-test timeout is 120 
 ## Results database
 
 `bench` uses `--db URL`, else `$LOOM_DATABASE_URL`, else
-`postgresql+psycopg://loom:loom@localhost:5432/loom` (the compose Postgres). Commands
-that need the schema apply migrations themselves; `bench db upgrade` does it explicitly.
+`postgresql+psycopg://loom:loom@localhost:5432/loom` (the compose Postgres). `bench plan`,
+`run`, `reproduce`, `report`, `competitiveness` and `reap` apply migrations themselves;
+`bench db upgrade` does it explicitly.
 
 ```bash
 docker compose up -d postgres
