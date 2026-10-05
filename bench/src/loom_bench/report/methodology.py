@@ -17,10 +17,11 @@ from loom_bench.report.analyze import ConfigResult
 from loom_bench.report.format import describe_slo, load_mode_label, usd
 
 ALLOCATION_TEXT = {
-    "all_output": "all of the replica's hourly cost is charged to output tokens "
-    "(input tokens are free); $/1M output is the headline number",
-    "all_input": "all of the replica's hourly cost is charged to input tokens "
-    "(output tokens are free)",
+    "all_output": "all of the replica's hourly cost is charged to output tokens, so "
+    "input tokens have no separate price ($/1M input is n/a, not $0); $/1M output is the "
+    "headline number",
+    "all_input": "all of the replica's hourly cost is charged to input tokens, so output "
+    "tokens have no separate price ($/1M output is n/a, not $0)",
 }
 
 

@@ -50,7 +50,7 @@
 <h2 id="{{ b.anchor }}">{{ b.title }}</h2>
 {% set first = b.configs[0].result %}
 {% set show_input = b.input_priced %}
-<p class="section-note">Ranked by $/1M output tokens at SLO, cheapest first.{% if not show_input %} Cost allocation all_output: the replica's whole cost is charged to output tokens, so input tokens are free.{% endif %} Load generation: {{ load_mode_label(b.board.load_mode) }}. SLO: {{ describe_slo(first.goodput.slo) }}. Values are means; the line under each is its confidence interval. Unranked configs (quality gate failed, untrusted, or no cost at SLO) are listed last.</p>
+<p class="section-note">Ranked by $/1M output tokens at SLO, cheapest first.{% if not show_input %} Cost allocation all_output: the replica's whole cost is charged to output tokens, so input tokens have no separate price.{% endif %} Load generation: {{ load_mode_label(b.board.load_mode) }}. SLO: {{ describe_slo(first.goodput.slo) }}. Values are means; the line under each is its confidence interval. Unranked configs (quality gate failed, untrusted, or no cost at SLO) are listed last.</p>
 {% call scroll_table(b.anchor) %}
 <table>
 <thead>

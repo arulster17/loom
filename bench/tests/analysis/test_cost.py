@@ -23,7 +23,13 @@ def test_all_output_headline():
     c = cost_at_slo(HOURLY, input_tok_s=point(3000), output_tok_s=point(1000))
     # 1000 tok/s = 3.6M tok/h -> $1.00 per 1M output tokens
     assert c.output_per_mtok.value == 1_000_000
-    assert c.input_per_mtok.value == 0
+    # input has no price of its own under all_output: n/a, not $0
+    assert c.input_per_mtok.model_dump() == {
+        "value": None,
+        "lo": None,
+        "hi": None,
+        "na_reason": "all cost allocated to output",
+    }
     assert c.total_per_mtok.value == 250_000  # 4000 tok/s blended
     assert c.allocation == "all_output"
     assert not c.trusted
@@ -37,7 +43,8 @@ def test_all_input():
         allocation=CostAllocation.all_input(),
     )
     assert c.input_per_mtok.value == 333_333  # 3.6e12 / 1.08e10 = 333_333.33
-    assert c.output_per_mtok.value == 0
+    assert c.output_per_mtok.value is None
+    assert c.output_per_mtok.na_reason == "all cost allocated to input"
 
 
 def test_weighted_prices_reproduce_replica_cost():
@@ -56,7 +63,8 @@ def test_weighted_prices_reproduce_replica_cost():
 
 
 def _billed_per_hour(tin: int, tout: int, c) -> Fraction:
-    per_s = tin * c.input_per_mtok.value + tout * c.output_per_mtok.value
+    # a side the allocation does not price (n/a) bills nothing
+    per_s = tin * (c.input_per_mtok.value or 0) + tout * (c.output_per_mtok.value or 0)
     return Fraction(per_s) * SECONDS_PER_HOUR / TOKENS_PER_MTOK
 
 
@@ -113,11 +121,21 @@ def test_ci_maps_high_throughput_to_low_cost():
         output_tok_s=ci(1000, 800, 1250),
         request_rate=ci(10, 8, 12.5),
     )
-    assert c.output_per_mtok.model_dump() == {"value": 1_000_000, "lo": 800_000, "hi": 1_250_000}
-    assert c.total_per_mtok.model_dump() == {"value": 200_000, "lo": 160_000, "hi": 250_000}
-    assert c.input_per_mtok.model_dump() == {"value": 0, "lo": 0, "hi": 0}
+    assert c.output_per_mtok.model_dump() == {
+        "value": 1_000_000,
+        "lo": 800_000,
+        "hi": 1_250_000,
+        "na_reason": None,
+    }
+    assert (c.total_per_mtok.value, c.total_per_mtok.lo, c.total_per_mtok.hi) == (
+        200_000,
+        160_000,
+        250_000,
+    )
+    assert c.input_per_mtok.value is None and c.input_per_mtok.na_reason
     # 10 req/s -> 100 micros per request -> 100_000 per 1k requests
-    assert c.per_1k_requests.model_dump() == {"value": 100_000, "lo": 80_000, "hi": 125_000}
+    r = c.per_1k_requests
+    assert (r.value, r.lo, r.hi) == (100_000, 80_000, 125_000)
     assert c.trusted
 
 

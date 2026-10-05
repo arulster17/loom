@@ -127,7 +127,8 @@ def test_populated_snapshot_renders_results(full_site, populated):
     assert "quality gate failed" in model
     assert "100 s (median of 1)" in model
     assert "$0.8404 – $0.8832" in model  # cost CI
-    assert "$/1M in at SLO" not in model  # all_output: input is free
+    assert "$/1M in at SLO" not in model  # all_output: input has no separate price
+    assert "$0.0000" not in model
 
     methodology = _text(full_site, "methodology.html")
     assert "From the published results" in methodology

@@ -164,7 +164,10 @@ def test_csv_has_integer_micros_and_formatted_usd(report):
     assert (
         int(first["output_per_mtok_lo_micros"]) < micros < int(first["output_per_mtok_hi_micros"])
     )
-    assert first["input_per_mtok_micros"] == "0"
+    assert first["input_per_mtok_micros"] == "" and first["input_per_mtok_usd"] == ""
+    assert first["input_per_mtok_na_reason"] == "all cost allocated to output"
+    assert first["output_per_mtok_na_reason"] == ""
+    assert first["goodput_output_tok_s_ci_method"] == "log_t"
     assert first["hourly_micros"] == "1861000" and first["hourly_usd"] == "$1.861000"
     assert (
         first["rank"] == "1"
@@ -206,3 +209,29 @@ def test_html_escapes_untrusted_text(results, price_book):
     html = render_html(build_leaderboard([hostile], price_book=price_book))
     assert "<script>" not in html
     assert "&lt;script&gt;x&lt;/script&gt;" in html
+
+
+def test_unallocated_price_is_na_not_zero(report):
+    md = render_markdown(report)
+    row = next(line for line in md.splitlines() if line.startswith("| 1 |"))
+    cells = [c.strip() for c in row.strip("|").split(" | ")]
+    assert cells[3] == "n/a (all cost allocated to output)"
+    assert "$0.0000" not in md
+    html = render_html(report)
+    assert 'n/a<span class="ci">all cost allocated to output</span>' in html
+    assert "$0.0000" not in html
+
+
+def test_all_input_ranks_by_input_cost(all_runs, price_book):
+    results = analyze_runs(
+        all_runs,
+        slo=SLO,
+        allocation=CostAllocation.all_input(),
+        hourly_price=default_price_resolver(price_book),
+    )
+    rows = build_leaderboard(results).boards[0].rows
+    ranked = [r for r in rows if r.status is RowStatus.RANKED]
+    assert [r.result.name for r in ranked] == ["vllm-awq", "sglang-bf16", "vllm-bf16"]
+    assert all(r.result.cost.output_per_mtok.na_reason for r in rows)
+    costs = [r.result.cost.input_per_mtok.value for r in ranked]
+    assert costs == sorted(costs)

@@ -5,9 +5,12 @@ buys `goodput` tokens per second. A GPU produces input (prefill) and output (dec
 tokens at the same time, so splitting its cost between them is a choice, recorded
 as a `CostAllocation`:
 
-- all_output: the whole cost is charged to output tokens; input is free. This is
-  the headline "$ per 1M output tokens at SLO".
-- all_input: the whole cost is charged to input tokens; output is free.
+- all_output: the whole cost is charged to output tokens. This is the headline
+  "$ per 1M output tokens at SLO". The input price is not applicable (not $0: the
+  allocation assigns input no cost, so there is nothing to price or to margin
+  against); its `MicrosRange` carries `na_reason`.
+- all_input: the whole cost is charged to input tokens; the output price is not
+  applicable in the same way.
 - weighted(r): an output token costs r input tokens. With effective throughput
   E = in_tok_s + r · out_tok_s, input price = cost / E and output price = r · that.
   Prices at these rates bill exactly the replica's cost at the measured mix.
@@ -70,11 +73,24 @@ class CostAllocation:
 
 
 class MicrosRange(BaseModel):
-    """A cost in micros with CI bounds. None means unbounded / not computable."""
+    """A cost in micros with CI bounds. None means unbounded / not computable.
+
+    `na_reason` is set when the price is not applicable at all (the allocation
+    assigns that side no cost); value and bounds are then None.
+    """
 
     value: Micros | None
     lo: Micros | None
     hi: Micros | None
+    na_reason: str | None = None
+
+    @classmethod
+    def not_applicable(cls, reason: str) -> MicrosRange:
+        return cls(value=None, lo=None, hi=None, na_reason=reason)
+
+
+NA_ALL_OUTPUT = "all cost allocated to output"
+NA_ALL_INPUT = "all cost allocated to input"
 
 
 class CostAtSlo(BaseModel):
@@ -110,11 +126,9 @@ def _prices(
         return None, None, None
     total = _per_unit(hourly, tin + tout, TOKENS_PER_MTOK)
     if alloc.method == "all_output":
-        out = _per_unit(hourly, tout, TOKENS_PER_MTOK)
-        return (None if out is None else 0), out, total
+        return None, _per_unit(hourly, tout, TOKENS_PER_MTOK), total
     if alloc.method == "all_input":
-        inp = _per_unit(hourly, tin, TOKENS_PER_MTOK)
-        return inp, (None if inp is None else 0), total
+        return _per_unit(hourly, tin, TOKENS_PER_MTOK), None, total
     r = alloc.output_input_ratio or Fraction(0)
     effective = tin + r * tout
     return (
@@ -146,6 +160,10 @@ def cost_at_slo(
     # The low cost bound comes from the high throughput bound, and the reverse.
     point, low, high = prices("mean"), prices("hi"), prices("lo")
     ranges = [MicrosRange(value=point[i], lo=low[i], hi=high[i]) for i in range(3)]
+    if alloc.method == "all_output":
+        ranges[0] = MicrosRange.not_applicable(NA_ALL_OUTPUT)
+    elif alloc.method == "all_input":
+        ranges[1] = MicrosRange.not_applicable(NA_ALL_INPUT)
 
     per_1k: MicrosRange | None = None
     if request_rate is not None:

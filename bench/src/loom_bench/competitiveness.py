@@ -28,10 +28,15 @@ class FlagKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class CostPerMtok:
-    """Our measured serving cost at SLO, micro-dollars per 1M tokens."""
+    """Our measured serving cost at SLO, micro-dollars per 1M tokens.
 
-    input: Micros
-    output: Micros
+    A side is None when it has no cost of its own: the cost allocation charges the
+    whole replica to the other side (input under all_output). No margin is checked
+    on such a side.
+    """
+
+    input: Micros | None
+    output: Micros | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,8 +126,8 @@ def assess(
     if our_cost_per_mtok is not None:
         for side in SIDES:
             ours = getattr(our_price, f"{side}_per_mtok")
-            cost: Micros = getattr(our_cost_per_mtok, side)
-            if ours >= cost:
+            cost: Micros | None = getattr(our_cost_per_mtok, side)
+            if cost is None or ours >= cost:
                 continue
             flags.append(
                 Flag(

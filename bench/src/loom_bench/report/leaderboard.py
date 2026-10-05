@@ -1,5 +1,8 @@
 """Per-model leaderboard ranked by $/1M output tokens at SLO.
 
+Under the all_input cost allocation output tokens have no price of their own, so
+those results rank by $/1M input tokens instead (`ranking_cost`).
+
 One board per (model, workload, load mode): costs measured on different workloads
 are not comparable. Rows are ranked cheapest first. Configs that failed the
 quality gate, are untrusted, or have no cost at SLO are still listed, after the
@@ -17,6 +20,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from loom_bench.cost import MicrosRange
 from loom_bench.prices import PriceBook
 from loom_bench.provenance import ContentKind
 from loom_bench.records import LoadMode
@@ -84,8 +88,16 @@ class LeaderboardReport(BaseModel):
     methodology: Methodology
 
 
+def ranking_cost(r: ConfigResult) -> MicrosRange | None:
+    """The price a result is ranked by: $/1M output, or $/1M input under all_input."""
+    if r.cost is None:
+        return None
+    return r.cost.input_per_mtok if r.allocation == "all_input" else r.cost.output_per_mtok
+
+
 def _out_cost(r: ConfigResult) -> int | None:
-    return None if r.cost is None else r.cost.output_per_mtok.value
+    rng = ranking_cost(r)
+    return None if rng is None else rng.value
 
 
 def status_of(r: ConfigResult) -> RowStatus:
@@ -104,10 +116,10 @@ def _rel(a: int, b: int) -> Fraction:
 
 
 def _overlap(a: ConfigResult, b: ConfigResult) -> bool:
-    """Whether the $/1M output CIs overlap; a missing high bound is unbounded."""
-    if a.cost is None or b.cost is None:
+    """Whether the ranking-cost CIs overlap; a missing high bound is unbounded."""
+    ra, rb = ranking_cost(a), ranking_cost(b)
+    if ra is None or rb is None:
         return False
-    ra, rb = a.cost.output_per_mtok, b.cost.output_per_mtok
     inf = 2**63
     a_lo, a_hi = ra.lo or 0, inf if ra.hi is None else ra.hi
     b_lo, b_hi = rb.lo or 0, inf if rb.hi is None else rb.hi
@@ -141,7 +153,9 @@ def recommend(
     if status is RowStatus.NO_COST:
         if r.goodput.max_load is None:
             return "No cost at SLO: no tested load met the SLO; test lower loads"
-        return "No cost at SLO: no hourly price for this replica"
+        if r.hourly_micros is None:
+            return "No cost at SLO: no hourly price for this replica"
+        return "No cost at SLO: no token throughput measured at the goodput load"
     if status in (RowStatus.GATE_FAILED, RowStatus.UNTRUSTED):
         if status is RowStatus.GATE_FAILED:
             text = f"Not ranked: {quality}"

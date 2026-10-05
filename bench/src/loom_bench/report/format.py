@@ -27,7 +27,12 @@ def usd(m: Micros | None, places: int = 4) -> str:
 
 
 def usd_ci(r: MicrosRange | None) -> str:
-    """Value with its CI, e.g. `$1.2924 [1.2610, 1.3252]`; a missing high bound is unbounded."""
+    """Value with its CI, e.g. `$1.2924 [1.2610, 1.3252]`; a missing high bound is unbounded.
+
+    A price the cost allocation does not apply to reads `n/a (<reason>)`, never $0.
+    """
+    if r is not None and r.na_reason:
+        return f"{NA} ({r.na_reason})"
     if r is None or r.value is None:
         return NA
     if r.lo is None and r.hi is None:
@@ -105,17 +110,22 @@ def to_csv(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> str:
 
 
 def micros_columns(prefix: str, r: MicrosRange | None) -> dict[str, Any]:
-    """`<prefix>_micros`, `_lo_micros`, `_hi_micros` and the same as formatted USD."""
+    """`<prefix>_micros`, `_lo_micros`, `_hi_micros`, the same as formatted USD, and
+    `<prefix>_na_reason` (why the price is not applicable; its micros are then empty)."""
     out: dict[str, Any] = {}
     for end in ("", "_lo", "_hi"):
         value = None if r is None else getattr(r, end.lstrip("_") or "value")
         out[f"{prefix}{end}_micros"] = value
         out[f"{prefix}{end}_usd"] = None if value is None else usd(value, CSV_USD_PLACES)
+    out[f"{prefix}_na_reason"] = None if r is None else r.na_reason
     return out
 
 
 def micros_column_names(prefix: str) -> list[str]:
-    return [f"{prefix}{end}_{kind}" for end in ("", "_lo", "_hi") for kind in ("micros", "usd")]
+    return [
+        *(f"{prefix}{end}_{kind}" for end in ("", "_lo", "_hi") for kind in ("micros", "usd")),
+        f"{prefix}_na_reason",
+    ]
 
 
 def _round(x: float | None) -> float | None:
@@ -123,15 +133,17 @@ def _round(x: float | None) -> float | None:
 
 
 def estimate_columns(prefix: str, e: Estimate | None) -> dict[str, Any]:
+    """Point, bounds and `<prefix>_ci_method` (`Estimate.method`: t, t_clipped, log_t)."""
     return {
         prefix: None if e is None else _round(e.mean),
         f"{prefix}_lo": None if e is None else _round(e.lo),
         f"{prefix}_hi": None if e is None else _round(e.hi),
+        f"{prefix}_ci_method": None if e is None else e.method,
     }
 
 
 def estimate_column_names(prefix: str) -> list[str]:
-    return [prefix, f"{prefix}_lo", f"{prefix}_hi"]
+    return [prefix, f"{prefix}_lo", f"{prefix}_hi", f"{prefix}_ci_method"]
 
 
 @cache

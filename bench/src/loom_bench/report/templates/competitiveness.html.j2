@@ -25,8 +25,8 @@
 <td class="num">{{ money(r.cost_output) }}</td>
 <td class="num">{{ price_text(r.price, 'input') }}</td>
 <td class="num">{{ price_text(r.price, 'output') }}</td>
-<td class="num">{{ margin_text(r.margin_input) }}</td>
-<td class="num">{{ margin_text(r.margin_output) }}</td>
+<td class="num">{{ margin_text(r.margin_input, r.cost_input) }}</td>
+<td class="num">{{ margin_text(r.margin_output, r.cost_output) }}</td>
 </tr>
 {% endfor %}
 </tbody>

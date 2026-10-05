@@ -1,5 +1,5 @@
 {% macro money(rng) -%}
-{% if rng is none or rng.value is none %}n/a{% else %}{{ rng.value|usd }}<span class="ci">{% if rng.lo is none and rng.hi is none %}no CI{% else %}{{ rng.lo|usd if rng.lo is not none else 'n/a' }} – {{ rng.hi|usd if rng.hi is not none else 'unbounded' }}{% endif %}</span>{% endif %}
+{% if rng is not none and rng.na_reason %}n/a<span class="ci">{{ rng.na_reason }}</span>{% elif rng is none or rng.value is none %}n/a{% else %}{{ rng.value|usd }}<span class="ci">{% if rng.lo is none and rng.hi is none %}no CI{% else %}{{ rng.lo|usd if rng.lo is not none else 'n/a' }} – {{ rng.hi|usd if rng.hi is not none else 'unbounded' }}{% endif %}</span>{% endif %}
 {%- endmacro %}
 
 {% macro estimate(e, places=0, unit='') -%}
