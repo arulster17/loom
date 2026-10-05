@@ -24,7 +24,7 @@ from loom_bench.cost import MicrosRange
 from loom_bench.prices import PriceBook
 from loom_bench.provenance import ContentKind
 from loom_bench.records import LoadMode
-from loom_bench.report.analyze import ColdStartStat, ConfigResult, WarningKind
+from loom_bench.report.analyze import UNTRUSTING, ColdStartStat, ConfigResult
 from loom_bench.report.format import (
     UNBRACKETED_NOTE,
     any_unbracketed,
@@ -50,13 +50,6 @@ from loom_bench.report.methodology import (
     methodology,
     methodology_markdown,
 )
-
-UNTRUSTED_REASONS = {
-    WarningKind.SINGLE_REPETITION: "single repetition",
-    WarningKind.UNBRACKETED_GOODPUT: "goodput not bracketed",
-    WarningKind.HIGH_CV: "high run-to-run variance",
-    WarningKind.MISSING_USAGE: "missing token usage",
-}
 
 
 class RowStatus(StrEnum):
@@ -163,9 +156,7 @@ def recommend(
         if status is RowStatus.GATE_FAILED:
             text = f"Not ranked: {quality}"
         else:
-            reasons = sorted(
-                {UNTRUSTED_REASONS[w.kind] for w in r.warnings if w.kind in UNTRUSTED_REASONS}
-            )
+            reasons = sorted({w.label for w in r.warnings if w.kind in UNTRUSTING})
             text = f"Not ranked: untrusted ({', '.join(reasons)}); rerun before relying on it"
         if leader is not None and lead_cost is not None and cost is not None and cost < lead_cost:
             text += f"; would be {pct(-_rel(cost, lead_cost))} cheaper than {leader.name}"

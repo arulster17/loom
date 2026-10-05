@@ -85,9 +85,25 @@ UNTRUSTING = frozenset(
 )
 
 
+# Short reason per warning kind, for tables (the message carries the detail).
+WARNING_LABELS: dict[WarningKind, str] = {
+    WarningKind.SINGLE_REPETITION: "single repetition",
+    WarningKind.UNBRACKETED_GOODPUT: "goodput not bracketed",
+    WarningKind.HIGH_CV: "high run-to-run variance",
+    WarningKind.MISSING_USAGE: "missing token usage",
+    WarningKind.NO_GOODPUT: "no tested load met the SLO",
+    WarningKind.NO_PRICE: "no hourly price",
+    WarningKind.EXCLUDED_RUNS: "runs not completed were excluded",
+}
+
+
 class ResultWarning(BaseModel):
     kind: WarningKind
     message: str
+
+    @property
+    def label(self) -> str:
+        return WARNING_LABELS[self.kind]
 
 
 class ConfigLabel(BaseModel):

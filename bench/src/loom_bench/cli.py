@@ -216,7 +216,7 @@ def render_goodput(results: list[ConfigResult]) -> None:
     if not results:
         return
     table = Table(title="Goodput at SLO (as in bench report)")
-    for col in ("cell", "workload", "mode", "goodput load", "out tok/s", "$/1M out", "trusted"):
+    for col in ("cell", "workload", "goodput load", "out tok/s", "$/1M out", "trusted"):
         table.add_column(col)
     table.add_column("main warning", overflow="fold")
     for r in results:
@@ -224,12 +224,11 @@ def render_goodput(results: list[ConfigResult]) -> None:
         table.add_row(
             r.name,
             r.workload,
-            r.load_mode.value,
-            goodput_load(r.goodput),
+            goodput_load(r.goodput),  # the unit (req/s, concurrent) gives the load mode
             est(r.goodput.output_tok_s, 1),
             usd_ci(r.cost.output_per_mtok if r.cost else None),
             "yes" if r.trusted else "[red]no[/]",
-            "" if warning is None else warning.message,
+            "" if warning is None else warning.label,
         )
     if any(r.goodput.max_load is not None and not r.goodput.bracketed for r in results):
         table.caption = UNBRACKETED_NOTE

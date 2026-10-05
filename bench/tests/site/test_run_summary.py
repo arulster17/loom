@@ -66,7 +66,7 @@ def test_summary_shows_trust_and_main_warning(monkeypatch):
     lines = {line.split("│")[1].strip(): line for line in text.splitlines() if "│" in line}
     assert "yes" in lines["steady"]
     assert "no" in lines["one-shot"]
-    assert "1 completed repetition" in lines["one-shot"]
+    assert "single repetition" in lines["one-shot"]
     # goodput not bracketed: "+" on the load, explained once in the caption
     assert "4+ req/s" in lines["one-shot"]
     assert text.count("+ after a goodput load") == 1
