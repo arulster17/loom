@@ -1,0 +1,48 @@
+name: site
+
+# Builds the public results site from the committed snapshot (site/data/) and deploys
+# it to GitHub Pages. Pages must be enabled once in the repository settings with
+# Source: GitHub Actions (docs/site.md).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "bench/src/loom_bench/site/**"
+      - "bench/src/loom_bench/report/**"
+      - ".github/workflows/site.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: >-
+          uv run python -m loom_bench.site build
+          --data site/data --config site/config.yaml --out site/_build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/_build
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
