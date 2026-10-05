@@ -1,5 +1,8 @@
 """Per-model leaderboard ranked by $/1M output tokens at SLO.
 
+Under the all_input cost allocation output tokens have no price of their own, so
+those results rank by $/1M input tokens instead (`ranking_cost`).
+
 One board per (model, workload, load mode): costs measured on different workloads
 are not comparable. Rows are ranked cheapest first. Configs that failed the
 quality gate, are untrusted, or have no cost at SLO are still listed, after the
@@ -17,22 +20,26 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from loom_bench.cost import MicrosRange
 from loom_bench.prices import PriceBook
 from loom_bench.provenance import ContentKind
 from loom_bench.records import LoadMode
-from loom_bench.report.analyze import ColdStartStat, ConfigResult, WarningKind
+from loom_bench.report.analyze import UNTRUSTING, ColdStartStat, ConfigResult
 from loom_bench.report.format import (
+    UNBRACKETED_NOTE,
+    any_unbracketed,
     describe_slo,
     est,
     estimate_column_names,
     estimate_columns,
+    goodput_load,
     html_env,
-    load_mode_label,
     load_value,
     md_table,
     micros_column_names,
     micros_columns,
     pct,
+    sig,
     to_csv,
     usd,
     usd_ci,
@@ -43,13 +50,6 @@ from loom_bench.report.methodology import (
     methodology,
     methodology_markdown,
 )
-
-UNTRUSTED_REASONS = {
-    WarningKind.SINGLE_REPETITION: "single repetition",
-    WarningKind.UNBRACKETED_GOODPUT: "goodput not bracketed",
-    WarningKind.HIGH_CV: "high run-to-run variance",
-    WarningKind.MISSING_USAGE: "missing token usage",
-}
 
 
 class RowStatus(StrEnum):
@@ -84,8 +84,16 @@ class LeaderboardReport(BaseModel):
     methodology: Methodology
 
 
+def ranking_cost(r: ConfigResult) -> MicrosRange | None:
+    """The price a result is ranked by: $/1M output, or $/1M input under all_input."""
+    if r.cost is None:
+        return None
+    return r.cost.input_per_mtok if r.allocation == "all_input" else r.cost.output_per_mtok
+
+
 def _out_cost(r: ConfigResult) -> int | None:
-    return None if r.cost is None else r.cost.output_per_mtok.value
+    rng = ranking_cost(r)
+    return None if rng is None else rng.value
 
 
 def status_of(r: ConfigResult) -> RowStatus:
@@ -104,10 +112,10 @@ def _rel(a: int, b: int) -> Fraction:
 
 
 def _overlap(a: ConfigResult, b: ConfigResult) -> bool:
-    """Whether the $/1M output CIs overlap; a missing high bound is unbounded."""
-    if a.cost is None or b.cost is None:
+    """Whether the ranking-cost CIs overlap; a missing high bound is unbounded."""
+    ra, rb = ranking_cost(a), ranking_cost(b)
+    if ra is None or rb is None:
         return False
-    ra, rb = a.cost.output_per_mtok, b.cost.output_per_mtok
     inf = 2**63
     a_lo, a_hi = ra.lo or 0, inf if ra.hi is None else ra.hi
     b_lo, b_hi = rb.lo or 0, inf if rb.hi is None else rb.hi
@@ -141,14 +149,14 @@ def recommend(
     if status is RowStatus.NO_COST:
         if r.goodput.max_load is None:
             return "No cost at SLO: no tested load met the SLO; test lower loads"
-        return "No cost at SLO: no hourly price for this replica"
+        if r.hourly_micros is None:
+            return "No cost at SLO: no hourly price for this replica"
+        return "No cost at SLO: no token throughput measured at the goodput load"
     if status in (RowStatus.GATE_FAILED, RowStatus.UNTRUSTED):
         if status is RowStatus.GATE_FAILED:
             text = f"Not ranked: {quality}"
         else:
-            reasons = sorted(
-                {UNTRUSTED_REASONS[w.kind] for w in r.warnings if w.kind in UNTRUSTED_REASONS}
-            )
+            reasons = sorted({w.label for w in r.warnings if w.kind in UNTRUSTING})
             text = f"Not ranked: untrusted ({', '.join(reasons)}); rerun before relying on it"
         if leader is not None and lead_cost is not None and cost is not None and cost < lead_cost:
             text += f"; would be {pct(-_rel(cost, lead_cost))} cheaper than {leader.name}"
@@ -244,7 +252,7 @@ def quality_text(r: ConfigResult) -> str:
 
 
 def cold_text(c: ColdStartStat | None) -> str:
-    return "n/a" if c is None else f"{c.median_s:.0f} s (median of {c.n})"
+    return "n/a" if c is None else f"{sig(c.median_s)} s (median of {c.n})"
 
 
 def board_title(b: Leaderboard) -> str:
@@ -280,7 +288,7 @@ def _md_row(row: LeaderboardRow) -> list[Any]:
         usd_ci(cost.input_per_mtok if cost else None),
         est(r.goodput.output_tok_s, 1),
         est(r.goodput_output_tok_s_per_gpu, 1),
-        load_value(r.goodput.max_load, r.load_mode),
+        goodput_load(r.goodput),
         est(r.ttft_p95_ms, 0, "ms"),
         est(r.tpot_p95_ms, 1, "ms"),
         f"{est(r.peak_output_tok_s, 1)} at {load_value(r.peak_load, r.load_mode)}",
@@ -294,11 +302,15 @@ def _md_row(row: LeaderboardRow) -> list[Any]:
 def render_markdown(report: LeaderboardReport) -> str:
     parts = [f"# {report.title}", ""]
     parts.append(
-        "Ranked by $/1M output tokens at SLO, cheapest first. Values are means with "
-        "95% confidence intervals in brackets. Goodput is the highest tested load that met "
-        "the SLO; raw peak throughput ignores the SLO and is not goodput. Unranked rows "
-        "(quality gate failed, untrusted, or no cost) are listed last."
+        "Ranked by $/1M output tokens at SLO (input tokens under the all_input cost "
+        "allocation), cheapest first. Values are point estimates (geometric means for "
+        "latency and throughput) with 95% confidence intervals in brackets; the methodology "
+        "below says how each is computed. Goodput is the highest tested load that met the "
+        "SLO; raw peak throughput ignores the SLO and is not goodput. Unranked rows (quality "
+        "gate failed, untrusted, or no cost) are listed last."
     )
+    if any_unbracketed(row.result.goodput for b in report.boards for row in b.rows):
+        parts += ["", UNBRACKETED_NOTE]
     for b in report.boards:
         parts += ["", f"## {board_title(b)}", "", md_table(MD_HEADERS, map(_md_row, b.rows))]
         warned = [row.result for row in b.rows if row.result.warnings]
@@ -317,10 +329,11 @@ def render_html(report: LeaderboardReport) -> str:
         .render(
             report=report,
             board_title=board_title,
-            load_value=load_value,
             quality_text=quality_text,
             cold_text=cold_text,
-            load_mode_label=load_mode_label,
+            unbracketed=any_unbracketed(
+                row.result.goodput for b in report.boards for row in b.rows
+            ),
         )
     )
 
@@ -380,7 +393,7 @@ CSV_COLUMNS = [
 
 def _csv_row(b: Leaderboard, row: LeaderboardRow, m: Methodology) -> dict[str, Any]:
     r = row.result
-    prov = next(c for c in m.configs if c.config_hash == r.config_hash)
+    prov = next(c for c in m.configs if c.key == r.key)
     q = r.quality
     worst = q.worst() if q else None
     dataset = DatasetRef.model_validate(r.provenance.get("dataset") or {})

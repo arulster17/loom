@@ -11,7 +11,7 @@ import asyncio
 import logging
 import uuid
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import typer
 from pydantic import ValidationError
@@ -42,6 +42,13 @@ from loom_bench.runner import (
     reproduce,
     run_experiment,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
+    from loom_bench.cost import CostAllocation
+    from loom_bench.prices import PriceBook
+    from loom_bench.slo import Slo
 
 EXIT_INVALID = 2
 EXIT_MISMATCH = 6
@@ -163,7 +170,72 @@ def render_plan(plan: Plan) -> None:
         )
 
 
-def render_outcome(outcome: Outcome) -> None:
+def _analyze_experiments(
+    session: Session,
+    experiment_ids: list[uuid.UUID],
+    slo: Slo,
+    allocation: CostAllocation,
+    prices: PriceBook,
+) -> list[ConfigResult]:
+    """ConfigResults with quality for these experiments: the one analysis behind
+    `bench report`, the results site and the summary printed after `bench run`."""
+    from loom_bench.report import analyze_runs, default_price_resolver, with_quality
+    from loom_bench.store import repo
+
+    runs = [run for i in experiment_ids for run in repo.list_runs(session, experiment_id=i)]
+    results = analyze_runs(
+        runs, slo=slo, allocation=allocation, hourly_price=default_price_resolver(prices)
+    )
+    return with_quality(
+        results,
+        repo.list_eval_runs(session, experiment_ids),
+        repo.list_gate_decisions(session, experiment_ids),
+    )
+
+
+def _run_results(exp: Experiment, ctx: RunnerContext, outcome: Outcome) -> list[ConfigResult]:
+    """The report's analysis of the runs just recorded; empty without an SLO."""
+    if exp.slo is None or not outcome.run_ids:
+        return []
+    from loom_bench.store.db import session_scope
+
+    try:
+        with session_scope(ctx.db_url) as s:
+            return _analyze_experiments(
+                s, [outcome.experiment_id], exp.slo, exp.cost_allocation.allocation(), ctx.prices
+            )
+    except (KeyError, ValueError, TypeError) as e:  # e.g. no price-book entry for the host
+        err.print(f"[yellow]cannot analyse the runs for the summary:[/] {e}")
+        return []
+
+
+def render_goodput(results: list[ConfigResult]) -> None:
+    """Goodput and cost at SLO per sweep, with trust exactly as `bench report` decides it."""
+    from loom_bench.report.format import UNBRACKETED_NOTE, est, goodput_load, usd_ci
+
+    if not results:
+        return
+    table = Table(title="Goodput at SLO (as in bench report)")
+    for col in ("cell", "workload", "goodput load", "out tok/s", "$/1M out", "trusted"):
+        table.add_column(col)
+    table.add_column("main warning", overflow="fold")
+    for r in results:
+        warning = r.main_warning
+        table.add_row(
+            r.name,
+            r.workload,
+            goodput_load(r.goodput),  # the unit (req/s, concurrent) gives the load mode
+            est(r.goodput.output_tok_s, 1),
+            usd_ci(r.cost.output_per_mtok if r.cost else None),
+            "yes" if r.trusted else "[red]no[/]",
+            "" if warning is None else warning.label,
+        )
+    if any(r.goodput.max_load is not None and not r.goodput.bracketed for r in results):
+        table.caption = UNBRACKETED_NOTE
+    console.print(table)
+
+
+def render_outcome(outcome: Outcome, results: list[ConfigResult] | None = None) -> None:
     color = {"completed": "green", "aborted": "red", "failed": "red"}[outcome.status.value]
     console.print(
         f"[bold {color}]{outcome.status.value}[/] experiment {outcome.experiment_id}: "
@@ -174,22 +246,7 @@ def render_outcome(outcome: Outcome) -> None:
     for g in outcome.gates:
         verdict = "[red]BLOCKED" if g.blocked else "[green]allowed"
         console.print(f"quality gate {g.cell} vs {g.baseline}: {g.decision} ({verdict}[/])")
-    if not outcome.goodput:
-        return
-    table = Table(title="Goodput at SLO")
-    for col in ("cell", "workload", "mode", "max load", "out tok/s", "$/1M out", "trusted"):
-        table.add_column(col)
-    for g in outcome.goodput:
-        table.add_row(
-            g.cell,
-            g.workload,
-            g.load_mode.value,
-            "-" if g.max_load is None else f"{g.max_load:g}{'' if g.bracketed else '+'}",
-            "-" if g.output_tok_s is None else f"{g.output_tok_s:.1f}",
-            "-" if g.output_per_mtok_micros is None else format_usd(g.output_per_mtok_micros, 4),
-            "yes" if g.trusted else "no",
-        )
-    console.print(table)
+    render_goodput(results or [])
 
 
 @app.command()
@@ -226,7 +283,7 @@ def run(
     except Exception as e:  # provider setup; the experiment is already marked failed
         err.print(f"[red]experiment {exp.name} failed:[/red] {type(e).__name__}: {e}")
         raise typer.Exit(EXIT_FAILED) from None
-    render_outcome(outcome)
+    render_outcome(outcome, _run_results(exp, ctx, outcome))
     raise typer.Exit(outcome.exit_code)
 
 
@@ -397,20 +454,10 @@ def _analyze(
     """ConfigResults (with quality) and cold-start stats for the selected experiments."""
     from sqlalchemy import select
 
-    from loom_bench.report import (
-        analyze_runs,
-        cold_starts_by_config,
-        default_price_resolver,
-        with_quality,
-    )
+    from loom_bench.report import cold_starts_by_config
     from loom_bench.store import repo
     from loom_bench.store.db import session_scope, upgrade
-    from loom_bench.store.models import (
-        BenchColdStart,
-        BenchEvalRun,
-        BenchExperiment,
-        BenchGateDecision,
-    )
+    from loom_bench.store.models import BenchExperiment
 
     upgrade(db)
     with session_scope(db) as s:
@@ -436,18 +483,9 @@ def _analyze(
             )
             raise typer.Exit(EXIT_INVALID)
         ids = [r.id for r in rows]
-        runs = [run for i in ids for run in repo.list_runs(s, experiment_id=i)]
-        results = analyze_runs(
-            runs,
-            slo=slo,
-            allocation=specs[0].cost_allocation.allocation(),
-            hourly_price=default_price_resolver(load_prices()),
-        )
-        evals = s.scalars(select(BenchEvalRun).where(BenchEvalRun.experiment_id.in_(ids)))
-        gates = s.scalars(select(BenchGateDecision).where(BenchGateDecision.experiment_id.in_(ids)))
-        results = with_quality(results, evals, gates)
-        colds = s.scalars(select(BenchColdStart).where(BenchColdStart.experiment_id.in_(ids)))
-        return results, cold_starts_by_config(colds, results)
+        allocation = specs[0].cost_allocation.allocation()
+        results = _analyze_experiments(s, ids, slo, allocation, load_prices())
+        return results, cold_starts_by_config(repo.list_cold_starts(s, ids), results)
 
 
 def _written(paths: list[Path]) -> None:

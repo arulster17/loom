@@ -8,18 +8,20 @@ from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict
 
+from loom_bench.metrics.aggregate import ci_rule_summary
 from loom_bench.money import Micros
 from loom_bench.prices import PriceBook
-from loom_bench.records import Market
+from loom_bench.records import LoadMode, Market
 from loom_bench.registry import Cloud
-from loom_bench.report.analyze import ConfigResult
+from loom_bench.report.analyze import ConfigResult, SweepKey
 from loom_bench.report.format import describe_slo, load_mode_label, usd
 
 ALLOCATION_TEXT = {
-    "all_output": "all of the replica's hourly cost is charged to output tokens "
-    "(input tokens are free); $/1M output is the headline number",
-    "all_input": "all of the replica's hourly cost is charged to input tokens "
-    "(output tokens are free)",
+    "all_output": "all of the replica's hourly cost is charged to output tokens, so "
+    "input tokens have no separate price ($/1M input is n/a, not $0); $/1M output is the "
+    "headline number",
+    "all_input": "all of the replica's hourly cost is charged to input tokens, so output "
+    "tokens have no separate price ($/1M output is n/a, not $0)",
 }
 
 
@@ -50,8 +52,12 @@ class DatasetRef(BaseModel):
 
 
 class ConfigProvenance(BaseModel):
+    """Provenance of one result: a config on one workload and load mode."""
+
     name: str
     config_hash: str
+    workload: str
+    load_mode: LoadMode
     label: str
     engine: str
     image: str | None
@@ -68,6 +74,19 @@ class ConfigProvenance(BaseModel):
     provenance_digests: list[str]
     reproduce: str
 
+    @property
+    def key(self) -> SweepKey:
+        return SweepKey(self.config_hash, self.workload, self.load_mode)
+
+    @property
+    def title(self) -> str:
+        return f"{self.name} · {self.workload}, {self.load_mode.value.replace('_', ' ')}"
+
+
+class CiMethodRow(BaseModel):
+    metrics: str  # metric family
+    method: str
+
 
 class Methodology(BaseModel):
     slos: list[str]
@@ -77,6 +96,7 @@ class Methodology(BaseModel):
     datasets: list[DatasetRef]
     repetitions: str
     ci_method: str
+    ci_methods: list[CiMethodRow]
     price_book_last_checked: dt.date | None
     configs: list[ConfigProvenance]
 
@@ -162,6 +182,8 @@ def _config_provenance(result: ConfigResult, price_book: PriceBook | None) -> Co
     return ConfigProvenance(
         name=result.name,
         config_hash=result.config_hash,
+        workload=result.workload,
+        load_mode=result.load_mode,
         label=result.label.text,
         engine=engine_text or "unknown",
         image=engine.get("image"),
@@ -201,11 +223,20 @@ def methodology(results: Sequence[ConfigResult], price_book: PriceBook | None) -
         repetitions = "none"
     conf = ", ".join(f"{c:.0%}" for c in confidences) or "95%"
     ci_method = (
-        f"Each metric is the mean across repetitions with a two-sided Student-t {conf} "
-        "confidence interval. A load meets the SLO only if the CI upper bound of every target "
-        "is within it; goodput is the highest passing load below the first failing one. Cost "
-        "CI bounds come from the goodput throughput CI (low cost from high throughput). "
-        "Results with a single repetition have no CI and are never trusted."
+        "Repetitions of a load point are combined per metric, with a two-sided "
+        f"{conf} Student-t interval on the scale that fits the metric. Latencies, "
+        "throughputs and rates are strictly positive and right-skewed: the value shown is "
+        "the geometric mean and the interval is the t-interval of ln(value), exponentiated "
+        "(geometric mean ×/÷ a factor), so both bounds are positive. Proportions such as "
+        "error rate and SLO attainment use the arithmetic mean of the per-run proportions "
+        "with the t-interval clipped to [0, 1]; it measures run-to-run variation, not "
+        "binomial sampling, so it is [0, 0] when no repetition saw an error. Counts use the "
+        "arithmetic t-interval clipped at 0, as does a positive metric when a repetition "
+        "measured 0. A load meets the SLO only if the CI upper bound of every target is "
+        "within it; goodput is the highest passing load below the first failing one. Cost "
+        "CI bounds come from the goodput throughput CI (low cost from high throughput), so "
+        "they are finite whenever the throughput lower bound is above zero. Results with a "
+        "single repetition have no CI and are never trusted."
     )
     return Methodology(
         slos=_distinct([describe_slo(r.goodput.slo) for r in results]),
@@ -215,6 +246,7 @@ def methodology(results: Sequence[ConfigResult], price_book: PriceBook | None) -
         datasets=datasets,
         repetitions=repetitions,
         ci_method=ci_method,
+        ci_methods=[CiMethodRow(metrics=m, method=t) for m, t in ci_rule_summary()],
         price_book_last_checked=price_book.last_checked if price_book else None,
         configs=[_config_provenance(r, price_book) for r in results],
     )
@@ -234,6 +266,7 @@ def methodology_markdown(m: Methodology) -> str:
         lines.append(f"- **Dataset:** {d.text}{source}")
     lines.append(f"- **Repetitions:** {m.repetitions}")
     lines.append(f"- **Confidence intervals:** {m.ci_method}")
+    lines += [f"  - {row.metrics}: {row.method}" for row in m.ci_methods]
     lines += [f"- **Cost allocation:** {a}" for a in m.allocations]
     checked = m.price_book_last_checked.isoformat() if m.price_book_last_checked else "n/a"
     lines.append(f"- **Price book last checked:** {checked}")
@@ -249,7 +282,7 @@ def methodology_markdown(m: Methodology) -> str:
         shas = ", ".join(_code(s) for s in c.git_shas) or "not recorded"
         lines += [
             "",
-            f"### {c.name} (`{c.config_hash}`)",
+            f"### {c.title} (`{c.config_hash}`)",
             "",
             f"- **Config:** {c.label}",
             f"- **Engine:** {c.engine}; image {_code(c.image)}; digest {_code(c.image_digest)}",

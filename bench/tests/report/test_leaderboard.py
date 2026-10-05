@@ -10,11 +10,13 @@ from loom_bench.report.analyze import (
     default_price_resolver,
     with_quality,
 )
+from loom_bench.report.format import UNBRACKETED_NOTE
 from loom_bench.report.leaderboard import (
     CSV_COLUMNS,
     MD_HEADERS,
     RowStatus,
     build_leaderboard,
+    cold_text,
     render_csv,
     render_html,
     render_markdown,
@@ -118,11 +120,11 @@ def test_markdown_table_and_footer(report):
     row = next(line for line in md.splitlines() if line.startswith("| 1 |"))
     cells = [c.strip() for c in row.strip("|").split(" | ")]
     assert cells[1].startswith("**sglang-bf16**<br>sglang 0.5.21 · unquantized · 1×L40S")
-    assert cells[2] == "$0.8615 [0.8406, 0.8835]"
-    assert cells[4] == "600.0 [585.1, 614.9]"
+    assert cells[2] == "$0.8615 [0.8404, 0.8832]"
+    assert cells[4] == "600.0 [585.3, 615.1]"  # geometric mean, log-t CI
     assert cells[6] == "6 req/s"
-    assert cells[7] == "413 [392, 434] ms"
-    assert cells[9] == "800.1 [780.2, 819.9] at 8 req/s"
+    assert cells[7] == "413 [393, 434] ms"
+    assert cells[9] == "800.0 [780.4, 820.2] at 8 req/s"
     assert cells[10] == "-0.010 (gsm8k) · pass"
     assert cells[11] == "95 s (median of 3)"
     assert "- sglang-1rep: load 2 req/s: 1 completed repetition; no confidence interval" in md
@@ -133,7 +135,12 @@ def test_markdown_table_and_footer(report):
         "- **Content:** realistic",
         "- **Dataset:** ShareGPT_V3 (license: apache-2.0)",
         "- **Repetitions:** 1–3 per load point",
-        "Student-t 95% confidence interval",
+        "two-sided 95% Student-t interval",
+        "the value shown is the geometric mean",
+        "  - latency percentiles and means (ms): geometric mean, Student-t interval on the "
+        "log scale (log_t)",
+        "  - error rate, SLO attainment, cache fractions and hit rates: arithmetic mean of "
+        "per-run proportions, Student-t interval clipped to [0, 1] (t_clipped)",
         "- **Cost allocation:** all_output",
         "- **Price book last checked:** 2026-10-04",
         "aws/us-east-1 g6e.xlarge spot: $1.8386/h",
@@ -159,7 +166,10 @@ def test_csv_has_integer_micros_and_formatted_usd(report):
     assert (
         int(first["output_per_mtok_lo_micros"]) < micros < int(first["output_per_mtok_hi_micros"])
     )
-    assert first["input_per_mtok_micros"] == "0"
+    assert first["input_per_mtok_micros"] == "" and first["input_per_mtok_usd"] == ""
+    assert first["input_per_mtok_na_reason"] == "all cost allocated to output"
+    assert first["output_per_mtok_na_reason"] == ""
+    assert first["goodput_output_tok_s_ci_method"] == "log_t"
     assert first["hourly_micros"] == "1861000" and first["hourly_usd"] == "$1.861000"
     assert (
         first["rank"] == "1"
@@ -201,3 +211,69 @@ def test_html_escapes_untrusted_text(results, price_book):
     html = render_html(build_leaderboard([hostile], price_book=price_book))
     assert "<script>" not in html
     assert "&lt;script&gt;x&lt;/script&gt;" in html
+
+
+def test_unallocated_price_is_na_not_zero(report):
+    md = render_markdown(report)
+    row = next(line for line in md.splitlines() if line.startswith("| 1 |"))
+    cells = [c.strip() for c in row.strip("|").split(" | ")]
+    assert cells[3] == "n/a (all cost allocated to output)"
+    assert "$0.0000" not in md
+    html = render_html(report)
+    assert 'n/a<span class="ci">all cost allocated to output</span>' in html
+    assert "$0.0000" not in html
+
+
+def test_all_input_ranks_by_input_cost(all_runs, price_book):
+    results = analyze_runs(
+        all_runs,
+        slo=SLO,
+        allocation=CostAllocation.all_input(),
+        hourly_price=default_price_resolver(price_book),
+    )
+    rows = build_leaderboard(results).boards[0].rows
+    ranked = [r for r in rows if r.status is RowStatus.RANKED]
+    assert [r.result.name for r in ranked] == ["vllm-awq", "sglang-bf16", "vllm-bf16"]
+    assert all(r.result.cost.output_per_mtok.na_reason for r in rows)
+    costs = [r.result.cost.input_per_mtok.value for r in ranked]
+    assert costs == sorted(costs)
+
+
+def test_unbracketed_goodput_is_marked_and_explained_once(report):
+    md = render_markdown(report)
+    rows = {
+        cells[1].split("**")[1]: cells
+        for line in md.splitlines()
+        if line.startswith("| ") and "**" in line
+        for cells in [[c.strip() for c in line.strip("|").split(" | ")]]
+    }
+    assert rows["sglang-bf16"][6] == "6 req/s"  # bracketed: a failing load above it
+    assert rows["sglang-1rep"][6] == "8+ req/s"  # every tested load met the SLO
+    assert md.count(UNBRACKETED_NOTE) == 1
+    assert render_html(report).count(UNBRACKETED_NOTE) == 1
+
+
+def test_cold_start_keeps_two_significant_figures():
+    assert cold_text(ColdStartStat(median_s=0.23, n=1)) == "0.23 s (median of 1)"
+    assert cold_text(ColdStartStat(median_s=1.3282, n=2)) == "1.3 s (median of 2)"
+    assert cold_text(ColdStartStat(median_s=95.4, n=3)) == "95 s (median of 3)"
+    assert cold_text(ColdStartStat(median_s=123.4, n=1)) == "123 s (median of 1)"
+
+
+def test_provenance_is_per_workload_not_per_config(price_book):
+    runs = [*make_runs("vllm-bf16"), *make_runs("vllm-bf16", workload="code")]
+    results = analyze_runs(
+        runs,
+        slo=SLO,
+        allocation=CostAllocation.all_output(),
+        hourly_price=default_price_resolver(price_book),
+    )
+    assert len({r.config_hash for r in results}) == 1 and len(results) == 2
+    report = build_leaderboard(results, price_book=price_book)
+    rows = list(csv.DictReader(io.StringIO(render_csv(report))))
+    by_workload = {r["workload"]: r["reproduce_command"] for r in rows}
+    expected = {r.workload: f"bench reproduce {r.reproduce_run_id()}" for r in results}
+    assert by_workload == expected and len(set(by_workload.values())) == 2
+    md = render_markdown(report)
+    assert "### vllm-bf16 · chat, open loop (`" in md
+    assert "### vllm-bf16 · code, open loop (`" in md

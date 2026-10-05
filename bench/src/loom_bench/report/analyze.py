@@ -85,9 +85,25 @@ UNTRUSTING = frozenset(
 )
 
 
+# Short reason per warning kind, for tables (the message carries the detail).
+WARNING_LABELS: dict[WarningKind, str] = {
+    WarningKind.SINGLE_REPETITION: "single repetition",
+    WarningKind.UNBRACKETED_GOODPUT: "goodput not bracketed",
+    WarningKind.HIGH_CV: "high run-to-run variance",
+    WarningKind.MISSING_USAGE: "missing token usage",
+    WarningKind.NO_GOODPUT: "no tested load met the SLO",
+    WarningKind.NO_PRICE: "no hourly price",
+    WarningKind.EXCLUDED_RUNS: "runs not completed were excluded",
+}
+
+
 class ResultWarning(BaseModel):
     kind: WarningKind
     message: str
+
+    @property
+    def label(self) -> str:
+        return WARNING_LABELS[self.kind]
 
 
 class ConfigLabel(BaseModel):
@@ -183,10 +199,22 @@ class ConfigResult(BaseModel):
         return self.cell_key or self.config_hash[:12]
 
     @property
+    def key(self) -> SweepKey:
+        """One result per key: a config can be benchmarked on several workloads."""
+        return SweepKey(self.config_hash, self.workload, self.load_mode)
+
+    @property
     def trusted(self) -> bool:
         if any(w.kind in UNTRUSTING for w in self.warnings):
             return False
         return self.goodput.max_load is None or self.goodput.trusted
+
+    @property
+    def main_warning(self) -> ResultWarning | None:
+        """The warning that best explains the verdict: the first one that makes the result
+        untrusted, else the first of any kind (no goodput, no price, ...)."""
+        untrusting = (w for w in self.warnings if w.kind in UNTRUSTING)
+        return next(untrusting, self.warnings[0] if self.warnings else None)
 
     @property
     def goodput_point(self) -> LoadPoint | None:
@@ -197,7 +225,7 @@ class ConfigResult(BaseModel):
         est = self.goodput.output_tok_s
         if est is None:
             return None
-        return _scale(est, 1 / self.gpus)
+        return est.scaled(1 / self.gpus)
 
     def reproduce_run_id(self) -> str:
         """A run whose provenance reproduces this sweep: first run at goodput, else first."""
@@ -209,17 +237,6 @@ def _arg(v: Any) -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
     return str(v)
-
-
-def _scale(est: Estimate, k: float) -> Estimate:
-    return Estimate(
-        mean=est.mean * k,
-        lo=None if est.lo is None else est.lo * k,
-        hi=None if est.hi is None else est.hi * k,
-        n=est.n,
-        std=None if est.std is None else est.std * k,
-        confidence=est.confidence,
-    )
 
 
 def _section(prov: Mapping[str, Any], name: str) -> Mapping[str, Any]:

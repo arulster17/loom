@@ -4,13 +4,13 @@ import sys
 
 import pytest
 from ext_support import (
-    BASE_URL,
     FAKE_TOOL,
     FIXTURES,
     MODEL,
     TOK,
     TOKENIZER,
     closed_plan,
+    load_context,
     open_plan,
     profile,
     read_jsonl,
@@ -24,7 +24,6 @@ from loom_bench.loadgen.external import (
     ExternalLoadGenerator,
     ExternalToolError,
     UnsupportedByTool,
-    WorkloadContext,
 )
 from loom_bench.loadgen.vllm_bench import VllmBench
 from loom_bench.records import LoadMode, RequestStatus
@@ -240,7 +239,7 @@ def test_parse_fixture_into_records(tmp_path):
     assert timed_out.first_token_at_s == pytest.approx(0.6 + 0.05)
 
     assert res.meta["prompts_source"] == "loom" and res.meta["tool"] == "vllm_bench"
-    assert res.meta["tool_warmup_requests"] == 1 and res.meta["send_times"] is True
+    assert res.meta["tool_warmup_requests"] == 1 and res.timeline == "measured"
     assert res.meta["tool_summary"]["failed"] == 2
 
 
@@ -248,16 +247,14 @@ async def test_end_to_end_with_fake_tool(tmp_path, monkeypatch):
     log = tmp_path / "log.json"
     monkeypatch.setenv("FAKE_BENCH_FIXTURE", str(FIXTURES / "vllm_custom_closed.json"))
     monkeypatch.setenv("FAKE_BENCH_LOG", str(log))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     prof = profile("long_context_needle")
     reqs = build_requests(prof, TOK, 6)
     gen = ExternalLoadGenerator(
         VllmBench(), command_prefix=[sys.executable, str(FAKE_TOOL)], workdir=tmp_path
-    ).bind(WorkloadContext(profile=prof, seed=7, tokenizer=TOKENIZER))
+    )
 
-    res = await gen.run(
-        BASE_URL, reqs, closed_plan(2, 5, 1), request_timeout_s=60, model=MODEL,
-        api_key="sk-test", keep_output=True,
-    )  # fmt: skip
+    res = await gen.run(load_context(prof, closed_plan(2, 5, 1), requests=reqs, keep_output=True))
 
     seen = json.loads(log.read_text())
     assert seen["api_key"] == "sk-test" and "sk-test" not in seen["argv"]
@@ -271,15 +268,13 @@ async def test_end_to_end_with_fake_tool(tmp_path, monkeypatch):
 
 async def test_tool_failure_surfaces_output_tail(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_BENCH_EXIT", "1")
-    gen = ExternalLoadGenerator(VllmBench(), command_prefix=[sys.executable, str(FAKE_TOOL)]).bind(
-        WorkloadContext(profile=profile("synthetic"))
-    )
+    gen = ExternalLoadGenerator(VllmBench(), command_prefix=[sys.executable, str(FAKE_TOOL)])
     with pytest.raises(ExternalToolError, match=r"status 1(.|\n)*Initial test run failed"):
-        await gen.run(BASE_URL, [], closed_plan(), request_timeout_s=60, model=MODEL)
+        await gen.run(load_context(profile("synthetic"), closed_plan()))
 
 
 def test_registered():
     assert "vllm_bench" in LOAD_GENERATORS
     gen = get_load_generator("vllm_bench")
     assert isinstance(gen, ExternalLoadGenerator) and isinstance(gen.tool, VllmBench)
-    assert gen.name == "vllm_bench" and gen.context is None and gen.command_prefix == []
+    assert gen.name == "vllm_bench" and gen.command_prefix == []

@@ -150,9 +150,15 @@ def _row(
 ) -> CompetitivenessRow:
     cost = best.cost if best else None
     cin, cout = (cost.input_per_mtok, cost.output_per_mtok) if cost else (None, None)
+    # A side the allocation does not price (na_reason) has no cost and no margin; a
+    # side that should be priced but is not (zero throughput) means no measurement.
+    priced = [r for r in (cin, cout) if r is not None and not r.na_reason]
     measured = (
-        CostPerMtok(input=cin.value, output=cout.value)
-        if cin is not None and cout is not None and cin.value is not None and cout.value is not None
+        CostPerMtok(
+            input=None if cin is None else cin.value,
+            output=None if cout is None else cout.value,
+        )
+        if priced and all(r.value is not None for r in priced)
         else None
     )
     flags = assess(
@@ -232,9 +238,10 @@ def build_competitiveness(
     )
 
 
-def margin_text(m: Margin | None) -> str:
+def margin_text(m: Margin | None, cost: MicrosRange | None = None) -> str:
+    """Margin with its share of price; `cost` explains an n/a margin (allocation)."""
     if m is None:
-        return "n/a"
+        return f"n/a ({cost.na_reason})" if cost is not None and cost.na_reason else "n/a"
     share = "" if m.fraction_of_price is None else f" ({pct(m.fraction_of_price)} of price)"
     worst = "" if m.worst is None else f"; {usd(m.worst)} at cost CI high"
     return f"{usd(m.value)}{share}{worst}"
@@ -292,8 +299,8 @@ def _ours_md(r: CompetitivenessRow) -> list[Any]:
         usd_ci(r.cost_output),
         price_text(r.price, "input"),
         price_text(r.price, "output"),
-        margin_text(r.margin_input),
-        margin_text(r.margin_output),
+        margin_text(r.margin_input, r.cost_input),
+        margin_text(r.margin_output, r.cost_output),
     ]
 
 

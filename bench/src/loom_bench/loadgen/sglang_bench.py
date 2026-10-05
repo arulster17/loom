@@ -12,8 +12,8 @@ keeps file order and passes `messages` through unchanged. Completions-endpoint
 kinds other than `synthetic` have no order-preserving dataset and are rejected.
 Arrivals: Poisson only. The tool ignores EOS unless `--disable-ignore-eos`.
 
-Its JSONL result has no per-request start times or latencies, so records are
-placed at t=0 and end at their last content chunk (`meta["send_times"]` False).
+Its JSONL result has no per-request start times or latencies, so its timeline is
+"unavailable": records are placed at t=0 and end at their last content chunk.
 On the completions endpoint the output length is the requested `max_tokens`
 (asking for a usage chunk there crashes the tool's parser).
 """
@@ -68,31 +68,31 @@ class SglangBench:
         self.executable = list(executable)
 
     def build_argv(self, run: ToolRun, result_path: Path) -> list[str]:
-        root, prefix = split_base_url(run.base_url)
+        root, prefix = split_base_url(run.job.base_url)
         if prefix != "/v1":
             raise UnsupportedByTool(
                 f"sglang bench_serving always calls /v1/...; base_url must end in /v1, "
-                f"got {run.base_url!r}"
+                f"got {run.job.base_url!r}"
             )
         endpoint = run.profile.endpoint
         argv = [
             *self.executable,
-            "--backend", _BACKENDS[run.context.engine == "sglang"][endpoint],
+            "--backend", _BACKENDS[run.job.engine == "sglang"][endpoint],
             "--base-url", root,
-            "--model", run.model,
+            "--model", run.job.served_model,
         ]  # fmt: skip
-        if run.context.tokenizer:
-            argv += ["--tokenizer", run.context.tokenizer]
+        if run.tokenizer:
+            argv += ["--tokenizer", run.tokenizer]
         argv += [
             "--num-prompts", str(run.num_prompts),
-            "--seed", str(run.context.seed),
+            "--seed", str(run.job.seed),
             "--warmup-requests", str(run.warmup_requests),
             *self._load_args(run),
             *self._dataset_args(run),
         ]  # fmt: skip
         if not ignore_eos(run.profile):
             argv.append("--disable-ignore-eos")
-        body: dict[str, Any] = {"temperature": run.profile.temperature, **run.context.extra_body}
+        body: dict[str, Any] = {"temperature": run.profile.temperature, **run.job.extra_body}
         if endpoint == "chat":
             body["stream_options"] = {"include_usage": True}
         argv += [
@@ -112,7 +112,7 @@ class SglangBench:
     def _load_args(self, run: ToolRun) -> list[str]:
         if run.mode is LoadMode.CLOSED_LOOP:
             return ["--request-rate", "inf", "--max-concurrency", str(run.concurrency)]
-        arrival = run.context.arrival
+        arrival = run.ctx.arrival
         match arrival:
             case PoissonArrivals():
                 rate = arrival.rate

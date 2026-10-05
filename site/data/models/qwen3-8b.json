@@ -11,6 +11,7 @@
       "license": "apache-2.0",
       "gated": false,
       "size_bytes": 16381516776,
+      "quant_method": null,
       "trust_remote_code": false,
       "trust_remote_code_review": null
     },

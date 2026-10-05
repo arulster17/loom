@@ -94,12 +94,27 @@ def test_engine_args_merge_and_null_removes():
         ({"name": "x", "max_context": 10**6}, "max_context"),
         ({"name": "x", "quantization": "int3"}, "quantization"),
         ({"name": "x", "hf": {"revision": "main"}}, "revision"),  # must be pinned
+        ({"name": "x", "quantization": "awq"}, "cannot be served"),  # needs an AWQ checkpoint
     ],
 )
 def test_invalid_overrides_are_rejected(variant, match):
     exp = Experiment.model_validate({**mock_doc(), "variants": [variant]})
     with pytest.raises(ExpansionError, match=match):
         expand(exp, REGISTRY)
+
+
+def test_variant_serves_a_prequantized_checkpoint():
+    hf = {"repo": "Qwen/Qwen3-8B-AWQ", "revision": "1" * 40, "quant_method": "awq"}
+    exp = Experiment.model_validate(
+        {
+            **mock_doc(),
+            "provider": {"kind": "aws_ec2"},
+            "variants": [{"name": "awq", "hf": hf, "quantization": "awq"}],
+        }
+    )
+    (cell,) = expand(exp, REGISTRY)
+    assert (cell.spec.hf.quant_method, cell.spec.quantization) == ("awq", "awq")
+    assert cell.launch.args[0] == "Qwen/Qwen3-8B-AWQ" and "--quantization" not in cell.launch.args
 
 
 def test_reserved_engine_arg_is_rejected_by_the_launch_renderer():

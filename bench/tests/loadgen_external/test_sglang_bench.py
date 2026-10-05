@@ -4,13 +4,13 @@ import sys
 
 import pytest
 from ext_support import (
-    BASE_URL,
     FAKE_TOOL,
     FIXTURES,
     MODEL,
     TOK,
     TOKENIZER,
     closed_plan,
+    load_context,
     open_plan,
     profile,
     read_jsonl,
@@ -20,7 +20,7 @@ from ext_support import (
 )
 
 from loom_bench.loadgen.base import LOAD_GENERATORS, get_load_generator
-from loom_bench.loadgen.external import ExternalLoadGenerator, UnsupportedByTool, WorkloadContext
+from loom_bench.loadgen.external import ExternalLoadGenerator, UnsupportedByTool
 from loom_bench.loadgen.sglang_bench import SglangBench, random_ids_lengths
 from loom_bench.records import LoadMode, RequestStatus
 from loom_bench.workloads import build_requests
@@ -204,7 +204,7 @@ def test_parse_last_jsonl_line_into_records(tmp_path):
         failed.error.startswith("Internal Server Error:") and "KV cache exhausted" in failed.error
     )
     assert failed.first_token_at_s is None and failed.finished_at_s is None
-    assert res.meta["send_times"] is False
+    assert res.timeline == "unavailable"
     assert res.meta["output_lens_source"] == "server_usage"
     assert res.meta["tool_summary"]["completed"] == 2
 
@@ -222,13 +222,14 @@ async def test_end_to_end_with_fake_tool(tmp_path, monkeypatch):
     log = tmp_path / "log.json"
     monkeypatch.setenv("FAKE_BENCH_FIXTURE", str(FIXTURES / "sglang_openai_closed.jsonl"))
     monkeypatch.setenv("FAKE_BENCH_LOG", str(log))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     prof = profile("long_generation")
     reqs = build_requests(prof, TOK, 4)
     gen = ExternalLoadGenerator(
         SglangBench(), command_prefix=[sys.executable, str(FAKE_TOOL)], workdir=tmp_path
-    ).bind(WorkloadContext(profile=prof, engine="sglang", tokenizer=TOKENIZER))
+    )
 
-    res = await gen.run(BASE_URL, reqs, closed_plan(2, 3, 1), request_timeout_s=60, model=MODEL)
+    res = await gen.run(load_context(prof, closed_plan(2, 3, 1), requests=reqs, engine="sglang"))
 
     seen = json.loads(log.read_text())
     assert seen["argv"][:5] == [*EXE, "--backend", "sglang-oai-chat"]
@@ -244,4 +245,4 @@ def test_registered():
     assert "sglang_bench" in LOAD_GENERATORS
     gen = get_load_generator("sglang_bench")
     assert isinstance(gen, ExternalLoadGenerator) and isinstance(gen.tool, SglangBench)
-    assert gen.name == "sglang_bench" and gen.context is None
+    assert gen.name == "sglang_bench" and gen.command_prefix == []

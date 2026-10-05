@@ -53,7 +53,9 @@ def test_rows_use_best_ranked_config_and_margins(report):
     assert qwen.cost_output.value == pytest.approx(861_517, rel=1e-3)
     assert qwen.margin_output.value == 500_000 - qwen.cost_output.value
     assert qwen.margin_output.worst == 500_000 - qwen.cost_output.hi
-    assert qwen.margin_input.value == 50_000  # all_output allocation: input costs nothing
+    # all_output allocation: input has no cost of its own, so no input margin
+    assert qwen.margin_input is None
+    assert qwen.cost_input.na_reason == "all cost allocated to output"
     assert (llama.model_id, llama.workload, llama.best_config, llama.price) == (
         "llama-3.3-70b-instruct",
         None,
@@ -84,9 +86,11 @@ def test_markdown_states_public_list_prices_only(report):
     md = render_markdown(report)
     assert "> Public list prices only" in md
     assert (
-        "| chat (open loop) | sglang-bf16 | $0.0000 [0.0000, 0.0000] | $0.8615 [0.8406, 0.8835]"
+        "| chat (open loop) | sglang-bf16 | n/a (all cost allocated to output) "
+        "| $0.8615 [0.8404, 0.8832] | $0.0500 | $0.5000 | n/a (all cost allocated to output) |"
         in md
     )
+    assert "$0.0000" not in md
     assert "| OpenRouter (aggregator) | qwen/qwen3-8b | $0.1170 | $0.4550 |" in md
     assert "https://openrouter.ai/qwen/qwen3-8b | 2026-10-04 |" in md
     assert "`price_above_market`: qwen3-8b output: $0.5000/1M is $0.0450 (9.9%) above" in md

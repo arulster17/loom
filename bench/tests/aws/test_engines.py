@@ -3,8 +3,8 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from loom_bench.engines import docker_run_argv, render_args, render_launch
-from loom_bench.registry import ModelSpec, load_registry
+from loom_bench.engines import docker_run_argv, quantization_flag, render_args, render_launch
+from loom_bench.registry import CHECKPOINT_PRECISIONS, ModelSpec, load_registry
 
 VLLM_IMAGE = (
     "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90"
@@ -13,8 +13,6 @@ SGLANG_IMAGE = (
     "lmsysorg/sglang@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469"
 )
 QWEN_REV = "b968826d9c46dd6066d109eabc6255188de91218"
-LLAMA_REV = "6f6073b423013f6a7d4d9f39144961bfbfbc386b"
-TO_SGLANG = {"engine": "sglang", "version": "0.5.21", "image": SGLANG_IMAGE}
 
 
 @pytest.fixture(scope="module")
@@ -36,6 +34,17 @@ def patched(spec: ModelSpec, **changes: Any) -> ModelSpec:
             node = node[p]
         node[leaf] = value
     return ModelSpec.model_validate(doc)
+
+
+def on_sglang(spec: ModelSpec, **changes: Any) -> ModelSpec:
+    return patched(
+        spec,
+        engine__name="sglang",
+        engine__version="0.5.21",
+        engine__image=SGLANG_IMAGE,
+        engine__args={},
+        **changes,
+    )
 
 
 def test_vllm_qwen_exact_argv(qwen: ModelSpec) -> None:
@@ -79,7 +88,7 @@ def test_vllm_llama_tp4(llama: ModelSpec) -> None:
 
 
 def test_sglang_qwen_exact_argv(qwen: ModelSpec) -> None:
-    launch = render_launch(qwen, TO_SGLANG)
+    launch = render_launch(on_sglang(qwen))
     assert launch.engine == "sglang"
     assert launch.image == SGLANG_IMAGE
     assert launch.args == [
@@ -102,60 +111,92 @@ def test_sglang_qwen_exact_argv(qwen: ModelSpec) -> None:
 
 
 def test_sglang_llama_tp2_pp2_fp8_kv(llama: ModelSpec) -> None:
-    launch = render_launch(
-        llama, {**TO_SGLANG, "tp": 2, "pp": 2, "kv_cache_dtype": "fp8", "port": 30000}
-    )
+    spec = on_sglang(llama, parallelism__tp=2, parallelism__pp=2, kv_cache_dtype="fp8")
+    launch = render_launch(spec)
     a = launch.args
     assert a[a.index("--tp-size") + 1] == "2"
     assert a[a.index("--pp-size") + 1] == "2"
     assert a[a.index("--kv-cache-dtype") + 1] == "fp8_e4m3"
-    assert a[a.index("--port") + 1] == "30000"
-    assert launch.port == 30000
     assert launch.gpus == 4
 
 
-def test_overrides_patch_args_and_quantization(qwen: ModelSpec) -> None:
-    spec = patched(qwen, engine__args={"max_num_seqs": 128, "enable_prefix_caching": True})
-    launch = render_launch(
-        spec,
-        {
-            "args": {
-                "max_num_seqs": 256,
-                "enable_prefix_caching": None,
-                "gpu_memory_utilization": 0.9,
-            },
-            "quantization": "fp8",
-            "kv_cache_dtype": "fp8",
-            "max_context": 8192,
-            "ready_timeout_s": 600,
-        },
+def test_engine_args_follow_registry_flags(qwen: ModelSpec) -> None:
+    spec = patched(
+        qwen,
+        engine__args={"max_num_seqs": 256, "gpu_memory_utilization": 0.9},
+        kv_cache_dtype="fp8",
+        max_context=8192,
     )
-    a = launch.args
+    a = render_launch(spec).args
     assert a[a.index("--max-model-len") + 1] == "8192"
-    assert a[a.index("--quantization") + 1] == "fp8"
     assert a[a.index("--kv-cache-dtype") + 1] == "fp8"
     assert a[-4:] == ["--max-num-seqs", "256", "--gpu-memory-utilization", "0.9"]
-    assert "--enable-prefix-caching" not in a
-    assert launch.ready_timeout_s == 600
 
 
-def test_prequantized_formats_emit_no_flag(qwen: ModelSpec) -> None:
-    for q in ("awq", "gptq", "w4a16", "w8a8", "nvfp4"):
-        assert "--quantization" not in render_launch(qwen, {"quantization": q}).args
+# One row per (hf.quant_method, quantization) pair in the `quantization_flag` table.
+QUANT_TABLE = [
+    (None, "none", []),
+    (None, "fp8", ["--quantization", "fp8"]),
+    ("fp8", "fp8", []),
+    ("compressed-tensors", "fp8", []),
+    ("compressed-tensors", "w8a8", []),
+    ("compressed-tensors", "w4a16", []),
+    ("compressed-tensors", "nvfp4", []),
+    ("awq", "awq", []),
+    ("gptq", "gptq", []),
+    ("modelopt", "fp8", []),
+    ("modelopt", "nvfp4", []),
+]
 
 
-def test_explicit_quantization_arg_replaces_derived(qwen: ModelSpec) -> None:
-    ct = render_launch(
-        qwen, {"quantization": "fp8", "args": {"quantization": "compressed-tensors"}}
-    )
-    assert ct.args[ct.args.index("--quantization") + 1] == "compressed-tensors"
-    assert ct.args.count("--quantization") == 1
-    off = render_launch(qwen, {"quantization": "fp8", "args": {"quantization": False}})
-    assert "--quantization" not in off.args
+def test_quant_table_covers_every_allowed_pair() -> None:
+    allowed = {(m, q) for m, qs in CHECKPOINT_PRECISIONS.items() for q in qs}
+    assert {(m, q) for m, q, _ in QUANT_TABLE} == allowed
+
+
+@pytest.mark.parametrize(("method", "precision", "flag"), QUANT_TABLE)
+@pytest.mark.parametrize("engine", ["vllm", "sglang"])
+def test_quantization_flag_table(
+    qwen: ModelSpec, engine: str, method: str | None, precision: str, flag: list[str]
+) -> None:
+    spec = patched(qwen, hf__quant_method=method, quantization=precision)
+    if engine == "sglang":
+        spec = on_sglang(spec)
+    assert quantization_flag(spec) == flag
+    args = render_launch(spec).args
+    if flag:
+        i = args.index("--quantization")
+        assert args[i : i + 2] == flag and args.count("--quantization") == 1
+    else:
+        assert "--quantization" not in args
+
+
+@pytest.mark.parametrize(
+    ("method", "precision"),
+    [
+        (None, "awq"),
+        (None, "gptq"),
+        (None, "w4a16"),
+        (None, "w8a8"),
+        (None, "fp4"),
+        (None, "nvfp4"),
+        ("fp8", "none"),
+        ("awq", "none"),
+        ("awq", "fp8"),
+        ("gptq", "awq"),
+        ("compressed-tensors", "none"),
+        ("modelopt", "fp4"),
+    ],
+)
+def test_quantization_pairs_outside_the_table_are_rejected(
+    qwen: ModelSpec, method: str | None, precision: str
+) -> None:
+    with pytest.raises(ValidationError, match="cannot be served from"):
+        patched(qwen, hf__quant_method=method, quantization=precision)
 
 
 def test_render_args_types() -> None:
-    argv, quant = render_args(
+    argv = render_args(
         "vllm",
         {
             "enforce_eager": True,
@@ -166,7 +207,6 @@ def test_render_args_types() -> None:
             "load_format": "safetensors",
         },
     )
-    assert quant is None
     assert argv == [
         "--enforce-eager",
         "--max-num-batched-tokens",
@@ -188,6 +228,7 @@ def test_render_args_types() -> None:
         {"trust_remote_code": True},
         {"max_model_len": 4096},
         {"tensor_parallel_size": 2},
+        {"quantization": "compressed-tensors"},
         {"port": 9000},
         {"Bad Flag": 1},
         {"x": None},
@@ -209,35 +250,11 @@ def test_trust_remote_code_only_with_review(qwen: ModelSpec) -> None:
         hf__trust_remote_code_review={"reviewer": "a", "date": "2026-10-01", "notes": "ok"},
     )
     assert "--trust-remote-code" in render_launch(reviewed).args
-    assert "--trust-remote-code" in render_launch(reviewed, TO_SGLANG).args
-
-
-@pytest.mark.parametrize(
-    ("overrides", "match"),
-    [
-        ({"engine": "sglang"}, "requires image and version"),
-        ({"tp": 2}, "tp \\* pp"),
-        ({"max_context": 65536}, "exceeds the registry cap"),
-        ({"bogus": 1}, "Extra inputs"),
-        ({"image": "vllm/vllm-openai:latest"}, "String should match"),
-        ({"env": {"HF_TOKEN": "x"}}, "secrets never"),
-        ({"env": {"lower": "x"}}, "invalid environment"),
-    ],
-)
-def test_overrides_validated(qwen: ModelSpec, overrides: dict[str, Any], match: str) -> None:
-    with pytest.raises(ValueError, match=match):
-        render_launch(qwen, overrides)
-
-
-def test_engine_switch_drops_other_engine_args(qwen: ModelSpec) -> None:
-    spec = patched(qwen, engine__args={"max_num_seqs": 64})
-    launch = render_launch(spec, {**TO_SGLANG, "args": {"mem_fraction_static": 0.85}})
-    assert "--max-num-seqs" not in launch.args
-    assert launch.args[-2:] == ["--mem-fraction-static", "0.85"]
+    assert "--trust-remote-code" in render_launch(on_sglang(reviewed)).args
 
 
 def test_docker_run_argv(qwen: ModelSpec) -> None:
-    launch = render_launch(qwen, {"env": {"VLLM_LOGGING_LEVEL": "INFO"}})
+    launch = render_launch(qwen).model_copy(update={"env": {"VLLM_LOGGING_LEVEL": "INFO"}})
     argv = docker_run_argv(launch, weights_dir="/opt/dlami/nvme/hf", container_name="loom-engine")
     assert argv[:5] == ["docker", "run", "--detach", "--name", "loom-engine"]
     joined = " ".join(argv)
@@ -253,8 +270,18 @@ def test_docker_run_argv(qwen: ModelSpec) -> None:
     assert argv[i + 4 :] == launch.args
 
 
+@pytest.mark.parametrize(
+    ("env", "match"),
+    [({"HF_TOKEN": "x"}, "secrets never"), ({"lower": "x"}, "invalid environment")],
+)
+def test_docker_run_argv_rejects_env(qwen: ModelSpec, env: dict[str, str], match: str) -> None:
+    launch = render_launch(qwen).model_copy(update={"env": env})
+    with pytest.raises(ValueError, match=match):
+        docker_run_argv(launch, weights_dir="/w", container_name="c")
+
+
 def test_docker_run_argv_sglang_entrypoint(qwen: ModelSpec) -> None:
-    launch = render_launch(qwen, TO_SGLANG)
+    launch = render_launch(on_sglang(qwen))
     argv = docker_run_argv(launch, weights_dir="/w", container_name="c")
     i = argv.index("--entrypoint")
     assert argv[i : i + 5] == [

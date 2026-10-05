@@ -28,9 +28,23 @@ PinnedImage = Annotated[
     str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9._/-]*[a-z0-9]@sha256:[0-9a-f]{64}$")
 ]
 Cloud = Literal["aws", "gcp"]
+# Serving precision of the weights.
 Quantization = Literal["none", "fp8", "awq", "gptq", "w4a16", "w8a8", "fp4", "nvfp4"]
+# `quantization_config.quant_method` in a pre-quantized checkpoint's config.json.
+QuantMethod = Literal["fp8", "compressed-tensors", "awq", "gptq", "modelopt"]
 KvCacheDtype = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
 Status = Literal["enabled", "preview", "disabled"]
+
+# Serving precisions each checkpoint format provides. Unquantized weights (None) are
+# served as they are or quantized to FP8 on load; the others are served as stored.
+CHECKPOINT_PRECISIONS: dict[QuantMethod | None, frozenset[Quantization]] = {
+    None: frozenset({"none", "fp8"}),
+    "fp8": frozenset({"fp8"}),
+    "compressed-tensors": frozenset({"fp8", "w8a8", "w4a16", "nvfp4"}),
+    "awq": frozenset({"awq"}),
+    "gptq": frozenset({"gptq"}),
+    "modelopt": frozenset({"fp8", "nvfp4"}),
+}
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -74,6 +88,7 @@ class HFSource(StrictModel):
     license: NonEmptyStr
     gated: Literal[False, "auto", "manual"]
     size_bytes: Annotated[int, Field(strict=True, gt=0)]
+    quant_method: QuantMethod | None = None  # None: unquantized (BF16/FP16) weights
     trust_remote_code: bool = False
     trust_remote_code_review: TrustRemoteCodeReview | None = None
 
@@ -181,6 +196,13 @@ class ModelSpec(StrictModel):
         missing = [c for c in self.clouds if getattr(hw.instance_types, c) is None]
         if missing:
             raise ValueError(f"hardware.instance_types missing for clouds {missing}")
+        allowed = CHECKPOINT_PRECISIONS[self.hf.quant_method]
+        if self.quantization not in allowed:
+            raise ValueError(
+                f"quantization {self.quantization!r} cannot be served from "
+                f"{self.hf.quant_method or 'unquantized'} weights "
+                f"(hf.quant_method {self.hf.quant_method!r} allows {sorted(allowed)})"
+            )
         if self.status == "enabled" and self.pricing is None:
             raise ValueError("status: enabled requires pricing")
         return self
@@ -202,9 +224,6 @@ class Registry(StrictModel):
             if m.id == model_id:
                 return m
         raise KeyError(f"unknown model id {model_id!r}")
-
-    def enabled(self) -> list[ModelSpec]:
-        return [m for m in self.models if m.status == "enabled"]
 
 
 def load_registry(path: Path | str | None = None) -> Registry:

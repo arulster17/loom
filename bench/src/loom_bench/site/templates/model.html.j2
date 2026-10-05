@@ -50,7 +50,7 @@
 <h2 id="{{ b.anchor }}">{{ b.title }}</h2>
 {% set first = b.configs[0].result %}
 {% set show_input = b.input_priced %}
-<p class="section-note">Ranked by $/1M output tokens at SLO, cheapest first.{% if not show_input %} Cost allocation all_output: the replica's whole cost is charged to output tokens, so input tokens are free.{% endif %} Load generation: {{ load_mode_label(b.board.load_mode) }}. SLO: {{ describe_slo(first.goodput.slo) }}. Values are means; the line under each is its confidence interval. Unranked configs (quality gate failed, untrusted, or no cost at SLO) are listed last.</p>
+<p class="section-note">Ranked by $/1M output tokens at SLO, cheapest first.{% if not show_input %} Cost allocation all_output: the replica's whole cost is charged to output tokens, so input tokens have no separate price.{% endif %} Load generation: {{ load_mode_label(b.board.load_mode) }}. SLO: {{ describe_slo(first.goodput.slo) }}. Values are point estimates (geometric means for latency and throughput); the line under each is its confidence interval (<a href="{{ root }}methodology.html#ci">how it is computed</a>). Unranked configs (quality gate failed, untrusted, or no cost at SLO) are listed last.{% if any_unbracketed(b.configs|map(attribute='result.goodput')) %} {{ unbracketed_note }}{% endif %}</p>
 {% call scroll_table(b.anchor) %}
 <table>
 <thead>
@@ -66,7 +66,7 @@
 <td class="num">{{ money(r.cost.output_per_mtok if r.cost else none) }}</td>
 {% if show_input %}<td class="num">{{ money(r.cost.input_per_mtok if r.cost else none) }}</td>{% endif %}
 <td class="num">{{ estimate(r.goodput_output_tok_s_per_gpu, 1) }}</td>
-<td class="num">{{ load_value(r.goodput.max_load, r.load_mode) }}</td>
+<td class="num">{{ goodput_load(r.goodput) }}</td>
 <td class="num">{{ estimate(r.ttft_p95_ms, 0, 'ms') }}</td>
 <td class="num">{{ estimate(r.tpot_p95_ms, 1, 'ms') }}</td>
 <td>{% if r.quality and r.quality.gate %}<span class="badge {{ r.quality.gate }}">{{ r.quality.gate }}</span>{% set worst = r.quality.worst() %}{% if worst %}<span class="sub">worst Δ {{ '%+.3f'|format(worst.delta) }} ({{ worst.task }})</span>{% endif %}{% else %}<span class="muted">not evaluated</span>{% endif %}</td>

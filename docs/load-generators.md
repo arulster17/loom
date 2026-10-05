@@ -1,9 +1,30 @@
 # Load generators
 
 A `LoadJob` names its generator in `loadgen`, a key in
-`loom_bench.loadgen.base.LOAD_GENERATORS`. Every generator returns a `RunResult`
-of `RequestRecord`s, so metrics, storage and reports don't depend on which one
-produced the load.
+`loom_bench.loadgen.base.LOAD_GENERATORS`. Every generator implements one call:
+
+```python
+class LoadGenerator(Protocol):
+    name: str
+
+    async def run(self, ctx: LoadContext) -> RunResult: ...
+```
+
+`prepare_load(job)` builds the `LoadContext` once, before any generator runs:
+
+| Field | What it holds |
+|---|---|
+| `job` | the `LoadJob`: endpoint, served model, engine, seed, timeouts, `extra_body`, ... |
+| `profile` | the parsed `WorkloadProfile` |
+| `arrival` | the parsed arrival spec (open loop only) |
+| `plan` | `OpenLoopPlan` (arrival offsets, warmup, in-flight cap) or `ClosedLoopPlan` |
+| `requests` | the prepared requests in send order, warmup first, with `extra_body` merged |
+| `tokenizer` | the tokenizer the requests were sized with |
+
+`jobexec.execute_load_job` only prepares the context, looks the generator up and
+calls `run`, scraping the server meanwhile. Every generator returns a
+`RunResult` of `RequestRecord`s, so metrics, storage and reports don't depend
+on which one produced the load.
 
 ## Native vs wrapped tools
 
@@ -85,8 +106,14 @@ request:
 - Times: `ttfts`, `itls` and `latencies`, in seconds. vLLM also stores
   `start_times` and `queue_times`, so t0 is the earliest arrival, `sent_at_s` is
   the actual send, and open-loop `scheduled_at_s` is the send time minus the wait
-  for a concurrency slot. SGLang stores neither, so its requests sit at t=0 and
-  end at their last content chunk (`meta["send_times"] = False`).
+  for a concurrency slot. SGLang stores neither, so its `RunResult` and
+  `LoadJobResult` carry `timeline = "unavailable"`: every `sent_at_s` is a 0.0
+  placeholder and a request ends at its last content chunk. TTFT, ITL, TPOT
+  and E2E are still real (they are relative to the send); the window must come
+  from the tool's `duration`, there are no scheduled times and so no client
+  queue delay, and `LoadJobResult` rejects a result that breaks either rule.
+  Native and vLLM runs are `"measured"`. The runner stores the flag in the
+  run summary's `client.timeline`.
 - Tokens: `input_lens` and `output_lens` become `prompt_tokens` and
   `completion_tokens` for successful requests. These come from the server's
   usage block when the tool gets one. SGLang on the completions endpoint
@@ -104,11 +131,12 @@ request:
 ```python
 from pathlib import Path
 
-from loom_bench.loadgen.base import get_load_generator
-from loom_bench.loadgen.external import ExternalLoadGenerator, WorkloadContext
+from loom_bench.loadgen.base import get_load_generator, prepare_load
+from loom_bench.loadgen.external import ExternalLoadGenerator
 from loom_bench.loadgen.vllm_bench import VllmBench
 
-gen = get_load_generator(job.loadgen).bind(WorkloadContext.from_job(job))  # tool installed locally
+ctx = prepare_load(job)
+result = await get_load_generator(job.loadgen).run(ctx)  # tool installed locally
 
 # On a GPU host, inside the engine image; run files must be visible at the same path:
 gen = ExternalLoadGenerator(
@@ -128,21 +156,15 @@ gen = ExternalLoadGenerator(
         "vllm/vllm-openai:v0.30.0",
     ],
     workdir=Path("/opt/loom/run"),
-).bind(WorkloadContext.from_job(job))
-result = await gen.run(
-    job.base_url,
-    requests,
-    plan,
-    request_timeout_s=job.request_timeout_s,
-    model=job.served_model,
-    api_key=api_key,
 )
+result = await gen.run(ctx)
 ```
 
 `--entrypoint ""` clears the image's `vllm serve` entrypoint so the command runs
-as given. The API key reaches the tool through `OPENAI_API_KEY` in its
-environment, never on the command line. Cancelling `run()` sends SIGTERM to the
-tool (which `docker run` forwards), then SIGKILL after a grace period.
+as given. The tool inherits the caller's environment, so an `OPENAI_API_KEY`
+set there reaches it (`-e OPENAI_API_KEY` forwards it into the container); a key
+is never put on the command line. Cancelling `run()` sends SIGTERM to the tool
+(which `docker run` forwards), then SIGKILL after a grace period.
 
 ## Adding a tool (GuideLLM, GenAI-Perf, ...)
 
@@ -150,9 +172,10 @@ The plug-in slot is `loom_bench.loadgen.external.ExternalTool`:
 
 1. Write a class with `name`, `result_file`,
    `build_argv(run: ToolRun, result_path) -> list[str]` and
-   `parse(run: ToolRun, result_path) -> RunResult`. `ToolRun` already holds the
-   measured and warmup counts, concurrency, profile, arrival spec, seed and
-   tokenizer. When the tool can replay prompts, write `run.requests` to
+   `parse(run: ToolRun, result_path) -> RunResult`. `ToolRun` holds the
+   `LoadContext` (`run.ctx`, with `run.job` and `run.profile` as shortcuts), the
+   measured and warmup counts, concurrency, and the HF tokenizer repo
+   (`run.tokenizer`). When the tool can replay prompts, write `run.requests` to
    `run.dataset_path` in the tool's dataset format. Raise `UnsupportedByTool`
    for anything the tool's flags cannot express.
 2. In `parse`, map the tool's per-request output to the arrays

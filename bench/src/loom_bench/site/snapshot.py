@@ -45,16 +45,10 @@ from loom_bench.report.analyze import (
 )
 from loom_bench.report.competitiveness import CompetitivenessReport, build_competitiveness
 from loom_bench.slo import Slo
-from loom_bench.store.models import (
-    BenchColdStart,
-    BenchEvalRun,
-    BenchExperiment,
-    BenchGateDecision,
-    BenchRun,
-    ExperimentStatus,
-)
+from loom_bench.store import repo
+from loom_bench.store.models import BenchExperiment, BenchRun, ExperimentStatus
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: Estimate.method (log-scale CIs), Methodology.ci_methods
 
 MANIFEST = "manifest.json"
 COMPETITIVENESS = "competitiveness.json"
@@ -189,13 +183,6 @@ def _experiments(
     return out
 
 
-def _rows[T](session: Session, model: type[T], experiment_ids: list[uuid.UUID]) -> list[T]:
-    if not experiment_ids:
-        return []
-    column = model.experiment_id  # type: ignore[attr-defined]
-    return list(session.scalars(select(model).where(column.in_(experiment_ids))))
-
-
 def _slo(
     slo: Slo | None, experiments: Iterable[BenchExperiment], runs: Iterable[BenchRun]
 ) -> Slo | None:
@@ -281,12 +268,12 @@ def _model_snapshots(
                 cold_starts=colds(members),
             )
         )
-    for repo, members in sorted(by_repo.items(), key=lambda kv: kv[0] or ""):
+    for hf_repo, members in sorted(by_repo.items(), key=lambda kv: kv[0] or ""):
         out.append(
             ModelSnapshot(
-                model_id=model_slug(repo or "unknown"),
-                display_name=repo or "Unknown model",
-                repo=repo,
+                model_id=model_slug(hf_repo or "unknown"),
+                display_name=hf_repo or "Unknown model",
+                repo=hf_repo,
                 registry=None,
                 results=members,
                 cold_starts=colds(members),
@@ -336,7 +323,7 @@ def export_snapshot(
 
     experiments = _experiments(session, experiment_ids)
     exp_ids = [e.id for e in experiments]
-    runs = _rows(session, BenchRun, exp_ids)
+    runs = [run for i in exp_ids for run in repo.list_runs(session, experiment_id=i)]
     slo = _slo(slo, experiments, runs)
 
     results: list[ConfigResult] = []
@@ -352,10 +339,10 @@ def export_snapshot(
         )
         results = with_quality(
             results,
-            _rows(session, BenchEvalRun, exp_ids),
-            _rows(session, BenchGateDecision, exp_ids),
+            repo.list_eval_runs(session, exp_ids),
+            repo.list_gate_decisions(session, exp_ids),
         )
-    cold_starts = cold_starts_by_config(_rows(session, BenchColdStart, exp_ids), results)
+    cold_starts = cold_starts_by_config(repo.list_cold_starts(session, exp_ids), results)
     models = _model_snapshots(results, cold_starts, registry)
     competitiveness = build_competitiveness(results, registry, competitors, price_book=price_book)
 

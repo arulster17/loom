@@ -146,3 +146,9 @@ def test_real_competitors_file():
     ]
     assert llama[1].providers == ("DeepInfra",)
     assert llama[1].median == 135_000  # DeepInfra 0.10, Novita 0.135, Together 1.04
+
+
+def test_side_without_allocated_cost_gets_no_margin_check():
+    # all_output: input has no cost of its own; a low input price is not a negative margin
+    flags = assess("m", price(1, 300_000), CostPerMtok(input=None, output=310_000), MARKET)
+    assert kinds(flags) == [(FlagKind.NEGATIVE_MARGIN, "output")]

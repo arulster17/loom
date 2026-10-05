@@ -19,13 +19,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import yaml
-from jinja2 import (
-    ChoiceLoader,
-    Environment,
-    PackageLoader,
-    StrictUndefined,
-    select_autoescape,
-)
+from jinja2 import ChoiceLoader, Environment, PackageLoader
 
 from loom_bench.cost import CostAllocation, cost_at_slo
 from loom_bench.money import SECONDS_PER_HOUR, TOKENS_PER_MTOK, Micros
@@ -39,9 +33,7 @@ from loom_bench.report.competitiveness import (
     margin_text,
     price_text,
 )
-from loom_bench.report.format import describe_slo, est, load_mode_label, load_value, num, pct
-from loom_bench.report.format import usd as usd_text
-from loom_bench.report.format import usd_ci as usd_ci_text
+from loom_bench.report.format import jinja_env, load_mode_label
 from loom_bench.report.leaderboard import (
     Leaderboard,
     LeaderboardRow,
@@ -100,33 +92,17 @@ def short_sha(sha: str | None) -> str:
 
 @cache
 def _env() -> Environment:
-    env = Environment(
-        loader=ChoiceLoader(
+    """The report environment (shared filters and globals) plus site-only helpers."""
+    env = jinja_env(
+        ChoiceLoader(
             [
                 PackageLoader("loom_bench.site", "templates"),
                 PackageLoader("loom_bench.report", "templates"),
             ]
-        ),
-        autoescape=select_autoescape(["html", "j2"]),
-        undefined=StrictUndefined,
-        trim_blocks=True,
-        lstrip_blocks=True,
-        keep_trailing_newline=True,
+        )
     )
-    env.filters.update(
-        usd=usd_text,
-        usd_ci=usd_ci_text,
-        est=est,
-        num=num,
-        pct=pct,
-        yaml=to_yaml,
-        short_sha=short_sha,
-        sentence=sentence,
-    )
+    env.filters.update(yaml=to_yaml, short_sha=short_sha, sentence=sentence)
     env.globals.update(
-        describe_slo=describe_slo,
-        load_mode_label=load_mode_label,
-        load_value=load_value,
         cold_text=cold_text,
         margin_text=margin_text,
         price_text=price_text,
@@ -259,14 +235,14 @@ class PriceRow:
 def _model_view(m: ModelSnapshot, price_book: PriceBook | None) -> ModelView:
     spec = ModelSpec.model_validate(m.registry) if m.registry else None
     report = build_leaderboard(m.results, cold_starts=m.cold_starts, price_book=price_book)
-    provenance = {c.config_hash: c for c in report.methodology.configs}
+    provenance = {c.key: c for c in report.methodology.configs}
     boards = []
     for b in report.boards:
         anchor = slug(b.workload, b.load_mode.value)
         configs = [
             ConfigView(
                 row=row,
-                provenance=provenance[row.result.config_hash],
+                provenance=provenance[row.result.key],
                 anchor=slug(anchor, row.result.name, row.result.config_hash[:8]),
                 config_yaml=to_yaml(row.result.provenance.get("config") or {}),
                 met={p.load: p.met for p in row.result.goodput.points},

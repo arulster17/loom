@@ -745,7 +745,11 @@ class _Executor:
             return None
         doc = {
             **summary.model_dump(mode="json"),
-            "client": {**result.meta, "client_saturated_count": result.client_saturated_count},
+            "client": {
+                **result.meta,
+                "timeline": result.timeline,
+                "client_saturated_count": result.client_saturated_count,
+            },
             "cost_basis": {
                 "hourly_micros": host.hourly_micros,
                 "market": host.request.market.value,

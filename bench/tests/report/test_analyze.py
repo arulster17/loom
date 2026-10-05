@@ -96,7 +96,8 @@ def test_cost_uses_price_book_and_goodput(results):
     assert vllm.cost == cost_from_goodput(ON_DEMAND, vllm.goodput, CostAllocation.all_output())
     # $1.861/h at 400 output tok/s = $1.2924 per 1M output tokens
     assert vllm.cost.output_per_mtok.value == pytest.approx(1_292_361, rel=1e-3)
-    assert vllm.cost.input_per_mtok.value == 0
+    assert vllm.cost.input_per_mtok.value is None  # all_output: input has no price
+    assert vllm.cost.input_per_mtok.na_reason == "all cost allocated to output"
     lo, value, hi = (
         vllm.cost.output_per_mtok.lo,
         vllm.cost.output_per_mtok.value,

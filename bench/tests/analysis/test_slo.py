@@ -1,11 +1,11 @@
 import pytest
 from pydantic import ValidationError
 
-from loom_bench.metrics.aggregate import AggregateSummary, aggregate_runs
+from loom_bench.metrics.aggregate import AggregateSummary, aggregate_runs, ci_rule, estimate_metric
 from loom_bench.metrics.summary import summarize_run
 from loom_bench.records import LoadMode, RequestRecord, RequestStatus
 from loom_bench.slo import Slo, bisect_next_load, find_goodput, slo_met
-from loom_bench.stats import Estimate, mean_ci
+from loom_bench.stats import Estimate, log_mean_ci
 
 SLO = Slo(ttft_ms={"p95": 1000}, tpot_ms={"p95": 50}, max_error_rate=0.01)
 
@@ -177,15 +177,18 @@ def _run(ttft_s: float, n: int = 20, out_tokens: int = 10, window_s: float = 10.
     return summarize_run(records, window_s=window_s, gpus=1)
 
 
-def test_aggregate_runs_t_ci_per_metric():
+def test_aggregate_runs_ci_per_metric():
     runs = [_run(0.1), _run(0.2), _run(0.3)]
     a = aggregate_runs(runs)
     assert a.n_runs == 3 and a.trusted
     ttft = a.get("ttft_ms.p95")
-    expected = mean_ci([100.0, 200.0, 300.0])
-    assert ttft.mean == pytest.approx(200)
+    expected = log_mean_ci([100.0, 200.0, 300.0])
+    assert ttft.method == "log_t"
+    assert ttft.mean == pytest.approx(6_000_000 ** (1 / 3))  # geometric mean
     assert ttft.lo == pytest.approx(expected.lo)
     assert ttft.hi == pytest.approx(expected.hi)
+    assert 0 < ttft.lo < ttft.mean < ttft.hi
+    assert a.get("error_rate").method == "t_clipped"
     assert a.get("throughput.output_tok_s").mean == pytest.approx(20)
     assert a.get("throughput.output_tok_s").std == 0
     assert any("ttft_ms.p95" in w and "CV" in w for w in a.warnings)
@@ -207,10 +210,42 @@ def test_aggregate_feeds_slo_and_goodput_end_to_end():
     points = [
         (1.0, aggregate_runs([_run(0.10), _run(0.11)])),
         (2.0, aggregate_runs([_run(0.200), _run(0.205), _run(0.210)])),
-        # mean 240 ms is within 250 ms, but the CI upper bound is not
+        # geometric mean 238 ms is within 250 ms, but the CI upper bound is not
         (4.0, aggregate_runs([_run(0.20), _run(0.24), _run(0.28)])),
     ]
     g = find_goodput(slo, points, LoadMode.OPEN_LOOP)
     assert g.max_load == 2.0
     assert g.first_failing_load == 4.0
-    assert points[2][1].get("ttft_ms.p95").mean == pytest.approx(240)
+    at4 = points[2][1].get("ttft_ms.p95")
+    assert at4.mean == pytest.approx((200 * 240 * 280) ** (1 / 3))
+    assert at4.hi > 250
+
+
+@pytest.mark.parametrize(
+    ("key", "scale"),
+    [
+        ("ttft_ms.p95", "positive"),
+        ("itl_ms.p50", "positive"),
+        ("throughput.output_tok_s", "positive"),
+        ("goodput.output_tok_s", "positive"),
+        ("ttft_ms.n", "non_negative"),
+        ("error_rate", "proportion"),
+        ("goodput.slo_attainment", "proportion"),
+        ("server.prefix_cache_hit_rate", "proportion"),
+        ("gpu.overall.utilization_mean_pct", "percent"),
+        ("counts.error", "non_negative"),
+        ("server.running_mean", "non_negative"),
+        ("something.new", "unbounded"),
+    ],
+)
+def test_ci_rule_per_metric(key, scale):
+    assert ci_rule(key).scale == scale
+
+
+def test_estimate_metric_methods_and_zero_fallback():
+    assert estimate_metric("ttft_ms.p95", [3.0, 40.0]).method == "log_t"
+    # a repetition with zero goodput cannot go on the log scale: clipped arithmetic
+    fallback = estimate_metric("goodput.output_tok_s", [0.0, 900.0])
+    assert fallback.method == "t_clipped" and fallback.lo == 0.0
+    err = estimate_metric("error_rate", [0.0, 0.5])
+    assert err.method == "t_clipped" and err.lo == 0.0 and err.hi == 1.0

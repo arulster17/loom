@@ -20,7 +20,7 @@ Status: Phase 0 in progress. Later phases start only after the previous phase is
 | HTTP client | `httpx` async, hand-rolled SSE parsing | Per-chunk timestamps with no client-side buffering. |
 | Mock backend | FastAPI + uvicorn | OpenAI-compatible streamer with a simulated batching GPU (queueing, prefill/decode costs, prefix cache, `/metrics`), so the whole Lab runs without a GPU. |
 | Results store | Postgres (SQLAlchemy 2 + Alembic) for provenance and aggregates; Parquet for per-request rows | Postgres is queryable and shared with the platform later; Parquet keeps millions of request rows cheap. |
-| Stats | numpy + scipy | t-intervals across repetitions, bootstrap for percentiles and paired eval deltas. |
+| Stats | numpy + scipy | Log-scale t-intervals (geometric means) for positive metrics and clipped t-intervals for fractions across repetitions; paired bootstrap for eval deltas. |
 | Quality | lm-evaluation-harness for MMLU-Pro / GSM8K / IFEval; native tasks for code exec (sandboxed), JSON-schema validity, tool calling, needle retrieval, logprob divergence | lm-eval covers the standard tasks; the native ones need control over sandboxing and per-sample scoring. |
 | AWS | boto3 (EC2, SSM, S3, Secrets Manager); Terraform for the bucket, IAM role and reaper Lambda | Least-privilege role and the reaper exist independently of any laptop. |
 | Reports / site | Jinja2 → markdown, HTML, CSV; static site published to GitHub Pages | No server to run; repo is public. |
@@ -131,12 +131,18 @@ models:
       repo: Qwen/Qwen3-8B
       revision: <40-char commit sha>  # required, pinned
       license: apache-2.0
+      gated: false                    # false | auto | manual
+      size_bytes: 16381516776
+      quant_method: null              # checkpoint format, from config.json quantization_config:
+                                      # fp8|compressed-tensors|awq|gptq|modelopt; null = BF16/FP16
       trust_remote_code: false        # true requires trust_remote_code_review {reviewer, date, notes}
     engine:
       name: vllm                      # vllm | sglang
       version: "x.y.z"
       image: vllm/vllm-openai@sha256:<digest>   # digest required
-      args: {}                        # engine-specific flags (prefix caching, max seqs, ...)
+      args: {}                        # engine-specific flags (prefix caching, max seqs, ...);
+                                      # flags set from fields here (quantization, tp, ...) are refused
+      chat_template_kwargs: {}        # sent with chat requests in benchmarks and evals
     hardware:
       gpu: L40S
       gpus_per_replica: 1             # must equal tp * pp
@@ -144,7 +150,7 @@ models:
       instance_types: {aws: g6e.xlarge}
     parallelism: {tp: 1, pp: 1, ep: 1}
     max_context: 32768
-    quantization: none                # none|fp8|awq|gptq|fp4|...
+    quantization: none                # serving precision: none|fp8|awq|gptq|w4a16|w8a8|fp4|nvfp4
     kv_cache_dtype: auto
     pricing:                          # integer micro-dollars per 1M tokens
       input_per_mtok: 0
@@ -152,10 +158,28 @@ models:
       cached_input_per_mtok: 0        # must be <= input
     scaling: {min_replicas: 0, max_replicas: 1}
     clouds: [aws]
-    capabilities: {tools: true, json_schema: true, vision: false}
+    capabilities: {tools: true, json_schema: true, vision: false, reasoning: true}
     routing_tier: 1
     status: preview                   # enabled|preview|disabled
 ```
+
+`hf.quant_method` describes the checkpoint; `quantization` is the precision served.
+Allowed pairs (`registry.CHECKPOINT_PRECISIONS`) and the engine flag they render
+(`engines.quantization_flag`, same for vLLM and SGLang):
+
+| `hf.quant_method` | `quantization` | `--quantization` |
+|---|---|---|
+| null | none | none |
+| null | fp8 | `fp8` (quantized on load) |
+| fp8 | fp8 | none |
+| compressed-tensors | fp8, w8a8, w4a16, nvfp4 | none |
+| awq | awq | none |
+| gptq | gptq | none |
+| modelopt | fp8, nvfp4 | none |
+
+A pre-quantized checkpoint names its method in `config.json`, which the engine reads;
+passing a different `--quantization` makes it refuse to start. Any other pair is rejected
+when the registry loads.
 
 ## Open questions
 

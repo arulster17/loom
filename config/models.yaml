@@ -14,6 +14,7 @@ models:
       license: apache-2.0
       gated: false
       size_bytes: 16381516776
+      quant_method: null  # unquantized BF16 checkpoint
       trust_remote_code: false
     engine:
       # vLLM is the default engine; SGLang is compared against it in the Lab.
@@ -51,6 +52,7 @@ models:
       license: llama3.3
       gated: manual
       size_bytes: 141107497872
+      quant_method: null  # unquantized BF16 checkpoint
       trust_remote_code: false
     engine:
       name: vllm

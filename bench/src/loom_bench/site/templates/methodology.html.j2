@@ -61,6 +61,18 @@
 <section aria-labelledby="ci">
 <h2 id="ci">Repetitions and confidence intervals</h2>
 <p>{{ method.ci_method }}</p>
+{% call scroll_table("ci-methods-h") %}
+<table>
+<caption id="ci-methods-h">Interval method by metric</caption>
+<thead><tr><th scope="col">Metrics</th><th scope="col">Point estimate and interval</th></tr></thead>
+<tbody>
+{% for row in method.ci_methods %}
+<tr><td>{{ row.metrics|sentence }}</td><td>{{ row.method|sentence }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+{% endcall %}
+<p>Why the log scale: with two or three repetitions, a symmetric interval around the mean of a noisy latency or throughput routinely reaches below zero, a value the quantity cannot take, and then makes the cost interval unbounded. The log-scale interval respects positivity and is wide in the direction the data are uncertain: a factor, not a fixed number of milliseconds.</p>
 <p>A result is <strong>untrusted</strong>, listed but not ranked, when any load point has fewer than two completed repetitions, goodput is not bracketed, a headline metric at the goodput load varies run to run by more than 10% (coefficient of variation), or successful requests lacked token usage. Runs that did not complete are excluded and counted.</p>
 <p>Repetitions in this snapshot: {{ method.repetitions }}.</p>
 </section>

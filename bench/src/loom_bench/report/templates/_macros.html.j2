@@ -1,9 +1,9 @@
 {% macro money(rng) -%}
-{% if rng is none or rng.value is none %}n/a{% else %}{{ rng.value|usd }}<span class="ci">{% if rng.lo is none and rng.hi is none %}no CI{% else %}{{ rng.lo|usd if rng.lo is not none else 'n/a' }} – {{ rng.hi|usd if rng.hi is not none else 'unbounded' }}{% endif %}</span>{% endif %}
+{% if rng is not none and rng.na_reason %}n/a<span class="ci">{{ rng.na_reason }}</span>{% elif rng is none or rng.value is none %}n/a{% else %}{{ rng.value|usd }}<span class="ci">{% if rng.lo is none and rng.hi is none %}no CI{% else %}{{ rng.lo|usd if rng.lo is not none else 'n/a' }} – {{ rng.hi|usd if rng.hi is not none else 'unbounded' }}{% endif %}</span>{% endif %}
 {%- endmacro %}
 
 {% macro estimate(e, places=0, unit='') -%}
-{% if e is none %}n/a{% else %}{{ e.mean|num(places) }}{{ ' ' ~ unit if unit }}<span class="ci">{% if e.lo is none %}n={{ e.n }}, no CI{% else %}{{ e.lo|num(places) }} – {{ e.hi|num(places) }}{% endif %}</span>{% endif %}
+{% if e is none %}n/a{% else %}{% set p = places_for([e.mean, e.lo, e.hi], places) %}{{ e.mean|num(p) }}{{ ' ' ~ unit if unit }}<span class="ci">{% if e.lo is none %}n={{ e.n }}, no CI{% else %}{{ e.lo|num(p) }} – {{ e.hi|num(p) }}{% endif %}</span>{% endif %}
 {%- endmacro %}
 
 {% macro link_list(urls) -%}
@@ -25,7 +25,7 @@
 <dt>Dataset</dt><dd>{{ d.text }}{% if d.source %}; source: {{ link_list([d.source]) }}{% endif %}</dd>
 {% endfor %}
 <dt>Repetitions</dt><dd>{{ m.repetitions }}</dd>
-<dt>Confidence intervals</dt><dd>{{ m.ci_method }}</dd>
+<dt>Confidence intervals</dt><dd>{{ m.ci_method }}<ul class="ci-methods">{% for row in m.ci_methods %}<li>{{ row.metrics }}: {{ row.method }}</li>{% endfor %}</ul></dd>
 {% for a in m.allocations %}
 <dt>Cost allocation</dt><dd>{{ a }}</dd>
 {% endfor %}
@@ -33,7 +33,7 @@
 </dl>
 {% for c in m.configs %}
 <details>
-<summary>{{ c.name }} <code>{{ c.config_hash }}</code></summary>
+<summary>{{ c.title }} <code>{{ c.config_hash }}</code></summary>
 <dl>
 <dt>Config</dt><dd>{{ c.label }}</dd>
 <dt>Engine</dt><dd>{{ c.engine }}; image <code>{{ c.image or 'not recorded' }}</code>; digest <code>{{ c.image_digest or 'not recorded' }}</code></dd>

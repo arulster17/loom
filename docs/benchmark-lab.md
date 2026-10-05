@@ -106,12 +106,12 @@ seed: 0
   on_demand), `disk_gb`. Account settings come from `$LOOM_AWS_CONFIG` / `LOOM_AWS_*`.
 
 **Variants** may set `engine` (name, version, image, args, chat_template_kwargs), `hf` (repo,
-revision, license, gated, size_bytes: a pre-quantized checkpoint), `hardware`, `parallelism`,
-`quantization`, `kv_cache_dtype`, `max_context`. The patched entry is re-validated by the
-registry rules (pinned revision and image digest, GPUs = tp x pp, ...) and the engine launch
-is rendered by `engines.render_launch`, so a bad override fails at `bench plan`. Rules match
-`engines.apply_overrides`: switching engine needs its image and version and drops the other
-engine's args; an arg (or sweep value) set to `null` is removed; `max_context` cannot exceed
+revision, license, gated, size_bytes, quant_method: a pre-quantized checkpoint), `hardware`,
+`parallelism`, `quantization`, `kv_cache_dtype`, `max_context`. The patched entry is
+re-validated by the registry rules (pinned revision and image digest, GPUs = tp x pp,
+quantization servable from the checkpoint, ...) and the engine launch is rendered by
+`engines.render_launch`, so a bad override fails at `bench plan`. Switching engine needs its
+image and version and drops the other engine's args; an arg (or sweep value) set to `null` is removed; `max_context` cannot exceed
 the registry's.
 
 **Cells.** `expand()` produces one cell per variant x sweep point, in declaration order. A
