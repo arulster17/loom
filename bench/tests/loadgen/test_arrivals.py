@@ -145,6 +145,24 @@ def test_burstgpt_trace_and_spec(tmp_path, monkeypatch):
     np.testing.assert_allclose(spec.schedule(duration_s=10.0, seed=0), [0.0, 4.0])
 
 
+def test_trace_at_rate_keeps_the_gaps_and_sets_the_mean_rate(tmp_path):
+    p = tmp_path / "burst.csv"
+    p.write_text(BURSTGPT)
+    rows = arr.read_burstgpt_trace(p)  # arrivals at 0, 40 and 105.5 s
+    # 2 arrivals in 10 s: the third (105.5 s) is stretched to land at 10 s
+    np.testing.assert_allclose(arr.trace_offsets_at_rate(rows, 0.2, 10.0), [0.0, 40 / 10.55])
+    spec = arr.parse_arrivals({"kind": "trace", "path": str(p), "format": "burstgpt", "rate": 1})
+    np.testing.assert_allclose(spec.schedule(duration_s=2.0, seed=0), [0.0, 2 * 40 / 105.5])
+    with pytest.raises(ValueError, match="needs 4"):
+        arr.trace_offsets_at_rate(rows, 1.5, 2.0)
+    with pytest.raises(ValueError, match="no arrivals"):
+        arr.trace_offsets_at_rate(rows, 0.1, 1.0)
+    with pytest.raises(ValidationError, match="time_scale or rate"):
+        arr.parse_arrivals(
+            {"kind": "trace", "path": str(p), "format": "burstgpt", "rate": 1, "time_scale": 2}
+        )
+
+
 def test_trace_missing_columns(tmp_path):
     p = tmp_path / "bad.csv"
     p.write_text("a,b\n1,2\n")

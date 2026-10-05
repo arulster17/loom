@@ -166,8 +166,15 @@ class Sample(_Strict):
 
 # --- workloads and load -----------------------------------------------------------
 
-# Arrival kinds whose intensity is a single rate the sweep value replaces.
-RATE_FIELDS = {"constant": "rate", "poisson": "rate", "gamma": "rate", "diurnal": "mean_rate"}
+# Arrival kinds whose intensity is a single rate the sweep value replaces. A trace's
+# rate is its mean rate over the run (`arrivals.trace_offsets_at_rate`).
+RATE_FIELDS = {
+    "constant": "rate",
+    "poisson": "rate",
+    "gamma": "rate",
+    "diurnal": "mean_rate",
+    "trace": "rate",
+}
 
 
 class LoadSearch(_Strict):
@@ -223,6 +230,8 @@ class LoadSpec(_Strict):
                 )
             if self.arrival and RATE_FIELDS[kind] in self.arrival:
                 raise ValueError(f"arrival.{RATE_FIELDS[kind]} comes from the load value")
+            if kind == "trace" and "time_scale" in (self.arrival or {}):
+                raise ValueError("trace arrival speed comes from the load value: drop time_scale")
             self.arrival_for(1.0)
         else:
             if (self.duration_s is None) == (self.num_requests is None):

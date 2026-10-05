@@ -1,9 +1,10 @@
 name: trace-azure-code
 description: >-
   Token lengths from the Azure LLM inference trace (code, 2023), replayed with
-  random-word text. Pair with `trace` arrivals on the same file for the real
-  arrival times. Download AzureLLMInferenceTrace_code.csv and set LOOM_DATA_DIR
-  (or override path). Prompts are clamped to fit a 32k context.
+  random-word text. For the real arrival times too, give the experiment's load
+  `arrival: {kind: trace, path: <this file>, format: azure}`; each load value is
+  then the trace's mean rate. Download AzureLLMInferenceTrace_code.csv and set
+  LOOM_DATA_DIR (or override path). Prompts are clamped to fit a 32k context.
 kind: trace
 content: synthetic
 endpoint: completions

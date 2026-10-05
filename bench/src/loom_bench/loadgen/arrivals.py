@@ -209,6 +209,24 @@ def trace_offsets(
     return t if duration_s is None else t[t < duration_s]
 
 
+def trace_offsets_at_rate(rows: list[TraceRow], rate: float, duration_s: float) -> np.ndarray:
+    """The trace's first round(rate x duration_s) arrivals, stretched or compressed so the
+    next one would land at `duration_s`: the gaps keep their proportions and the mean
+    rate over the run is `rate`."""
+    n = round(rate * duration_s)
+    if n < 1:
+        raise ValueError(f"trace at {rate:g}/s for {duration_s:g} s schedules no arrivals")
+    if len(rows) <= n:
+        raise ValueError(
+            f"trace has {len(rows)} arrivals; {rate:g}/s for {duration_s:g} s needs {n + 1}"
+        )
+    t = np.array([r.timestamp_s for r in rows[: n + 1]], dtype=np.float64)
+    if t[n] <= 0:
+        raise ValueError(f"the trace's first {n + 1} arrivals share one timestamp")
+    scaled = t[:n] * (duration_s / t[n])
+    return scaled[scaled < duration_s]
+
+
 # --- YAML specs ---------------------------------------------------------------
 
 
@@ -280,17 +298,30 @@ class DiurnalArrivals(_Spec):
 
 
 class TraceArrivals(_Spec):
+    """Replays a trace's arrival times. `time_scale` stretches them (0.5 replays twice as
+    fast, default 1); `rate` instead sets the mean rate (`trace_offsets_at_rate`), which
+    is how an experiment sweeps a trace."""
+
     kind: Literal["trace"] = "trace"
     path: str
     format: TraceFormat
-    time_scale: PositiveFloat = 1.0
+    time_scale: PositiveFloat | None = None
+    rate: PositiveFloat | None = None
     max_rows: PositiveInt | None = None
+
+    @model_validator(mode="after")
+    def _one_scale(self) -> TraceArrivals:
+        if self.time_scale is not None and self.rate is not None:
+            raise ValueError("trace arrivals take time_scale or rate, not both")
+        return self
 
     def rows(self) -> list[TraceRow]:
         return read_trace(self.path, self.format, self.max_rows)
 
     def schedule(self, duration_s: float, seed: int) -> np.ndarray:
-        return trace_offsets(self.rows(), self.time_scale, duration_s)
+        if self.rate is not None:
+            return trace_offsets_at_rate(self.rows(), self.rate, duration_s)
+        return trace_offsets(self.rows(), self.time_scale or 1.0, duration_s)
 
 
 ArrivalSpec = Annotated[

@@ -85,6 +85,8 @@ workloads:
       duration_s: 180               # open loop: required; closed loop: this or num_requests
       warmup_s: 30                  # open loop, inside duration_s; closed loop: warmup_requests
       arrival: {kind: gamma, burstiness: 0.5}   # open loop; the rate comes from the load value
+      # poisson (default) | constant | gamma | diurnal | trace (replays a trace file's arrival
+      # times at the load value's mean rate; docs/how-to/add-workload-profile.md)
       drain_timeout_s: 60
       request_timeout_s: 600
       scrape_interval_s: 1

@@ -117,9 +117,25 @@ records a hash of the resolved profile and its `content` kind.
 Limits to know:
 
 - Open-loop experiments sweep one rate, so their `arrival.kind` must be `poisson`,
-  `gamma`, `constant` or `diurnal`. `trace`, `ramp` and `onoff_burst` arrivals exist in
-  `loadgen/arrivals.py` but cannot be selected from an experiment, so a `trace` profile
-  replays its token lengths, not its arrival times.
+  `gamma`, `constant`, `diurnal` or `trace`. `ramp` and `onoff_burst` arrivals have no
+  single rate and cannot be selected from an experiment.
+- A `trace` profile replays its token lengths; pair it with `trace` arrivals on the same
+  file to replay its arrival times too:
+
+  ```yaml
+  - profile: trace-azure-code
+    load:
+      mode: open_loop
+      values: [2, 4, 8]       # mean req/s over the run
+      duration_s: 300
+      arrival: {kind: trace, path: "${LOOM_DATA_DIR}/azure/AzureLLMInferenceTrace_code.csv", format: azure}
+  ```
+
+  At load value r the run replays the trace's first r x `duration_s` arrivals,
+  stretched or compressed in time so their mean rate is r and their gaps keep their
+  proportions (`arrivals.trace_offsets_at_rate`); request i gets trace row i's lengths.
+  `time_scale` and `rate` come from the load value, so the arrival must not set them.
+  The trace needs more rows than the highest r x `duration_s`.
 - The wrapped tools (`vllm_bench`, `sglang_bench`) support only some kinds; see
   [load-generators.md](../load-generators.md#what-each-wrapper-supports).
 

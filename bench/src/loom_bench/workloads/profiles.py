@@ -129,7 +129,8 @@ class LongGenerationProfile(_Profile):
 
 
 class TraceProfile(_Profile):
-    """Token lengths from a production trace; pair with `trace` arrivals on the same file."""
+    """Token lengths from a production trace; pair with `trace` arrivals on the same file
+    (request i gets row i, arrival i is row i's time scaled to the load's rate)."""
 
     kind: Literal["trace"] = "trace"
     endpoint: Endpoint = "completions"
