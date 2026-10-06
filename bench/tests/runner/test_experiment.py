@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from loom_bench.experiment import (
     ExpansionError,
     Experiment,
+    LoadSpec,
     Variant,
     derive_seed,
     expand,
@@ -14,7 +15,7 @@ from loom_bench.experiment import (
 )
 from loom_bench.records import Market
 from loom_bench.registry import Registry, load_registry, read_yaml
-from loom_bench.runner import _host_request
+from loom_bench.runner import _host_request, next_search_load
 
 from .conftest import ABORT, LLAMA, QWEN, SMOKE, mock_doc, mock_experiment
 
@@ -189,6 +190,43 @@ def test_search_needs_an_slo():
     load = {"mode": "closed_loop", "search": {"lo": 1, "hi": 8}, "num_requests": 4}
     with pytest.raises(ValidationError, match="slo"):
         mock_experiment(workloads=[{"profile": "fixed-128-128", "load": load}], slo=None)
+
+
+def test_search_scale_defaults_to_linear_and_accepts_geometric():
+    base = {"mode": "open_loop", "duration_s": 10}
+    linear = LoadSpec.model_validate({**base, "search": {"lo": 1, "hi": 8}})
+    assert linear.search is not None and linear.search.scale == "linear"
+    geo = LoadSpec.model_validate(
+        {**base, "search": {"lo": 1, "hi": 8, "scale": "geometric", "step": 1.5}}
+    )
+    assert geo.search is not None and (geo.search.scale, geo.search.step) == ("geometric", 1.5)
+    with pytest.raises(ValidationError):
+        LoadSpec.model_validate({**base, "search": {"lo": 1, "hi": 8, "step": 1}})
+    with pytest.raises(ValidationError):
+        LoadSpec.model_validate({**base, "search": {"lo": 1, "hi": 8, "scale": "cubic"}})
+
+
+def test_next_search_load_follows_the_scale_rounds_closed_loop_and_caps_points():
+    geo = LoadSpec.model_validate(
+        {
+            "mode": "open_loop",
+            "duration_s": 10,
+            "search": {"lo": 1, "hi": 8, "scale": "geometric", "max_points": 3},
+        }
+    )
+    assert next_search_load(geo, []) == 1
+    assert next_search_load(geo, [(1, True)]) == 2
+    assert next_search_load(geo, [(1, True), (2, True)]) == 4
+    assert next_search_load(geo, [(1, True), (2, True), (4, False)]) is None  # max_points
+    closed = LoadSpec.model_validate(
+        {
+            "mode": "closed_loop",
+            "num_requests": 4,
+            "search": {"lo": 2, "hi": 16, "scale": "geometric", "rel_tol": 0.01},
+        }
+    )
+    assert next_search_load(closed, [(2, True), (4, False)]) == 3.0  # sqrt(8) rounds to 3
+    assert next_search_load(closed, [(2, True), (3, True), (4, False)]) is None  # a repeat
 
 
 def test_arrival_template_gets_the_load_value_as_rate():

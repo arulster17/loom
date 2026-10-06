@@ -567,16 +567,8 @@ class _Executor:
             for value in load.values:
                 await point(value)
         else:
-            search = load.search
-            assert search is not None and slo is not None
-            while len(history) < search.max_points:
-                nxt = bisect_next_load(history, search.lo, search.hi, search.rel_tol)
-                if nxt is None:
-                    break
-                if load.mode is LoadMode.CLOSED_LOOP:
-                    nxt = float(max(round(nxt), 1))
-                if any(v == nxt for v, _ in history):
-                    break
+            assert slo is not None
+            while (nxt := next_search_load(load, history)) is not None:
                 await point(nxt)
 
         if slo is None or not points:
@@ -873,6 +865,26 @@ class _Executor:
             summary.throughput.output_tok_s,
         )
         return summary
+
+
+def next_search_load(load: LoadSpec, history: Sequence[tuple[float, bool]]) -> float | None:
+    """The next point of `load.search` given the (load, met) points so far, or None when
+    the search is done: converged, out of points, or about to repeat a load (closed-loop
+    concurrency is rounded to whole requests)."""
+    search = load.search
+    assert search is not None
+    if len(history) >= search.max_points:
+        return None
+    nxt = bisect_next_load(
+        history, search.lo, search.hi, search.rel_tol, scale=search.scale, step=search.step
+    )
+    if nxt is None:
+        return None
+    if load.mode is LoadMode.CLOSED_LOOP:
+        nxt = float(max(round(nxt), 1))
+    if any(v == nxt for v, _ in history):
+        return None
+    return nxt
 
 
 def _fmt(v: float | None) -> str:

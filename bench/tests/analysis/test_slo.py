@@ -161,6 +161,51 @@ def test_bisect_terminal_cases():
     assert bisect_next_load([(1, True), (16, True), (8, False)], 1, 16) == 4.5
 
 
+@pytest.mark.parametrize("threshold", [0.5, 1.3, 1.9, 4.4, 6.0, 7.9, 8.0, 20.0])
+def test_geometric_search_converges_to_threshold(threshold):
+    history: list[tuple[float, bool]] = []
+    while (load := bisect_next_load(history, 0.5, 8.0, 0.05, scale="geometric")) is not None:
+        history.append((load, load <= threshold))
+        assert len(history) < 20
+    passing = max(load for load, met in history if met)
+    failing = [load for load, met in history if not met]
+    if threshold >= 8.0:  # hi passes: the search stops there, unbracketed
+        assert passing == 8.0 and not failing
+        return
+    assert passing <= threshold < min(failing)
+    assert min(failing) - passing <= 0.05 * passing
+
+
+def test_geometric_search_climbs_from_lo_then_bisects_on_a_log_scale():
+    assert bisect_next_load([], 1, 8, scale="geometric") == 1
+    assert bisect_next_load([(1, False)], 1, 8, scale="geometric") is None
+    assert bisect_next_load([(1, True)], 1, 8, scale="geometric") == 2
+    assert bisect_next_load([(1, True), (2, True)], 1, 8, scale="geometric") == 4
+    assert bisect_next_load([(1, True), (2, True)], 1, 8, scale="geometric", step=3) == 6
+    assert bisect_next_load([(1, True), (2, True), (4, True)], 1, 6, scale="geometric") == 6
+    assert bisect_next_load([(1, True), (6, True)], 1, 6, scale="geometric") is None
+    nxt = bisect_next_load([(1, True), (2, True), (4, False)], 1, 8, scale="geometric")
+    assert nxt == pytest.approx(8**0.5)
+    with pytest.raises(ValueError):
+        bisect_next_load([], 1, 8, scale="geometric", step=1.0)
+
+
+def _points_above(threshold: float, **search) -> int:
+    history: list[tuple[float, bool]] = []
+    while (load := bisect_next_load(history, **search)) is not None and len(history) < 6:
+        history.append((load, load <= threshold))
+    return sum(1 for load, _ in history if load > threshold)
+
+
+def test_geometric_search_spends_fewer_points_in_overload_than_linear():
+    # The first RunPod sweep (058128e9): code-completion on 1x L40S failed at 6.88 req/s
+    # and passed at 1; the old linear search over [1, 48] spent 4 of 5 points above that.
+    linear = _points_above(5.0, lo=1, hi=48, rel_tol=0.1)
+    geometric = _points_above(5.0, lo=1, hi=8, rel_tol=0.1, scale="geometric")
+    assert linear >= 4
+    assert geometric <= 2
+
+
 def _run(ttft_s: float, n: int = 20, out_tokens: int = 10, window_s: float = 10.0):
     records = [
         RequestRecord(

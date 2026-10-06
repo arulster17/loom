@@ -4,6 +4,11 @@
 # RunPod secret hf_token to carry an HF token with the Llama 3.3 license accepted.
 #
 # Same variants, workloads, SLO and quality as the AWS spec (llama-3.3-70b-tp4.yaml).
+#
+# Each workload searches the open-loop rate geometrically (x2 from `lo` until a rate
+# fails, then log-scale bisection). Ranges are scaled down from the measured Qwen3-8B
+# 1x L40S capacity (fixed-1k-1k ~1.2-1.9 req/s): a 70B model at TP=4 is expected to
+# sustain no more, so `hi` sits well above the expected knee without long overload.
 name: llama-3.3-70b-tp4-runpod
 description: Llama 3.3 70B BF16, TP=4 on RunPod Secure 4x L40S, vLLM v0.30.0, rate sweeps at SLO.
 model: llama-3.3-70b-instruct
@@ -16,14 +21,14 @@ workloads:
   - profile: fixed-1k-1k
     load:
       mode: open_loop
-      search: {lo: 0.25, hi: 6, rel_tol: 0.15, max_points: 4}
+      search: {lo: 0.25, hi: 2, rel_tol: 0.15, max_points: 4, scale: geometric}
       duration_s: 180
       warmup_s: 30
       drain_timeout_s: 90
   - profile: shared-prefix
     load:
       mode: open_loop
-      search: {lo: 0.5, hi: 16, rel_tol: 0.15, max_points: 4}
+      search: {lo: 0.5, hi: 4, rel_tol: 0.15, max_points: 4, scale: geometric}
       duration_s: 120
       warmup_s: 20
       drain_timeout_s: 30

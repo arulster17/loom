@@ -219,20 +219,39 @@ def find_goodput(
     )
 
 
+SearchScale = Literal["linear", "geometric"]
+
+
 def bisect_next_load(
-    history: Sequence[tuple[float, bool]], lo: float, hi: float, rel_tol: float = 0.05
+    history: Sequence[tuple[float, bool]],
+    lo: float,
+    hi: float,
+    rel_tol: float = 0.05,
+    *,
+    scale: SearchScale = "linear",
+    step: float = 2.0,
 ) -> float | None:
     """Next load to test when searching [lo, hi] for the highest load meeting the SLO.
 
     `history` holds (load, met) for tested points; points outside [lo, hi] are
-    ignored. Tests `lo`, then `hi`, then bisects between the highest pass below the
-    lowest failure and that failure. Returns None when done: `lo` fails, `hi` passes,
-    or the bracket is within `rel_tol` of the passing load.
+    ignored. Returns None when done: `lo` fails, `hi` passes, or the bracket is within
+    `rel_tol` of the passing load.
+
+    linear: tests `lo`, then `hi`, then the arithmetic midpoint between the highest
+    pass below the lowest failure and that failure.
+
+    geometric: tests `lo`, then climbs by `step` (capped at `hi`) until a load fails,
+    then takes the geometric midpoint of the bracket. Capacity spans orders of
+    magnitude across workloads and GPUs, and an overloaded point is the slowest kind
+    to run (queues to the request timeout), so this resolves goodput with the fewest
+    points above it.
     """
     if not 0 < lo < hi:
         raise ValueError("need 0 < lo < hi")
     if rel_tol <= 0:
         raise ValueError("rel_tol must be positive")
+    if step <= 1:
+        raise ValueError("step must be above 1")
     results = {load: met for load, met in history if lo <= load <= hi}
     if lo not in results:
         return lo
@@ -240,9 +259,14 @@ def bisect_next_load(
         return None
     failures = [load for load, met in results.items() if not met]
     if not failures:
+        if scale == "geometric":
+            best = max(results)
+            return None if best >= hi else min(hi, best * step)
         return hi if hi not in results else None
     fail = min(failures)
     passing = max(load for load, met in results.items() if met and load < fail)
     if fail - passing <= rel_tol * passing:
         return None
+    if scale == "geometric":
+        return float(np.sqrt(passing * fail))
     return (passing + fail) / 2

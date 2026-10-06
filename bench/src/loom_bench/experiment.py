@@ -41,7 +41,7 @@ from loom_bench.providers.base import EngineLaunch
 from loom_bench.quality.suite import Suite, load_suite
 from loom_bench.records import LoadMode
 from loom_bench.registry import REPO_ROOT, ModelSpec, Registry, read_yaml
-from loom_bench.slo import Slo
+from loom_bench.slo import SearchScale, Slo
 from loom_bench.workloads import WorkloadProfile, load_profile
 
 EXPERIMENTS_DIR = REPO_ROOT / "bench" / "experiments"
@@ -199,12 +199,19 @@ RATE_FIELDS = {
 
 
 class LoadSearch(_Strict):
-    """Bisect [lo, hi] for the highest load meeting the SLO (`slo.bisect_next_load`)."""
+    """Bisect [lo, hi] for the highest load meeting the SLO (`slo.bisect_next_load`).
+
+    `scale: geometric` climbs from `lo` by `step` until a load fails, then bisects
+    geometrically; it spends the fewest points in overload. `linear` (the default,
+    kept for older specs) tests `lo`, then `hi`, then arithmetic midpoints.
+    """
 
     lo: PositiveFloat
     hi: PositiveFloat
     rel_tol: PositiveFloat = 0.05
     max_points: Annotated[int, Field(ge=2)] = 8
+    scale: SearchScale = "linear"
+    step: Annotated[float, Field(gt=1)] = 2.0
 
     @model_validator(mode="after")
     def _ordered(self) -> Self:

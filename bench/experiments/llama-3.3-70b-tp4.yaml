@@ -19,14 +19,14 @@ workloads:
   - profile: fixed-1k-1k
     load:
       mode: open_loop
-      search: {lo: 0.25, hi: 6, rel_tol: 0.15, max_points: 4}
+      search: {lo: 0.25, hi: 2, rel_tol: 0.15, max_points: 4, scale: geometric}
       duration_s: 180
       warmup_s: 30
       drain_timeout_s: 90
   - profile: shared-prefix
     load:
       mode: open_loop
-      search: {lo: 0.5, hi: 16, rel_tol: 0.15, max_points: 4}
+      search: {lo: 0.5, hi: 4, rel_tol: 0.15, max_points: 4, scale: geometric}
       duration_s: 120
       warmup_s: 20
       drain_timeout_s: 30
