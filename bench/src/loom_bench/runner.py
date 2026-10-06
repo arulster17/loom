@@ -8,6 +8,10 @@ captures the divergence reference; every other cell is scored against it and
 gated against the baseline) -> teardown (always) -> completed, or failed when every
 load run failed (`judge_runs`).
 
+A failed eval job does not end the experiment: it is recorded (event, experiment
+reason, exit 8), the other engines still run, and a gate missing either side is
+`inconclusive` and blocked. Budget outcomes and a lost host still end it.
+
 Warmup is excluded from every summary and each load point is repeated; a single
 repetition is never trusted (see `metrics.aggregate`).
 """
@@ -128,7 +132,7 @@ EXIT_FAILED = 1
 EXIT_REFUSED = 3
 EXIT_BUDGET_STOP = 4
 EXIT_BUDGET_ABORT = 5
-EXIT_RUNS_FAILED = 8  # finished, but some load runs failed
+EXIT_RUNS_FAILED = 8  # finished, but some load runs or quality evals failed
 
 RUN_COMPLETED = "completed"
 RUN_FAILED = "failed"
@@ -293,6 +297,8 @@ class _Executor:
         self.events: list[dict[str, Any]] = []
         self.suite = exp.quality.load() if exp.quality is not None else None
         self.baselines: dict[str, _Baseline] = {}
+        self.failed_baselines: dict[str, tuple[Cell, str]] = {}  # knobs -> (cell, why)
+        self.eval_statuses: Counter[str] = Counter()
         self.eval_hosts: set[str] = set()  # hosts whose client env has the eval harness
         self.gates: list[GateRow] = []
 
@@ -428,7 +434,7 @@ class _Executor:
         for entry, profile in self.workloads:
             await self._run_workload(host, cell, endpoint, entry, profile)
         if self.suite is not None:
-            await self._run_quality(host, cell, endpoint, self.suite)
+            await self._run_quality_or_record_failure(host, cell, endpoint, self.suite)
 
     def _eval_job(self, cell: Cell, endpoint: Endpoint, suite: Suite) -> EvalJob:
         quality = self.exp.quality
@@ -438,8 +444,9 @@ class _Executor:
         if suite.divergence is not None:
             if cell.variant == quality.baseline_variant:
                 divergence = "capture_and_floor"
-            else:
-                divergence, reference = "score", self._baseline(cell).reference
+            elif (base := self.baselines.get(canonical_json(cell.knobs))) is not None:
+                divergence, reference = "score", base.reference
+            # no baseline results (its eval failed): nothing to score divergence against
         return EvalJob(
             run_id=str(uuid.uuid4()),
             suite=suite,
@@ -455,11 +462,53 @@ class _Executor:
             reference=reference,
         )
 
-    def _baseline(self, cell: Cell) -> _Baseline:
-        base = self.baselines.get(canonical_json(cell.knobs))
-        if base is None:
-            raise RuntimeError(f"{cell.key}: its baseline cell has no quality results to gate on")
-        return base
+    async def _run_quality_or_record_failure(
+        self, host: Host, cell: Cell, endpoint: Endpoint, suite: Suite
+    ) -> None:
+        """Run the quality suite; a failed eval is recorded and the experiment goes on.
+
+        Budget outcomes and a lost host still propagate: they end the experiment.
+        """
+        quality = self.exp.quality
+        assert quality is not None
+        try:
+            await self._run_quality(host, cell, endpoint, suite)
+        except (BudgetExceeded, HostLost):
+            raise
+        except Exception as e:
+            reason = f"{type(e).__name__}: {e}"
+            log.exception("quality suite on %s failed", cell.key)
+            self.eval_statuses[RUN_FAILED] += 1
+            self.event("quality_failed", cell=cell.key, config_hash=cell.config_hash, error=reason)
+            if cell.variant == quality.baseline_variant:
+                self.failed_baselines[canonical_json(cell.knobs)] = (cell, reason)
+            else:
+                base = self.baselines.get(canonical_json(cell.knobs))
+                self._record_inconclusive(
+                    cell, base.cell if base else None, f"candidate eval failed: {reason}"
+                )
+            return
+        self.eval_statuses[RUN_COMPLETED] += 1
+
+    def _record_inconclusive(self, cell: Cell, baseline: Cell | None, reason: str) -> None:
+        """A gate with a side missing: inconclusive and blocked, never a pass."""
+        with session_scope(self.ctx.db_url) as s:
+            repo.record_gate_decision(
+                s,
+                experiment_id=self.experiment_id,
+                baseline_config_hash=baseline.config_hash if baseline else "",
+                candidate_config_hash=cell.config_hash,
+                decision="inconclusive",
+                details={"decision": "inconclusive", "blocked": True, "reasons": [reason]},
+            )
+        row = GateRow(
+            cell=cell.key,
+            baseline=baseline.key if baseline else "",
+            decision="inconclusive",
+            blocked=True,
+        )
+        self.gates.append(row)
+        self.event("gate", **row.model_dump(), reasons=[reason])
 
     async def _run_quality(self, host: Host, cell: Cell, endpoint: Endpoint, suite: Suite) -> None:
         quality = self.exp.quality
@@ -519,7 +568,15 @@ class _Executor:
                 )
             self.baselines[canonical_json(cell.knobs)] = _Baseline(cell, result, reference)
             return
-        base = self._baseline(cell)
+        key = canonical_json(cell.knobs)
+        base = self.baselines.get(key)
+        if base is None:
+            failed = self.failed_baselines.get(key)
+            if failed is None:
+                self._record_inconclusive(cell, None, "its baseline cell has no quality results")
+            else:
+                self._record_inconclusive(cell, failed[0], f"baseline eval failed: {failed[1]}")
+            return
         decision = gate_against_baseline(
             base.result,
             result,
@@ -891,25 +948,35 @@ def _fmt(v: float | None) -> str:
     return "-" if v is None else f"{v:.1f}"
 
 
-def judge_runs(statuses: Counter[str]) -> tuple[ExperimentStatus, str | None, int]:
-    """The outcome of an experiment that ran to the end, from its load runs' statuses.
+def judge_runs(
+    statuses: Counter[str], evals: Counter[str] | None = None
+) -> tuple[ExperimentStatus, str | None, int]:
+    """The outcome of an experiment that ran to the end, from its load runs' and quality
+    evals' statuses.
 
-    Every run failed: `failed`. Some failed: `completed`, with the count as the reason and
-    a non-zero exit, so a sweep with holes never looks finished. Reports only use
-    completed runs either way.
+    Every load run failed: `failed`. Some load runs or any eval failed: `completed`, with
+    the counts as the reason and a non-zero exit, so a sweep with holes never looks
+    finished. Reports only use completed runs, and a gate missing a side is inconclusive.
     """
     total = sum(statuses.values())
     bad = total - statuses[RUN_COMPLETED]
-    if bad == 0:
-        return ExperimentStatus.COMPLETED, None, EXIT_OK
+    evals = evals or Counter()
+    eval_total = sum(evals.values())
+    eval_bad = eval_total - evals[RUN_COMPLETED]
     detail = ", ".join(f"{n} {s}" for s, n in sorted(statuses.items()) if s != RUN_COMPLETED)
-    if bad == total:
-        return ExperimentStatus.FAILED, f"all {total} runs failed ({detail})", EXIT_FAILED
-    return (
-        ExperimentStatus.COMPLETED,
-        f"{bad} of {total} runs failed ({detail})",
-        EXIT_RUNS_FAILED,
-    )
+    reasons: list[str] = []
+    if bad:
+        if bad == total:
+            reason = f"all {total} runs failed ({detail})"
+            if eval_bad:
+                reason += f"; {eval_bad} of {eval_total} quality evals failed"
+            return ExperimentStatus.FAILED, reason, EXIT_FAILED
+        reasons.append(f"{bad} of {total} runs failed ({detail})")
+    if eval_bad:
+        reasons.append(f"{eval_bad} of {eval_total} quality evals failed")
+    if not reasons:
+        return ExperimentStatus.COMPLETED, None, EXIT_OK
+    return ExperimentStatus.COMPLETED, "; ".join(reasons), EXIT_RUNS_FAILED
 
 
 def _finish(
@@ -1022,7 +1089,7 @@ async def _execute(
     if guard.tripped.is_set() and status is ExperimentStatus.COMPLETED:
         status, reason, code = ExperimentStatus.ABORTED, guard.reason, EXIT_BUDGET_ABORT
     if status is ExperimentStatus.COMPLETED:
-        status, reason, code = judge_runs(ex.run_statuses)
+        status, reason, code = judge_runs(ex.run_statuses, ex.eval_statuses)
     spent = _finish(ctx, experiment_id, status, reason)
     if interrupted is not None:
         raise interrupted

@@ -3,7 +3,8 @@
 Exit codes: 0 ok, 1 failed, 2 invalid input, 3 refused by the planner (over a
 cap), 4 stopped before a step that would pass the cap, 5 hard budget abort,
 6 reproduction outside normal variance, 7 quality gate blocked, 8 finished but some runs
-failed (every run failing marks the experiment failed and exits 1). A gate that needs
+or quality evals failed (every load run failing marks the experiment failed and exits 1;
+a gate missing a side is inconclusive). A gate that needs
 review (divergence above the calibrated limits while every task passes) exits 0 unless
 the suite sets `gate.review_blocks`, in which case it is blocked and exits 7.
 """
@@ -268,7 +269,7 @@ def render_goodput(results: list[ConfigResult]) -> None:
 def render_outcome(outcome: Outcome, results: list[ConfigResult] | None = None) -> None:
     color = {"completed": "green", "aborted": "red", "failed": "red"}[outcome.status.value]
     if outcome.status.value == "completed" and outcome.exit_code != EXIT_OK:
-        color = "yellow"  # finished with failed runs
+        color = "yellow"  # finished with failed runs or evals
     console.print(
         f"[bold {color}]{outcome.status.value}[/] experiment {outcome.experiment_id}: "
         f"{len(outcome.run_ids)} runs, spent {format_usd(outcome.spent_micros)}"
