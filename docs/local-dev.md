@@ -37,7 +37,19 @@ uv run pytest -q        # ~800 tests, about 2 minutes; Postgres tests are skippe
 ```
 
 Tests never touch the network or a cloud: AWS calls go to moto or fakes, HTTP to
-`httpx.MockTransport` or the mock backend.
+`httpx.MockTransport` or the mock backend. The one exception is deselected by default:
+
+```bash
+uv run pytest -m network -s bench/tests/deps   # a few minutes; downloads wheels and datasets
+```
+
+It rebuilds the GPU hosts' client environment exactly as RunPod and AWS hosts install it
+(a clean CPython 3.12 venv, the hash-locked `uv export` requirements with the `lmeval`
+extra via `pip --require-hashes --no-deps`, the wheel, `pip check`) and runs every task of
+every eval suite at 2 items, plus divergence, through `bench quality job` against the mock
+backend. A missing or broken eval dependency fails here instead of on a paid pod.
+`LOOM_POD_REQUIREMENTS=<file>` checks another requirements set; without `HF_TOKEN`, tasks
+whose tokenizer is license-gated are skipped when another suite runs the same harness task.
 
 Postgres-marked tests (`-m postgres`) need `LOOM_TEST_DATABASE_URL`. Each test creates
 and drops its own schema, so the compose database is safe to use:
@@ -48,7 +60,8 @@ LOOM_TEST_DATABASE_URL=postgresql+psycopg://loom:loom@localhost:5432/loom \
   uv run pytest -q -m postgres          # or drop -m to run everything
 ```
 
-Markers (`pyproject.toml`): `postgres`, `slow`. Default per-test timeout is 120 s.
+Markers (`pyproject.toml`): `postgres`, `slow`, `network` (deselected unless `-m network`).
+Default per-test timeout is 120 s.
 
 ## Results database
 
@@ -193,7 +206,8 @@ imported with a targeted `# type: ignore[import-untyped]`.
 `.github/workflows/ci.yml` runs on pushes to `main` and on pull requests:
 `uv sync --frozen`, `ruff check`, `ruff format --check`, `mypy bench/src`,
 `pytest -q -n auto` with a Postgres 16
-service and `LOOM_TEST_DATABASE_URL` set, so Postgres-marked tests run there.
+service and `LOOM_TEST_DATABASE_URL` set, so Postgres-marked tests run there. A second
+job, `pod-client-env`, runs `pytest -m network bench/tests/deps` (above).
 `.github/workflows/site.yml` builds the results site on pushes to `main` that touch the
 site or report code, and deploys it to GitHub Pages once Pages is enabled
 ([site.md](site.md#deployment)).

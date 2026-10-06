@@ -28,3 +28,15 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy bench/src
       - run: uv run pytest -q -n auto
+
+  # The GPU hosts' client environment rebuilt from uv.lock exactly as RunPod and AWS
+  # hosts install it, running every task of every eval suite at 2 items against the mock
+  # backend (bench/tests/deps). Catches a missing or broken dependency before a paid run.
+  pod-client-env:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run pytest -m network -q -s bench/tests/deps
