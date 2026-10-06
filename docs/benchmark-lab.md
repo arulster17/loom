@@ -261,7 +261,9 @@ needs review are ranked with that flag.
 Code-executing tasks are refused at `bench plan` unless `allow_code_exec: true`. The suite
 is a name in `bench/evals/` or a YAML path from the repo root. See `docs/quality-gate.md`
 for the method. A failed eval job is recorded (`quality_failed` event, exit 8) and the
-experiment goes on; gates missing a side are `inconclusive`.
+experiment goes on; gates missing a side are `inconclusive`. A task whose requests were
+all errors, or more than 10% non-retryable 4xx rejections, fails its eval job this way
+instead of scoring zeros.
 
 A smoke experiment (`smoke: true`) runs a real experiment's code paths at minimal scale:
 `quality.limit: N` (allowed only there) caps every suite task near N items and divergence

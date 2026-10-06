@@ -300,7 +300,10 @@ suites.
    ids and a hash of the item's content, plus the raw outputs as `Completion`s for the
    sanity checks. Score an item whose request fails after retries as 0 with the error in
    `meta` (`failed_item`): a config that cannot answer must not look as good as one that
-   can.
+   can. `run_suite` then fails the whole task (`EvalTaskFailed`, naming the status and the
+   first error) when every item errored, or when more than 10% of items were rejected
+   with a non-retryable 4xx: the server refused the request shape (e.g. a missing engine
+   flag), so the zeros would measure the config and two broken engines would gate 0 vs 0.
 2. Ship any fixed data under `quality/data/` with a `version` field and a license note;
    self-author it or use data whose license allows redistribution. Load third-party data
    from the Hub at a pinned revision, only when the task runs.

@@ -29,7 +29,12 @@ from loom_bench.quality.gate import GateDecision, GatePolicy, evaluate_gate
 from loom_bench.quality.sanity import SanityResult, check_completions
 from loom_bench.quality.suite import Suite
 from loom_bench.quality.tasks import build_task
-from loom_bench.quality.tasks.base import Completion, EvalContext, ItemResult
+from loom_bench.quality.tasks.base import (
+    Completion,
+    EvalContext,
+    ItemResult,
+    check_request_errors,
+)
 from loom_bench.stats import Estimate, mean_ci
 from loom_bench.store.models import BenchEvalRun, BenchGateDecision
 from loom_bench.store.repo import record_eval_run, record_gate_decision
@@ -111,6 +116,7 @@ async def run_suite(
             seconds = time.monotonic() - t0
             if not out.items:
                 raise RuntimeError(f"{spec.name}: task produced no items")
+            check_request_errors(spec.name, out.items)
             version = out.version or task.version
             runs[spec.name] = TaskRun(
                 name=spec.name,

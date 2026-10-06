@@ -124,6 +124,49 @@ async def score_items[T](
     )
 
 
+# Above this share of items rejected with a non-retryable 4xx, a task fails instead of
+# scoring: the server refused the request shape (a missing engine flag, an unsupported
+# parameter), so its zeros would measure the config, not the model. A few rejections
+# can be item-specific (one over-long prompt) and stay scored 0.
+MAX_REJECTED_FRACTION = 0.10
+
+
+class EvalTaskFailed(RuntimeError):
+    """A task's requests failed too broadly for its scores to mean anything."""
+
+
+def _rejected(status: object) -> bool:
+    return isinstance(status, int) and 400 <= status < 500 and status not in (408, 429)
+
+
+def check_request_errors(task: str, items: Sequence[ItemResult]) -> None:
+    """Fail a task whose scores would mostly measure request errors, not answers.
+
+    Two engines that both reject every request would otherwise score 0 vs 0 and pass
+    the gate. A task fails when every item errored (nothing was measured), or when
+    more than `MAX_REJECTED_FRACTION` of items were rejected with a non-retryable 4xx.
+    Errors after exhausted retries (5xx, timeouts) below that stay scored 0: a config
+    that cannot answer reliably must not look as good as one that can.
+    """
+    errored = [i for i in items if "error" in i.meta]
+    if not errored:
+        return
+    rejected = [i for i in errored if _rejected(i.meta.get("status"))]
+    n = len(items)
+    if rejected and len(rejected) > MAX_REJECTED_FRACTION * n:
+        first = rejected[0].meta
+        raise EvalTaskFailed(
+            f"{task}: {len(rejected)} of {n} requests rejected "
+            f"(HTTP {first.get('status')}); first: {first.get('error')}"
+        )
+    if len(errored) == n:
+        first = errored[0].meta
+        raise EvalTaskFailed(
+            f"{task}: all {n} requests failed (HTTP {first.get('status')}); "
+            f"first: {first.get('error')}"
+        )
+
+
 def failed_item(item_id: str, content_hash: str, error: EvalRequestError) -> ItemResult:
     return ItemResult(
         item_id=item_id,
