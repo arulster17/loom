@@ -169,3 +169,43 @@ def test_subsets_select_tasks_in_suite_order():
         _suite(tasks=tasks, subsets={"x": ["a", "zzz"]})
     with pytest.raises(ValueError, match="unknown or repeated"):
         _suite(tasks=tasks, subsets={"x": ["a", "a"]})
+
+
+def test_limited_caps_every_kind_and_keeps_everything_else():
+    tasks = [
+        {"name": "a", "kind": "toy_arithmetic", "params": {"n": 10}},
+        {
+            "name": "n",
+            "kind": "needle",
+            "params": {"context_tokens": [4096], "samples_per_cell": 3},
+        },
+        {"name": "c", "kind": "code_exec", "params": {"datasets": ["humaneval", "mbpp"]}},
+        {"name": "j", "kind": "json_schema", "params": {"limit": 2}},
+        {"name": "t", "kind": "tool_calling"},
+        {**GSM8K, "items": 1319},
+        {**GSM8K, "name": "mmlu", "items": 2100, "params": {**GSM8K["params"], "limit": 150}},
+        {**GSM8K, "name": "g3", "params": {**GSM8K["params"], "samples": {"gsm8k": [3, 1, 4, 5]}}},
+    ]
+    full = _suite(tasks=tasks, divergence={"prompts": 48}, subsets={"q": ["a", "t"]})
+    small = full.limited(4)
+    assert small.item_limit == 4 and full.item_limit is None
+    got = {t.name: (t.planned_items(), t.params) for t in small.tasks}
+    assert got["a"][0] == 4
+    assert got["n"] == (5, {"context_tokens": [4096], "samples_per_cell": 1})  # 5 depths
+    assert got["c"][0] == 8  # 4 per dataset
+    assert got["j"][0] == 2  # an existing smaller limit stays
+    assert got["t"][0] == 4
+    assert got["gsm8k"] == (4, {**GSM8K["params"], "limit": 4})
+    assert got["mmlu"][0] == 56  # 14 subjects x 4: the planner count scales with the limit
+    assert got["g3"][0] == 4 and got["g3"][1]["samples"] == {"gsm8k": [3, 1, 4, 5]}
+    assert small.divergence is not None and small.divergence.prompts == 4
+    tiny = full.limited(1).divergence
+    assert tiny is not None and tiny.prompts == 2  # divergence needs at least two prompts
+    assert (small.gate, small.subsets, small.seed) == (full.gate, full.subsets, full.seed)
+    assert [t.kind for t in small.tasks] == [t.kind for t in full.tasks]
+
+
+@pytest.mark.parametrize("name", ["qwen3-8b", "llama-3.3-70b-instruct"])
+def test_shipped_suites_can_run_at_smoke_scale(name):
+    small = load_suite(name).limited(4)
+    assert all((t.planned_items() or t.items or 0) <= 60 for t in small.tasks)

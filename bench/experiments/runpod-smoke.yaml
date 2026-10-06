@@ -1,14 +1,24 @@
-# RunPod smoke test: the cheapest real run that exercises the whole runpod provider
-# path once. One RunPod Secure Cloud pod (1x L40S, on-demand), Qwen3-8B on vLLM v0.30.0,
-# one short closed-loop job, no quality suite. What it proves (docs/runbook-runpod.md):
-# pod creation with the TTL watchdog, SSH into the stock vLLM image, weights pulled at
-# the pinned revision, the engine on loopback, the bench wheel in the pinned client
-# Python as the unprivileged job user (`job_isolation ok`), results back through
-# presigned S3 URLs, and teardown by terminate. The max_spend cap holds even if the pod
-# lives to its TTL.
+# RunPod smoke test: the real Qwen3-8B sweep (qwen3-8b-vllm-vs-sglang-runpod.yaml) at the
+# smallest scale that still runs every code path it uses, so a broken path costs cents
+# here instead of hours there. Same model, provider block and both engine images (same
+# digests), the same three workload profiles under the same open-loop geometric search
+# (2 points, 2 repetitions, short windows and outputs), the same quality suite subset with
+# every task capped at 4 items (`quality.limit`), the same SLO and the same gate.
+# bench/tests/runner/test_plan.py fails if the two drift apart.
+#
+# What it proves, per engine (docs/runbook-runpod.md): pod creation with the TTL
+# watchdog, SSH into the stock image, weights at the pinned revision, the engine on
+# loopback, the bench wheel in the pinned client Python as the unprivileged job user
+# (`job_isolation ok`), load jobs and the rate search, every eval task loading and running
+# in the pod's client environment (lm-eval tasks with their extras, the native tasks,
+# divergence capture, noise floor and scoring), the SGLang-vs-vLLM gate, results back
+# through presigned S3 URLs, and teardown by terminate. Its scores and goodput measure
+# nothing (4 items per task: the gate comes out inconclusive); `smoke: true` keeps it out
+# of default reports and the results site.
 name: runpod-smoke
-description: Qwen3-8B on vLLM v0.30.0, one RunPod Secure 1x L40S pod, one short closed-loop job.
+description: The Qwen3-8B vLLM vs SGLang RunPod sweep at smoke scale, every code path once.
 model: qwen3-8b
+smoke: true
 provider:
   kind: runpod
   container_disk_gb: 80
@@ -18,23 +28,49 @@ variants:
       name: vllm
       version: "0.30.0"
       image: vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
+  - name: sglang
+    engine:
+      name: sglang
+      version: "0.5.21"
+      image: lmsysorg/sglang@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
 workloads:
-  - profile: fixed-128-128
+  - profile: fixed-1k-1k
+    overrides: {output_len: 128}
     load:
-      mode: closed_loop
-      values: [8]
-      num_requests: 64
-      warmup_requests: 8
-repetitions: 1
-# One repetition has no confidence interval: these results are a smoke check, flagged
-# untrusted, never a leaderboard entry.
-allow_single_run: true
+      mode: open_loop
+      search: {lo: 0.5, hi: 1, rel_tol: 0.1, max_points: 2, scale: geometric}
+      duration_s: 10
+      warmup_s: 2
+      drain_timeout_s: 15
+  - profile: shared-prefix
+    overrides: {output_len: 32}
+    load:
+      mode: open_loop
+      search: {lo: 1, hi: 2, rel_tol: 0.1, max_points: 2, scale: geometric}
+      duration_s: 10
+      warmup_s: 2
+      drain_timeout_s: 15
+  - profile: code-completion
+    load:
+      mode: open_loop
+      search: {lo: 1, hi: 2, rel_tol: 0.1, max_points: 2, scale: geometric}
+      duration_s: 10
+      warmup_s: 2
+      drain_timeout_s: 15
+repetitions: 2
 slo:
   ttft_ms: {p95: 1000}
   tpot_ms: {p95: 50}
   max_error_rate: 0.01
+quality:
+  suite: qwen3-8b
+  subset: phase0
+  baseline_variant: vllm
+  limit: 4
+# Each pod's TTL holds `bench plan`'s estimate with margin; max_spend holds the worst
+# case of both pods living to their TTL.
 budget:
-  max_spend: "$2"
+  max_spend: "$1.50"
   ttl_minutes: 40
   accrual_interval_s: 15
 seed: 0

@@ -540,6 +540,8 @@ def _analyze(
                 BenchExperiment.name.not_like("%--reproduce"),
             )
         rows = list(s.scalars(stmt))
+        if not experiments:  # smoke runs share config hashes with real ones: never by default
+            rows = [r for r in rows if not (r.spec or {}).get("smoke")]
         if not rows:
             err.print("[red]no matching experiments")
             raise typer.Exit(EXIT_INVALID)

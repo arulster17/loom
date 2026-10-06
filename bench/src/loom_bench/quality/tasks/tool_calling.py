@@ -192,6 +192,7 @@ def match_call(
 
 class ToolCallingParams(TaskParams):
     categories: tuple[Category, ...] = ("simple", "multiple")
+    limit: Annotated[int, Field(ge=1)] | None = None  # first N items of those categories
     max_tokens: Annotated[int, Field(ge=1)] = 512
 
 
@@ -200,11 +201,14 @@ class ToolCallingTask(ParamTask[ToolCallingParams]):
     version: ClassVar[str] = "1"
 
     def planned_items(self) -> int:
-        return sum(i.category in self.params.categories for i in load_data().items)
+        n = sum(i.category in self.params.categories for i in load_data().items)
+        return n if self.params.limit is None else min(n, self.params.limit)
 
     async def run(self, ctx: EvalContext) -> TaskOutput:
         data = load_data()
         items = [i for i in data.items if i.category in self.params.categories]
+        if self.params.limit is not None:
+            items = items[: self.params.limit]
 
         async def score(item: ToolItem) -> tuple[ItemResult, Completion | None]:
             tools = data.tools_for(item)

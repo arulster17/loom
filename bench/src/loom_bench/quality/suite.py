@@ -10,6 +10,7 @@ pair item for item with a full run of the same tasks.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Annotated, Any, Self
 
@@ -100,6 +101,9 @@ class Suite(_Strict):
     subsets: dict[TaskName, Annotated[list[TaskName], Field(min_length=1)]] = Field(
         default_factory=dict
     )
+    # Set by `limited`: every task capped near this many items. A smoke check that each
+    # task loads and runs end to end; its scores measure nothing.
+    item_limit: PositiveInt | None = None
 
     @model_validator(mode="after")
     def _check(self) -> Self:
@@ -149,11 +153,61 @@ class Suite(_Strict):
             sanity=self.sanity_limits,
         )
 
+    def limited(self, n: int) -> Suite:
+        """This suite with every task capped near `n` items and divergence at `n` prompts
+        (at least 2), everything else unchanged: same tasks, datasets, parameters and
+        harness code paths at smoke scale. Raises for a task kind with no item limit."""
+        if n < 1:
+            raise ValueError("limit must be at least 1")
+        doc = self.model_dump(mode="json")
+        doc["tasks"] = [_limit_task(t, n) for t in self.tasks]
+        if self.divergence is not None:
+            cap = max(2, n)
+            prompts = self.divergence.prompts
+            doc["divergence"]["prompts"] = cap if prompts is None else min(prompts, cap)
+        doc["item_limit"] = n
+        return Suite.model_validate(doc)
+
     def extra_body(self) -> dict[str, Any]:
         """Per-request extras every eval request carries."""
         return (
             {"chat_template_kwargs": self.chat_template_kwargs} if self.chat_template_kwargs else {}
         )
+
+
+# The parameter that caps each task kind's items (`Suite.limited`).
+_ITEM_LIMIT_PARAM = {
+    "lm_eval": "limit",  # first N docs of every (sub)task
+    "json_schema": "limit",
+    "tool_calling": "limit",
+    "code_exec": "limit",  # per dataset
+    "toy_arithmetic": "n",
+}
+
+
+def _limit_task(task: SuiteTask, n: int) -> dict[str, Any]:
+    doc = task.model_dump(mode="json")
+    params = dict(task.params)
+    if task.kind == "needle":
+        params["samples_per_cell"] = 1  # one item per (length, depth) cell
+        doc["items"] = None
+    elif task.kind == "lm_eval" and params.get("samples") is not None:
+        params["samples"] = {k: list(v)[:n] for k, v in params["samples"].items()}
+        doc["items"] = None
+    elif task.kind in _ITEM_LIMIT_PARAM:
+        key = _ITEM_LIMIT_PARAM[task.kind]
+        old = params.get(key)
+        params[key] = n if old is None else min(int(old), n)
+        if task.items is not None and task.kind == "lm_eval":
+            # planner estimate only: scale the declared count by the new per-task limit
+            scaled = math.ceil(task.items * params[key] / old) if old else min(task.items, n)
+            doc["items"] = max(1, scaled)
+        else:
+            doc["items"] = None
+    else:
+        raise ValueError(f"task {task.name}: kind {task.kind!r} has no item limit")
+    doc["params"] = params
+    return doc
 
 
 def load_suite(name_or_path: str | Path) -> Suite:

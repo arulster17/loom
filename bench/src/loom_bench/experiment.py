@@ -333,9 +333,12 @@ class QualitySpec(_Strict):
     subset: Slug | None = None  # a named subset of the suite's tasks; None runs them all
     baseline_variant: Slug
     allow_code_exec: bool = False  # code_exec tasks run model output in the sandbox
+    # Smoke experiments only: cap every task near this many items (`Suite.limited`).
+    limit: PositiveInt | None = None
 
     def load(self) -> Suite:
-        return load_quality_suite(self.suite)
+        suite = load_quality_suite(self.suite)
+        return suite if self.limit is None else suite.limited(self.limit)
 
     def task_names(self, suite: Suite) -> list[str] | None:
         """The EvalJob task list: None for the whole suite."""
@@ -364,6 +367,10 @@ class Experiment(_Strict):
     workloads: Annotated[list[WorkloadEntry], Field(min_length=1)]
     repetitions: PositiveInt = 3
     allow_single_run: bool = False
+    # A smoke check of the real path at minimal scale. Its cells share config hashes with
+    # the real experiment's, so it is left out of default reports and the results site;
+    # `quality.limit` is allowed only here.
+    smoke: bool = False
     slo: Slo | None = None
     cost_allocation: CostAllocationSpec = Field(default_factory=CostAllocationSpec)
     budget: BudgetSpec
@@ -392,6 +399,8 @@ class Experiment(_Strict):
             raise ValueError("load.search needs an slo to search against")
         if self.quality is not None and self.quality.baseline_variant not in names:
             raise ValueError(f"quality.baseline_variant {self.quality.baseline_variant!r} unknown")
+        if self.quality is not None and self.quality.limit is not None and not self.smoke:
+            raise ValueError("quality.limit is for smoke experiments only (set smoke: true)")
         is_mock = self.provider.kind == "mock"
         for v in self.variants:
             if v.mock and not is_mock:

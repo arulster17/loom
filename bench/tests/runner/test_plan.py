@@ -78,9 +78,7 @@ def test_real_experiments_fit_their_caps_with_margin(path):
     assert plan.hosts[0].seconds < 0.95 * plan.hosts[0].ttl_s
 
 
-@pytest.mark.parametrize(
-    ("path", "pods"), [(QWEN_RUNPOD, 2), (LLAMA_RUNPOD, 1), (RUNPOD_SMOKE, 1)], ids=lambda p: str(p)
-)
+@pytest.mark.parametrize(("path", "pods"), [(QWEN_RUNPOD, 2), (LLAMA_RUNPOD, 1)], ids=str)
 def test_runpod_experiments_fit_their_caps_with_ttl_margin(path, pods):
     exp = load_experiment(path)
     assert exp.provider.kind == "runpod"
@@ -95,11 +93,70 @@ def test_runpod_experiments_fit_their_caps_with_ttl_margin(path, pods):
         assert host.seconds < 0.8 * host.ttl_s  # each pod finishes well inside its TTL
 
 
-def test_runpod_smoke_stays_under_two_dollars_even_to_ttl():
+def test_runpod_smoke_stays_under_a_dollar_fifty_even_to_ttl():
     plan = _plan(load_experiment(RUNPOD_SMOKE))
-    assert plan.caps.effective == parse_usd("$2")
-    assert plan.ttl_worst_micros < parse_usd("$1")
-    assert plan.n_cells == 1
+    assert plan.ok, plan.refusals
+    assert plan.caps.effective == parse_usd("$1.50")
+    assert plan.ttl_worst_micros <= plan.caps.effective  # both pods to their TTL
+    assert plan.n_cells == 2 and len(plan.hosts) == 2  # one pod per engine image
+    for host in plan.hosts:
+        assert host.steps[0].kind == "cold_start"
+        assert host.seconds < 0.8 * host.ttl_s
+
+
+def _eval_paths(exp: Experiment) -> set[tuple[str, str]]:
+    """(kind, harness task) of every eval task the experiment runs: what decides which
+    code and which dependencies the pod's eval job needs."""
+    assert exp.quality is not None
+    suite = exp.quality.load()
+    tasks = suite.select(exp.quality.subset)
+    out = set()
+    for t in tasks:
+        harness = t.params.get("tasks") if t.kind == "lm_eval" else None
+        for name in harness or [t.name]:
+            out.add((t.kind, name))
+    return out
+
+
+def _load_shape(exp: Experiment) -> dict[str, tuple[str, str | None]]:
+    return {
+        w.profile: (w.load.mode.value, w.load.search.scale if w.load.search else None)
+        for w in exp.workloads
+    }
+
+
+def test_runpod_smoke_covers_every_code_path_of_the_real_qwen_sweep():
+    # The first 8B sweep (058128e9) died on an eval extra the old vLLM-only, eval-less
+    # smoke never touched. The smoke must run what the sweep runs, at smoke scale.
+    smoke, real = load_experiment(RUNPOD_SMOKE), load_experiment(QWEN_RUNPOD)
+    assert smoke.smoke and not real.smoke
+    assert smoke.model == real.model and smoke.provider == real.provider
+    assert smoke.variants == real.variants  # both engines, same images by digest
+    assert _load_shape(smoke) == _load_shape(real)  # profiles, load modes, search scale
+    assert smoke.repetitions >= 2  # aggregation and confidence intervals, as in the sweep
+    assert smoke.slo == real.slo
+    assert smoke.quality is not None and real.quality is not None
+    assert (smoke.quality.suite, smoke.quality.subset, smoke.quality.baseline_variant) == (
+        real.quality.suite,
+        real.quality.subset,
+        real.quality.baseline_variant,
+    )
+    assert smoke.quality.allow_code_exec == real.quality.allow_code_exec
+    assert _eval_paths(smoke) == _eval_paths(real)
+    assert smoke.quality.limit is not None and real.quality.limit is None
+    assert smoke.quality.load().divergence is not None  # capture, floor and scoring run
+
+
+def test_the_llama_sweep_runs_no_eval_path_or_load_shape_the_qwen_smoke_misses():
+    # No separate Llama smoke: a 4x L40S pod is ~$4.40/h and its 141 GB download alone
+    # takes most of an hour. Its eval tasks, load modes and engine image are the Qwen
+    # smoke's; what only the real Llama run exercises is TP=4, the 250 GB disk and the
+    # gated-model token (docs/runbook-runpod.md).
+    smoke, llama = load_experiment(RUNPOD_SMOKE), load_experiment(LLAMA_RUNPOD)
+    assert _eval_paths(llama) <= _eval_paths(smoke)
+    assert set(_load_shape(llama).items()) <= set(_load_shape(smoke).items())
+    smoke_images = {v.engine.image for v in smoke.variants if v.engine}
+    assert {v.engine.image for v in llama.variants if v.engine} <= smoke_images
 
 
 def test_runpod_specs_match_their_aws_counterparts_apart_from_the_provider():
