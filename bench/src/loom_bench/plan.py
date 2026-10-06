@@ -448,13 +448,14 @@ class RunpodAccrualTerms:
     max_ttl_s: int
 
 
-# The runpod provider's default host-lifetime limit.
-RUNPOD_MAX_TTL_S = 8 * 3600
-
-
 def runpod_accrual_terms() -> RunpodAccrualTerms:
-    """The runpod provider's planning limits (its defaults until it has settings)."""
-    return RunpodAccrualTerms(max_ttl_s=RUNPOD_MAX_TTL_S)
+    """The runpod provider's planning limits: configured ones, else its defaults."""
+    from loom_bench.providers.runpod import RunpodSettings, load_runpod_settings
+
+    try:
+        return RunpodAccrualTerms(max_ttl_s=load_runpod_settings().max_ttl_s)
+    except (ValidationError, FileNotFoundError):
+        return RunpodAccrualTerms(max_ttl_s=RunpodSettings.model_fields["max_ttl_s"].default)
 
 
 def _runpod_hardware_problems(cell: Cell, prices: PriceBook) -> list[str]:

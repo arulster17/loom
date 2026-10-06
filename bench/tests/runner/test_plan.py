@@ -16,11 +16,11 @@ from loom_bench.plan import (
     EVAL_HARNESS_TASK_S,
     EVAL_ITEM_S,
     MOCK_EVAL_JOB_S,
-    RUNPOD_MAX_TTL_S,
     RUNPOD_TIMING,
     Estimator,
     PlanError,
     build_plan,
+    runpod_accrual_terms,
 )
 from loom_bench.prices import HOURS_PER_MONTH, load_prices
 from loom_bench.provenance import GitInfo
@@ -323,7 +323,7 @@ def test_runpod_unpriced_instance_is_a_plan_error():
 
 
 def test_runpod_ttl_above_the_pod_limit_is_refused():
-    limit_min = RUNPOD_MAX_TTL_S / 60
+    limit_min = runpod_accrual_terms().max_ttl_s / 60
     refusals = _plan(_runpod(budget={"ttl_minutes": limit_min + 1})).refusals
     assert any("RunPod pod limit" in r for r in refusals)
 

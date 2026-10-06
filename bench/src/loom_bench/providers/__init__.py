@@ -1,7 +1,7 @@
 """Benchmark host providers, constructed by experiment `provider.kind`.
 
 Implementations import lazily so optional dependencies (uvicorn for mock,
-boto3 for aws_ec2) load only when that provider is used.
+boto3 for aws_ec2 and runpod) load only when that provider is used.
 """
 
 from __future__ import annotations
@@ -74,4 +74,18 @@ def make_provider(spec: ProviderSpec, *, prices: PriceBook, work_dir: Path) -> P
             )
         wheel = settings.wheel_path or build_wheel(work_dir / "wheel")
         return AwsEc2Provider(settings, prices=prices, wheel_path=wheel)
+    if spec.kind == "runpod":
+        from loom_bench.providers.runpod import RunpodProvider, load_runpod_settings
+        from loom_bench.providers.runpod_api import RunpodApi, load_runpod_api_key
+
+        rp_settings = load_runpod_settings()
+        key = load_runpod_api_key()
+        if key is None:
+            raise ValueError(
+                "no RunPod API key: set RUNPOD_API_KEY or store it in the macOS Keychain "
+                "(service RUNPOD_API_KEY)"
+            )
+        api = RunpodApi(key, rest_url=rp_settings.rest_url, graphql_url=rp_settings.graphql_url)
+        wheel = rp_settings.wheel_path or build_wheel(work_dir / "wheel")
+        return RunpodProvider(rp_settings, spec=spec, api=api, prices=prices, wheel_path=wheel)
     raise NotImplementedError(f"provider kind {spec.kind} is not built yet")

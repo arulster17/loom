@@ -237,7 +237,33 @@ def test_mock_launch_carries_the_whole_config():
     assert json.loads(launch.args[1])["max_num_seqs"] == 3
 
 
-def test_runpod_provider_is_refused_until_built(tmp_path):
+def test_runpod_provider_needs_settings_and_an_api_key(tmp_path, monkeypatch):
     spec = RunpodProviderSpec(kind="runpod")
-    with pytest.raises(NotImplementedError, match="runpod is not built yet"):
+    with pytest.raises(ValidationError):  # no bucket or owner configured
         make_provider(spec, prices=load_prices(), work_dir=tmp_path)
+    monkeypatch.setenv("LOOM_RUNPOD_BUCKET", "loom-bench-test")
+    monkeypatch.setenv("LOOM_RUNPOD_OWNER", "arul")
+    with pytest.raises(ValueError, match="no RunPod API key"):
+        make_provider(spec, prices=load_prices(), work_dir=tmp_path)
+
+
+def test_runpod_provider_is_built_from_settings_and_the_key(tmp_path, monkeypatch):
+    from loom_bench.providers.runpod import RunpodProvider
+
+    wheel = tmp_path / "loom_bench-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"w")
+    for k, v in {
+        "LOOM_RUNPOD_BUCKET": "loom-bench-test",
+        "LOOM_RUNPOD_OWNER": "arul",
+        "LOOM_RUNPOD_WHEEL_PATH": str(wheel),
+        "RUNPOD_API_KEY": "rpa_FAKEFAKEFAKE",
+        "AWS_ACCESS_KEY_ID": "testing",
+        "AWS_SECRET_ACCESS_KEY": "testing",
+    }.items():
+        monkeypatch.setenv(k, v)
+    spec = RunpodProviderSpec(kind="runpod")
+    provider = make_provider(spec, prices=load_prices(), work_dir=tmp_path)
+    assert isinstance(provider, RunpodProvider)
+    assert provider.wheel_path == wheel
+    assert provider.spec == spec
+    assert "rpa_FAKE" not in repr(provider.api)
