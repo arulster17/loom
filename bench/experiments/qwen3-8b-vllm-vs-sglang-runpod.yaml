@@ -62,8 +62,10 @@ quality:
   baseline_variant: vllm
 # Each pod's TTL: `bench plan` puts one pod at ~3.6 h (cold start, 3 sweeps, eval), so
 # 6 h leaves ~65% margin while keeping the worst case (both pods to TTL) near $13.
+# max_spend $15: the approved real-spend limit for the first RunPod sweep, just above
+# that worst case.
 budget:
-  max_spend: "$40"
+  max_spend: "$15"
   ttl_minutes: 360
   accrual_interval_s: 15
 seed: 0
