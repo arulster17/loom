@@ -1,8 +1,9 @@
 """Dry-run planner: hosts, per-step time estimates, estimated spend against the caps.
 
 Cells with identical hardware share one host; after the first (cold) start the
-host switches configs with warm restarts. Every timing assumption is in
-`AWS_TIMING`, `LOCAL_TIMING`, `MOCK_*`, `ASSUMED_*` and `EVAL_*` below.
+host switches configs with warm restarts (on runpod the engine image is part of the
+host key, so each image gets its own pod). Every timing assumption is in `AWS_TIMING`,
+`RUNPOD_TIMING`, `LOCAL_TIMING`, `MOCK_*`, `ASSUMED_*` and `EVAL_*` below.
 `bench run` refuses to start when `Plan.refusals` is non-empty.
 """
 
@@ -22,6 +23,7 @@ from loom_bench.experiment import (
     Experiment,
     LoadSpec,
     MockProviderSpec,
+    RunpodProviderSpec,
     WorkloadEntry,
 )
 from loom_bench.loadgen.base import EXTERNAL_TOOLS
@@ -30,6 +32,7 @@ from loom_bench.prices import HOURS_PER_MONTH, BlockStorage, InstanceType, Price
 from loom_bench.quality.divergence import load_prompts
 from loom_bench.quality.suite import SuiteTask
 from loom_bench.records import LoadMode, Market
+from loom_bench.registry import Cloud
 from loom_bench.workloads import WorkloadProfile
 
 
@@ -61,6 +64,25 @@ AWS_TIMING = Timing(
     eval_setup_s=300.0,  # loom-bench[lmeval]: lm-eval, torch and transformers wheels
     eval_job_s=60.0,
 )
+# RunPod pod: the engine image is the pod's container, so boot covers scheduling and
+# container start, image_pull the pull plus sshd install from the start command. The
+# 2026-10-06 spike took ~3 s to start the container on a cached image, 14 s for the
+# Qwen3-8B weights and 68 s of engine init; these leave room for an uncached image and
+# a slower datacenter. Terminate stops billing within seconds.
+RUNPOD_TIMING = Timing(
+    boot_s=60.0,
+    image_pull_s=240.0,
+    download_bytes_per_s=150e6,
+    load_bytes_per_s=400e6,
+    engine_init_s=240.0,
+    run_overhead_s=30.0,
+    teardown_s=30.0,
+    eval_setup_s=300.0,
+    eval_job_s=60.0,
+)
+# Weights plus room for the engine's caches (torch.compile, CUDA graphs, HF downloads in
+# flight) on the pod's container disk.
+RUNPOD_DISK_HEADROOM_GB = 35
 LOCAL_TIMING = Timing(
     boot_s=0.0,
     image_pull_s=0.0,
@@ -138,6 +160,8 @@ class Estimator:
         self.timing = (
             AWS_TIMING
             if isinstance(p, AwsEc2ProviderSpec)
+            else RUNPOD_TIMING
+            if isinstance(p, RunpodProviderSpec)
             else LOCAL_TIMING
             if p.kind == "local"
             else None
@@ -322,25 +346,43 @@ class PlanError(ValueError):
     """The experiment cannot be planned as written, e.g. its instance type has no price."""
 
 
-def _instance(prices: PriceBook, region: str, instance_type: str) -> InstanceType:
+def _instance(
+    prices: PriceBook, region: str, instance_type: str, cloud: Cloud = "aws"
+) -> InstanceType:
     try:
-        return prices.instance("aws", region, instance_type)
+        return prices.instance(cloud, region, instance_type)
     except KeyError:
         raise PlanError(
-            f"instance type {instance_type} has no price for aws/{region} in "
+            f"instance type {instance_type} has no price for {cloud}/{region} in "
             "bench/prices.yaml: add it (docs/how-to/add-gpu-type.md) or set "
             "provider.instance_type to a priced type"
         ) from None
 
 
-def _storage(prices: PriceBook, region: str) -> BlockStorage:
+def _storage(prices: PriceBook, region: str, cloud: Cloud = "aws") -> BlockStorage:
     try:
-        storage = prices.region("aws", region).storage
+        storage = prices.region(cloud, region).storage
     except KeyError:
         storage = None
     if storage is None:
-        raise PlanError(f"aws/{region} has no block storage price in bench/prices.yaml")
+        raise PlanError(f"{cloud}/{region} has no block storage price in bench/prices.yaml")
     return storage
+
+
+def _runpod_price(cell: Cell, prices: PriceBook) -> tuple[Micros, str, list[str]]:
+    """prices.yaml on-demand plus the container disk, rounded up. The provider accrues at
+    the larger of this and the pod's API costPerHr, so the plan is not optimistic."""
+    hw = cell.hardware
+    notes: list[str] = []
+    instance = _instance(prices, hw["region"], hw["instance_type"], "runpod")
+    if not instance.verified:
+        notes.append(f"unverified instance price: {instance.note}")
+    storage = _storage(prices, hw["region"], "runpod")
+    if not storage.verified:
+        notes.append(f"unverified storage price included: {storage.note}")
+    disk = math.ceil(Fraction(storage.per_gb_month * hw["disk_gb"], HOURS_PER_MONTH))
+    notes.append("accrued at max(the pod's API costPerHr, this price)")
+    return instance.on_demand_per_hour + disk, Market.ON_DEMAND.value, notes
 
 
 def host_price(exp: Experiment, cell: Cell, prices: PriceBook) -> tuple[Micros, str, list[str]]:
@@ -350,6 +392,8 @@ def host_price(exp: Experiment, cell: Cell, prices: PriceBook) -> tuple[Micros, 
         if p.hourly_price is None:
             return 0, Market.LOCAL.value, ["unpriced mock: no hourly_price, so no cost at SLO"]
         return p.hourly_price, Market.LOCAL.value, ["simulated price (mock)"]
+    if isinstance(p, RunpodProviderSpec):
+        return _runpod_price(cell, prices)
     if not isinstance(p, AwsEc2ProviderSpec):
         return 0, Market.LOCAL.value, ["not billed (local endpoint)"]
     hw = cell.hardware
@@ -399,7 +443,47 @@ def aws_accrual_terms() -> AwsAccrualTerms:
         )
 
 
+@dataclass(frozen=True)
+class RunpodAccrualTerms:
+    max_ttl_s: int
+
+
+# The runpod provider's default host-lifetime limit.
+RUNPOD_MAX_TTL_S = 8 * 3600
+
+
+def runpod_accrual_terms() -> RunpodAccrualTerms:
+    """The runpod provider's planning limits (its defaults until it has settings)."""
+    return RunpodAccrualTerms(max_ttl_s=RUNPOD_MAX_TTL_S)
+
+
+def _runpod_hardware_problems(cell: Cell, prices: PriceBook) -> list[str]:
+    hw = cell.hardware
+    it = _instance(prices, hw["region"], hw["instance_type"], "runpod")
+    out = []
+    if it.gpu != cell.spec.hardware.gpu:
+        out.append(
+            f"{cell.key}: {hw['instance_type']} has {it.gpu}, spec wants {cell.spec.hardware.gpu}"
+        )
+    # The pod is created with the replica's GPU count, so the priced entry must match it.
+    if it.gpu_count != cell.gpus:
+        out.append(
+            f"{cell.key}: {hw['instance_type']} is priced for {it.gpu_count} GPUs, "
+            f"the replica uses {cell.gpus}"
+        )
+    need_gb = cell.spec.hf.size_bytes / 1e9 + RUNPOD_DISK_HEADROOM_GB
+    if hw["disk_gb"] < need_gb:
+        out.append(
+            f"{cell.key}: provider.container_disk_gb {hw['disk_gb']} is below the "
+            f"{math.ceil(need_gb)} GB the weights ({cell.spec.hf.size_bytes / 1e9:.0f} GB) "
+            f"and {RUNPOD_DISK_HEADROOM_GB} GB of engine headroom need"
+        )
+    return out
+
+
 def _hardware_problems(exp: Experiment, cell: Cell, prices: PriceBook) -> list[str]:
+    if isinstance(exp.provider, RunpodProviderSpec):
+        return _runpod_hardware_problems(cell, prices)
     if not isinstance(exp.provider, AwsEc2ProviderSpec):
         return []
     hw = cell.hardware
@@ -429,13 +513,18 @@ def build_plan(
         max_ttl = aws_accrual_terms().max_ttl_s
         if ttl_s > max_ttl:
             refusals.append(f"budget.ttl_minutes is above the AWS host limit of {max_ttl / 60:g}")
-        if exp.loadgen in EXTERNAL_TOOLS:
-            refusals.append(
-                f"loadgen {exp.loadgen} runs `{EXTERNAL_TOOLS[exp.loadgen]}`, which the "
-                "aws_ec2 job container (loom-bench on the client image) does not have, so "
-                "every run would fail: use loadgen native on aws_ec2, or run the wrapper "
-                "against a local endpoint (docs/load-generators.md)"
-            )
+    if isinstance(exp.provider, RunpodProviderSpec):
+        max_ttl = runpod_accrual_terms().max_ttl_s
+        if ttl_s > max_ttl:
+            refusals.append(f"budget.ttl_minutes is above the RunPod pod limit of {max_ttl / 60:g}")
+    kind = exp.provider.kind
+    if kind in ("aws_ec2", "runpod") and exp.loadgen in EXTERNAL_TOOLS:
+        refusals.append(
+            f"loadgen {exp.loadgen} runs `{EXTERNAL_TOOLS[exp.loadgen]}`, which the "
+            f"{kind} job environment (the loom-bench wheel only) does not have, so every "
+            f"run would fail: use loadgen native on {kind}, or run the wrapper against a "
+            "local endpoint (docs/load-generators.md)"
+        )
     if est.uncounted_tasks():
         refusals.append(
             f"quality tasks {est.uncounted_tasks()} have no item count to estimate their "

@@ -1,3 +1,6 @@
+import math
+from fractions import Fraction
+
 import pytest
 from typer.testing import CliRunner
 
@@ -13,13 +16,16 @@ from loom_bench.plan import (
     EVAL_HARNESS_TASK_S,
     EVAL_ITEM_S,
     MOCK_EVAL_JOB_S,
+    RUNPOD_MAX_TTL_S,
+    RUNPOD_TIMING,
     Estimator,
+    PlanError,
     build_plan,
 )
-from loom_bench.prices import load_prices
+from loom_bench.prices import HOURS_PER_MONTH, load_prices
 from loom_bench.provenance import GitInfo
 from loom_bench.quality.tasks import TASKS
-from loom_bench.registry import load_registry
+from loom_bench.registry import load_registry, read_yaml
 from loom_bench.runner import EXIT_REFUSED, plan_experiment
 from loom_bench.store import repo
 from loom_bench.store.db import session_scope
@@ -260,3 +266,70 @@ def test_code_exec_tasks_need_the_opt_in(tmp_path):
     assert expand(_with_quality(load_experiment(QWEN), path, allow_code_exec=True), REGISTRY)
     with pytest.raises(ExpansionError, match="no subset"):
         expand(_with_quality(load_experiment(QWEN), path, subset="nope"), REGISTRY)
+
+
+def _runpod(path=QWEN, budget=None, **provider):
+    doc = read_yaml(path)
+    doc["provider"] = {"kind": "runpod", **provider}
+    if budget:
+        doc["budget"] = {**doc["budget"], **budget}
+    return Experiment.model_validate(doc)
+
+
+def test_runpod_gives_each_engine_image_its_own_pod():
+    plan = _plan(_runpod())
+    assert plan.ok, plan.refusals
+    assert len(plan.hosts) == 2  # vLLM and SGLang images: one pod each
+    for host in plan.hosts:
+        kinds = [s.kind for s in host.steps]
+        assert kinds[0] == "cold_start" and "warm_start" not in kinds
+        assert host.provider == "runpod" and host.market == "on_demand"
+        assert host.instance_type == "l40s-x1"
+        assert host.steps[-1].kind == "teardown"
+        assert host.steps[-1].seconds == RUNPOD_TIMING.teardown_s
+    size = REGISTRY.get("qwen3-8b").hf.size_bytes
+    t = RUNPOD_TIMING
+    cold = t.boot_s + t.image_pull_s + size / t.download_bytes_per_s
+    cold += size / t.load_bytes_per_s + t.engine_init_s
+    assert plan.hosts[0].steps[0].seconds == pytest.approx(cold)
+
+
+def test_runpod_hourly_price_is_the_price_book_plus_container_disk():
+    host, _ = _plan(_runpod(container_disk_gb=100)).hosts
+    it = PRICES.instance("runpod", "secure", "l40s-x1")
+    storage = PRICES.region("runpod", "secure").storage
+    disk = math.ceil(Fraction(storage.per_gb_month * 100, HOURS_PER_MONTH))
+    assert host.hourly_micros == it.on_demand_per_hour + disk
+    assert any("costPerHr" in n for n in host.price_notes)
+
+
+def test_runpod_llama_needs_a_container_disk_that_fits_the_weights():
+    refusals = _plan(_runpod(LLAMA)).refusals
+    (refusal,) = [r for r in refusals if "container_disk_gb" in r]
+    assert "container_disk_gb 80 is below the 177 GB" in refusal
+    plan = _plan(_runpod(LLAMA, container_disk_gb=250))
+    assert not [r for r in plan.refusals if "container_disk_gb" in r]
+    assert plan.hosts[0].instance_type == "l40s-x4"
+
+
+def test_runpod_gpu_count_must_match_the_priced_instance():
+    refusals = _plan(_runpod(instance_type="l40s-x4")).refusals
+    assert any("priced for 4 GPUs, the replica uses 1" in r for r in refusals)
+
+
+def test_runpod_unpriced_instance_is_a_plan_error():
+    with pytest.raises(PlanError, match="no price for runpod/secure"):
+        _plan(_runpod(instance_type="l40s-x2"))
+
+
+def test_runpod_ttl_above_the_pod_limit_is_refused():
+    limit_min = RUNPOD_MAX_TTL_S / 60
+    refusals = _plan(_runpod(budget={"ttl_minutes": limit_min + 1})).refusals
+    assert any("RunPod pod limit" in r for r in refusals)
+
+
+@pytest.mark.parametrize("loadgen", ["vllm_bench", "sglang_bench"])
+def test_external_load_generators_are_refused_on_runpod(loadgen):
+    exp = _runpod().model_copy(update={"loadgen": loadgen})
+    (refusal,) = [r for r in _plan(exp).refusals if "loadgen" in r]
+    assert "runpod job environment" in refusal and "use loadgen native on runpod" in refusal
