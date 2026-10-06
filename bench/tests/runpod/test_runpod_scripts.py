@@ -491,6 +491,51 @@ def test_warm_start_downloads_nothing_and_needs_no_token(tmp_path: Path) -> None
     assert "loom-stage sshd_ready" not in proc.stdout
 
 
+def with_proc1_path(w: dict[str, Any], path: str) -> None:
+    """Rewrite PATH in the world's fake /proc/1/environ."""
+    proc1 = Path(w["values"]["PROC1_ENVIRON"])
+    entries = [kv for kv in proc1.read_bytes().split(b"\0") if kv]
+    env = dict(kv.decode().split("=", 1) for kv in entries)
+    proc1_file(proc1, {**env, "PATH": path})
+
+
+def test_start_engine_downloads_with_the_images_python(tmp_path: Path) -> None:
+    # SGLang's Python is a venv on the image's PATH (/opt/sglang/bin). The SSH session's
+    # default PATH misses it and finds a system python3 without huggingface_hub, which
+    # is how the 2026-10-06 smoke test failed.
+    w = engine_env_world(tmp_path)
+    bin_dir = tmp_path / "bin"
+    venv_bin = tmp_path / "opt-sglang-bin"
+    venv_bin.mkdir()
+    (bin_dir / "python3").rename(venv_bin / "python3")
+    stub(
+        bin_dir,
+        "python3",
+        "echo \"ModuleNotFoundError: No module named 'huggingface_hub'\" >&2\nexit 1\n",
+    )
+    with_proc1_path(w, f"{venv_bin}:{bin_dir}:/usr/bin:/bin")
+    try:
+        proc = run_bash(
+            render_script("start_engine", template_dir=DIR, **w["values"]), env=w["env"]
+        )
+    finally:
+        kill_engine(w["pidfile"])
+    assert proc.returncode == 0, proc.stderr
+    assert read_env(w["logs"] / "download_env")["HF_TOKEN"] == TOKEN
+    assert re.search(r"^loom-stage weights_ready ", proc.stdout, re.MULTILINE)
+
+
+def test_start_engine_fails_when_the_image_has_no_python(tmp_path: Path) -> None:
+    w = engine_env_world(tmp_path)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with_proc1_path(w, str(empty))
+    proc = run_bash(render_script("start_engine", template_dir=DIR, **w["values"]), env=w["env"])
+    assert proc.returncode == 1
+    assert "python3 is not on the image's PATH" in proc.stderr
+    assert not (w["logs"] / "download_env").exists()
+
+
 # ---------------------------------------------------------------------------- stop_engine
 
 

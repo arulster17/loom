@@ -26,6 +26,12 @@ proc1_value() {
   return 0
 }
 
+# The image's own Python, found on PID 1's PATH. This SSH session has sshd's default
+# PATH, which misses a venv the image puts on PATH (SGLang's is /opt/sglang/bin), and
+# only the image's Python has huggingface_hub.
+image_python="$(PATH="$(proc1_value PATH)" && command -v python3)" || true
+[ -n "$image_python" ] || fail "python3 is not on the image's PATH"
+
 if [ "$WARM" = 0 ]; then
   grep -q '^sshd_ready ' "$STAGE_FILE" || fail "pod start did not finish: TTL watchdog state unknown"
   sed 's/^/loom-stage /' "$STAGE_FILE"
@@ -36,14 +42,14 @@ if [ "$WARM" = 0 ]; then
     *'{{'*) fail "the RunPod secret for HF_TOKEN was not substituted" ;;
   esac
   if ! HF_TOKEN="$tok" HF_HOME="$WEIGHTS_DIR" HF_HUB_DISABLE_PROGRESS_BARS=1 \
-    python3 -c "$DOWNLOAD_PY" "$MODEL_REPO" "$MODEL_REVISION" >>"$LOG_DIR/weights.log" 2>&1; then
+    "$image_python" -c "$DOWNLOAD_PY" "$MODEL_REPO" "$MODEL_REVISION" >>"$LOG_DIR/weights.log" 2>&1; then
     tok=""
     fail_log "weight download failed" "$LOG_DIR/weights.log"
   fi
   tok=""
 else
   HF_HOME="$WEIGHTS_DIR" HF_HUB_OFFLINE=1 HF_HUB_DISABLE_PROGRESS_BARS=1 \
-    python3 -c "$DOWNLOAD_PY" "$MODEL_REPO" "$MODEL_REVISION" >>"$LOG_DIR/weights.log" 2>&1 \
+    "$image_python" -c "$DOWNLOAD_PY" "$MODEL_REPO" "$MODEL_REVISION" >>"$LOG_DIR/weights.log" 2>&1 \
     || fail_log "weights for $MODEL_REPO@$MODEL_REVISION are not cached" "$LOG_DIR/weights.log"
 fi
 stage weights_ready
