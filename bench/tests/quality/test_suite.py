@@ -27,6 +27,50 @@ def test_pinned_suite_is_valid_and_fits_the_model(name):
     assert suite.chat_template_kwargs == expected
 
 
+# lm-eval tasks whose modules import packages that only an lm-eval extra installs. GPU hosts
+# install the `lmeval` extra from uv.lock, so a missing extra only fails on the host (the
+# first RunPod sweep lost its eval to `No module named 'langdetect'`).
+LMEVAL_TASK_EXTRAS = {
+    "ifeval": ("ifeval", {"langdetect", "immutabledict", "nltk"}),
+    "niah_": ("ruler", {"wonderwords", "nltk"}),
+}
+
+
+def _lmeval_pin_extras() -> set[str]:
+    import re
+    import tomllib
+
+    from loom_bench.registry import REPO_ROOT
+
+    project = tomllib.loads((REPO_ROOT / "bench" / "pyproject.toml").read_text())
+    pins = project["project"]["optional-dependencies"]["lmeval"]
+    (pin,) = [p for p in pins if p.startswith("lm-eval")]
+    match = re.match(r"lm-eval\[([^\]]*)\]", pin)
+    return {e.strip() for e in match.group(1).split(",")} if match else set()
+
+
+def _locked_packages() -> set[str]:
+    import tomllib
+
+    from loom_bench.registry import REPO_ROOT
+
+    lock = tomllib.loads((REPO_ROOT / "uv.lock").read_text())
+    return {p["name"] for p in lock["package"]}
+
+
+@pytest.mark.parametrize("name", SUITES)
+def test_lmeval_tasks_have_their_extras_locked(name):
+    extras, locked = _lmeval_pin_extras(), _locked_packages()
+    for t in load_suite(name).tasks:
+        if t.kind != "lm_eval":
+            continue
+        for task in t.params["tasks"]:
+            for prefix, (extra, packages) in LMEVAL_TASK_EXTRAS.items():
+                if task.startswith(prefix):
+                    assert extra in extras, f"{name}/{task} needs lm-eval[{extra}]"
+                    assert packages <= locked, f"{name}/{task}: {packages - locked} not in uv.lock"
+
+
 def test_policy_from_suite():
     suite = load_suite("qwen3-8b")
     policy = suite.policy()

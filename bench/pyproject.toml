@@ -24,7 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 mock = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "prometheus-client>=0.20"]
 aws = ["boto3>=1.35"]
-lmeval = ["lm-eval[api]==0.4.13", "transformers>=4.45"]
+lmeval = ["lm-eval[api,ifeval,ruler]==0.4.13", "transformers>=4.45"]
 
 [project.scripts]
 bench = "loom_bench.cli:app"
