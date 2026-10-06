@@ -671,6 +671,10 @@ def test_run_job_isolates_the_job_and_round_trips_results(tmp_path: Path) -> Non
     # URLs went to curl on stdin only.
     curl_argv = (w["logs"] / "curl_argv").read_text()
     assert "Signature" not in curl_argv and "https://" not in curl_argv
+    # Downloads follow HTTPS-only redirects: the client Python's GitHub release URL
+    # answers 302, and without -L curl saved the empty redirect body (smoke test).
+    fetches = [line for line in curl_argv.splitlines() if " -o /dev/null" not in line]
+    assert fetches and all("-L --proto =https --proto-redir =https" in line for line in fetches)
     # A process the job user left behind was killed.
     assert w["lingering"].wait(timeout=5) == -signal.SIGKILL
     env_dir = Path(values["ENV_ROOT"]) / f"{values['WHEEL_SHA256']}-{values['REQS_SHA256']}"

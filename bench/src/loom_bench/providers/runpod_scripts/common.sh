@@ -40,9 +40,11 @@ assert_job_isolated() {
 }
 
 # Presigned URLs go to curl in a config on stdin, never in argv: /proc/<pid>/cmdline
-# is world-readable, and the job user must not see them.
+# is world-readable, and the job user must not see them. Follow redirects (HTTPS only):
+# GitHub release downloads (the client Python) answer 302, which -f does not treat as
+# an error, so without -L the download is the empty redirect body.
 fetch() {
-  printf 'url = "%s"\n' "$1" | curl -fsS --retry 3 -K - -o "$2"
+  printf 'url = "%s"\n' "$1" | curl -fsS -L --proto =https --proto-redir =https --retry 3 -K - -o "$2"
 }
 
 upload() {
