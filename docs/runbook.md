@@ -5,7 +5,7 @@ incidents, reproducing, publishing and tearing everything down. One-time account
 (quotas, HF token secret, Terraform, runner policy, `AwsSettings`) is in
 [aws-setup.md](aws-setup.md); do that first.
 
-Money rails, for reference: $150 overall, $50 per experiment (`bench/budget.yaml`), and
+Money rails, for reference: $149.75 overall, $50 per experiment (`bench/budget.yaml`), and
 each experiment's own `budget.max_spend`. How they act is in
 [benchmark-lab.md](benchmark-lab.md#budget-rails).
 
@@ -149,7 +149,7 @@ reason. Then:
    accrual interval of the live hosts plus the teardown time.
 3. Completed runs stay in the database; reports skip runs that did not complete. Fix the
    plan (fewer points, shorter durations) before running again. Spend already recorded
-   counts toward the $150 overall cap.
+   counts toward the overall cap.
 
 ### Spot interruption
 

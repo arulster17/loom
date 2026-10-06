@@ -7,5 +7,9 @@
 # `bench run` refuses to start when the plan's estimate, or the worst case of every
 # host living to its TTL, exceeds the effective cap:
 #   min(budget.max_spend, per_experiment_cap, overall_cap - billable spend so far).
-overall_cap: "$150"
+#
+# Spend made outside the results DB (e.g. the 2026-10-06 RunPod spike, ~$0.07) is not
+# recorded in `bench_spend`, so overall_cap is lowered by hand to stay at or below the
+# real prepaid RunPod balance.
+overall_cap: "$149.75"
 per_experiment_cap: "$50"

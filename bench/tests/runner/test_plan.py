@@ -43,7 +43,10 @@ def _plan(exp, overall_spent=0):
 
 
 def test_budget_yaml_caps():
-    assert BudgetConfig(overall_cap=parse_usd("$150"), per_experiment_cap=CAP_50) == BUDGET
+    # Properties, not exact values: overall_cap is lowered by hand for off-DB spend.
+    assert isinstance(BUDGET, BudgetConfig)
+    assert BUDGET.per_experiment_cap == CAP_50
+    assert 0 < BUDGET.per_experiment_cap <= BUDGET.overall_cap <= parse_usd("$150")
 
 
 @pytest.mark.parametrize("path", [QWEN, LLAMA], ids=lambda p: p.stem)
@@ -156,7 +159,7 @@ def test_overall_cap_counts_prior_billable_spend(ctx, db):
     _prior(db, "aws_ec2", parse_usd("$146"))
     _, plan = plan_experiment(exp, ctx)
     assert plan.caps.overall_spent == parse_usd("$146")
-    assert plan.caps.effective == parse_usd("$4")
+    assert plan.caps.effective == BUDGET.overall_cap - parse_usd("$146")
     assert not plan.ok
 
 
