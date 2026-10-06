@@ -202,9 +202,10 @@ async def test_local_results_are_unpriced_unless_the_experiment_sets_a_price(moc
     endpoint = await provider.start_engine(host, mock_launch(SPEC, MockConfig(**FAST)), warm=False)
     ranked = {}
     for name, over in (("unpriced", {}), ("priced", {"hourly_price": "$2"})):
-        exp = Experiment.model_validate(
-            {**_local_doc(endpoint.base_url, endpoint.metrics_url, **over), "name": name}
-        )
+        doc = _local_doc(endpoint.base_url, endpoint.metrics_url, **over)
+        # No latency target: whether the priced config has a cost at SLO must not depend
+        # on how busy the machine is (a missed TTFT p95 would leave it with no cost).
+        exp = Experiment.model_validate({**doc, "name": name, "slo": {"max_error_rate": 0.01}})
         outcome = await run_experiment(exp, ctx)
         with session_scope(ctx.db_url) as s:
             runs = repo.list_runs(s, experiment_id=outcome.experiment_id)
