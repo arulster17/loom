@@ -47,6 +47,8 @@ _RESERVED_FLAGS: dict[str, frozenset[str]] = {
             "port",
             "download-dir",
             "trust-remote-code",
+            "enable-auto-tool-choice",
+            "tool-call-parser",
         }
     ),
     "sglang": frozenset(
@@ -68,6 +70,7 @@ _RESERVED_FLAGS: dict[str, frozenset[str]] = {
             "port",
             "download-dir",
             "trust-remote-code",
+            "tool-call-parser",
         }
     ),
 }
@@ -147,7 +150,21 @@ def _trust_remote_code(spec: ModelSpec) -> list[str]:
     return []
 
 
+def _tool_call_parser(spec: ModelSpec) -> str | None:
+    """The engine's tool-call parser when the model serves tools, else None."""
+    if not spec.capabilities.tools:
+        return None
+    parser = spec.tool_call_parsers.get(spec.engine.name)
+    if parser is None:
+        raise ValueError(
+            f"{spec.id}: capabilities.tools needs tool_call_parsers.{spec.engine.name}"
+        )
+    return parser
+
+
 def _vllm_args(spec: ModelSpec, extra: list[str]) -> list[str]:
+    parser = _tool_call_parser(spec)
+    tools = ["--enable-auto-tool-choice", "--tool-call-parser", parser] if parser else []
     return [
         spec.hf.repo,
         "--revision",
@@ -166,6 +183,7 @@ def _vllm_args(spec: ModelSpec, extra: list[str]) -> list[str]:
         "--kv-cache-dtype",
         spec.kv_cache_dtype,
         *_trust_remote_code(spec),
+        *tools,
         "--host",
         "0.0.0.0",
         "--port",
@@ -175,6 +193,8 @@ def _vllm_args(spec: ModelSpec, extra: list[str]) -> list[str]:
 
 
 def _sglang_args(spec: ModelSpec, extra: list[str]) -> list[str]:
+    parser = _tool_call_parser(spec)
+    tools = ["--tool-call-parser", parser] if parser else []
     pp = ["--pp-size", str(spec.parallelism.pp)] if spec.parallelism.pp > 1 else []
     kv = (
         []
@@ -196,6 +216,7 @@ def _sglang_args(spec: ModelSpec, extra: list[str]) -> list[str]:
         *quantization_flag(spec),
         *kv,
         *_trust_remote_code(spec),
+        *tools,
         "--enable-metrics",
         "--host",
         "0.0.0.0",

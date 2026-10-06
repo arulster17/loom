@@ -70,6 +70,9 @@ a default in `registry.py`:
     scaling: {min_replicas: 0, max_replicas: 1}
     clouds: [aws]
     capabilities: {tools: true, json_schema: true, vision: false, reasoning: false}
+    # Required with tools: true, one per engine you serve it on (vLLM adds
+    # --enable-auto-tool-choice). Check the name in the pinned engine version's parsers.
+    tool_call_parsers: {vllm: llama3_json, sglang: llama3}
     routing_tier: 1
     status: preview                 # enabled | preview | disabled
 ```
@@ -89,12 +92,14 @@ Load-time validation (`registry.py`, tested in `bench/tests/config/test_registry
 | `trust_remote_code: true` needs `trust_remote_code_review: {reviewer, date, notes}` | `trust_remote_code_review` |
 | every cloud in `clouds` has an `instance_types` entry | `instance_types missing` |
 | `status: enabled` needs `pricing`; prices are integers; `cached_input_per_mtok ≤ input_per_mtok` | `requires pricing`, `cached_input` |
+| `capabilities.tools: true` needs `tool_call_parsers.<engine.name>` (without it the engine rejects `tool_choice: auto` and every tool-calling item scores 0) | `needs tool_call_parsers` |
 | unique `id`s, no unknown keys, no duplicate YAML keys | `duplicate`, the key name |
 
 Rendering (`engines.render_launch`, `bench/tests/aws/test_engines.py`): `engine.args` may
 not set flags that come from registry fields (model, revision, tokenizer, served model
 name, tp/pp, max length, quantization, KV-cache dtype, host, port, download dir,
-trust-remote-code).
+trust-remote-code, tool-call parser). A variant that switches engine needs a
+`tool_call_parsers` entry for the new engine, or rendering fails.
 
 Planning (`bench plan`): the instance type must have a price in `bench/prices.yaml`, its
 GPU must equal `hardware.gpu` and its GPU count must cover `gpus_per_replica`; otherwise

@@ -178,6 +178,10 @@ class ModelSpec(StrictModel):
     scaling: Scaling
     clouds: Annotated[list[Cloud], Field(min_length=1)]
     capabilities: Capabilities
+    # Tool-call parser per engine (vLLM `--tool-call-parser`, SGLang `--tool-call-parser`).
+    # Model-level, not under `engine`, so it survives a variant switching engines.
+    # `capabilities.tools` needs one: without it the engine rejects `tool_choice: auto`.
+    tool_call_parsers: dict[Literal["vllm", "sglang"], NonEmptyStr] = Field(default_factory=dict)
     routing_tier: Annotated[int, Field(ge=0)]
     status: Status
 
@@ -218,6 +222,14 @@ class Registry(StrictModel):
         dupes = sorted({i for i in ids if ids.count(i) > 1})
         if dupes:
             raise ValueError(f"duplicate model ids: {dupes}")
+        # Checked here, not on ModelSpec, so model snapshots stored before the field
+        # existed still load; rendering a launch checks it again for variants.
+        for m in self.models:
+            if m.capabilities.tools and m.engine.name not in m.tool_call_parsers:
+                raise ValueError(
+                    f"{m.id}: capabilities.tools needs tool_call_parsers.{m.engine.name} "
+                    "(the engine rejects tool_choice: auto without a parser)"
+                )
         return self
 
     def get(self, model_id: str) -> ModelSpec:

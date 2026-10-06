@@ -80,6 +80,9 @@ def test_vllm_qwen_exact_argv(qwen: ModelSpec) -> None:
         "32768",
         "--kv-cache-dtype",
         "auto",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser",
+        "hermes",
         "--host",
         "0.0.0.0",
         "--port",
@@ -111,6 +114,8 @@ def test_sglang_qwen_exact_argv(qwen: ModelSpec) -> None:
         "1",
         "--context-length",
         "32768",
+        "--tool-call-parser",
+        "qwen25",
         "--enable-metrics",
         "--host",
         "0.0.0.0",
@@ -127,6 +132,31 @@ def test_sglang_llama_tp2_pp2_fp8_kv(llama: ModelSpec) -> None:
     assert a[a.index("--pp-size") + 1] == "2"
     assert a[a.index("--kv-cache-dtype") + 1] == "fp8_e4m3"
     assert launch.gpus == 4
+
+
+def test_llama_tool_call_parsers(llama: ModelSpec) -> None:
+    vllm = render_launch(llama).args
+    assert vllm[vllm.index("--tool-call-parser") + 1] == "llama3_json"
+    assert "--enable-auto-tool-choice" in vllm
+    sglang = render_launch(on_sglang(llama)).args
+    assert sglang[sglang.index("--tool-call-parser") + 1] == "llama3"
+    assert "--enable-auto-tool-choice" not in sglang
+
+
+def test_tools_without_a_parser_for_the_engine_cannot_launch(qwen: ModelSpec) -> None:
+    # Serving tools without a parser makes the engine reject `tool_choice: auto` (HTTP
+    # 400), which scored every tool_calling item 0 in the 2026-10-06 smoke test.
+    with pytest.raises(ValueError, match=r"tool_call_parsers\.sglang"):
+        render_launch(on_sglang(qwen, tool_call_parsers={"vllm": "hermes"}))
+    no_tools = patched(qwen, capabilities__tools=False, tool_call_parsers={})
+    assert "--tool-call-parser" not in render_launch(no_tools).args
+
+
+@pytest.mark.parametrize("engine", ["vllm", "sglang"])
+def test_engine_args_may_not_set_the_tool_parser(qwen: ModelSpec, engine: str) -> None:
+    spec = qwen if engine == "vllm" else on_sglang(qwen)
+    with pytest.raises(ValueError, match="'tool_call_parser' is set from the registry"):
+        render_launch(patched(spec, engine__args={"tool_call_parser": "pythonic"}))
 
 
 def test_engine_args_follow_registry_flags(qwen: ModelSpec) -> None:

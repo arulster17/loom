@@ -33,6 +33,7 @@ def model(**overrides: Any) -> dict[str, Any]:
         "scaling": {"min_replicas": 0, "max_replicas": 1},
         "clouds": ["aws"],
         "capabilities": {"tools": True},
+        "tool_call_parsers": {"vllm": "hermes"},
         "routing_tier": 1,
         "status": "preview",
     }
@@ -112,6 +113,9 @@ def test_minimal_model_is_valid_and_enabled_with_pricing():
         ({"hf__quant_method": "bitsandbytes", "quantization": "w4a16"}, "quant_method"),
         ({"engine__name": "tgi"}, "name"),
         ({"capabilities__audio": True}, "audio"),
+        ({"tool_call_parsers": {}}, "capabilities.tools needs tool_call_parsers.vllm"),
+        ({"tool_call_parsers": {"sglang": "qwen25"}}, "needs tool_call_parsers.vllm"),
+        ({"tool_call_parsers": {"tgi": "hermes"}}, "tool_call_parsers"),
         ({"surprise": 1}, "surprise"),
     ],
 )

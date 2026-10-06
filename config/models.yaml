@@ -41,6 +41,9 @@ models:
     scaling: {min_replicas: 0, max_replicas: 1}
     clouds: [aws, runpod]
     capabilities: {tools: true, json_schema: true, vision: false, reasoning: true}
+    # Qwen3 emits Hermes-style <tool_call> blocks: vLLM 0.30.0 `hermes`, SGLang 0.5.21
+    # `qwen25` (its Qwen 2.5/3 detector).
+    tool_call_parsers: {vllm: hermes, sglang: qwen25}
     routing_tier: 1
     status: preview
 
@@ -76,5 +79,7 @@ models:
     scaling: {min_replicas: 0, max_replicas: 1}
     clouds: [aws, runpod]
     capabilities: {tools: true, json_schema: true, vision: false, reasoning: false}
+    # Llama 3.x JSON tool calls: vLLM 0.30.0 `llama3_json`, SGLang 0.5.21 `llama3`.
+    tool_call_parsers: {vllm: llama3_json, sglang: llama3}
     routing_tier: 1
     status: preview
