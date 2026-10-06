@@ -102,7 +102,7 @@ downloads weights at the pinned revision with the HF token, starts the engine an
 for one token; each load point × repetition runs as a `bench job run` on the host; the
 host is terminated at the end, also on errors and Ctrl-C. Exit codes: 0 ok, 1 failed
 (including every run failing), 3 refused, 4 stopped before a step that would pass the cap,
-5 hard budget abort, 8 finished but some runs failed.
+5 hard budget abort, 8 finished but some load runs or quality evals failed.
 
 Run one experiment at a time. Each plan assumes the remaining overall budget is its own;
 the guard still trips when spend across all experiments reaches the overall cap, but two

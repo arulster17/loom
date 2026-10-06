@@ -51,9 +51,11 @@ To benchmark an endpoint you already run (vLLM, SGLang, or `bench mock-server`),
 
 Exit codes: 0 ok, 1 failed, 2 invalid input, 3 refused by the planner, 4 stopped before a
 step that would pass the cap, 5 hard budget abort, 6 reproduction outside normal variance,
-7 quality gate blocked, 8 finished but some runs failed. An experiment whose every load
-run failed is recorded as `failed` and exits 1; one with some failed runs stays
-`completed`, with the count in its reason, and exits 8. Invalid input (a malformed or missing file, an unknown model or
+7 quality gate blocked, 8 finished but some load runs or quality evals failed. An
+experiment whose every load run failed is recorded as `failed` and exits 1; one with some
+failed runs or a failed eval stays `completed`, with the counts in its reason, and exits 8.
+A failed eval never stops the experiment: the other engines still run, and a gate missing
+a side is `inconclusive` (blocked). Invalid input (a malformed or missing file, an unknown model or
 suite, an instance type with no price in `bench/prices.yaml`, a malformed experiment id)
 is reported as one message, never a traceback.
 
@@ -83,7 +85,9 @@ workloads:
     load:
       mode: open_loop               # or closed_loop
       values: [1, 2, 4]             # req/s (open) or concurrency (closed) ...
-      # search: {lo: 0.5, hi: 12, rel_tol: 0.1, max_points: 6}   # ... or bisect on the SLO
+      # search: {lo: 0.5, hi: 4, rel_tol: 0.1, max_points: 6, scale: geometric}   # ... or search
+      # the SLO: geometric climbs x`step` (default 2) from lo until a load fails, then bisects
+      # on a log scale (few points in overload); linear (the default) tests lo, hi, midpoints
       duration_s: 180               # open loop: required; closed loop: this or num_requests
       warmup_s: 30                  # open loop, inside duration_s; closed loop: warmup_requests
       arrival: {kind: gamma, burstiness: 0.5}   # open loop; the rate comes from the load value
@@ -256,7 +260,14 @@ sanity; eval runs and gate decisions are stored (`bench_eval_runs`,
 needs review are ranked with that flag.
 Code-executing tasks are refused at `bench plan` unless `allow_code_exec: true`. The suite
 is a name in `bench/evals/` or a YAML path from the repo root. See `docs/quality-gate.md`
-for the method.
+for the method. A failed eval job is recorded (`quality_failed` event, exit 8) and the
+experiment goes on; gates missing a side are `inconclusive`.
+
+A smoke experiment (`smoke: true`) runs a real experiment's code paths at minimal scale:
+`quality.limit: N` (allowed only there) caps every suite task near N items and divergence
+at N prompts (`Suite.limited`). Smoke experiments share config hashes with the real ones,
+so default `bench report` selection and the site's latest snapshot leave them out; pass
+`-e <id>` to report one.
 
 ## Phase 0 experiments
 
@@ -267,7 +278,7 @@ The real runs are on RunPod Secure Cloud on-demand, since the AWS GPU spot quota
 |---|---|---|---|---|
 | `qwen3-8b-vllm-vs-sglang-runpod` | 2x RunPod 1x L40S (one pod per engine), 3.6 h each of a 6 h TTL | $7.92 | $13.21 | $15 |
 | `llama-3.3-70b-tp4-runpod` | 1x RunPod 4x L40S, 2.7 h of a 4 h TTL | $11.73 | $17.58 | $45 |
-| `runpod-smoke` | 1x RunPod 1x L40S, 13.5 min of a 40 min TTL, one job, no quality | $0.25 | $0.73 | $2 |
+| `runpod-smoke` | 2x RunPod 1x L40S (the Qwen sweep at smoke scale), 31 min each of a 40 min TTL | $1.15 | $1.47 | $1.50 |
 
 The AWS specs stay as the secondary path:
 
@@ -275,6 +286,11 @@ The AWS specs stay as the secondary path:
 |---|---|---|---|---|
 | `qwen3-8b-vllm-vs-sglang` | 1x g6e.xlarge spot, 7.1 h of an 8 h TTL | $16.56 | $18.56 | $40 |
 | `llama-3.3-70b-tp4` | 1x g6e.12xlarge spot, 2.7 h of a 3.5 h TTL | $28.04 | $35.86 | $45 |
+
+Rates are searched geometrically, with ranges sized for one L40S from the first RunPod
+sweep (058128e9): Qwen3-8B fixed-1k-1k passed 1.22 req/s and failed 1.94; shared-prefix
+and code-completion failed at 4.88 and 6.88. The earlier linear search over hi = 12-48
+req/s spent most of its points deep in overload.
 
 Estimates include cold starts, assume every searched point waits out its drain timeout,
 and include each config's eval job (the suites' `phase0` subset: GSM8K, IFEval, tool

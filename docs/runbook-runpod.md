@@ -88,6 +88,8 @@ Run through all of it before every real run.
   ```
 
 - [ ] **Clean git tree.** Provenance records the commit and a dirty flag. Commit first.
+- [ ] **The smoke test passed on this commit** (see [Smoke test](#smoke-test)) before
+  any real sweep: it runs every code path the Qwen sweep uses for about $1.
 - [ ] **Plan is under the cap**:
 
   ```sh
@@ -97,8 +99,8 @@ Run through all of it before every real run.
   Check "estimated spend" and "worst case (all hosts to TTL)" against "effective cap".
   The hourly rate per pod is prices.yaml's on-demand price plus container disk; at run
   time the guard accrues the larger of that and the pod's API `costPerHr`. Expected
-  today: `runpod-smoke` $0.25 estimate, $0.73 worst case, $2 cap;
-  `qwen3-8b-vllm-vs-sglang-runpod` $7.92, $13.21, $40 (two pods, one per engine);
+  today: `runpod-smoke` $1.15 estimate, $1.47 worst case, $1.50 cap (two pods);
+  `qwen3-8b-vllm-vs-sglang-runpod` $7.92, $13.21, $15 (two pods, one per engine);
   `llama-3.3-70b-tp4-runpod` $11.73, $17.58, $45. Exit 3 means refused: lower the load
   points or `budget.ttl_minutes`, never the caps.
 
@@ -124,8 +126,9 @@ What happens, per engine image (each image gets its own pod):
    Quality suites run there too, as `bench quality job`.
 5. The pod is terminated at the end, also on errors and Ctrl-C.
 
-Exit codes: 0 ok, 1 failed (including every run failing), 3 refused, 4 stopped before a
-step that would pass the cap, 5 hard budget abort, 8 finished but some runs failed. Run one experiment at a time, as on AWS.
+Exit codes: 0 ok, 1 failed (including every load run failing), 3 refused, 4 stopped
+before a step that would pass the cap, 5 hard budget abort, 8 finished but some load runs
+or quality evals failed. Run one experiment at a time, as on AWS.
 
 ## 3. Monitoring
 
@@ -134,7 +137,10 @@ Spend: the `bench_experiments` and `bench_spend` queries in
 `results/<experiment id>/events.jsonl` (`provisioned`, `engine_started` with its stages
 and `system` facts, quality, gates). The pod's API price and the prices.yaml rate it was
 compared with are in the host's `accrual_basis`; each run's provenance records the
-as-run price with basis `observed_api` and the datacenter.
+as-run price with basis `observed_api` and the datacenter. When RunPod names no
+datacenter (an empty `machine.dataCenterId` and no `RUNPOD_DC_ID` in the pod), the
+machine's location is recorded instead, as `data_center_location` and
+`availability_zone: location:<code>` (a country, not a datacenter).
 
 Pod side, while it runs: with `authorize_account_key` on, the account's registered key
 can log in as root (`ssh root@<public ip> -p <mapped port>`; both are on the pod's
@@ -154,6 +160,14 @@ The runner has already terminated every pod and marked the experiment `aborted` 
 reason. Confirm nothing is running (the preflight query), read `abort_reason` and
 `spent_micros`, and fix the plan before running again, as in
 [runbook.md](runbook.md#hard-budget-abort-exit-5-or-graceful-stop-exit-4).
+
+### A quality eval failed (exit 8)
+
+The experiment keeps going: the other engines still run their load sweeps and evals.
+`events.jsonl` has a `quality_failed` event with the error, the experiment's reason counts
+the failed evals, and any gate missing a side is stored as `inconclusive` (blocked). The
+load results stand; fix the cause (the error usually names a missing module or a harness
+failure), prove it with the smoke test, and rerun.
 
 ### Pod refused for its price
 
@@ -217,10 +231,21 @@ sweep finishes.
 
 ## Smoke test
 
-`bench/experiments/runpod-smoke.yaml`: Qwen3-8B on vLLM v0.30.0, one Secure 1× L40S pod,
-one short closed-loop job, one repetition, `max_spend: "$2"`, TTL 40 min. It is the
-cheapest run that exercises the whole provider once; its results are flagged untrusted
-and never published.
+`bench/experiments/runpod-smoke.yaml` is the real Qwen3-8B sweep
+(`qwen3-8b-vllm-vs-sglang-runpod`) at smoke scale, so every code path the sweep uses runs
+once before the sweep pays for hours: both engine images by the same digests (one Secure
+1× L40S pod each), the same three workload profiles under the same geometric rate search
+(2 points × 2 repetitions, 10 s windows), the same quality subset with every task capped
+at 4 items (`quality.limit`), divergence capture, noise floor and scoring, and the
+SGLang-vs-vLLM gate. `max_spend: "$1.50"`, TTL 40 min per pod (worst case $1.47).
+`bench/tests/runner/test_plan.py` fails if the smoke and the real spec drift apart. It is
+`smoke: true`: left out of default reports and the results site, since its cells share
+config hashes with the real ones. The old smoke ran vLLM only with no eval, and the first
+8B sweep (058128e9) found the missing lm-eval extra hours in, after $3.39.
+
+Dependency bugs are caught for free before that: `uv run pytest -m network` (CI job
+`pod-client-env`) rebuilds the pods' client environment from `uv.lock` and runs every task
+of every eval suite at 2 items against the mock backend.
 
 ```sh
 uv run bench plan bench/experiments/runpod-smoke.yaml
@@ -229,7 +254,13 @@ uv run bench run bench/experiments/runpod-smoke.yaml
 
 Checklist:
 
-- [ ] `events.jsonl` has an `engine_started` event with `system.job_isolation == "ok"`.
+- [ ] `events.jsonl` has an `engine_started` event with `system.job_isolation == "ok"`
+  for both pods (vLLM and SGLang).
+- [ ] Each workload ran its two search points, and the experiment ended `completed` with
+  exit 0 (exit 8 means a run or an eval failed: read the reason).
+- [ ] Both cells have a `quality` event naming gsm8k, ifeval, tool_calling and
+  json_schema, there is no `quality_failed` event, `reference_captured` has a
+  `self_divergence`, and SGLang has a `gate` event (inconclusive at 4 items is expected).
 - [ ] The cold start stages include `pod_created`, `image_pulled`, `sshd_ready`,
   `ssh_online`, `weights_ready`, `engine_healthy` and `first_token`.
 - [ ] The run completed, and its `result.json` and `gpu.csv` are under
@@ -240,4 +271,6 @@ Checklist:
 - [ ] The pod shows as terminated (gone from the pod list), not exited.
 - [ ] Section 5 passes.
 
-Smoke test result (2026-10-06): passed on the second attempt, experiment `17d0cb33`, 1x L40S Secure in US-MO-1. `job_isolation ok` was recorded, the pod terminated, `bench reap --dry-run` was clean, and the DB spend ($0.1506 over both attempts) matched the balance drop ($0.1502). The first attempt failed because pods did not follow the 302 redirect on the client Python download (fixed in 0721077).
+Smoke test result (redesigned smoke, both engines with evals): pending.
+
+Earlier smoke test result (the vLLM-only smoke, 2026-10-06): passed on the second attempt, experiment `17d0cb33`, 1x L40S Secure in US-MO-1. `job_isolation ok` was recorded, the pod terminated, `bench reap --dry-run` was clean, and the DB spend ($0.1506 over both attempts) matched the balance drop ($0.1502). The first attempt failed because pods did not follow the 302 redirect on the client Python download (fixed in 0721077).

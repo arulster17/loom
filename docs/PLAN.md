@@ -199,5 +199,9 @@ Later (RunPod hardening and follow-ups):
 - A scheduled RunPod reaper, e.g. a sweep in the AWS reaper Lambda with the RunPod key in Secrets Manager. Today the backstops are the in-pod TTL watchdog and a manual `bench reap`; a pod stuck before its container starts has no watchdog.
 - Codify the `loom-runpod-bench` IAM user (created with the CLI) in Terraform.
 - Run the engine as a non-root user in the pod; today it runs as root and can read the HF token and the pod-scoped key ([security.md](security.md#runpod-pods-runpod)).
+- Before every paid sweep: the RunPod smoke (`runpod-smoke`, about $1) runs every code
+  path of the Qwen sweep at minimal scale, and CI's `pod-client-env` job rebuilds the
+  pods' client environment and runs every eval task offline. The first 8B sweep
+  (058128e9, $3.39) failed on an lm-eval extra the old vLLM-only smoke never touched.
 - Optionally pin both pods of a vLLM vs SGLang comparison to one datacenter (`provider.data_center_ids`); today RunPod chooses and the datacenter is recorded per run.
 - The AWS GPU spot quota increase is pending with AWS; when granted, the `aws_ec2` specs can run as well.
