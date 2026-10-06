@@ -240,4 +240,4 @@ Checklist:
 - [ ] The pod shows as terminated (gone from the pod list), not exited.
 - [ ] Section 5 passes.
 
-Smoke test result: pending
+Smoke test result (2026-10-06): passed on the second attempt, experiment `17d0cb33`, 1x L40S Secure in US-MO-1. `job_isolation ok` was recorded, the pod terminated, `bench reap --dry-run` was clean, and the DB spend ($0.1506 over both attempts) matched the balance drop ($0.1502). The first attempt failed because pods did not follow the 302 redirect on the client Python download (fixed in 0721077).
