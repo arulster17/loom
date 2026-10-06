@@ -122,3 +122,6 @@ sysinfo gpu_count "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c
 sysinfo driver_version "$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)"
 sysinfo cuda_version "$(nvidia-smi | sed -n 's/.*CUDA Version: *\([0-9.]*\).*/\1/p' | head -n 1)"
 sysinfo kernel "$(uname -r)"
+# RunPod injects the datacenter; the create response does not always carry machine.dataCenterId.
+dc="$(proc1_value RUNPOD_DC_ID)"
+[ -z "$dc" ] || sysinfo data_center "$dc"

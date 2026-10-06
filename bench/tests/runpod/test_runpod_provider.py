@@ -326,6 +326,20 @@ async def test_reap_terminates_expired_managed_pods_only(fake, s3, tmp_path) -> 
 # --- engine ------------------------------------------------------------------------
 
 
+async def test_data_center_falls_back_to_the_pod_when_the_api_omits_it(fake, s3, tmp_path) -> None:
+    # The smoke test's create response had no machine.dataCenterId; the pod's injected
+    # RUNPOD_DC_ID (reported by start_engine) fills it in.
+    ssh = FakePodExec(
+        {"start_engine": lambda t, s: ok(engine_stdout() + "loom-sys data_center EU-RO-1\n")}
+    )
+    p = provider(fake, s3, tmp_path, ssh=ssh)
+    host = await p.provision(request())
+    fake.pods[host.host_id]["machine"].pop("dataCenterId")
+    host.info["data_center"] = None
+    ep = await p.start_engine(host, vllm_launch(), warm=False)
+    assert ep.system["data_center"] == "EU-RO-1"
+
+
 async def test_cold_start_waits_for_ssh_and_reports_stages_and_system(fake, s3, tmp_path) -> None:
     fake.gets_before_ssh = 2
     ssh = FakePodExec(offline=2)

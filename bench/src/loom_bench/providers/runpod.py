@@ -584,7 +584,7 @@ class RunpodProvider:
             "cloud_type": host.info.get("cloud_type"),
             "instance_type": host.info.get("instance_type"),
             "gpu_type_id": host.info.get("gpu_type_id"),
-            "data_center": host.info.get("data_center"),
+            "data_center": host.info.get("data_center") or system.get("data_center"),
         }
         if pod is not None:
             machine = pod.get("machine")

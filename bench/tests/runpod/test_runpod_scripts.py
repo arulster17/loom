@@ -324,6 +324,7 @@ def engine_env_world(tmp_path: Path, *, token: str = TOKEN) -> dict[str, Any]:
             "HF_TOKEN": token,
             "RUNPOD_API_KEY": POD_KEY,
             "RUNPOD_POD_ID": "fakepod000001",
+            "RUNPOD_DC_ID": "EUR-IS-2",
             "PUBLIC_KEY": "ssh-ed25519 AAAA account",
             "LOOM_SSH_PUBKEY": "ssh-ed25519 AAAA runner",
             "MY_SERVICE_PASSWORD": "hunter2hunter2",
@@ -408,6 +409,7 @@ def test_start_engine_keeps_secrets_from_the_engine_and_proves_isolation(tmp_pat
         "loom-sys gpu_count 1",
         "loom-sys driver_version 580.159.03",
         "loom-sys cuda_version 13.0",
+        "loom-sys data_center EUR-IS-2",
     ]:
         assert line in proc.stdout.splitlines()
     for name in ["weights_ready", "engine_started", "engine_healthy", "first_token"]:
