@@ -228,6 +228,7 @@ def _host_request(exp: Experiment, cell: Cell, experiment_id: uuid.UUID) -> Host
         market=Market(hw.get("market", Market.LOCAL.value)),
         gpus=cell.gpus,
         disk_gb=hw.get("disk_gb", 0),
+        image=cell.launch.image or None,
         ttl_s=exp.budget.ttl_s,
         tags={
             "loom:experiment": str(experiment_id),

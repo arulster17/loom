@@ -207,15 +207,16 @@ class PriceBasis(_Section):
     `source`: `observed_spot`, the AZ's spot price read at launch; `prices_yaml`, the
     on-demand price in `bench/prices.yaml`; `experiment`, the price the experiment
     declares for a mock or local host; `unobserved`, a spot host whose AZ had no spot
-    price to read, so the as-run price is unknown. Never includes the budget guard's
-    spot safety multiplier.
+    price to read, so the as-run price is unknown; `observed_api`, the hourly price the
+    provider's API reported for the host when it was created (RunPod `costPerHr`). Never
+    includes the budget guard's spot safety multiplier.
     """
 
     market: Market
-    source: Literal["observed_spot", "prices_yaml", "experiment", "unobserved"]
+    source: Literal["observed_spot", "prices_yaml", "experiment", "unobserved", "observed_api"]
     spot_price_usd: str | None = None  # observed_spot: the price read at launch
-    observed_at: AwareDatetime | None = None  # observed_spot: that price's timestamp
-    availability_zone: str | None = None
+    observed_at: AwareDatetime | None = None  # observed_spot / observed_api: when it was read
+    availability_zone: str | None = None  # AWS AZ, or the RunPod datacenter id
     storage_gb: int = Field(default=0, ge=0)  # block storage included in the price
 
 

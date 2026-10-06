@@ -1,8 +1,9 @@
 """Provider contract: where benchmark pools come from.
 
 Implementations: `mock` (in-process simulated GPU), `local` (an endpoint you
-already run), `aws_ec2` (tagged spot/on-demand VM running the engine in Docker).
-A Phase 1 `k8s` provider will reuse the Helm chart.
+already run), `aws_ec2` (tagged spot/on-demand VM running the engine in Docker),
+`runpod` (one RunPod pod per engine image; in progress). A Phase 1 `k8s` provider
+will reuse the Helm chart.
 
 Lifecycle per host: provision -> start_engine (cold) -> run jobs and evals ->
 [stop_engine -> start_engine (warm) -> run jobs and evals]* -> teardown.
@@ -28,12 +29,15 @@ from loom_bench.records import Market
 class HostRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    cloud: str | None = None  # aws | gcp | None for mock/local
+    cloud: str | None = None  # aws | gcp | runpod | None for mock/local
     region: str | None = None
     instance_type: str | None = None
     market: Market = Market.LOCAL
     gpus: int = 1
     disk_gb: int = 0
+    # Engine image the host is created for. runpod runs the engine as the pod's own
+    # container, so a pod serves one image; aws_ec2, mock and local ignore it.
+    image: str | None = None
     ttl_s: int  # hard lifetime; the host must not outlive this even if the runner dies
     tags: dict[str, str] = Field(default_factory=dict)  # loom:experiment, loom:owner, ...
 

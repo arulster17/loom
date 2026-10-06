@@ -30,7 +30,7 @@ models:
       gpu: L40S
       gpus_per_replica: 1
       nodes_per_replica: 1
-      instance_types: {aws: g6e.xlarge}
+      instance_types: {aws: g6e.xlarge, runpod: l40s-x1}
     parallelism: {tp: 1, pp: 1, ep: 1}
     # Native context. config.json says 40960, but the model card gives 32768 native and
     # 131072 only with YaRN rope scaling, which is not enabled here.
@@ -39,7 +39,7 @@ models:
     kv_cache_dtype: auto
     pricing: null
     scaling: {min_replicas: 0, max_replicas: 1}
-    clouds: [aws]
+    clouds: [aws, runpod]
     capabilities: {tools: true, json_schema: true, vision: false, reasoning: true}
     routing_tier: 1
     status: preview
@@ -65,7 +65,7 @@ models:
       gpu: L40S
       gpus_per_replica: 4
       nodes_per_replica: 1
-      instance_types: {aws: g6e.12xlarge}
+      instance_types: {aws: g6e.12xlarge, runpod: l40s-x4}
     parallelism: {tp: 4, pp: 1, ep: 1}
     # The model supports 131072. After ~141 GB of BF16 weights, 4 x 48 GB leaves too
     # little KV-cache memory for useful concurrency at that length, so serving is capped.
@@ -74,7 +74,7 @@ models:
     kv_cache_dtype: auto
     pricing: null
     scaling: {min_replicas: 0, max_replicas: 1}
-    clouds: [aws]
+    clouds: [aws, runpod]
     capabilities: {tools: true, json_schema: true, vision: false, reasoning: false}
     routing_tier: 1
     status: preview

@@ -9,11 +9,13 @@ from typer.testing import CliRunner
 
 from loom_bench.cli import app
 from loom_bench.cost import NO_LOCAL_PRICE
-from loom_bench.experiment import Experiment, LocalProviderSpec, mock_launch
+from loom_bench.experiment import Experiment, LocalProviderSpec, RunpodProviderSpec, mock_launch
 from loom_bench.jobexec import execute_load_job
 from loom_bench.jobs import LoadJob, LoadJobResult, TokenizerSpec
 from loom_bench.mock.config import MockConfig
+from loom_bench.prices import load_prices
 from loom_bench.provenance import PriceBasis, Provenance
+from loom_bench.providers import make_provider
 from loom_bench.providers.base import HostRequest
 from loom_bench.providers.local import LocalProvider
 from loom_bench.providers.mock import MockProvider, live_host_ids
@@ -233,3 +235,9 @@ def test_mock_launch_carries_the_whole_config():
     cfg = MockConfig(**FAST, max_num_seqs=3)
     launch = mock_launch(SPEC, cfg)
     assert json.loads(launch.args[1])["max_num_seqs"] == 3
+
+
+def test_runpod_provider_is_refused_until_built(tmp_path):
+    spec = RunpodProviderSpec(kind="runpod")
+    with pytest.raises(NotImplementedError, match="runpod is not built yet"):
+        make_provider(spec, prices=load_prices(), work_dir=tmp_path)

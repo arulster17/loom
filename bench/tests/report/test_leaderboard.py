@@ -124,7 +124,7 @@ def test_single_ranked_and_no_cost_recommendations(price_book):
     )
 
 
-def test_markdown_table_and_footer(report):
+def test_markdown_table_and_footer(report, price_book):
     md = render_markdown(report)
     assert "| " + " | ".join(md_headers(report.boards[0])) + " |" in md
     assert "$/1M out at SLO, on-demand | $/1M in at SLO, on-demand | $/1M out at SLO, spot | " in md
@@ -156,7 +156,7 @@ def test_markdown_table_and_footer(report):
         "  - error rate, SLO attainment, cache fractions and hit rates: arithmetic mean of "
         "per-run proportions, Student-t interval clipped to [0, 1] (t_clipped)",
         "- **Cost allocation:** all_output",
-        "- **Price book last checked:** 2026-10-05",
+        f"- **Price book last checked:** {price_book.last_checked.isoformat()}",
         "aws/us-east-1 g6e.xlarge + 200 GB block storage, from the price book: on-demand "
         "$1.8829/h; spot $1.8605/h; committed 1y n/a",
         "the spot price is an indicative average and moves hourly",

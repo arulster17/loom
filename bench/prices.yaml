@@ -6,8 +6,12 @@
 # Spot prices are indicative only: the average across us-east-1 AZs in a vantage.sh
 # snapshot. Spot moves by the hour, so a run's spend records the price it used.
 # Entries with `verified: false` are refused by cost math unless explicitly allowed.
+#
+# RunPod has no regions to price: its "region" here is the cloud type (secure), and
+# instance names (l40s-x1, ...) are Loom's names for a GPU type x count. RunPod picks
+# the datacenter; the provider accrues at max(the pod's API costPerHr, this price).
 
-last_checked: 2026-10-05
+last_checked: 2026-10-06
 
 clouds:
   aws:
@@ -218,3 +222,41 @@ clouds:
           last_checked: 2026-10-04
           verified: false
           note: Third-party snapshot (gcloud-compute.com); confirm on the GCP pricing page.
+
+  runpod:
+    secure:
+      storage:
+        kind: container-disk
+        per_gb_month: 100_000  # "Container disk $0.10/GB/month" (running pods), RunPod docs
+        sources:
+          - https://docs.runpod.io/pods/pricing
+        last_checked: 2026-10-06
+      # Secure Cloud on-demand (uninterruptible) prices and minimum pod specs from the
+      # RunPod API (gpuTypes "NVIDIA L40S" lowestPrice, secureCloud: true) on 2026-10-06;
+      # a 1x pod was billed at this costPerHr in EUR-IS-2. Container disk is billed
+      # separately (storage above), so local_nvme_gb is 0.
+      instances:
+        l40s-x1:
+          gpu: L40S
+          gpu_count: 1
+          gpu_memory_gb: 48
+          vcpus: 16
+          memory_gib: 94
+          local_nvme_gb: 0
+          on_demand_per_hour: 1_090_000
+          sources:
+            - https://www.runpod.io/pricing
+            - https://docs.runpod.io/pods/pricing
+          last_checked: 2026-10-06
+        l40s-x4:
+          gpu: L40S
+          gpu_count: 4
+          gpu_memory_gb: 48
+          vcpus: 64
+          memory_gib: 752
+          local_nvme_gb: 0
+          on_demand_per_hour: 4_360_000
+          sources:
+            - https://www.runpod.io/pricing
+            - https://docs.runpod.io/pods/pricing
+          last_checked: 2026-10-06

@@ -71,8 +71,9 @@ def test_every_shipped_price_loads_and_is_consistent():
         quote = prices.instance_price(cloud, region, name, allow_unverified=True)
         assert quote.per_hour == it.on_demand_per_hour
     # A cloud with a provider is priced with storage: every one of its regions needs it.
-    for region in prices.clouds["aws"].values():
-        assert region.storage is not None and region.storage.verified
+    for cloud in ("aws", "runpod"):
+        for region in prices.clouds[cloud].values():
+            assert region.storage is not None and region.storage.verified, cloud
 
 
 def test_every_registry_instance_type_has_a_price():
@@ -83,7 +84,7 @@ def test_every_registry_instance_type_has_a_price():
             regions = prices.clouds[cloud].values()
             matches = [r.instances[instance_type] for r in regions if instance_type in r.instances]
             assert matches, f"{model.id}: no price for {cloud}/{instance_type}"
-            if cloud == "aws":  # reports refuse unverified prices
+            if cloud in ("aws", "runpod"):  # reports refuse unverified prices
                 assert all(m.verified for m in matches), f"{model.id}: {instance_type}"
             assert all(m.gpu == model.hardware.gpu for m in matches)
             assert all(m.gpu_count == model.hardware.gpus_per_replica for m in matches)

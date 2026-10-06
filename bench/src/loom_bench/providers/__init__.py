@@ -64,12 +64,14 @@ def make_provider(spec: ProviderSpec, *, prices: PriceBook, work_dir: Path) -> P
         from loom_bench.providers.local import LocalProvider
 
         return LocalProvider(spec)
-    from loom_bench.providers.aws_ec2 import AwsEc2Provider, load_aws_settings
+    if spec.kind == "aws_ec2":
+        from loom_bench.providers.aws_ec2 import AwsEc2Provider, load_aws_settings
 
-    settings = load_aws_settings()
-    if settings.region != spec.region:
-        raise ValueError(
-            f"experiment region {spec.region} != AWS settings region {settings.region}"
-        )
-    wheel = settings.wheel_path or build_wheel(work_dir / "wheel")
-    return AwsEc2Provider(settings, prices=prices, wheel_path=wheel)
+        settings = load_aws_settings()
+        if settings.region != spec.region:
+            raise ValueError(
+                f"experiment region {spec.region} != AWS settings region {settings.region}"
+            )
+        wheel = settings.wheel_path or build_wheel(work_dir / "wheel")
+        return AwsEc2Provider(settings, prices=prices, wheel_path=wheel)
+    raise NotImplementedError(f"provider kind {spec.kind} is not built yet")

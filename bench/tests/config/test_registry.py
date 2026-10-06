@@ -104,6 +104,8 @@ def test_minimal_model_is_valid_and_enabled_with_pricing():
         ({"pricing": {**PRICING, "input_per_mtok": 0.1}}, "input_per_mtok"),
         ({"scaling": {"min_replicas": 2, "max_replicas": 1}}, "max_replicas"),
         ({"clouds": ["gcp"]}, "instance_types missing"),
+        ({"clouds": ["aws", "runpod"]}, "instance_types missing for clouds \\['runpod'\\]"),
+        ({"clouds": ["azure"]}, "clouds"),
         ({"quantization": "int3"}, "quantization"),
         ({"quantization": "awq"}, "cannot be served from unquantized weights"),
         ({"hf__quant_method": "awq"}, "cannot be served from awq weights"),

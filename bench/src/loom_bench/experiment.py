@@ -103,8 +103,29 @@ class AwsEc2ProviderSpec(_Strict):
     disk_gb: PositiveInt = 200
 
 
+# RunPod GPU type ids by registry GPU name; `provider.gpu_type_id` covers the others.
+RUNPOD_GPU_TYPE_IDS: dict[str, str] = {"L40S": "NVIDIA L40S"}
+
+
+class RunpodProviderSpec(_Strict):
+    """RunPod pods, always on-demand (uninterruptible). The engine runs as the pod's
+    own container, so each engine image gets its own pod (see `hardware_for`)."""
+
+    kind: Literal["runpod"]
+    cloud_type: Literal["secure"] = "secure"
+    instance_type: str | None = None  # default: the cell's hardware.instance_types.runpod
+    gpu_type_id: str | None = None  # default: RUNPOD_GPU_TYPE_IDS[hardware.gpu]
+    container_disk_gb: PositiveInt = 80
+    # CUDA versions the host driver must support; the pinned vLLM image needs 13.0.
+    allowed_cuda_versions: Annotated[list[str], Field(min_length=1)] = Field(
+        default_factory=lambda: ["13.0"]
+    )
+    data_center_ids: Annotated[list[str], Field(min_length=1)] | None = None  # None: any
+
+
 ProviderSpec = Annotated[
-    MockProviderSpec | LocalProviderSpec | AwsEc2ProviderSpec, Field(discriminator="kind")
+    MockProviderSpec | LocalProviderSpec | AwsEc2ProviderSpec | RunpodProviderSpec,
+    Field(discriminator="kind"),
 ]
 
 
@@ -552,6 +573,8 @@ def hardware_for(exp: Experiment, spec: ModelSpec) -> tuple[str, dict[str, Any]]
     if p.kind == "local":
         hw = {"provider": "local", "engine": p.engine, "served_model": p.served_model}
         return f"local/{p.base_url}", hw
+    if p.kind == "runpod":
+        return _runpod_hardware(p, spec)
     instance = p.instance_type or spec.hardware.instance_types.aws
     if instance is None:
         raise ExpansionError(f"{spec.id}: no aws instance type in the registry or provider")
@@ -566,6 +589,35 @@ def hardware_for(exp: Experiment, spec: ModelSpec) -> tuple[str, dict[str, Any]]
         "gpus": gpus,
     }
     return f"aws/{p.region}/{instance}/{p.market}/{p.disk_gb}gb", hw
+
+
+def _runpod_hardware(p: RunpodProviderSpec, spec: ModelSpec) -> tuple[str, dict[str, Any]]:
+    """A pod runs one engine image, so the image is part of the host key: cells on
+    different images (vLLM vs SGLang) get separate pods, each with an honest cold start,
+    and cells on the same image share a pod through warm restarts."""
+    instance = p.instance_type or spec.hardware.instance_types.runpod
+    if instance is None:
+        raise ExpansionError(f"{spec.id}: no runpod instance type in the registry or provider")
+    gpu_type_id = p.gpu_type_id or RUNPOD_GPU_TYPE_IDS.get(spec.hardware.gpu)
+    if gpu_type_id is None:
+        raise ExpansionError(
+            f"{spec.id}: no RunPod GPU type id for {spec.hardware.gpu}; set provider.gpu_type_id"
+        )
+    hw = {
+        "provider": "runpod",
+        "cloud": "runpod",
+        "region": p.cloud_type,
+        "instance_type": instance,
+        "market": "on_demand",
+        "gpu": spec.hardware.gpu,
+        "gpus": spec.hardware.gpus_per_replica,
+        "gpu_type_id": gpu_type_id,
+        "disk_gb": p.container_disk_gb,
+        "allowed_cuda_versions": list(p.allowed_cuda_versions),
+    }
+    digest = spec.engine.image.partition("@sha256:")[2][:12]
+    key = f"runpod/{p.cloud_type}/{instance}/{p.container_disk_gb}gb/{spec.engine.name}@{digest}"
+    return key, hw
 
 
 def tokenizer_for(exp: Experiment, spec: ModelSpec) -> TokenizerSpec:

@@ -27,7 +27,7 @@ GitSha = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
 PinnedImage = Annotated[
     str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9._/-]*[a-z0-9]@sha256:[0-9a-f]{64}$")
 ]
-Cloud = Literal["aws", "gcp"]
+Cloud = Literal["aws", "gcp", "runpod"]
 # Serving precision of the weights.
 Quantization = Literal["none", "fp8", "awq", "gptq", "w4a16", "w8a8", "fp4", "nvfp4"]
 # `quantization_config.quant_method` in a pre-quantized checkpoint's config.json.
@@ -110,6 +110,7 @@ class Engine(StrictModel):
 class InstanceTypes(StrictModel):
     aws: NonEmptyStr | None = None
     gcp: NonEmptyStr | None = None
+    runpod: NonEmptyStr | None = None  # a `bench/prices.yaml` runpod instance, e.g. l40s-x1
 
 
 class Hardware(StrictModel):

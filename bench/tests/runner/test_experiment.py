@@ -1,15 +1,20 @@
+import uuid
+
 import pytest
 from pydantic import ValidationError
 
 from loom_bench.experiment import (
     ExpansionError,
     Experiment,
+    Variant,
     derive_seed,
     expand,
     load_experiment,
     sweep_points,
 )
-from loom_bench.registry import load_registry
+from loom_bench.records import Market
+from loom_bench.registry import Registry, load_registry, read_yaml
+from loom_bench.runner import _host_request
 
 from .conftest import ABORT, LLAMA, QWEN, SMOKE, mock_doc, mock_experiment
 
@@ -220,3 +225,91 @@ def test_derived_seeds_are_stable_and_distinct():
     assert derive_seed(0, "w", 1.0, 0) == derive_seed(0, "w", 1.0, 0)
     seeds = {derive_seed(0, "w", v, r) for v in (1.0, 2.0) for r in range(3)}
     assert len(seeds) == 6
+
+
+def runpod_experiment(path=QWEN, **provider) -> Experiment:
+    """A shipped experiment moved onto the runpod provider."""
+    doc = read_yaml(path)
+    return Experiment.model_validate({**doc, "provider": {"kind": "runpod", **provider}})
+
+
+def test_runpod_hardware_and_host_key_per_image():
+    vllm, sglang = expand(runpod_experiment(), REGISTRY)
+    assert vllm.hardware == {
+        "provider": "runpod",
+        "cloud": "runpod",
+        "region": "secure",
+        "instance_type": "l40s-x1",
+        "market": "on_demand",
+        "gpu": "L40S",
+        "gpus": 1,
+        "gpu_type_id": "NVIDIA L40S",
+        "disk_gb": 80,
+        "allowed_cuda_versions": ["13.0"],
+    }
+    # One pod runs one engine image: different images never share a host.
+    assert vllm.host_key == "runpod/secure/l40s-x1/80gb/vllm@8a69ffad015f"
+    assert sglang.host_key == "runpod/secure/l40s-x1/80gb/sglang@b1259f3ea327"
+    assert sglang.hardware == vllm.hardware
+
+
+def test_runpod_cells_on_one_image_share_a_pod():
+    exp = runpod_experiment(container_disk_gb=120)
+    exp = exp.model_copy(
+        update={"variants": exp.variants[:1], "sweep": {"max_context": [8192, 16384]}}
+    )
+    a, b = expand(exp, REGISTRY)
+    assert a.host_key == b.host_key == "runpod/secure/l40s-x1/120gb/vllm@8a69ffad015f"
+    assert a.config_hash != b.config_hash
+
+
+def test_runpod_llama_uses_four_gpus():
+    (cell,) = expand(runpod_experiment(LLAMA), REGISTRY)
+    assert cell.hardware["instance_type"] == "l40s-x4"
+    assert cell.hardware["gpus"] == 4 == cell.gpus
+
+
+def test_runpod_spec_defaults_and_rejects_bad_fields():
+    exp = runpod_experiment()
+    assert exp.provider.kind == "runpod"
+    assert exp.provider.cloud_type == "secure"
+    assert exp.provider.data_center_ids is None  # no datacenter pin by default
+    for bad in ({"market": "spot"}, {"cloud_type": "community"}, {"allowed_cuda_versions": []}):
+        with pytest.raises(ValidationError):
+            runpod_experiment(**bad)
+
+
+def registry_without_runpod_instance() -> Registry:
+    doc = REGISTRY.model_dump(mode="json")
+    for m in doc["models"]:
+        m["hardware"]["instance_types"].pop("runpod")
+        m["clouds"] = ["aws"]
+    return Registry.model_validate(doc)
+
+
+def test_runpod_expansion_errors():
+    with pytest.raises(ExpansionError, match="no runpod instance type"):
+        expand(runpod_experiment(), registry_without_runpod_instance())
+    a100 = [Variant.model_validate({"name": "a100", "hardware": {"gpu": "A100"}})]
+    with pytest.raises(ExpansionError, match="no RunPod GPU type id for A100"):
+        expand(runpod_experiment().model_copy(update={"variants": a100}), REGISTRY)
+    exp = runpod_experiment(gpu_type_id="NVIDIA A100 80GB PCIe")
+    (cell,) = expand(exp.model_copy(update={"variants": a100}), REGISTRY)
+    assert cell.hardware["gpu_type_id"] == "NVIDIA A100 80GB PCIe"
+
+
+def test_host_request_carries_the_engine_image():
+    exp = runpod_experiment()
+    _, sglang = expand(exp, REGISTRY)
+    req = _host_request(exp, sglang, uuid.uuid4())
+    assert req.image == sglang.launch.image
+    assert (req.cloud, req.region, req.instance_type, req.disk_gb, req.gpus) == (
+        "runpod",
+        "secure",
+        "l40s-x1",
+        80,
+        1,
+    )
+    assert req.market is Market.ON_DEMAND
+    mock = mock_experiment()
+    assert _host_request(mock, expand(mock, REGISTRY)[0], uuid.uuid4()).image is None
