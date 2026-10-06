@@ -42,6 +42,7 @@ from loom_bench.quality.tasks.base import ItemResult
 from loom_bench.records import LoadMode, Market
 from loom_bench.registry import load_registry
 
+from . import fakes as fakes_mod
 from .conftest import BUCKET, REGION
 from .fakes import FakePodExec, FakeRunpod, engine_stdout, ok, script_var
 
@@ -338,6 +339,52 @@ async def test_data_center_falls_back_to_the_pod_when_the_api_omits_it(fake, s3,
     host.info["data_center"] = None
     ep = await p.start_engine(host, vllm_launch(), warm=False)
     assert ep.system["data_center"] == "EU-RO-1"
+    assert "data_center_location" not in ep.system
+
+
+def _machine_without_dc(monkeypatch) -> None:
+    # The 8B sweep's pod (058128e9): dataCenterId "" and only location "SE".
+    original = fakes_mod.create_response_fixture
+
+    def fixture() -> dict:
+        data = original()
+        data["machine"] = {**data["machine"], "dataCenterId": "", "location": "SE"}
+        return data
+
+    monkeypatch.setattr(fakes_mod, "create_response_fixture", fixture)
+
+
+async def test_an_empty_data_center_falls_back_to_the_location_marked_as_one(
+    fake, s3, tmp_path, monkeypatch
+) -> None:
+    _machine_without_dc(monkeypatch)
+    p = provider(fake, s3, tmp_path)  # start_engine reports no RUNPOD_DC_ID either
+    host = await p.provision(request())
+    assert host.info["data_center"] is None
+    assert host.info["data_center_location"] == "SE"
+    assert host.price_basis.availability_zone == "location:SE"
+    ep = await p.start_engine(host, vllm_launch(), warm=False)
+    assert ep.system["data_center"] is None
+    assert ep.system["data_center_location"] == "SE"
+
+
+async def test_the_pods_dc_id_beats_the_location(fake, s3, tmp_path, monkeypatch) -> None:
+    _machine_without_dc(monkeypatch)
+    ssh = FakePodExec(
+        {"start_engine": lambda t, s: ok(engine_stdout() + "loom-sys data_center EU-SE-1\n")}
+    )
+    p = provider(fake, s3, tmp_path, ssh=ssh)
+    host = await p.provision(request())
+    ep = await p.start_engine(host, vllm_launch(), warm=False)
+    assert ep.system["data_center"] == "EU-SE-1"
+    assert "data_center_location" not in ep.system
+
+
+async def test_a_known_data_center_is_recorded_as_is(fake, s3, tmp_path) -> None:
+    host = await provider(fake, s3, tmp_path).provision(request())
+    assert host.info["data_center"] == "EUR-IS-2"
+    assert host.info["data_center_location"] == "IE"  # kept, but never used as the zone
+    assert host.price_basis.availability_zone == "EUR-IS-2"
 
 
 async def test_cold_start_waits_for_ssh_and_reports_stages_and_system(fake, s3, tmp_path) -> None:

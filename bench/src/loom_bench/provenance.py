@@ -216,7 +216,9 @@ class PriceBasis(_Section):
     source: Literal["observed_spot", "prices_yaml", "experiment", "unobserved", "observed_api"]
     spot_price_usd: str | None = None  # observed_spot: the price read at launch
     observed_at: AwareDatetime | None = None  # observed_spot / observed_api: when it was read
-    availability_zone: str | None = None  # AWS AZ, or the RunPod datacenter id
+    # AWS AZ, or the RunPod datacenter id; `location:<code>` when RunPod gave only the
+    # machine's location (a country), not its datacenter.
+    availability_zone: str | None = None
     storage_gb: int = Field(default=0, ge=0)  # block storage included in the price
 
 

@@ -193,6 +193,16 @@ def pod_loss(
     )
 
 
+def _data_center(machine: object) -> tuple[str | None, str | None]:
+    """(datacenter id, location) from a pod's `machine`. RunPod sometimes returns an
+    empty or missing `dataCenterId` with only `location` (a country code such as "SE")."""
+    if not isinstance(machine, Mapping):
+        return None, None
+    data_center = str(machine.get("dataCenterId") or "").strip() or None
+    location = str(machine.get("location") or "").strip() or None
+    return data_center, location
+
+
 def _rm_tree(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
@@ -414,7 +424,10 @@ class RunpodProvider:
             self.api.terminate_pod(pod_id)
             raise
         machine = pod.get("machine") if isinstance(pod.get("machine"), Mapping) else {}
-        data_center = (machine or {}).get("dataCenterId")
+        data_center, location = _data_center(machine)
+        # A bare location (e.g. "SE") is a country, not a datacenter: prefixed so it is
+        # never read as one.
+        zone = data_center or (f"location:{location}" if location else None)
         if observed is not None:
             as_run = self.prices.with_storage(
                 "runpod", region, Fraction(observed), req.disk_gb, allow_unverified=True
@@ -423,7 +436,7 @@ class RunpodProvider:
                 market=Market.ON_DEMAND,
                 source="observed_api",
                 observed_at=now,
-                availability_zone=data_center,
+                availability_zone=zone,
                 storage_gb=req.disk_gb,
             )
         else:
@@ -433,7 +446,7 @@ class RunpodProvider:
             basis = PriceBasis(
                 market=Market.ON_DEMAND,
                 source="prices_yaml",
-                availability_zone=data_center,
+                availability_zone=zone,
                 storage_gb=req.disk_gb,
             )
         instance = max(observed or 0, listed)
@@ -453,6 +466,7 @@ class RunpodProvider:
                 "instance_type": req.instance_type,
                 "gpu_type_id": body["gpuTypeIds"][0],
                 "data_center": data_center,
+                "data_center_location": location,
                 "pod_created_s": round(created_s, 3),
                 "accrual_basis": {
                     "api_cost_per_hr": None if cost in (None, 0, "") else str(cost),
@@ -586,10 +600,15 @@ class RunpodProvider:
             "gpu_type_id": host.info.get("gpu_type_id"),
             "data_center": host.info.get("data_center") or system.get("data_center"),
         }
+        location = host.info.get("data_center_location")
         if pod is not None:
-            machine = pod.get("machine")
-            if isinstance(machine, Mapping) and machine.get("dataCenterId"):
-                info["data_center"] = machine["dataCenterId"]
+            pod_dc, pod_location = _data_center(pod.get("machine"))
+            info["data_center"] = pod_dc or info["data_center"]
+            location = pod_location or location
+        if not info["data_center"] and location:
+            # Neither the API nor the pod's RUNPOD_DC_ID named the datacenter: record the
+            # machine's location under its own key, never as a datacenter id.
+            info["data_center_location"] = location
         if "gpus" in info:
             info["gpus"] = [g.strip() for g in str(info["gpus"]).split(",") if g.strip()]
         if "gpu_count" in info:
