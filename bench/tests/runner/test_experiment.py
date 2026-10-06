@@ -229,6 +229,20 @@ def test_next_search_load_follows_the_scale_rounds_closed_loop_and_caps_points()
     assert next_search_load(closed, [(2, True), (3, True), (4, False)]) is None  # a repeat
 
 
+def test_next_search_load_descends_below_a_failing_lo():
+    spec = {"mode": "open_loop", "duration_s": 10}
+    search = {"lo": 1, "hi": 8, "scale": "geometric"}
+    plain = LoadSpec.model_validate({**spec, "search": search})
+    assert plain.search is not None and plain.search.descend == 0
+    assert next_search_load(plain, [(1, False)]) is None
+    down = LoadSpec.model_validate({**spec, "search": {**search, "descend": 2}})
+    assert next_search_load(down, [(1, False)]) == 0.5
+    assert next_search_load(down, [(1, False), (0.5, False)]) == 0.25
+    assert next_search_load(down, [(1, False), (0.5, False), (0.25, False)]) is None
+    with pytest.raises(ValidationError):
+        LoadSpec.model_validate({**spec, "search": {**search, "descend": -1}})
+
+
 def test_arrival_template_gets_the_load_value_as_rate():
     exp = mock_experiment(
         workloads=[

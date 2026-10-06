@@ -190,6 +190,43 @@ def test_geometric_search_climbs_from_lo_then_bisects_on_a_log_scale():
         bisect_next_load([], 1, 8, scale="geometric", step=1.0)
 
 
+@pytest.mark.parametrize("scale", ["linear", "geometric"])
+def test_a_failing_lo_ends_the_search_without_descend(scale):
+    assert bisect_next_load([(1.5, False)], 1.5, 8, scale=scale) is None
+    assert bisect_next_load([(1.5, False)], 1.5, 8, scale=scale, descend=0) is None
+
+
+def test_a_failing_lo_steps_down_then_bisects_the_new_bracket():
+    search = {"lo": 1.5, "hi": 8, "rel_tol": 0.1, "scale": "geometric", "descend": 2}
+    assert bisect_next_load([(1.5, False)], **search) == 0.75
+    assert bisect_next_load([(1.5, False), (0.75, False)], **search) == 0.375
+    # The floor is lo / step**descend: nothing below it, and the search gives up.
+    assert bisect_next_load([(1.5, False), (0.75, False), (0.375, False)], **search) is None
+    # A pass below lo brackets the knee between it and the lowest failure.
+    nxt = bisect_next_load([(1.5, False), (0.75, True)], **search)
+    assert nxt == pytest.approx((1.5 * 0.75) ** 0.5)
+    nxt = bisect_next_load([(1.5, False), (0.75, False), (0.375, True)], **search)
+    assert nxt == pytest.approx((0.75 * 0.375) ** 0.5)
+    with pytest.raises(ValueError):
+        bisect_next_load([], 1, 8, descend=-1)
+
+
+def test_descend_finds_goodput_the_ci_rule_hid_at_lo():
+    # Smoke run 51ad57b0: with a conservative verdict a workload failed its first point;
+    # the knee is really at 1.2, so a search from 1.5 found no goodput at all.
+    def run(**search) -> list[tuple[float, bool]]:
+        history: list[tuple[float, bool]] = []
+        while (load := bisect_next_load(history, **search)) is not None and len(history) < 6:
+            history.append((load, load <= 1.2))
+        return history
+
+    base = {"lo": 1.5, "hi": 8, "rel_tol": 0.1, "scale": "geometric"}
+    assert run(**base) == [(1.5, False)]
+    with_descent = run(**base, descend=2)
+    passing = max(load for load, met in with_descent if met)
+    assert 1.2 / 1.1 <= passing <= 1.2
+
+
 def _points_above(threshold: float, **search) -> int:
     history: list[tuple[float, bool]] = []
     while (load := bisect_next_load(history, **search)) is not None and len(history) < 6:

@@ -230,12 +230,19 @@ def bisect_next_load(
     *,
     scale: SearchScale = "linear",
     step: float = 2.0,
+    descend: int = 0,
 ) -> float | None:
     """Next load to test when searching [lo, hi] for the highest load meeting the SLO.
 
-    `history` holds (load, met) for tested points; points outside [lo, hi] are
-    ignored. Returns None when done: `lo` fails, `hi` passes, or the bracket is within
-    `rel_tol` of the passing load.
+    `history` holds (load, met) for tested points; points outside
+    [lo / step**descend, hi] are ignored. Returns None when done: `hi` passes, the
+    bracket is within `rel_tol` of the passing load, or `lo` and every load below it
+    down to the floor failed.
+
+    When `lo` fails, the search steps down by `step` up to `descend` times until a load
+    passes, then bisects between that pass and the lowest failure. A conservative
+    verdict (CI upper bound over few repetitions) can fail a first point whose raw
+    latencies pass easily; without the descent such a workload ends with no goodput.
 
     linear: tests `lo`, then `hi`, then the arithmetic midpoint between the highest
     pass below the lowest failure and that failure.
@@ -252,19 +259,26 @@ def bisect_next_load(
         raise ValueError("rel_tol must be positive")
     if step <= 1:
         raise ValueError("step must be above 1")
-    results = {load: met for load, met in history if lo <= load <= hi}
+    if descend < 0:
+        raise ValueError("descend must not be negative")
+    floor = lo / step**descend
+    results = {load: met for load, met in history if floor * (1 - 1e-9) <= load <= hi}
     if lo not in results:
         return lo
-    if not results[lo]:
-        return None
     failures = [load for load, met in results.items() if not met]
+    if not any(results.values()):
+        nxt = min(results) / step
+        return nxt if nxt >= floor * (1 - 1e-9) else None
     if not failures:
         if scale == "geometric":
             best = max(results)
             return None if best >= hi else min(hi, best * step)
         return hi if hi not in results else None
     fail = min(failures)
-    passing = max(load for load, met in results.items() if met and load < fail)
+    below = [load for load, met in results.items() if met and load < fail]
+    if not below:
+        return None
+    passing = max(below)
     if fail - passing <= rel_tol * passing:
         return None
     if scale == "geometric":

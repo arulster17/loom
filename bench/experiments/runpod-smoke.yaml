@@ -38,7 +38,7 @@ workloads:
     overrides: {output_len: 128}
     load:
       mode: open_loop
-      search: {lo: 0.5, hi: 1, rel_tol: 0.1, max_points: 2, scale: geometric}
+      search: {lo: 0.5, hi: 1, rel_tol: 0.1, max_points: 2, scale: geometric, descend: 1}
       duration_s: 10
       warmup_s: 2
       drain_timeout_s: 15
@@ -46,14 +46,14 @@ workloads:
     overrides: {output_len: 32}
     load:
       mode: open_loop
-      search: {lo: 1, hi: 2, rel_tol: 0.1, max_points: 2, scale: geometric}
+      search: {lo: 1, hi: 2, rel_tol: 0.1, max_points: 2, scale: geometric, descend: 1}
       duration_s: 10
       warmup_s: 2
       drain_timeout_s: 15
   - profile: code-completion
     load:
       mode: open_loop
-      search: {lo: 1, hi: 2, rel_tol: 0.1, max_points: 2, scale: geometric}
+      search: {lo: 1, hi: 2, rel_tol: 0.1, max_points: 2, scale: geometric, descend: 1}
       duration_s: 10
       warmup_s: 2
       drain_timeout_s: 15

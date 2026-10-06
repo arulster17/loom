@@ -9,6 +9,7 @@
 # fails, then log-scale bisection). Ranges are scaled down from the measured Qwen3-8B
 # 1x L40S capacity (fixed-1k-1k ~1.2-1.9 req/s): a 70B model at TP=4 is expected to
 # sustain no more, so `hi` sits well above the expected knee without long overload.
+# `descend: 2` steps down to lo/2 and lo/4 if `lo` itself fails the conservative verdict.
 name: llama-3.3-70b-tp4-runpod
 description: Llama 3.3 70B BF16, TP=4 on RunPod Secure 4x L40S, vLLM v0.30.0, rate sweeps at SLO.
 model: llama-3.3-70b-instruct
@@ -21,14 +22,14 @@ workloads:
   - profile: fixed-1k-1k
     load:
       mode: open_loop
-      search: {lo: 0.25, hi: 2, rel_tol: 0.15, max_points: 4, scale: geometric}
+      search: {lo: 0.25, hi: 2, rel_tol: 0.15, max_points: 4, scale: geometric, descend: 2}
       duration_s: 180
       warmup_s: 30
       drain_timeout_s: 90
   - profile: shared-prefix
     load:
       mode: open_loop
-      search: {lo: 0.5, hi: 4, rel_tol: 0.15, max_points: 4, scale: geometric}
+      search: {lo: 0.5, hi: 4, rel_tol: 0.15, max_points: 4, scale: geometric, descend: 2}
       duration_s: 120
       warmup_s: 20
       drain_timeout_s: 30

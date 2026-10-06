@@ -28,7 +28,8 @@ An experiment declares an SLO, e.g. `{ttft_ms: {p95: 1000}, tpot_ms: {p95: 50},
 max_error_rate: 0.01}`, and a load sweep per workload: fixed `values`, or a bisection
 `search: {lo, hi, rel_tol, max_points}` (`slo.bisect_next_load`: test `lo`, then `hi`,
 then halve the bracket between the highest pass and the lowest failure until it is within
-`rel_tol`).
+`rel_tol`; `scale: geometric` climbs from `lo` instead, and `descend: N` steps down from a
+failing `lo` up to N times before giving up).
 
 1. Each load point runs `repetitions` times. Each run yields its own p95 TTFT, p95 TPOT,
    error rate, throughput, ... (`metrics/summary.py`, warmup excluded).

@@ -7,8 +7,10 @@
 # scale, so few points land in overload (the slowest points to run). The ranges fit
 # one L40S: the first RunPod sweep (058128e9, vLLM) passed fixed-1k-1k at 1.22 and
 # failed at 1.94 req/s, and passed shared-prefix and code-completion at 1 but failed
-# them at 4.88 and 6.88. Starting those two at 1.5 lets 5 points bracket a knee near
-# 4-6 req/s to ~20%.
+# them at 4.88 and 6.88. Those two start at 1 req/s, the rate known to pass; 5 points
+# (the most the 8 h TTL cap allows) bracket a knee near 4-6 req/s to ~40%. The pass
+# verdict is conservative (CI upper bound over 3 reps), so a first point can fail with
+# easy raw latencies: `descend: 2` then steps down to lo/2 and lo/4 before giving up.
 # 3 repetitions per point. Image digests: research notes of 2026-10-04.
 #
 # AWS path (secondary): the account's GPU spot quota is 0, so the real run is
@@ -37,21 +39,21 @@ workloads:
   - profile: fixed-1k-1k
     load:
       mode: open_loop
-      search: {lo: 0.5, hi: 4, rel_tol: 0.1, max_points: 6, scale: geometric}
+      search: {lo: 0.5, hi: 4, rel_tol: 0.1, max_points: 6, scale: geometric, descend: 2}
       duration_s: 180
       warmup_s: 30
       drain_timeout_s: 60
   - profile: shared-prefix
     load:
       mode: open_loop
-      search: {lo: 1.5, hi: 8, rel_tol: 0.1, max_points: 5, scale: geometric}
+      search: {lo: 1, hi: 8, rel_tol: 0.1, max_points: 5, scale: geometric, descend: 2}
       duration_s: 120
       warmup_s: 20
       drain_timeout_s: 30
   - profile: code-completion
     load:
       mode: open_loop
-      search: {lo: 1.5, hi: 8, rel_tol: 0.1, max_points: 5, scale: geometric}
+      search: {lo: 1, hi: 8, rel_tol: 0.1, max_points: 5, scale: geometric, descend: 2}
       duration_s: 120
       warmup_s: 20
       drain_timeout_s: 30

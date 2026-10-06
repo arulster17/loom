@@ -204,6 +204,8 @@ class LoadSearch(_Strict):
     `scale: geometric` climbs from `lo` by `step` until a load fails, then bisects
     geometrically; it spends the fewest points in overload. `linear` (the default,
     kept for older specs) tests `lo`, then `hi`, then arithmetic midpoints.
+    `descend: N` steps down from a failing `lo` by `step` up to N times before giving up
+    (default 0: a failing `lo` ends the search).
     """
 
     lo: PositiveFloat
@@ -212,6 +214,7 @@ class LoadSearch(_Strict):
     max_points: Annotated[int, Field(ge=2)] = 8
     scale: SearchScale = "linear"
     step: Annotated[float, Field(gt=1)] = 2.0
+    descend: Annotated[int, Field(ge=0)] = 0
 
     @model_validator(mode="after")
     def _ordered(self) -> Self:

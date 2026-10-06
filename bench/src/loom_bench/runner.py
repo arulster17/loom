@@ -933,7 +933,13 @@ def next_search_load(load: LoadSpec, history: Sequence[tuple[float, bool]]) -> f
     if len(history) >= search.max_points:
         return None
     nxt = bisect_next_load(
-        history, search.lo, search.hi, search.rel_tol, scale=search.scale, step=search.step
+        history,
+        search.lo,
+        search.hi,
+        search.rel_tol,
+        scale=search.scale,
+        step=search.step,
+        descend=search.descend,
     )
     if nxt is None:
         return None

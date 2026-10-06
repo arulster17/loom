@@ -87,7 +87,8 @@ workloads:
       values: [1, 2, 4]             # req/s (open) or concurrency (closed) ...
       # search: {lo: 0.5, hi: 4, rel_tol: 0.1, max_points: 6, scale: geometric}   # ... or search
       # the SLO: geometric climbs x`step` (default 2) from lo until a load fails, then bisects
-      # on a log scale (few points in overload); linear (the default) tests lo, hi, midpoints
+      # on a log scale (few points in overload); linear (the default) tests lo, hi, midpoints;
+      # descend: N (default 0) steps down from a failing lo by `step` up to N times
       duration_s: 180               # open loop: required; closed loop: this or num_requests
       warmup_s: 30                  # open loop, inside duration_s; closed loop: warmup_requests
       arrival: {kind: gamma, burstiness: 0.5}   # open loop; the rate comes from the load value
@@ -291,8 +292,11 @@ The AWS specs stay as the secondary path:
 
 Rates are searched geometrically, with ranges sized for one L40S from the first RunPod
 sweep (058128e9): Qwen3-8B fixed-1k-1k passed 1.22 req/s and failed 1.94; shared-prefix
-and code-completion failed at 4.88 and 6.88. The earlier linear search over hi = 12-48
-req/s spent most of its points deep in overload.
+and code-completion passed 1 and failed at 4.88 and 6.88, so those two start at 1 req/s.
+The earlier linear search over hi = 12-48 req/s spent most of its points deep in
+overload. Every search has `descend: 2`: the pass verdict uses the CI upper bound over 3
+repetitions, which can fail a first point whose raw latencies pass easily, so a failing
+`lo` steps down to lo/2 and lo/4 before the workload ends with no goodput.
 
 Estimates include cold starts, assume every searched point waits out its drain timeout,
 and include each config's eval job (the suites' `phase0` subset: GSM8K, IFEval, tool

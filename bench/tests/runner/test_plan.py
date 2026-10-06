@@ -118,9 +118,14 @@ def _eval_paths(exp: Experiment) -> set[tuple[str, str]]:
     return out
 
 
-def _load_shape(exp: Experiment) -> dict[str, tuple[str, str | None]]:
+def _load_shape(exp: Experiment) -> dict[str, tuple[str, str | None, bool]]:
+    """Profile -> (load mode, search scale, whether the search can descend below lo)."""
     return {
-        w.profile: (w.load.mode.value, w.load.search.scale if w.load.search else None)
+        w.profile: (
+            w.load.mode.value,
+            w.load.search.scale if w.load.search else None,
+            bool(w.load.search and w.load.search.descend),
+        )
         for w in exp.workloads
     }
 
