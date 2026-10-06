@@ -377,6 +377,24 @@ def _ec2_client() -> object | None:
     return boto3.client("ec2", region_name=settings.region)
 
 
+def _runpod_reaper() -> tuple[object, str] | None:
+    """A RunPod API client and the pod name prefix, or None without an API key."""
+    from loom_bench.providers.runpod import RunpodSettings, load_runpod_settings
+    from loom_bench.providers.runpod_api import RunpodApi, load_runpod_api_key
+
+    key = load_runpod_api_key()
+    if key is None:
+        return None
+    try:
+        settings = load_runpod_settings()
+        prefix, rest, graphql = settings.name_prefix, settings.rest_url, settings.graphql_url
+    except (ValidationError, FileNotFoundError):
+        fields = RunpodSettings.model_fields
+        prefix = fields["name_prefix"].default
+        rest, graphql = fields["rest_url"].default, fields["graphql_url"].default
+    return RunpodApi(key, rest_url=rest, graphql_url=graphql), prefix
+
+
 @app.command("reap")
 def reap_cmd(
     dry_run: Annotated[bool, typer.Option("--dry-run", help="List, do not terminate.")] = False,
@@ -384,16 +402,28 @@ def reap_cmd(
 ) -> None:
     """Terminate resources whose TTL passed (for when a runner died).
 
-    Covers every provider's DB-recorded resources and, when AWS settings are
-    configured ($LOOM_AWS_CONFIG or LOOM_AWS_*), every Loom-tagged EC2 instance.
+    Covers every provider's DB-recorded resources; when AWS settings are configured
+    ($LOOM_AWS_CONFIG or LOOM_AWS_*), every Loom-tagged EC2 instance; and with a RunPod
+    API key (RUNPOD_API_KEY or the Keychain), every Loom-managed RunPod pod.
     """
     from loom_bench.store.db import upgrade
 
     upgrade(db)
     ec2 = _ec2_client()
     if ec2 is None:
-        console.print("[yellow]AWS not configured: only DB-recorded mock/local resources reaped")
-    reaped = asyncio.run(reap(db, dry_run=dry_run, ec2=ec2))
+        console.print("[yellow]AWS not configured: EC2 instances are not reaped")
+    runpod = _runpod_reaper()
+    if runpod is None:
+        console.print("[yellow]No RunPod API key: RunPod pods are not reaped")
+    reaped = asyncio.run(
+        reap(
+            db,
+            dry_run=dry_run,
+            ec2=ec2,
+            runpod=runpod[0] if runpod else None,
+            runpod_prefix=runpod[1] if runpod else "loom-bench",
+        )
+    )
     table = Table(title="Expired resources")
     for col in ("provider", "resource", "experiment", "ttl", "action"):
         table.add_column(col)

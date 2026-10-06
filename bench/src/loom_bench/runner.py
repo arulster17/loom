@@ -133,7 +133,9 @@ RUN_ABORTED = "aborted"
 RUN_INTERRUPTED = "interrupted"  # spot reclaim
 RUN_HOST_LOST = "host_lost"
 
-RESOURCE_TYPES = {"aws_ec2": "ec2_instance", "mock": "mock_server"}
+RESOURCE_TYPES = {"aws_ec2": "ec2_instance", "runpod": "runpod_pod", "mock": "mock_server"}
+# Providers whose jobs run on a GPU host and can sample nvidia-smi alongside the load.
+GPU_SAMPLING_PROVIDERS = frozenset({"aws_ec2", "runpod"})
 
 
 @dataclass
@@ -411,7 +413,14 @@ class _Executor:
                 resource_id=host.host_id,
                 config_hash=cell.config_hash,
             )
-        self.event("engine_started", host=host.host_id, cell=cell.key, warm=warm, stages=stages)
+        self.event(
+            "engine_started",
+            host=host.host_id,
+            cell=cell.key,
+            warm=warm,
+            stages=stages,
+            system=endpoint.system,
+        )
         for entry, profile in self.workloads:
             await self._run_workload(host, cell, endpoint, entry, profile)
         if self.suite is not None:
@@ -652,7 +661,7 @@ class _Executor:
             max_inflight=load.max_inflight,
             seed=seed,
             scrape_interval_s=load.scrape_interval_s,
-            sample_gpu=self.exp.provider.kind == "aws_ec2",
+            sample_gpu=self.exp.provider.kind in GPU_SAMPLING_PROVIDERS,
             extra_body=_extra_body(cell, profile),
         )
 
@@ -1348,7 +1357,7 @@ class ReapedResource(BaseModel):
     provider: str
     resource_id: str
     experiment_id: uuid.UUID | None
-    ttl_at: datetime | None  # None: found by the AWS reaper, never recorded in this DB
+    ttl_at: datetime | None  # None: found by a provider reaper, never recorded in this DB
     action: str  # terminated | gone | would terminate | skipped: ...
 
 
@@ -1358,6 +1367,8 @@ async def reap(
     now: datetime | None = None,
     dry_run: bool = False,
     ec2: Any = None,
+    runpod: Any = None,
+    runpod_prefix: str = "loom-bench",
 ) -> list[ReapedResource]:
     """Terminate resources whose TTL passed and mark the DB rows reaped.
 
@@ -1365,7 +1376,10 @@ async def reap(
     resource not running in this process is already gone and is only marked.
     With an `ec2` client, `aws_reaper` also terminates every Loom-managed
     instance past its TTL tag, recorded here or not; an expired recorded
-    instance AWS no longer lists ended itself at its TTL (`self-ttl`).
+    instance AWS no longer lists ended itself at its TTL (`self-ttl`). With a
+    RunPod API client (`runpod`), `runpod_reaper` does the same for pods named
+    `{runpod_prefix}-…` that carry `LOOM_MANAGED=true`; an expired recorded pod
+    RunPod no longer lists was terminated by its own TTL watchdog.
     """
     from loom_bench.providers.mock import MockProvider
 
@@ -1381,15 +1395,24 @@ async def reap(
         from loom_bench.providers import aws_reaper
 
         aws_ids = await asyncio.to_thread(aws_reaper.reap, ec2, now, dry_run=dry_run)
+    pod_ids: list[str] = []
+    if runpod is not None:
+        from loom_bench.providers import runpod_reaper
+
+        pod_ids = await asyncio.to_thread(
+            runpod_reaper.reap, runpod, now, prefix=runpod_prefix, dry_run=dry_run
+        )
     out: list[ReapedResource] = []
     for provider, resource_id, experiment_id, ttl_at in expired:
         by = TerminatedBy.REAPER
         if provider == "aws_ec2" and ec2 is None:
             action = "skipped: aws not configured"
+        elif provider == "runpod" and runpod is None:
+            action = "skipped: runpod not configured"
         elif dry_run:
             action = "would terminate"
-        elif provider == "aws_ec2":
-            gone = resource_id not in aws_ids
+        elif provider in ("aws_ec2", "runpod"):
+            gone = resource_id not in (aws_ids if provider == "aws_ec2" else pod_ids)
             action, by = ("gone", TerminatedBy.SELF_TTL) if gone else ("terminated", by)
         else:
             action = "terminated" if resource_id in killed else "gone"
@@ -1408,13 +1431,14 @@ async def reap(
     recorded = {r[1] for r in expired}
     out += [
         ReapedResource(
-            provider="aws_ec2",
+            provider=provider,
             resource_id=rid,
             experiment_id=None,
             ttl_at=None,
             action="would terminate" if dry_run else "terminated",
         )
-        for rid in aws_ids
+        for provider, ids in (("aws_ec2", aws_ids), ("runpod", pod_ids))
+        for rid in ids
         if rid not in recorded
     ]
     return out
