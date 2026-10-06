@@ -35,7 +35,7 @@ To benchmark an endpoint you already run (vLLM, SGLang, or `bench mock-server`),
 | `bench plan EXP.yaml` | Hosts, per-step time estimates, estimated spend vs caps. Exit 3 if refused. |
 | `bench run EXP.yaml [--dry-run] [--db URL] [--out results/]` | Plans, refuses if over a cap, then runs. `--dry-run` stops after the plan. |
 | `bench reproduce RUN_ID \| provenance.json [--tolerance 0.25]` | Re-runs one stored run from its provenance and compares it with the original. |
-| `bench reap [--dry-run]` | Terminates resources whose TTL passed (DB-recorded; all Loom-tagged EC2 instances when AWS is configured). |
+| `bench reap [--dry-run]` | Terminates resources whose TTL passed (DB-recorded; all Loom-tagged EC2 instances when AWS is configured; all Loom-managed RunPod pods when a RunPod API key is found). |
 | `bench report [-e EXP]...` | Leaderboard (md, html, csv) by $/1M output tokens at SLO. |
 | `bench competitiveness [-e EXP]...` | Our cost at SLO vs competitors' list prices. |
 | `bench compare EXP_A EXP_B [--match-by]` | Per-metric deltas with variance verdicts. Exit 6 if outside normal variance. |
@@ -95,7 +95,7 @@ slo: {ttft_ms: {p95: 1000}, tpot_ms: {p95: 50}, max_error_rate: 0.01}
 cost_allocation: {method: all_output}   # all_input | weighted + output_input_ratio
 budget: {max_spend: "$40", ttl_minutes: 480, accrual_interval_s: 15}
 quality: {suite: qwen3-8b, subset: phase0, baseline_variant: vllm}   # optional
-loadgen: native                     # key in LOAD_GENERATORS; aws_ec2 takes native only
+loadgen: native                     # key in LOAD_GENERATORS; aws_ec2 and runpod take native only
 seed: 0
 ```
 
@@ -113,6 +113,14 @@ seed: 0
   SLO" and are not ranked, never $0.
 - `aws_ec2`: `region`, `instance_type` (default: the registry's), `market` (spot |
   on_demand), `disk_gb`. Account settings come from `$LOOM_AWS_CONFIG` / `LOOM_AWS_*`.
+- `runpod`: `cloud_type` (secure), `instance_type` (default: the registry's
+  `instance_types.runpod`, e.g. `l40s-x1`), `gpu_type_id` (default from the GPU, e.g.
+  `NVIDIA L40S`), `container_disk_gb` (default 80; must hold the weights plus 35 GB),
+  `allowed_cuda_versions` (default `["13.0"]`), `data_center_ids` (default: any). Always
+  on-demand. Each engine image gets its own pod, so a vLLM vs SGLang experiment plans
+  two hosts, each with a cold start. Settings come from `$LOOM_RUNPOD_CONFIG` /
+  `LOOM_RUNPOD_*`, the API key from `RUNPOD_API_KEY` or the macOS Keychain
+  ([runbook-runpod.md](runbook-runpod.md)).
 
 **Variants** may set `engine` (name, version, image, args, chat_template_kwargs), `hf` (repo,
 revision, license, gated, size_bytes, quant_method: a pre-quantized checkpoint), `hardware`,
@@ -152,8 +160,9 @@ it there.
 2. **Planner refusal.** `bench run` prints the plan first and refuses (exit 3, nothing
    created) when the estimate exceeds the effective cap, when the worst case of every host
    living to its TTL exceeds it, when a host's estimated time exceeds its TTL, or when the
-   TTL is above the AWS provider's limit. There is no override flag. Assumptions live in
-   `plan.py` (`AWS_TIMING`, `MOCK_*`, `ASSUMED_*`, `EVAL_*`): boot 180 s, image pull 300 s,
+   TTL is above the AWS or RunPod provider's limit. There is no override flag. Assumptions
+   live in `plan.py` (`AWS_TIMING`, `RUNPOD_TIMING`, `MOCK_*`, `ASSUMED_*`, `EVAL_*`). On
+   AWS: boot 180 s, image pull 300 s,
    weights at 150 MB/s download and 400 MB/s load, engine init 240 s, 30 s per run on top
    of its duration and full drain timeout (an overloaded point waits it out), 90 s
    teardown. An eval job takes, per task, items x a per-kind item time / concurrency
@@ -162,7 +171,10 @@ it there.
    60 s of harness start-up per lm-eval task, 4 s per divergence prompt over 16 slots (and
    on the baseline 1 s per prompt, one at a time, for the noise-floor pass), 60 s per job and, once per AWS host, 300 s to install the eval harness. Spot
    hosts are priced like the provider accrues them: price x its safety multiplier (1.25),
-   plus the root EBS volume. Warm restarts reload weights from the host's cache and pull an
+   plus the root EBS volume. On RunPod: boot 60 s, image pull (and sshd install) 240 s,
+   30 s teardown, the rest as on AWS; a pod is priced at prices.yaml's on-demand rate plus
+   its container disk, and the provider accrues the larger of that and the pod's API
+   `costPerHr`. Warm restarts reload weights from the host's cache and pull an
    image only when it changes.
 3. **Budget guard** (`budget.BudgetGuard`). Every `accrual_interval_s` it writes
    `Σ host.hourly_micros x elapsed` to `bench_spend` (computed from launch each time, so no
@@ -175,12 +187,15 @@ it there.
    price, plus the teardown time (which is still accrued, so recorded spend stays true):
    $2.32/h x 15 s is about one cent for the Qwen run.
 4. **Instance self-TTL.** Every host is created with `ttl_s = budget.ttl_minutes`; EC2
-   instances schedule their own shutdown (terminate) at that age, so a dead runner cannot
-   leave one billing. The planner's TTL check bounds that worst case below the cap.
+   instances schedule their own shutdown (terminate) at that age, and RunPod pods run a
+   watchdog that terminates the pod at that absolute time (a container restart cannot
+   extend it), so a dead runner cannot leave one billing. The planner's TTL check bounds that worst case below the cap.
 5. **Reaper.** `bench reap` terminates expired resources recorded in `bench_resources`
    (marking them `terminated_by: reaper`, or `self-ttl` for EC2 instances that already ended)
-   and, with AWS configured, every Loom-tagged instance past its TTL tag. The same reaper runs
-   as a scheduled Lambda (`infra/aws/bench`).
+   and, with AWS configured, every Loom-tagged instance past its TTL tag; with a RunPod API
+   key, every pod named `loom-bench-…` with `LOOM_MANAGED=true` past its TTL or exited. The
+   AWS reaper also runs as a scheduled Lambda (`infra/aws/bench`); there is no scheduled
+   RunPod reaper yet.
 
 Spot interruptions (`SpotInterrupted` from the provider) are recorded (the in-flight run as
 `interrupted`, an event in `events.jsonl`) and the cell is retried once on a new host if the
@@ -243,6 +258,17 @@ for the method.
 
 ## Phase 0 experiments
 
+The real runs are on RunPod Secure Cloud on-demand, since the AWS GPU spot quota is 0
+(an increase is pending with AWS):
+
+| Experiment | Host | Estimate | Worst case (TTL) | Cap |
+|---|---|---|---|---|
+| `qwen3-8b-vllm-vs-sglang-runpod` | 2x RunPod 1x L40S (one pod per engine), 3.6 h each of a 6 h TTL | $7.92 | $13.21 | $40 |
+| `llama-3.3-70b-tp4-runpod` | 1x RunPod 4x L40S, 2.7 h of a 4 h TTL | $11.73 | $17.58 | $45 |
+| `runpod-smoke` | 1x RunPod 1x L40S, 13.5 min of a 40 min TTL, one job, no quality | $0.25 | $0.73 | $2 |
+
+The AWS specs stay as the secondary path:
+
 | Experiment | Host | Estimate | Worst case (TTL) | Cap |
 |---|---|---|---|---|
 | `qwen3-8b-vllm-vs-sglang` | 1x g6e.xlarge spot, 7.1 h of an 8 h TTL | $16.56 | $18.56 | $40 |
@@ -252,8 +278,6 @@ Estimates include cold starts, assume every searched point waits out its drain t
 and include each config's eval job (the suites' `phase0` subset: GSM8K, IFEval, tool
 calling, JSON schema, divergence and sanity; about 27 min per config) and the eval harness
 install. The full suites would take about 1.8 h per config and push the Qwen host past its
-TTL.
+TTL. RunPod and AWS run the same variants, workloads, SLO and quality subset on the same
+GPUs (L40S).
 
-Both specs target `aws_ec2` spot. With the account's GPU spot quota at 0, the real runs
-are planned on RunPod Secure Cloud on-demand (same GPUs, 1x and 4x L40S) once that
-provider is built ([PLAN.md](PLAN.md)); the estimates above are for the AWS hosts.

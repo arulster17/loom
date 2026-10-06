@@ -14,8 +14,8 @@ Commands below assume the repo root, region `us-east-1`, the default name prefix
 needs an admin identity.
 
 This is the `aws_ec2` path, now secondary for GPU benches: the account's GPU spot quota
-is 0, and the real runs are planned on RunPod once that provider is built
-([PLAN.md](PLAN.md)).
+is 0 (an increase is pending with AWS), and the real runs are on RunPod
+([runbook-runpod.md](runbook-runpod.md)).
 
 ## 1. Preflight checklist
 

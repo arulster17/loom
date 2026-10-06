@@ -2,7 +2,7 @@
 
 Implementations: `mock` (in-process simulated GPU), `local` (an endpoint you
 already run), `aws_ec2` (tagged spot/on-demand VM running the engine in Docker),
-`runpod` (one RunPod pod per engine image; in progress). A Phase 1 `k8s` provider
+`runpod` (one RunPod pod per engine image, driven over SSH). A Phase 1 `k8s` provider
 will reuse the Helm chart.
 
 Lifecycle per host: provision -> start_engine (cold) -> run jobs and evals ->

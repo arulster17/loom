@@ -7,7 +7,7 @@ Status: Phase 0 in progress. Later phases start only after the previous phase is
 | Decision | Choice | Why |
 |---|---|---|
 | Phase 0 GPU provisioning | EC2 spot + Docker, driven over SSM; instance self-terminates at TTL | Cheapest and fastest under the $150 cap; no EKS control plane or cluster spin-up. Providers are pluggable, so a k8s/Helm provider (Phase 1) makes EKS/GKE runs a config change. |
-| Phase 0 GPU provider (2026-10-05) | RunPod Secure Cloud on-demand: Qwen3-8B on 1x L40S, Llama 3.3 70B on 4x L40S. EC2 (`aws_ec2`) stays as the secondary path. The RunPod provider is planned, not built, and needs approval first. | The AWS GPU spot quota is 0. Secure Cloud over Community for steadier latency. AWS support is still needed later. |
+| Phase 0 GPU provider (2026-10-05) | RunPod Secure Cloud on-demand: Qwen3-8B on 1x L40S, Llama 3.3 70B on 4x L40S. The `runpod` provider is built (2026-10-06): one pod per engine image, driven over direct SSH, jobs as an unprivileged user, results through presigned S3 URLs ([runbook-runpod.md](runbook-runpod.md)). EC2 (`aws_ec2`) stays as the secondary path; a spot quota increase is pending with AWS. | The AWS GPU spot quota is 0. Secure Cloud over Community for steadier latency. AWS support is still needed later. |
 | Phase 0 region | AWS `us-east-1` | Deepest GPU capacity and spot pools; prices in `bench/prices.yaml`. |
 | License | Apache-2.0 | Permissive with patent grant; same as vLLM / SGLang. |
 
@@ -185,12 +185,19 @@ when the registry loads.
 ## Open questions
 
 Asked now:
-- ~~Provisioning approach~~ → EC2 spot + Docker; secondary for GPU benches since the AWS GPU spot quota came back 0 (RunPod Secure Cloud on-demand is the planned primary).
+- ~~Provisioning approach~~ → EC2 spot + Docker; secondary for GPU benches since the AWS GPU spot quota came back 0 (RunPod Secure Cloud on-demand is the primary; a quota increase is pending with AWS).
 - ~~License~~ → Apache-2.0.
 
 Needed later (will stop and ask when reached):
 1. ~~AWS account access and GPU spot quota~~ → account access is set up and `infra/aws/bench` is applied; the GPU spot quota is 0, so GPU benches move to RunPod (see Decisions).
-2. ~~Hugging Face token with the Llama 3.3 license accepted~~ → done. On AWS it is in Secrets Manager (`loom/hf-token`); on RunPod it is a RunPod secret ([security.md](security.md#runpod-planned-provider)). Never in the repo.
+2. ~~Hugging Face token with the Llama 3.3 license accepted~~ → done. On AWS it is in Secrets Manager (`loom/hf-token`); on RunPod it is a RunPod secret ([security.md](security.md#runpod-pods-runpod)). Never in the repo.
 3. Waitlist backend for the public results page: a form service (Formspree / Buttondown) or a small AWS Lambda writing to Postgres.
 4. Phase 1: confirm gateway language, ledger design and Stripe account before building.
-5. Approval to build the RunPod provider, and to codify the `loom-runpod-bench` IAM user (created with the CLI) in Terraform.
+5. ~~Approval to build the RunPod provider~~ → approved and built (2026-10-06).
+
+Later (RunPod hardening and follow-ups):
+- A scheduled RunPod reaper, e.g. a sweep in the AWS reaper Lambda with the RunPod key in Secrets Manager. Today the backstops are the in-pod TTL watchdog and a manual `bench reap`; a pod stuck before its container starts has no watchdog.
+- Codify the `loom-runpod-bench` IAM user (created with the CLI) in Terraform.
+- Run the engine as a non-root user in the pod; today it runs as root and can read the HF token and the pod-scoped key ([security.md](security.md#runpod-pods-runpod)).
+- Optionally pin both pods of a vLLM vs SGLang comparison to one datacenter (`provider.data_center_ids`); today RunPod chooses and the datacenter is recorded per run.
+- The AWS GPU spot quota increase is pending with AWS; when granted, the `aws_ec2` specs can run as well.

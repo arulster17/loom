@@ -18,7 +18,7 @@ no customer data: prompts are synthetic or come from public datasets.
   text (the script carries the secret's name, not its value), tags, logs or the engine
   container: weights are downloaded first and the engine runs with `HF_HUB_OFFLINE=1`.
   The host scripts must never use `set -x` (`aws_scripts/common.sh`).
-  RunPod differs; see [RunPod (planned provider)](#runpod-planned-provider).
+  RunPod differs; see [RunPod pods (`runpod`)](#runpod-pods-runpod).
 - **Engine launches carry no secrets**: `engines.docker_run_argv` refuses environment
   variable names containing `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL` or `KEY`.
 - **User-data** is readable by anyone who can describe the instance and contains only the
@@ -61,27 +61,96 @@ so the runner identity can act as the host role (including reading the HF token)
 managed instance. The launch statement allows any subnet in the region and the describe
 and command-tracking actions are not resource-scoped.
 
-## RunPod (planned provider)
+## RunPod pods (`runpod`)
 
-The AWS GPU spot quota is 0, so GPU benchmarks are planned on RunPod Secure Cloud
-on-demand. The RunPod provider is not built yet; this section records the security
-decisions made for it (2026-10-05) so they are not reopened.
+Since the AWS GPU spot quota is 0, GPU benchmarks run on RunPod Secure Cloud on-demand
+pods ([runbook-runpod.md](runbook-runpod.md)). The pod is the engine image's own
+container: there is no Docker inside it, and the engine, the bench client and the
+secrets RunPod injects share one container. The decisions below date from 2026-10-05/06
+so they are not reopened.
 
 - **No AWS credentials in pods.** As on AWS hosts, the runner presigns per-job S3 URLs
   ([below](#s3-and-presigned-urls)) and pods only GET inputs and PUT results through them.
-- **Accepted change: the HF token is in the pod environment.** It is a RunPod secret
-  injected into the pod's environment, so the engine process and any code running in the
-  pod can read it. On AWS it is fetched from Secrets Manager and never reaches the engine
+- **Accepted change: the HF token is in the pod environment.** The pod env sets
+  `HF_TOKEN` to the RunPod secret reference `{{ RUNPOD_SECRET_hf_token }}`
+  (`RunpodSettings.hf_secret_name`), which RunPod substitutes into PID 1's environment.
+  On AWS the token is fetched from Secrets Manager and never reaches the engine
   container. Accepted because fetching it from Secrets Manager would need AWS credentials
   in the pod, a larger exposure than a read token. Mitigations: the token is read-only
   and used only for model downloads; pods hold no AWS credentials; S3 access is through
-  presigned URLs only.
+  presigned URLs only. `providers/runpod_scripts/start_engine.sh` reads it from
+  `/proc/1/environ` as root and passes it only to the weight-download process; it is
+  never exported, written to disk, logged or given to the engine process.
+- **Accepted for now: the engine runs as root.** Its environment is PID 1's minus
+  `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, `PUBLIC_KEY`, `RUNPOD_*`, `LOOM_*`, `AWS_*` and
+  any name matching `TOKEN|SECRET|PASSWORD|CREDENTIAL|KEY`, and it is bound to
+  `127.0.0.1` with `HF_HUB_OFFLINE=1`. Being root, it can still read `/proc/1/environ`,
+  so the HF token and the pod-scoped `RUNPOD_API_KEY` are within its reach. This stays
+  inside the accepted HF-token change; a non-root engine is later hardening
+  ([PLAN.md](PLAN.md)).
+- **Job isolation.** Load jobs and evals run as uid 10001 (`loom`, no login shell)
+  through `setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs env -i`
+  with an allowlisted environment (`HOME`, `PATH`, `LANG`): no `HF_TOKEN`, `RUNPOD_*`,
+  `PUBLIC_KEY` or `AWS_*`. Only PID 1's owner (root) may read `/proc/1/environ`. Every
+  engine start checks that:
+  1. the job user cannot read `/proc/1/environ`;
+  2. the job user's environment carries no secret names (names only are printed);
+  3. no secret value (the HF token or the pod key) is stored under `/etc`, `/opt/loom`,
+     `/var/lib/loom`, `/tmp`, `/root` or `/var/log/loom` (the weights directory,
+     `/opt/loom/hf`, is excluded).
+
+  Any failure fails the engine start. On success it emits `loom-sys job_isolation ok`,
+  which lands in `engine_started.system.job_isolation` in the run's `events.jsonl`;
+  every job repeats check 1 before `bench` runs. The client runs on a pinned
+  python-build-standalone CPython (sha256-checked, `runpod_layout.CLIENT_PYTHON_*`) in
+  a virtualenv the job user cannot write; after each job every uid-10001 process is
+  killed.
+- **Limits of the isolation.** The offline tests (`bench/tests/runpod/`) run the pod
+  scripts against stub `setpriv`, `curl` and `nvidia-smi`; only a real pod proves the
+  kernel denies uid 10001 `/proc/1/environ`, which is why the smoke checklist requires
+  `job_isolation ok` ([runbook-runpod.md](runbook-runpod.md#smoke-test)). uid 10001 has
+  unfiltered network egress: the container has no `iptables`, unlike the AWS
+  load-generator rule. Model-written code from code evals still needs the sandbox caveats
+  [below](#code-execution-sandbox).
+- **SSH.** RunPod has no exec API, so the pod start command installs `openssh-server`
+  and the runner connects to the pod's mapped TCP 22 (`providers/runpod_ssh.py`). Each
+  provider instance (one `bench run`) generates its own ed25519 key in a 0700 temporary
+  directory, removed at exit and never written to results; its public key reaches the
+  pod as env `LOOM_SSH_PUBKEY`. With `authorize_account_key` (default true) the account's
+  registered key (`PUBLIC_KEY`) is also authorized, for debugging. sshd is key-only,
+  `AllowUsers root` (the job user cannot log in), no forwarding, and starts with an empty
+  environment. Host keys are trusted on first use (`StrictHostKeyChecking=accept-new`)
+  and pinned in a per-pod `known_hosts` file: a man-in-the-middle on the very first
+  connection would go unnoticed.
+- **Nothing secret in the pod spec.** Anyone with the account key can read a pod's env
+  and start command through the API, so the env holds only the HF secret reference,
+  `LOOM_*` values (`LOOM_MANAGED`, `LOOM_TTL`, experiment, owner) and the SSH public key,
+  and the start command no secrets and no URLs besides RunPod's GraphQL endpoint. A
+  validator rejects an `hf_secret_name` starting with `aws`. Presigned URLs reach the pod
+  only inside scripts sent on SSH stdin (`bash -s`), are written to a root-only control
+  directory removed once the output is read, and go to `curl` as a config on stdin, never
+  in argv (`/proc/<pid>/cmdline` is world-readable); URLs containing `"`, `\` or a
+  newline are refused before rendering.
 - **Fallback keys, not for pods.** A scoped IAM user, `loom-runpod-bench` (inline policy
   `loom-bench-bucket-only`: `s3:PutObject`/`GetObject` on the bench bucket's objects and
   `s3:ListBucket` on the bucket), has its keys stored as the RunPod secrets
   `aws_access_key_id` and `aws_secret_access_key`. They are an unused fallback: pod specs
   must not reference them. The user was created with the AWS CLI and is not yet in
   Terraform (to do).
+- **Lifetime: terminate, never stop.** A stopped pod keeps billing for its disk, so the
+  provider, the in-pod watchdog and the reaper only terminate. The pod start command arms
+  a TTL watchdog before anything else, at an absolute epoch (a container restart cannot
+  extend it); at the TTL it calls GraphQL `podTerminate` with the pod-scoped
+  `RUNPOD_API_KEY` and `RUNPOD_POD_ID` RunPod injects, read from its own environment,
+  retrying every 30 s. A pod whose setup fails terminates itself the same way.
+  `bench reap` terminates pods both named `{name_prefix}-…` and carrying
+  `LOOM_MANAGED=true` once past their TTL, or `EXITED`. There is no scheduled RunPod
+  reaper yet: if the runner dies, the backstops are the watchdog and a manual
+  `bench reap`, and a pod stuck before its container starts has no watchdog at all.
+- **API key.** The account key comes from `RUNPOD_API_KEY` or the macOS Keychain
+  (service `RUNPOD_API_KEY`), is sent only in the `Authorization` header and is redacted
+  from error text. `bench/tests/conftest.py` clears it (and `LOOM_RUNPOD_*`) for every
+  test, so no test reaches the real API.
 
 ## S3 and presigned URLs
 
@@ -92,10 +161,11 @@ decisions made for it (2026-10-05) so they are not reopened.
   `runs/<experiment id>/<run id>/`: GET for `job.json` and the wheel, PUT for
   `result.json` and `gpu.csv`. They expire after `presign_expiry_s` (default 6 h, at most
   7 days) or when the signing credentials expire, whichever is first.
-- The URLs are part of the script sent with `ssm:SendCommand`, so they are visible in
-  SSM Run Command history to anyone who can list commands until they expire. Until then
-  a holder could read the job and wheel or overwrite a result. The runner validates every
-  result against the `LoadJobResult` schema.
+- On `aws_ec2` the URLs are part of the script sent with `ssm:SendCommand`, so they are
+  visible in SSM Run Command history to anyone who can list commands until they expire.
+  On `runpod` they travel only over SSH (see above). Until a URL expires, a holder could
+  read the job and wheel or overwrite a result. The runner validates every result against
+  the `LoadJobResult` schema.
 
 ## Code-execution sandbox
 

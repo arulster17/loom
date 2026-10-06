@@ -7,10 +7,10 @@ has no inbound ports and no SSH keys. Everything below is done once per account.
 The whole Phase 0 budget is $150, at most $50 per experiment, so the steps put
 the safety rails up before the first GPU starts.
 
-This account's GPU spot quota is 0, so Phase 0 GPU benchmarks are planned on RunPod
-Secure Cloud on-demand instead (provider not built yet; see [PLAN.md](PLAN.md)). The
-EC2 path below stays as the secondary one, and `infra/aws/bench` is applied: RunPod runs
-use its S3 bucket through presigned URLs.
+This account's GPU spot quota is 0 (an increase is pending with AWS), so Phase 0 GPU
+benchmarks run on RunPod Secure Cloud on-demand instead
+([runbook-runpod.md](runbook-runpod.md)). The EC2 path below stays as the secondary one,
+and `infra/aws/bench` is applied: RunPod runs use its S3 bucket through presigned URLs.
 
 Region: `us-east-1` (prices in `bench/prices.yaml`).
 

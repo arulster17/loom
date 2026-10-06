@@ -99,7 +99,9 @@ once, half-up (`PriceBook.with_storage`):
 where 730 is `prices.HOURS_PER_MONTH`, the hours per month AWS uses to convert GB-month
 prices, and storage GB is the root volume the host ran with, recorded in the
 provenance's `price_basis.storage_gb` (max(`disk_gb`, `root_volume_gb` 200) on
-`aws_ec2`). us-east-1 storage is EBS gp3 at $0.08/GB-month, from the AWS price list.
+`aws_ec2`; the container disk, `container_disk_gb`, on `runpod`). us-east-1 storage is
+EBS gp3 at $0.08/GB-month, from the AWS price list; RunPod container disk is
+$0.10/GB-month, from RunPod's pricing docs.
 
 | Column | Instance price | Use |
 |---|---|---|
@@ -127,7 +129,8 @@ from:
 | `price_basis.source` | `hourly_micros` |
 |---|---|
 | `observed_spot` | the spot price of the host's AZ read at launch (`describe_spot_price_history`; `spot_price_usd`, `observed_at` and `availability_zone` are recorded) plus storage |
-| `prices_yaml` | an on-demand host: `on_demand_per_hour` plus storage, the same as its on-demand column |
+| `observed_api` | a RunPod pod: the `costPerHr` its create (or first read) returned, plus container disk; `observed_at` and the datacenter (`availability_zone`) are recorded |
+| `prices_yaml` | an on-demand host: `on_demand_per_hour` plus storage, the same as its on-demand column (also a RunPod pod whose API returned no price) |
 | `experiment` | a mock or local host's declared price |
 | `unobserved` | none: a spot host in an AZ with no spot price to read; its as-run cost is unknown |
 
@@ -156,6 +159,11 @@ gives each host an accrual rate, `Host.hourly_micros`:
   on-demand rate;
 - on-demand: `on_demand_per_hour`;
 - plus the root EBS volume: ⌈`per_gb_month` × volume GB / 730⌉.
+
+`providers/runpod.py` accrues a pod at the larger of its API `costPerHr` and
+`on_demand_per_hour`, plus the container disk the same way, and terminates a pod whose
+API price is above `on_demand_per_hour` × `RunpodSettings.max_price_ratio` (1.25) before
+any work. The raw values are in the host's `accrual_basis`.
 
 The multiplier keeps recorded spend above the real bill, since spot prices move during a
 run; it stays inside accrual and never reaches a reported cost. The planner estimates

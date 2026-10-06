@@ -8,10 +8,10 @@ $/1M tokens at an SLO, with confidence intervals and full provenance for every n
 Phase 1 (gateway, billing, dashboard) is planned in [docs/PLAN.md](docs/PLAN.md).
 
 **Status:** Phase 0 is built and runs end to end on the mock backend. The first GPU runs
-(Qwen3-8B vLLM vs SGLang on 1x L40S, Llama 3.3 70B TP=4 on 4x L40S) are planned on
-RunPod Secure Cloud, because the AWS GPU spot quota is 0. The RunPod provider is not
-built yet (the EC2 provider stays as the secondary path); no measured results are
-published yet.
+(Qwen3-8B vLLM vs SGLang on 1x L40S, Llama 3.3 70B TP=4 on 4x L40S) run on RunPod
+Secure Cloud, because the AWS GPU spot quota is 0; the RunPod provider is built and its
+smoke test is next (the EC2 provider stays as the secondary path). No measured results
+are published yet.
 
 ## Quick start (no GPU, no cloud)
 
@@ -31,7 +31,8 @@ gives the default results database instead of SQLite (unset `LOOM_DATABASE_URL`)
 ## Docs
 
 [docs/README.md](docs/README.md) indexes everything: architecture, local development,
-running experiments, the quality gate, the cost model, AWS setup and runbook, security,
-and how to add a model, engine, GPU type, workload profile or eval task.
+running experiments, the quality gate, the cost model, the RunPod runbook, AWS setup and
+runbook, security, and how to add a model, engine, GPU type, workload profile or eval
+task.
 
 Licensed under Apache-2.0.

@@ -17,7 +17,8 @@
 ## Operations
 
 - [aws-setup.md](aws-setup.md): one-time AWS account setup: quotas, HF token secret, Terraform, runner policy, settings.
-- [runbook.md](runbook.md): GPU runs: preflight, monitoring spend, incidents, reproducing, publishing, teardown.
+- [runbook-runpod.md](runbook-runpod.md): GPU runs on RunPod (the primary path): preflight, monitoring spend, incidents, teardown checks, smoke test.
+- [runbook.md](runbook.md): GPU runs on AWS: preflight, monitoring spend, incidents, reproducing, publishing, teardown.
 - [security.md](security.md): Phase 0 security measures and their limits; Phase 1 requirements.
 
 ## Reference (how to add ...)

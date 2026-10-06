@@ -32,7 +32,7 @@ flowchart TD
     B[bench/budget.yaml] --> P
     P -->|refusals: exit 3| X[stop, nothing created]
     P --> G[budget.BudgetGuard<br/>accrues spend, trips at cap]
-    G --> V[providers.make_provider<br/>mock / local / aws_ec2]
+    G --> V[providers.make_provider<br/>mock / local / aws_ec2 / runpod]
     V --> H[provision Host]
     H --> S[start_engine<br/>engines.render_launch]
     S --> J[LoadJob per load point x repetition]
@@ -57,8 +57,10 @@ Step by step (`runner.run_experiment`):
    `config_hash` is the sha256 of the canonical JSON of
    `{model, launch, hardware}` and identifies the setup across experiments.
 2. **Plan** (`plan.build_plan`). Cells with the same hardware share one host (cold start
-   once, warm restarts between configs). Every step gets a time estimate (assumptions in
-   `plan.AWS_TIMING`, `MOCK_*`, `ASSUMED_*`), priced at the host's hourly rate. The plan
+   once, warm restarts between configs); on `runpod` the engine image is part of the
+   hardware, so each image gets its own pod and its own cold start. Every step gets a
+   time estimate (assumptions in `plan.AWS_TIMING`, `RUNPOD_TIMING`, `MOCK_*`,
+   `ASSUMED_*`), priced at the host's hourly rate. The plan
    is refused (exit 3, nothing created) when the estimate, or every host living to its
    TTL, exceeds the effective cap, or a host's time exceeds its TTL.
 3. **Budget guard** (`budget.BudgetGuard`). Accrues `Σ host.hourly_micros × elapsed` into
@@ -76,8 +78,10 @@ Step by step (`runner.run_experiment`):
 7. **Quality** (optional). After a cell's workloads, `quality.runner.run_suite` runs the
    pinned suite on the live endpoint; non-baseline cells are gated against the baseline
    cell (`gate_against_baseline`). Stored in `bench_eval_runs`, `bench_gate_decisions`.
-   There is no eval job type: suites run from the runner process, which is why the planner
-   refuses `quality:` on `aws_ec2` (the endpoint listens on the host's loopback).
+   The suite is an `EvalJob` run by `provider.run_eval`: in-process for `mock` and
+   `local`, as `bench quality job` on the GPU host for `aws_ec2` and `runpod` (the
+   endpoint listens on loopback there). The baseline may sit on another host: on
+   `runpod`, SGLang is gated against vLLM across two pods.
 8. **Teardown** always runs (`finally`), also on Ctrl-C and budget aborts.
 9. **Analyse** (`report.analyze_runs`). Groups completed runs by
    `(config_hash, workload, load_mode)`, aggregates repetitions per load point, finds
@@ -95,7 +99,7 @@ Step by step (`runner.run_experiment`):
 | `budget.py` | Caps and `BudgetGuard` |
 | `runner.py` | Orchestration, provenance assembly, spot retry, `reproduce`, `reap` |
 | `engines.py` | `ModelSpec` → `EngineLaunch` (vLLM / SGLang argv) → `docker run` |
-| `providers/` | `base.py` contract; `mock.py`, `local.py`, `aws_ec2.py` (+ `aws_ssm.py`, `aws_scripts/*.sh`, `aws_reaper.py`) |
+| `providers/` | `base.py` contract; `mock.py`, `local.py`, `aws_ec2.py` (+ `aws_ssm.py`, `aws_scripts/*.sh`, `aws_reaper.py`), `runpod.py` (+ `runpod_api.py`, `runpod_ssh.py`, `runpod_layout.py`, `runpod_scripts/*.sh`, `runpod_reaper.py`) |
 | `jobs.py`, `jobexec.py` | `LoadJob` / `LoadJobResult` and their execution |
 | `loadgen/` | `native` driver, arrivals, wrappers for `vllm bench serve` and `sglang.bench_serving` |
 | `client/openai_stream.py` | Streaming OpenAI client with per-chunk timestamps |
@@ -124,9 +128,9 @@ generator produced the load.
 endpoint: base URL, metrics URL, engine name (selects the Prometheus name map), served
 model, load generator key, the resolved workload, tokenizer spec, load mode and value,
 arrival spec, durations, timeouts, seed, `extra_body`. It round-trips through JSON: the
-mock and local providers execute it in-process; `aws_ec2` uploads it to S3 and runs
-`bench job run --in job.json --out result.json` on the GPU host, so measured latency has
-no WAN hop. A `LoadJobResult` carries the records, the measurement window, the raw
+mock and local providers execute it in-process; `aws_ec2` and `runpod` upload it to S3
+and run `bench job run --in job.json --out result.json` on the GPU host, so measured
+latency has no WAN hop. A `LoadJobResult` carries the records, the measurement window, the raw
 `/metrics` scrapes, optional `nvidia-smi` CSV and `timeline` (`measured`, or
 `unavailable` for a tool that reports no send times).
 
@@ -136,8 +140,8 @@ no WAN hop. A `LoadJobResult` carries the records, the measurement window, the r
 `reap(now)`. A `Host` reports the spend inputs (`hourly_micros`, the accrual rate, market,
 launch time, `ttl_at`); the guard decides when to abort. It also carries its as-run cost
 price and basis (`as_run_micros`, `price_basis`, no safety multiplier), which the runner
-writes into every run's provenance. Every host gets a TTL; mock and EC2 hosts are
-recorded in `bench_resources` so the reaper can find them. Losing a host raises
+writes into every run's provenance. Every host gets a TTL; mock hosts, EC2 instances and
+RunPod pods are recorded in `bench_resources` so the reaper can find them. Losing a host raises
 `HostLost`, or `SpotInterrupted` for a spot reclaim. An `Endpoint` returns the base URL,
 metrics URL, cold/warm start stage timings and system info (GPU names, driver, CUDA,
 image digest).
@@ -147,6 +151,7 @@ image digest).
 | `mock` | in-process uvicorn thread | `loom_bench.mock` (simulated GPU) | runner process | simulated (`hourly_price`; unpriced without it), never counts toward the overall cap |
 | `local` | an endpoint you already run | not started or stopped; one cell only | runner process | no (market `local`); priced in reports only if the experiment sets `hourly_price` |
 | `aws_ec2` | one tagged EC2 GPU VM (DLAMI, Docker) driven over SSM | engine container from the registry image | client container on the host (`python:3.12-slim` by digest, locked dependencies) | yes: spot × multiplier or on-demand, plus root EBS |
+| `runpod` | one RunPod Secure Cloud on-demand pod per engine image, driven over direct SSH | engine process in the pod's own container (the registry image), on loopback | same container, as uid 10001, pinned python-build-standalone + locked dependencies | yes: max(API `costPerHr`, prices.yaml on-demand), plus container disk |
 
 **Registry** (`registry.py`). `config/models.yaml` is the single source of model
 configuration. Experiments never bypass it: a variant patches a registry entry and the
@@ -183,7 +188,7 @@ docker-compose Postgres); SQLite URLs work for local use.
 | Goodput via load sweep, max sustainable concurrency | `slo.find_goodput`, `slo.bisect_next_load`, `runner._run_workload` |
 | Repetitions, CIs, run-to-run CV | `metrics/aggregate.py`, `stats.py` |
 | Server queue time, preemptions, KV-cache use, prefix-cache hit rate | `metrics/prometheus.py` (`ENGINE_METRICS`) |
-| GPU utilization, memory, power | `metrics/gpu.py`; sampled by `providers/aws_scripts/run_job.sh` |
+| GPU utilization, memory, power | `metrics/gpu.py`; sampled by `providers/aws_scripts/run_job.sh` and `providers/runpod_scripts/run_job.sh` |
 | Cold and warm start stages | provider `start_engine` → `bench_cold_starts` (`runner._run_cell`) |
 | Spot interruptions | `SpotInterrupted` → run status `interrupted`, `events.jsonl` |
 | $/1M tokens at SLO with CIs | `cost.py`, `report/analyze.py` ([cost-model.md](cost-model.md)) |
@@ -217,7 +222,7 @@ schema and open decisions are in [PLAN.md](PLAN.md). How it attaches to Phase 0:
   cannot drift.
 - **Billing**: usage events and a double-entry ledger in the same Postgres; Phase 0
   tables are untouched.
-- **k8s provider**: a fourth implementation of `providers/base.Provider` that deploys the
+- **k8s provider**: another implementation of `providers/base.Provider` that deploys the
   shared Helm chart, so EKS/GKE benchmarks become an experiment `provider.kind`.
   `hardware.nodes_per_replica > 1` is rejected until multi-node serving exists.
 - **Production cost validation**: Prometheus cost-per-1M-tokens served, compared with the
