@@ -4,6 +4,9 @@
 #
 # Each workload bisects the open-loop rate for the highest load meeting the SLO,
 # 3 repetitions per point. Image digests: research notes of 2026-10-04.
+#
+# AWS path (secondary): the account's GPU spot quota is 0, so the real run is
+# planned on RunPod Secure Cloud (1x L40S) once that provider is built.
 name: qwen3-8b-vllm-vs-sglang
 description: Qwen3-8B BF16 on g6e.xlarge spot, vLLM v0.30.0 vs SGLang v0.5.21, rate sweeps at SLO.
 model: qwen3-8b

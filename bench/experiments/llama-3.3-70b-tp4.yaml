@@ -2,6 +2,8 @@
 # g6e.12xlarge spot host (4x L40S, PCIe), vLLM v0.30.0 at defaults. Fewer points
 # than the Qwen run: the 70B download dominates the cold start and the host is
 # ~4.4x the price. Needs an HF token with the Llama 3.3 license accepted.
+# AWS path (secondary): the account's GPU spot quota is 0, so the real run is
+# planned on RunPod Secure Cloud (4x L40S) once that provider is built.
 name: llama-3.3-70b-tp4
 description: Llama 3.3 70B BF16, TP=4 on g6e.12xlarge spot, vLLM v0.30.0, rate sweeps at SLO.
 model: llama-3.3-70b-instruct

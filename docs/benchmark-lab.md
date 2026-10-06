@@ -252,3 +252,7 @@ and include each config's eval job (the suites' `phase0` subset: GSM8K, IFEval, 
 calling, JSON schema, divergence and sanity; about 27 min per config) and the eval harness
 install. The full suites would take about 1.8 h per config and push the Qwen host past its
 TTL.
+
+Both specs target `aws_ec2` spot. With the account's GPU spot quota at 0, the real runs
+are planned on RunPod Secure Cloud on-demand (same GPUs, 1x and 4x L40S) once that
+provider is built ([PLAN.md](PLAN.md)); the estimates above are for the AWS hosts.

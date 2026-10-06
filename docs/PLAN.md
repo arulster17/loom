@@ -7,6 +7,7 @@ Status: Phase 0 in progress. Later phases start only after the previous phase is
 | Decision | Choice | Why |
 |---|---|---|
 | Phase 0 GPU provisioning | EC2 spot + Docker, driven over SSM; instance self-terminates at TTL | Cheapest and fastest under the $150 cap; no EKS control plane or cluster spin-up. Providers are pluggable, so a k8s/Helm provider (Phase 1) makes EKS/GKE runs a config change. |
+| Phase 0 GPU provider (2026-10-05) | RunPod Secure Cloud on-demand: Qwen3-8B on 1x L40S, Llama 3.3 70B on 4x L40S. EC2 (`aws_ec2`) stays as the secondary path. The RunPod provider is planned, not built, and needs approval first. | The AWS GPU spot quota is 0. Secure Cloud over Community for steadier latency. AWS support is still needed later. |
 | Phase 0 region | AWS `us-east-1` | Deepest GPU capacity and spot pools; prices in `bench/prices.yaml`. |
 | License | Apache-2.0 | Permissive with patent grant; same as vLLM / SGLang. |
 
@@ -184,11 +185,12 @@ when the registry loads.
 ## Open questions
 
 Asked now:
-- ~~Provisioning approach~~ → EC2 spot + Docker.
+- ~~Provisioning approach~~ → EC2 spot + Docker; secondary for GPU benches since the AWS GPU spot quota came back 0 (RunPod Secure Cloud on-demand is the planned primary).
 - ~~License~~ → Apache-2.0.
 
 Needed later (will stop and ask when reached):
-1. AWS account access for Phase 0 runs (IAM user or SSO profile), and GPU spot quota of at least 48 vCPUs for "All G and VT Spot Instance Requests" in us-east-1. Quota approval can take days, so requesting it early helps.
-2. Hugging Face token with the Llama 3.3 license accepted (stored in AWS Secrets Manager, never in the repo).
+1. ~~AWS account access and GPU spot quota~~ → account access is set up and `infra/aws/bench` is applied; the GPU spot quota is 0, so GPU benches move to RunPod (see Decisions).
+2. ~~Hugging Face token with the Llama 3.3 license accepted~~ → done. On AWS it is in Secrets Manager (`loom/hf-token`); on RunPod it is a RunPod secret ([security.md](security.md#runpod-planned-provider)). Never in the repo.
 3. Waitlist backend for the public results page: a form service (Formspree / Buttondown) or a small AWS Lambda writing to Postgres.
 4. Phase 1: confirm gateway language, ledger design and Stripe account before building.
+5. Approval to build the RunPod provider, and to codify the `loom-runpod-bench` IAM user (created with the CLI) in Terraform.

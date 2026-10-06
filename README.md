@@ -8,8 +8,10 @@ $/1M tokens at an SLO, with confidence intervals and full provenance for every n
 Phase 1 (gateway, billing, dashboard) is planned in [docs/PLAN.md](docs/PLAN.md).
 
 **Status:** Phase 0 is built and runs end to end on the mock backend. The first GPU runs
-(Qwen3-8B vLLM vs SGLang on `g6e.xlarge`, Llama 3.3 70B TP=4 on `g6e.12xlarge`) are
-pending AWS access; no measured results are published yet.
+(Qwen3-8B vLLM vs SGLang on 1x L40S, Llama 3.3 70B TP=4 on 4x L40S) are planned on
+RunPod Secure Cloud, because the AWS GPU spot quota is 0. The RunPod provider is not
+built yet (the EC2 provider stays as the secondary path); no measured results are
+published yet.
 
 ## Quick start (no GPU, no cloud)
 

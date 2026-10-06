@@ -9,14 +9,16 @@ no customer data: prompts are synthetic or come from public datasets.
 - **None in the repository.** `.gitignore` excludes `.env*`, `*.tfstate*` and
   `*.tfvars`; `bench/tests/aws/test_terraform.py` fails on account ids or secrets in the
   Terraform. Terraform state is local to whoever applied it.
-- **Hugging Face token** lives only in AWS Secrets Manager (`loom/hf-token`, plain
-  string). Only the GPU host's instance role may read it (`GetSecretValue` on that one
-  secret ARN); the runner policy cannot. `providers/aws_scripts/start_engine.sh` reads it
-  on the host during a cold start, exports it only in that shell, passes it by name to the
-  short-lived download container, and unsets it. It is never in user-data, SSM command
+- **Hugging Face token** (`aws_ec2`) lives only in AWS Secrets Manager
+  (`loom/hf-token`, plain string). Only the GPU host's instance role may read it
+  (`GetSecretValue` on that one secret ARN); the runner policy cannot.
+  `providers/aws_scripts/start_engine.sh` reads it on the host during a cold start,
+  exports it only in that shell, passes it by name to the short-lived download container,
+  and unsets it. It is never in user-data, SSM command
   text (the script carries the secret's name, not its value), tags, logs or the engine
   container: weights are downloaded first and the engine runs with `HF_HUB_OFFLINE=1`.
   The host scripts must never use `set -x` (`aws_scripts/common.sh`).
+  RunPod differs; see [RunPod (planned provider)](#runpod-planned-provider).
 - **Engine launches carry no secrets**: `engines.docker_run_argv` refuses environment
   variable names containing `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL` or `KEY`.
 - **User-data** is readable by anyone who can describe the instance and contains only the
@@ -58,6 +60,28 @@ Limits worth knowing: `ssm:SendCommand` with `AWS-RunShellScript` is root on ben
 so the runner identity can act as the host role (including reading the HF token) on a
 managed instance. The launch statement allows any subnet in the region and the describe
 and command-tracking actions are not resource-scoped.
+
+## RunPod (planned provider)
+
+The AWS GPU spot quota is 0, so GPU benchmarks are planned on RunPod Secure Cloud
+on-demand. The RunPod provider is not built yet; this section records the security
+decisions made for it (2026-10-05) so they are not reopened.
+
+- **No AWS credentials in pods.** As on AWS hosts, the runner presigns per-job S3 URLs
+  ([below](#s3-and-presigned-urls)) and pods only GET inputs and PUT results through them.
+- **Accepted change: the HF token is in the pod environment.** It is a RunPod secret
+  injected into the pod's environment, so the engine process and any code running in the
+  pod can read it. On AWS it is fetched from Secrets Manager and never reaches the engine
+  container. Accepted because fetching it from Secrets Manager would need AWS credentials
+  in the pod, a larger exposure than a read token. Mitigations: the token is read-only
+  and used only for model downloads; pods hold no AWS credentials; S3 access is through
+  presigned URLs only.
+- **Fallback keys, not for pods.** A scoped IAM user, `loom-runpod-bench` (inline policy
+  `loom-bench-bucket-only`: `s3:PutObject`/`GetObject` on the bench bucket's objects and
+  `s3:ListBucket` on the bucket), has its keys stored as the RunPod secrets
+  `aws_access_key_id` and `aws_secret_access_key`. They are an unused fallback: pod specs
+  must not reference them. The user was created with the AWS CLI and is not yet in
+  Terraform (to do).
 
 ## S3 and presigned URLs
 
