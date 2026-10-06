@@ -281,7 +281,7 @@ The real runs are on RunPod Secure Cloud on-demand, since the AWS GPU spot quota
 |---|---|---|---|---|
 | `qwen3-8b-vllm-vs-sglang-runpod` | 2x RunPod 1x L40S (one pod per engine), 3.6 h each of a 6 h TTL | $7.92 | $13.21 | $15 |
 | `llama-3.3-70b-tp4-runpod` | 1x RunPod 4x L40S, 2.7 h of a 4 h TTL | $11.73 | $17.58 | $45 |
-| `runpod-smoke` | 2x RunPod 1x L40S (the Qwen sweep at smoke scale), 31 min each of a 40 min TTL | $1.15 | $1.47 | $1.50 |
+| `runpod-smoke` | 2x RunPod 1x L40S (the Qwen sweep at smoke scale), 37 min each of a 47 min TTL | $1.35 | $1.72 | $1.75 |
 
 The AWS specs stay as the secondary path:
 

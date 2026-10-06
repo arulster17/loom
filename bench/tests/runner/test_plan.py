@@ -93,10 +93,10 @@ def test_runpod_experiments_fit_their_caps_with_ttl_margin(path, pods):
         assert host.seconds < 0.8 * host.ttl_s  # each pod finishes well inside its TTL
 
 
-def test_runpod_smoke_stays_under_a_dollar_fifty_even_to_ttl():
+def test_runpod_smoke_stays_under_a_dollar_seventy_five_even_to_ttl():
     plan = _plan(load_experiment(RUNPOD_SMOKE))
     assert plan.ok, plan.refusals
-    assert plan.caps.effective == parse_usd("$1.50")
+    assert plan.caps.effective == parse_usd("$1.75")
     assert plan.ttl_worst_micros <= plan.caps.effective  # both pods to their TTL
     assert plan.n_cells == 2 and len(plan.hosts) == 2  # one pod per engine image
     for host in plan.hosts:
@@ -138,7 +138,9 @@ def test_runpod_smoke_covers_every_code_path_of_the_real_qwen_sweep():
     assert smoke.model == real.model and smoke.provider == real.provider
     assert smoke.variants == real.variants  # both engines, same images by digest
     assert _load_shape(smoke) == _load_shape(real)  # profiles, load modes, search scale
-    assert smoke.repetitions >= 2  # aggregation and confidence intervals, as in the sweep
+    # Same repetitions: the pass verdict's CI uses t with reps-1 degrees of freedom, and
+    # at 2 reps (t ~ 12.7) every point failed, so smoke 51ad57b0 never ran the climb.
+    assert smoke.repetitions == real.repetitions
     assert smoke.slo == real.slo
     assert smoke.quality is not None and real.quality is not None
     assert (smoke.quality.suite, smoke.quality.subset, smoke.quality.baseline_variant) == (

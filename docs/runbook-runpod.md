@@ -99,7 +99,7 @@ Run through all of it before every real run.
   Check "estimated spend" and "worst case (all hosts to TTL)" against "effective cap".
   The hourly rate per pod is prices.yaml's on-demand price plus container disk; at run
   time the guard accrues the larger of that and the pod's API `costPerHr`. Expected
-  today: `runpod-smoke` $1.15 estimate, $1.47 worst case, $1.50 cap (two pods);
+  today: `runpod-smoke` $1.35 estimate, $1.72 worst case, $1.75 cap (two pods);
   `qwen3-8b-vllm-vs-sglang-runpod` $7.92, $13.21, $15 (two pods, one per engine);
   `llama-3.3-70b-tp4-runpod` $11.73, $17.58, $45. Exit 3 means refused: lower the load
   points or `budget.ttl_minutes`, never the caps.
@@ -235,9 +235,12 @@ sweep finishes.
 (`qwen3-8b-vllm-vs-sglang-runpod`) at smoke scale, so every code path the sweep uses runs
 once before the sweep pays for hours: both engine images by the same digests (one Secure
 1× L40S pod each), the same three workload profiles under the same geometric rate search
-(2 points × 2 repetitions, 10 s windows), the same quality subset with every task capped
-at 4 items (`quality.limit`), divergence capture, noise floor and scoring, and the
-SGLang-vs-vLLM gate. `max_spend: "$1.50"`, TTL 40 min per pod (worst case $1.47).
+(2 points with a 1-step descent, 10 s windows) and the same 3 repetitions, the same
+quality subset with every task capped at 4 items (`quality.limit`), divergence capture,
+noise floor and scoring, and the SGLang-vs-vLLM gate. `max_spend: "$1.75"`, TTL 47 min per
+pod (worst case $1.72). The repetitions must match: the pass verdict's CI upper bound
+uses t with reps-1 degrees of freedom, and at 2 reps (t ≈ 12.7) smoke 51ad57b0 failed
+every first point, so the climb never ran.
 `bench/tests/runner/test_plan.py` fails if the smoke and the real spec drift apart. It is
 `smoke: true`: left out of default reports and the results site, since its cells share
 config hashes with the real ones. The old smoke ran vLLM only with no eval, and the first
@@ -256,8 +259,10 @@ Checklist:
 
 - [ ] `events.jsonl` has an `engine_started` event with `system.job_isolation == "ok"`
   for both pods (vLLM and SGLang).
-- [ ] Each workload ran its two search points, and the experiment ended `completed` with
-  exit 0 (exit 8 means a run or an eval failed: read the reason).
+- [ ] Each workload ran a second search point (a climb if `lo` passed, a descent if it
+  failed), every load run is ok, and the experiment ended `completed` with exit 0 (exit 8
+  means a run or an eval failed: read the reason). Goodput may come out empty at smoke
+  scale; the search path running is what counts.
 - [ ] Both cells have a `quality` event naming gsm8k, ifeval, tool_calling and
   json_schema, there is no `quality_failed` event, `reference_captured` has a
   `self_divergence`, and SGLang has a `gate` event (inconclusive at 4 items is expected).
