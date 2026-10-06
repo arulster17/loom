@@ -100,8 +100,9 @@ What happens: the plan prints again and is re-checked; one spot host is launched
 cheapest AZ; user-data arms the TTL shutdown; the start script pulls the image,
 downloads weights at the pinned revision with the HF token, starts the engine and waits
 for one token; each load point × repetition runs as a `bench job run` on the host; the
-host is terminated at the end, also on errors and Ctrl-C. Exit codes: 0 ok, 1 failed,
-3 refused, 4 stopped before a step that would pass the cap, 5 hard budget abort.
+host is terminated at the end, also on errors and Ctrl-C. Exit codes: 0 ok, 1 failed
+(including every run failing), 3 refused, 4 stopped before a step that would pass the cap,
+5 hard budget abort, 8 finished but some runs failed.
 
 Run one experiment at a time. Each plan assumes the remaining overall budget is its own;
 the guard still trips when spend across all experiments reaches the overall cap, but two

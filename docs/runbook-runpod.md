@@ -124,8 +124,8 @@ What happens, per engine image (each image gets its own pod):
    Quality suites run there too, as `bench quality job`.
 5. The pod is terminated at the end, also on errors and Ctrl-C.
 
-Exit codes: 0 ok, 1 failed, 3 refused, 4 stopped before a step that would pass the cap,
-5 hard budget abort. Run one experiment at a time, as on AWS.
+Exit codes: 0 ok, 1 failed (including every run failing), 3 refused, 4 stopped before a
+step that would pass the cap, 5 hard budget abort, 8 finished but some runs failed. Run one experiment at a time, as on AWS.
 
 ## 3. Monitoring
 

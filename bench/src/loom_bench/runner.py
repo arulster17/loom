@@ -5,7 +5,8 @@ per cell (warm restart between configs): per workload, load points (fixed or
 bisected on the SLO) x repetitions -> LoadJob -> provider.run_job -> Parquet +
 summary + provenance -> EvalJob -> provider.run_eval (the baseline variant
 captures the divergence reference; every other cell is scored against it and
-gated against the baseline) -> teardown (always) -> completed.
+gated against the baseline) -> teardown (always) -> completed, or failed when every
+load run failed (`judge_runs`).
 
 Warmup is excluded from every summary and each load point is repeated; a single
 repetition is never trusted (see `metrics.aggregate`).
@@ -18,6 +19,7 @@ import functools
 import json
 import logging
 import uuid
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -126,6 +128,7 @@ EXIT_FAILED = 1
 EXIT_REFUSED = 3
 EXIT_BUDGET_STOP = 4
 EXIT_BUDGET_ABORT = 5
+EXIT_RUNS_FAILED = 8  # finished, but some load runs failed
 
 RUN_COMPLETED = "completed"
 RUN_FAILED = "failed"
@@ -285,6 +288,7 @@ class _Executor:
         self.recorded: set[str] = set()
         self.done: dict[tuple[str, str, float, int], RunSummary] = {}
         self.run_ids: list[uuid.UUID] = []
+        self.run_statuses: Counter[str] = Counter()
         self.goodput: list[GoodputRow] = []
         self.events: list[dict[str, Any]] = []
         self.suite = exp.quality.load() if exp.quality is not None else None
@@ -803,6 +807,7 @@ class _Executor:
                 finished_at=_now(),
             )
         self.run_ids.append(run_id)
+        self.run_statuses[status] += 1
 
     async def _run_once(
         self,
@@ -872,6 +877,27 @@ class _Executor:
 
 def _fmt(v: float | None) -> str:
     return "-" if v is None else f"{v:.1f}"
+
+
+def judge_runs(statuses: Counter[str]) -> tuple[ExperimentStatus, str | None, int]:
+    """The outcome of an experiment that ran to the end, from its load runs' statuses.
+
+    Every run failed: `failed`. Some failed: `completed`, with the count as the reason and
+    a non-zero exit, so a sweep with holes never looks finished. Reports only use
+    completed runs either way.
+    """
+    total = sum(statuses.values())
+    bad = total - statuses[RUN_COMPLETED]
+    if bad == 0:
+        return ExperimentStatus.COMPLETED, None, EXIT_OK
+    detail = ", ".join(f"{n} {s}" for s, n in sorted(statuses.items()) if s != RUN_COMPLETED)
+    if bad == total:
+        return ExperimentStatus.FAILED, f"all {total} runs failed ({detail})", EXIT_FAILED
+    return (
+        ExperimentStatus.COMPLETED,
+        f"{bad} of {total} runs failed ({detail})",
+        EXIT_RUNS_FAILED,
+    )
 
 
 def _finish(
@@ -983,6 +1009,8 @@ async def _execute(
         await guard.stop()
     if guard.tripped.is_set() and status is ExperimentStatus.COMPLETED:
         status, reason, code = ExperimentStatus.ABORTED, guard.reason, EXIT_BUDGET_ABORT
+    if status is ExperimentStatus.COMPLETED:
+        status, reason, code = judge_runs(ex.run_statuses)
     spent = _finish(ctx, experiment_id, status, reason)
     if interrupted is not None:
         raise interrupted
