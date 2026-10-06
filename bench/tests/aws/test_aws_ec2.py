@@ -4,12 +4,14 @@ import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import boto3
 import pytest
 
 from loom_bench.engines import render_launch
+from loom_bench.experiment import expand, load_experiment
 from loom_bench.jobs import (
     EvalJob,
     EvalJobResult,
@@ -19,7 +21,7 @@ from loom_bench.jobs import (
     TokenizerSpec,
 )
 from loom_bench.prices import load_prices
-from loom_bench.provenance import PriceBasis
+from loom_bench.provenance import GitInfo, PriceBasis, build_provenance
 from loom_bench.providers import export_requirements
 from loom_bench.providers.aws_ec2 import (
     CLIENT_IMAGE,
@@ -37,12 +39,14 @@ from loom_bench.quality.sanity import SanityResult
 from loom_bench.quality.suite import Suite
 from loom_bench.quality.tasks.base import ItemResult
 from loom_bench.records import LoadMode, Market
-from loom_bench.registry import load_registry
+from loom_bench.registry import REPO_ROOT, load_registry
+from loom_bench.runner import _Executor
 
 from .conftest import REGION, amazon_ami, state
 from .fakes import FakeSsm, Proxy, client_error, no_sleep
 
 DLAMI_PARAM = "/loom/test/dlami"
+QWEN_EXPERIMENT = REPO_ROOT / "bench/experiments/qwen3-8b-vllm-vs-sglang.yaml"
 G6E_XLARGE_ON_DEMAND = 1_861_000
 # 200 GB gp3 at $0.08/GB-month over 730 h = 21_917.8 micros/h, rounded up.
 EBS_200GB = 21_918
@@ -345,8 +349,8 @@ def engine_stdout(t0: float) -> str:
         f"loom-stage engine_healthy {t0 + 250}",
         f"loom-stage first_token {t0 + 250.4}",
         "loom-sys gpus NVIDIA L40S",
-        "loom-sys driver 595.91.07",
-        "loom-sys cuda 13.2",
+        "loom-sys driver_version 595.91.07",
+        "loom-sys cuda_version 13.2",
         "loom-sys image_digest vllm/vllm-openai@sha256:" + "a" * 64,
     ]
     return "\n".join(lines) + "\n"
@@ -378,8 +382,9 @@ async def test_start_engine_cold_reports_stages_and_system(aws: dict[str, Any]) 
     assert {"instance_running", "ssm_online"} <= ep.start_stages.keys()
     assert list(ep.start_stages)[-1] == "first_token"
     assert ep.system["gpus"] == ["NVIDIA L40S"]
-    assert ep.system["driver"] == "595.91.07"
-    assert ep.system["cuda"] == "13.2"
+    assert ep.system["driver_version"] == "595.91.07"
+    assert ep.system["cuda_version"] == "13.2"
+    assert ep.system["gpu_count"] == 1
     assert ep.system["image_digest"].endswith("a" * 64)
     assert ep.system["instance_type"] == "g6e.xlarge"
 
@@ -391,6 +396,36 @@ async def test_start_engine_cold_reports_stages_and_system(aws: dict[str, Any]) 
     assert sent["InstanceIds"] == [host.host_id]
     assert sent["Parameters"]["executionTimeout"] == [str(1800 + 3600)]
     assert sent["OutputS3KeyPrefix"] == f"ssm/exp-1/{host.host_id}"
+
+
+async def test_cold_start_system_facts_reach_provenance(aws: dict[str, Any]) -> None:
+    """The keys start_engine.sh emits are the ones the runner reads into provenance."""
+    holder: dict[str, Host] = {}
+    ssm = FakeSsm(
+        lambda script: [
+            {
+                "Status": "Success",
+                "StandardOutputContent": engine_stdout(holder["host"].launched_at.timestamp()),
+            }
+        ]
+    )
+    p = provider(aws, ssm=ssm)
+    host = holder["host"] = await p.provision(request())
+    cell = next(
+        c for c in expand(load_experiment(QWEN_EXPERIMENT), load_registry()) if c.launch.image
+    )
+    ep = await p.start_engine(host, cell.launch, warm=False)
+    sections = _Executor._serving_sections(
+        SimpleNamespace(git=GitInfo()),  # type: ignore[arg-type]
+        host,
+        cell,
+        ep,
+    )
+    prov = build_provenance(cell.config, **sections)
+    assert prov.cuda_version == "13.2"
+    assert prov.driver_version == "595.91.07"
+    assert prov.hardware.gpu_count == 1
+    assert prov.hardware.gpu_type == "L40S"
 
 
 async def test_warm_start_and_stop(aws: dict[str, Any]) -> None:

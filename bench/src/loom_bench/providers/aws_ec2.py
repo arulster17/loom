@@ -603,6 +603,7 @@ class AwsEc2Provider:
         }
         if "gpus" in info:
             info["gpus"] = [g.strip() for g in str(info["gpus"]).split(",") if g.strip()]
+            info["gpu_count"] = len(info["gpus"])
         base = f"http://127.0.0.1:{launch.port}"
         return Endpoint(
             base_url=f"{base}/v1",

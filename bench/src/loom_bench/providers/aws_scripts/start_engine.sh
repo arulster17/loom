@@ -60,8 +60,8 @@ curl -fsS -o /dev/null -H 'Content-Type: application/json' \
 stage first_token
 
 sysinfo gpus "$(nvidia-smi --query-gpu=name --format=csv,noheader | paste -sd, -)"
-sysinfo driver "$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)"
-sysinfo cuda "$(nvidia-smi | sed -n 's/.*CUDA Version: *\([0-9.]*\).*/\1/p' | head -n 1)"
+sysinfo driver_version "$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)"
+sysinfo cuda_version "$(nvidia-smi | sed -n 's/.*CUDA Version: *\([0-9.]*\).*/\1/p' | head -n 1)"
 sysinfo image_digest "$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE")"
 sysinfo docker "$(docker version --format '{{.Server.Version}}')"
 sysinfo kernel "$(uname -r)"
