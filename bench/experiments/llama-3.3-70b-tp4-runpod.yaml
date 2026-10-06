@@ -1,18 +1,15 @@
-# Phase 0 leaderboard #2: Llama 3.3 70B Instruct (BF16, ~141 GB) with TP=4 on one
-# g6e.12xlarge spot host (4x L40S, PCIe), vLLM v0.30.0 at defaults. Fewer points
-# than the Qwen run: the 70B download dominates the cold start and the host is
-# ~4.4x the price. Needs an HF token with the Llama 3.3 license accepted.
-# AWS path (secondary): the account's GPU spot quota is 0, so the real run is
-# on RunPod Secure Cloud (4x L40S): llama-3.3-70b-tp4-runpod.yaml.
-name: llama-3.3-70b-tp4
-description: Llama 3.3 70B BF16, TP=4 on g6e.12xlarge spot, vLLM v0.30.0, rate sweeps at SLO.
+# Phase 0 leaderboard #2 on RunPod: Llama 3.3 70B Instruct (BF16, ~141 GB) with TP=4 on
+# one RunPod Secure Cloud 4x L40S pod (on-demand), vLLM v0.30.0 at defaults. The 250 GB
+# container disk holds the weights plus engine headroom (no network volume). Needs the
+# RunPod secret hf_token to carry an HF token with the Llama 3.3 license accepted.
+#
+# Same variants, workloads, SLO and quality as the AWS spec (llama-3.3-70b-tp4.yaml).
+name: llama-3.3-70b-tp4-runpod
+description: Llama 3.3 70B BF16, TP=4 on RunPod Secure 4x L40S, vLLM v0.30.0, rate sweeps at SLO.
 model: llama-3.3-70b-instruct
 provider:
-  kind: aws_ec2
-  region: us-east-1
-  instance_type: g6e.12xlarge
-  market: spot
-  disk_gb: 400
+  kind: runpod
+  container_disk_gb: 250
 variants:
   - name: vllm-tp4
 workloads:
@@ -42,8 +39,10 @@ quality:
   suite: llama-3.3-70b-instruct
   subset: phase0
   baseline_variant: vllm-tp4
+# The pod's TTL: `bench plan` puts it at ~2.7 h (the 141 GB download dominates the cold
+# start), so 4 h leaves ~50% margin; worst case to TTL is ~$18.
 budget:
   max_spend: "$45"
-  ttl_minutes: 210
+  ttl_minutes: 240
   accrual_interval_s: 15
 seed: 0

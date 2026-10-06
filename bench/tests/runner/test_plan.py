@@ -31,7 +31,17 @@ from loom_bench.store import repo
 from loom_bench.store.db import session_scope
 from loom_bench.store.models import BenchExperiment
 
-from .conftest import LLAMA, QWEN, SMOKE, mock_doc, mock_experiment, write_yaml
+from .conftest import (
+    LLAMA,
+    LLAMA_RUNPOD,
+    QWEN,
+    QWEN_RUNPOD,
+    RUNPOD_SMOKE,
+    SMOKE,
+    mock_doc,
+    mock_experiment,
+    write_yaml,
+)
 
 REGISTRY = load_registry()
 PRICES = load_prices()
@@ -68,7 +78,40 @@ def test_real_experiments_fit_their_caps_with_margin(path):
     assert plan.hosts[0].seconds < 0.95 * plan.hosts[0].ttl_s
 
 
-@pytest.mark.parametrize("path", [QWEN, LLAMA, SMOKE], ids=lambda p: p.stem)
+@pytest.mark.parametrize(
+    ("path", "pods"), [(QWEN_RUNPOD, 2), (LLAMA_RUNPOD, 1), (RUNPOD_SMOKE, 1)], ids=lambda p: str(p)
+)
+def test_runpod_experiments_fit_their_caps_with_ttl_margin(path, pods):
+    exp = load_experiment(path)
+    assert exp.provider.kind == "runpod"
+    plan = _plan(exp)
+    assert plan.ok, plan.refusals
+    assert plan.ttl_worst_micros <= plan.caps.effective
+    assert plan.total_micros < plan.caps.effective * 0.6
+    assert len(plan.hosts) == pods  # one pod per engine image
+    for host in plan.hosts:
+        assert host.provider == "runpod" and host.market == "on_demand"
+        assert host.steps[0].kind == "cold_start"
+        assert host.seconds < 0.8 * host.ttl_s  # each pod finishes well inside its TTL
+
+
+def test_runpod_smoke_stays_under_two_dollars_even_to_ttl():
+    plan = _plan(load_experiment(RUNPOD_SMOKE))
+    assert plan.caps.effective == parse_usd("$2")
+    assert plan.ttl_worst_micros < parse_usd("$1")
+    assert plan.n_cells == 1
+
+
+def test_runpod_specs_match_their_aws_counterparts_apart_from_the_provider():
+    for aws, runpod in ((QWEN, QWEN_RUNPOD), (LLAMA, LLAMA_RUNPOD)):
+        a, r = load_experiment(aws), load_experiment(runpod)
+        for field in ("model", "variants", "workloads", "repetitions", "slo", "quality"):
+            assert getattr(a, field) == getattr(r, field), (runpod.stem, field)
+
+
+@pytest.mark.parametrize(
+    "path", [QWEN, LLAMA, SMOKE, QWEN_RUNPOD, LLAMA_RUNPOD, RUNPOD_SMOKE], ids=lambda p: p.stem
+)
 def test_bench_plan_cli_accepts_shipped_experiments(path, db):
     result = CliRunner().invoke(app, ["plan", str(path), "--db", db])
     assert result.exit_code == 0, result.output

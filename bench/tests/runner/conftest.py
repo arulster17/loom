@@ -14,6 +14,9 @@ SMOKE = EXPERIMENTS_DIR / "mock-smoke.yaml"
 ABORT = EXPERIMENTS_DIR / "mock-budget-abort.yaml"
 QWEN = EXPERIMENTS_DIR / "qwen3-8b-vllm-vs-sglang.yaml"
 LLAMA = EXPERIMENTS_DIR / "llama-3.3-70b-tp4.yaml"
+QWEN_RUNPOD = EXPERIMENTS_DIR / "qwen3-8b-vllm-vs-sglang-runpod.yaml"
+LLAMA_RUNPOD = EXPERIMENTS_DIR / "llama-3.3-70b-tp4-runpod.yaml"
+RUNPOD_SMOKE = EXPERIMENTS_DIR / "runpod-smoke.yaml"
 
 
 @pytest.fixture(autouse=True)

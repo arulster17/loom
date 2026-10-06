@@ -1,21 +1,19 @@
-# Phase 0 leaderboard #1: Qwen3-8B (BF16) on one L40S, vLLM vs SGLang at engine
-# defaults (prefix caching on in both). One g6e.xlarge spot host serves both
-# engines: SGLang starts warm after vLLM, reusing the downloaded weights.
+# Phase 0 leaderboard #1 on RunPod: Qwen3-8B (BF16) on one RunPod Secure Cloud 1x L40S
+# pod per engine (on-demand), vLLM vs SGLang at engine defaults (prefix caching on in
+# both). A pod runs one engine image, so each engine gets its own pod and its own honest
+# cold start; the two pods run one after the other, not side by side. The datacenter is
+# RunPod's choice and is recorded per run (price_basis.availability_zone).
 #
-# Each workload bisects the open-loop rate for the highest load meeting the SLO,
-# 3 repetitions per point. Image digests: research notes of 2026-10-04.
-#
-# AWS path (secondary): the account's GPU spot quota is 0, so the real run is
-# on RunPod Secure Cloud (1x L40S): qwen3-8b-vllm-vs-sglang-runpod.yaml.
-name: qwen3-8b-vllm-vs-sglang
-description: Qwen3-8B BF16 on g6e.xlarge spot, vLLM v0.30.0 vs SGLang v0.5.21, rate sweeps at SLO.
+# Same variants, workloads, SLO and quality gate as the AWS spec
+# (qwen3-8b-vllm-vs-sglang.yaml). Each workload bisects the open-loop rate for the
+# highest load meeting the SLO, 3 repetitions per point. Image digests: research notes
+# of 2026-10-04.
+name: qwen3-8b-vllm-vs-sglang-runpod
+description: Qwen3-8B BF16 on RunPod Secure 1x L40S, vLLM v0.30.0 vs SGLang v0.5.21, rate sweeps at SLO.
 model: qwen3-8b
 provider:
-  kind: aws_ec2
-  region: us-east-1
-  instance_type: g6e.xlarge
-  market: spot
-  disk_gb: 200
+  kind: runpod
+  container_disk_gb: 80
 variants:
   - name: vllm
     engine:
@@ -62,8 +60,10 @@ quality:
   suite: qwen3-8b
   subset: phase0
   baseline_variant: vllm
+# Each pod's TTL: `bench plan` puts one pod at ~3.6 h (cold start, 3 sweeps, eval), so
+# 6 h leaves ~65% margin while keeping the worst case (both pods to TTL) near $13.
 budget:
   max_spend: "$40"
-  ttl_minutes: 480
+  ttl_minutes: 360
   accrual_interval_s: 15
 seed: 0

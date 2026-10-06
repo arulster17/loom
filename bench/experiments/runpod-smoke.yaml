@@ -1,0 +1,40 @@
+# RunPod smoke test: the cheapest real run that exercises the whole runpod provider
+# path once. One RunPod Secure Cloud pod (1x L40S, on-demand), Qwen3-8B on vLLM v0.30.0,
+# one short closed-loop job, no quality suite. What it proves (docs/runbook-runpod.md):
+# pod creation with the TTL watchdog, SSH into the stock vLLM image, weights pulled at
+# the pinned revision, the engine on loopback, the bench wheel in the pinned client
+# Python as the unprivileged job user (`job_isolation ok`), results back through
+# presigned S3 URLs, and teardown by terminate. The max_spend cap holds even if the pod
+# lives to its TTL.
+name: runpod-smoke
+description: Qwen3-8B on vLLM v0.30.0, one RunPod Secure 1x L40S pod, one short closed-loop job.
+model: qwen3-8b
+provider:
+  kind: runpod
+  container_disk_gb: 80
+variants:
+  - name: vllm
+    engine:
+      name: vllm
+      version: "0.30.0"
+      image: vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
+workloads:
+  - profile: fixed-128-128
+    load:
+      mode: closed_loop
+      values: [8]
+      num_requests: 64
+      warmup_requests: 8
+repetitions: 1
+# One repetition has no confidence interval: these results are a smoke check, flagged
+# untrusted, never a leaderboard entry.
+allow_single_run: true
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+budget:
+  max_spend: "$2"
+  ttl_minutes: 40
+  accrual_interval_s: 15
+seed: 0
