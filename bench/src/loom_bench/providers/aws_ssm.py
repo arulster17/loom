@@ -22,6 +22,8 @@ ScriptValue = str | int | Sequence[str]
 _REQUIRES_RE = re.compile(r"^# requires:(.*)$", re.MULTILINE)
 _NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _HEREDOC_END = "LOOM_SCRIPT_EOF"
+# Templates live in providers/<dir>/; the RunPod provider renders from runpod_scripts.
+DEFAULT_TEMPLATE_DIR = "aws_scripts"
 TERMINAL_FAILURES = frozenset({"Cancelled", "TimedOut", "Failed", "Cancelling"})
 # SSM's own delivery window; the script's run time is bounded by executionTimeout.
 DELIVERY_TIMEOUT_S = 600
@@ -36,12 +38,12 @@ class SsmCommandError(RuntimeError):
         self.stderr = stderr
 
 
-def _template(name: str) -> str:
-    return (files("loom_bench.providers") / "aws_scripts" / f"{name}.sh").read_text()
+def _template(name: str, template_dir: str = DEFAULT_TEMPLATE_DIR) -> str:
+    return (files("loom_bench.providers") / template_dir / f"{name}.sh").read_text()
 
 
-def required_vars(name: str) -> frozenset[str]:
-    m = _REQUIRES_RE.search(_template(name))
+def required_vars(name: str, *, template_dir: str = DEFAULT_TEMPLATE_DIR) -> frozenset[str]:
+    m = _REQUIRES_RE.search(_template(name, template_dir))
     if m is None:
         raise ValueError(f"script {name} has no '# requires:' line")
     return frozenset(m.group(1).split())
@@ -57,16 +59,19 @@ def _assign(name: str, value: ScriptValue) -> str:
     return f"{name}=({' '.join(shlex.quote(str(v)) for v in value)})"
 
 
-def render_script(name: str, **values: ScriptValue) -> str:
-    """Bash script for template `name` with exactly its required variables set."""
-    body = _template(name)
-    required = required_vars(name)
+def render_script(
+    name: str, *, template_dir: str = DEFAULT_TEMPLATE_DIR, **values: ScriptValue
+) -> str:
+    """Bash script for template `name` (in `template_dir`, with that directory's
+    `common.sh`) with exactly its required variables set."""
+    body = _template(name, template_dir)
+    required = required_vars(name, template_dir=template_dir)
     missing, extra = required - values.keys(), values.keys() - required
     if missing or extra:
         raise ValueError(f"script {name}: missing {sorted(missing)}, unexpected {sorted(extra)}")
     lines = ["#!/bin/bash", "set -euo pipefail", "umask 022"]
     lines += [_assign(k, values[k]) for k in sorted(values)]
-    script = "\n".join(lines) + "\n\n" + _template("common") + "\n" + body
+    script = "\n".join(lines) + "\n\n" + _template("common", template_dir) + "\n" + body
     if _HEREDOC_END in script:
         raise ValueError(f"script {name} contains the heredoc terminator")
     return script

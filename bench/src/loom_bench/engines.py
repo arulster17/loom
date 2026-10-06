@@ -3,7 +3,8 @@
 `render_launch` turns a model into an `EngineLaunch`: the engine's CLI args after
 its entrypoint. Experiment variants patch the spec before it gets here
 (`experiment.apply_variant`). `docker_run_argv` wraps the launch into the
-`docker run` used on a GPU host.
+`docker run` used on a GPU host; `engine_process_argv` is the bare process used
+where the host is the engine's own container (RunPod).
 """
 
 from __future__ import annotations
@@ -239,6 +240,25 @@ def render_launch(spec: ModelSpec) -> EngineLaunch:
         port=ENGINE_PORT,
         gpus=spec.parallelism.tp * spec.parallelism.pp,
     )
+
+
+def engine_process_argv(launch: EngineLaunch, *, host: str) -> list[str]:
+    """The engine run as a plain process (no container runtime), listening on `host`.
+
+    For providers whose host is itself the engine's container (RunPod): the
+    entrypoint plus `launch.args` with the `--host` value replaced, so the config
+    hash, which covers `launch.args`, is unchanged. `launch.env` is validated (no
+    secret names); the caller sets it in the process environment.
+    """
+    if launch.engine not in ENTRYPOINTS:
+        raise ValueError(f"no entrypoint for engine {launch.engine!r}")
+    _validate_env(launch.env)
+    args = list(launch.args)
+    at = [i for i, a in enumerate(args) if a == "--host"]
+    if len(at) != 1 or at[0] + 1 >= len(args):
+        raise ValueError("engine args must set --host exactly once")
+    args[at[0] + 1] = host
+    return [*ENTRYPOINTS[launch.engine], *args]
 
 
 def docker_run_argv(launch: EngineLaunch, *, weights_dir: str, container_name: str) -> list[str]:
