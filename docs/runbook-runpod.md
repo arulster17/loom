@@ -99,7 +99,7 @@ Run through all of it before every real run.
   Check "estimated spend" and "worst case (all hosts to TTL)" against "effective cap".
   The hourly rate per pod is prices.yaml's on-demand price plus container disk; at run
   time the guard accrues the larger of that and the pod's API `costPerHr`. Expected
-  today: `runpod-smoke` $1.35 estimate, $1.72 worst case, $1.75 cap (two pods);
+  today: `runpod-smoke` $1.35 estimate, $2.20 worst case, $2.25 cap (two pods);
   `qwen3-8b-vllm-vs-sglang-runpod` $7.92, $13.21, $15 (two pods, one per engine);
   `llama-3.3-70b-tp4-runpod` $11.73, $17.58, $45. Exit 3 means refused: lower the load
   points or `budget.ttl_minutes`, never the caps.
@@ -237,8 +237,8 @@ once before the sweep pays for hours: both engine images by the same digests (on
 1× L40S pod each), the same three workload profiles under the same geometric rate search
 (2 points with a 1-step descent, 10 s windows) and the same 3 repetitions, the same
 quality subset with every task capped at 4 items (`quality.limit`), divergence capture,
-noise floor and scoring, and the SGLang-vs-vLLM gate. `max_spend: "$1.75"`, TTL 47 min per
-pod (worst case $1.72). The repetitions must match: the pass verdict's CI upper bound
+noise floor and scoring, and the SGLang-vs-vLLM gate. `max_spend: "$2.25"`, TTL 60 min per
+pod (worst case $2.20; SGLang's image pull took 226 s in b97dea4c, so 47 min left ~2 min of margin). The repetitions must match: the pass verdict's CI upper bound
 uses t with reps-1 degrees of freedom, and at 2 reps (t ≈ 12.7) smoke 51ad57b0 failed
 every first point, so the climb never ran.
 `bench/tests/runner/test_plan.py` fails if the smoke and the real spec drift apart. It is

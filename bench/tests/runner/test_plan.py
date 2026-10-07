@@ -93,10 +93,10 @@ def test_runpod_experiments_fit_their_caps_with_ttl_margin(path, pods):
         assert host.seconds < 0.8 * host.ttl_s  # each pod finishes well inside its TTL
 
 
-def test_runpod_smoke_stays_under_a_dollar_seventy_five_even_to_ttl():
+def test_runpod_smoke_stays_under_two_twenty_five_even_to_ttl():
     plan = _plan(load_experiment(RUNPOD_SMOKE))
     assert plan.ok, plan.refusals
-    assert plan.caps.effective == parse_usd("$1.75")
+    assert plan.caps.effective == parse_usd("$2.25")
     assert plan.ttl_worst_micros <= plan.caps.effective  # both pods to their TTL
     assert plan.n_cells == 2 and len(plan.hosts) == 2  # one pod per engine image
     for host in plan.hosts:

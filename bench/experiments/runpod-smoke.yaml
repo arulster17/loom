@@ -72,7 +72,7 @@ quality:
 # Each pod's TTL holds `bench plan`'s estimate with margin; max_spend holds the worst
 # case of both pods living to their TTL.
 budget:
-  max_spend: "$1.75"
-  ttl_minutes: 47
+  max_spend: "$2.25"
+  ttl_minutes: 60
   accrual_interval_s: 15
 seed: 0
