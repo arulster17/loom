@@ -29,7 +29,13 @@ from rich.panel import Panel
 from rich.table import Table
 
 from loom_bench.budget import load_budget
-from loom_bench.experiment import ExpansionError, Experiment, load_experiment
+from loom_bench.experiment import (
+    ExpansionError,
+    Experiment,
+    is_smoke,
+    load_experiment,
+    smoke_spec_names,
+)
 from loom_bench.money import format_usd
 from loom_bench.plan import Plan, PlanError
 from loom_bench.prices import load_prices
@@ -541,7 +547,8 @@ def _analyze(
             )
         rows = list(s.scalars(stmt))
         if not experiments:  # smoke runs share config hashes with real ones: never by default
-            rows = [r for r in rows if not (r.spec or {}).get("smoke")]
+            smoke_names = smoke_spec_names()
+            rows = [r for r in rows if not is_smoke(r.spec, smoke_names)]
         if not rows:
             err.print("[red]no matching experiments")
             raise typer.Exit(EXIT_INVALID)

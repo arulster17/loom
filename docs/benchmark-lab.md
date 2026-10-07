@@ -318,7 +318,9 @@ at N prompts (`Suite.limited`), the suite's `divergence.hard_prompts` first (pro
 continuations split characters across byte-level tokens; Qwen3: 20 and 40). Smoke
 experiments share config hashes with the real ones,
 so default `bench report` selection and the site's latest snapshot leave them out; pass
-`-e <id>` to report one.
+`-e <id>` to report one. An experiment counts as a smoke when its spec sets `smoke: true`
+or carries the name of a shipped spec that does (`experiment.is_smoke`), so runpod-smoke
+runs recorded before the flag existed stay out too.
 
 ## Phase 0 experiments
 

@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 
 from loom_bench import __version__
 from loom_bench.cost import CostAllocation
+from loom_bench.experiment import is_smoke, smoke_spec_names
 from loom_bench.prices import Competitors, PriceBook, load_competitors, load_prices
 from loom_bench.provenance import GitInfo, canonical_json, git_info
 from loom_bench.registry import REPO_ROOT, Registry, load_registry
@@ -173,8 +174,9 @@ def _experiments(
             .order_by(BenchExperiment.created_at.desc(), BenchExperiment.id)
         )
         latest: dict[str, BenchExperiment] = {}
+        smoke_names = smoke_spec_names()
         for exp in rows:
-            if (exp.spec or {}).get("smoke"):  # smoke checks are never published
+            if is_smoke(exp.spec, smoke_names):  # smoke checks are never published
                 continue
             latest.setdefault(exp.name, exp)
         return sorted(latest.values(), key=lambda e: (e.created_at, str(e.id)))
@@ -315,8 +317,9 @@ def export_snapshot(
     """Write a results snapshot of `experiment_ids` to `out_dir`, replacing a previous one.
 
     "latest" takes the most recent completed experiment of each name, skipping smoke
-    experiments (`smoke: true`). The SLO defaults to the one recorded in the experiment
-    specs and run summaries (they must agree); cost allocation defaults to all_output.
+    experiments (`experiment.is_smoke`: `smoke: true`, or a shipped smoke spec's name).
+    The SLO defaults to the one recorded in the experiment specs and run summaries (they
+    must agree); cost allocation defaults to all_output.
     Price book, registry and competitors default to the files in the repository.
     """
     out = Path(out_dir)

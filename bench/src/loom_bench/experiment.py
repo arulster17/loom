@@ -426,6 +426,29 @@ def load_experiment(path: str | Path) -> Experiment:
     return Experiment.model_validate(read_yaml(Path(path)))
 
 
+def smoke_spec_names(experiments_dir: Path = EXPERIMENTS_DIR) -> frozenset[str]:
+    """Names of the shipped experiment specs that are smoke checks (`smoke: true`)."""
+    names = set()
+    for path in sorted(experiments_dir.glob("*.yaml")):
+        doc = read_yaml(path)
+        if isinstance(doc, Mapping) and doc.get("smoke") is True and doc.get("name"):
+            names.add(str(doc["name"]))
+    return frozenset(names)
+
+
+def is_smoke(spec: Mapping[str, Any] | None, smoke_names: frozenset[str]) -> bool:
+    """Whether a stored experiment spec is a smoke check, kept out of default reports.
+
+    True when the spec sets `smoke: true`, or when it carries the name of a shipped smoke
+    spec (`smoke_names`): smoke runs recorded before the flag existed (runpod-smoke
+    32b9a262 and 17d0cb33) have no flag but the same name, and share config hashes with
+    the real runs just the same.
+    """
+    if not spec:
+        return False
+    return spec.get("smoke") is True or spec.get("name") in smoke_names
+
+
 # --- expansion ------------------------------------------------------------------
 
 
