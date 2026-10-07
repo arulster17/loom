@@ -78,6 +78,7 @@ Run through all of it before every real run.
   | `pod_ready_timeout_s` | 900 | until the pod is running with an SSH address |
   | `ssh_online_timeout_s` | 600 | until sshd answers |
   | `max_price_ratio` | 1.25 | refuse a pod whose API price is above prices.yaml × this |
+  | `capacity_wait_s` | 1800 | how long to keep retrying a create refused for lack of stock (0: fail at once) |
 
 - [ ] **OpenSSH** on the laptop (`ssh`, `ssh-keygen`): the runner drives pods over SSH.
 - [ ] **Results database** is up and migrated, the same one as every other real run. It
@@ -185,7 +186,10 @@ the console price, update `bench/prices.yaml` (and its `last_checked`), plan aga
 
 A failed create surfaces as `RunPod POST /pods failed (...)`. If the request failed
 without a clear answer from RunPod, the provider terminates any pod created under that
-name anyway. A pod without an SSH address after `pod_ready_timeout_s` (900 s), or whose
+name anyway. When RunPod refuses for lack of stock (`There are no instances currently
+available`), the provider waits 30, 60, 120, then every 240 s and retries, for up to
+`capacity_wait_s` (1800 s). Each attempt gets a fresh name and TTL, and nothing is billed
+while waiting. Other refusals are not retried. A pod without an SSH address after `pod_ready_timeout_s` (900 s), or whose
 sshd does not answer within `ssh_online_timeout_s` (600 s), fails the experiment and is
 terminated. L40S Secure stock varies by datacenter and over the day: retry later, or pin
 `provider.data_center_ids` to one with stock.

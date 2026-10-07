@@ -28,13 +28,15 @@ from __future__ import annotations
 import asyncio
 import atexit
 import hashlib
+import itertools
+import logging
 import math
 import os
 import re
 import secrets
 import shutil
 import tempfile
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from fractions import Fraction
@@ -104,10 +106,19 @@ _PINNED_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*[a-z0-9]@sha256:[0-9a-f]{64}$")
 # RunPod documents no limit on dockerStartCmd; keep the rendered start command small.
 MAX_START_CMD_BYTES = 8192
 POD_NAME_MAX = 191  # RunPod's documented limit on `name`
+# Waits between pod creates that RunPod refuses for lack of stock; the last repeats.
+CAPACITY_BACKOFF_S = (30.0, 60.0, 120.0, 240.0)
+
+log = logging.getLogger(__name__)
 
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _capacity_backoff() -> Iterator[float]:
+    yield from CAPACITY_BACKOFF_S
+    yield from itertools.repeat(CAPACITY_BACKOFF_S[-1])
 
 
 def check_url(url: str) -> str:
@@ -145,6 +156,9 @@ class RunpodSettings(BaseModel):
     ssh_online_timeout_s: Annotated[int, Field(gt=0)] = 600
     # Refuse a pod whose API price is above prices.yaml x this.
     max_price_ratio: Annotated[Decimal, Field(ge=1)] = Decimal("1.25")
+    # How long to keep retrying a pod create that RunPod refuses for lack of stock.
+    # Nothing is billed while waiting; 0 fails on the first refusal.
+    capacity_wait_s: Annotated[int, Field(ge=0)] = 1800
 
     @field_validator("hf_secret_name")
     @classmethod
@@ -479,7 +493,28 @@ class RunpodProvider:
         )
 
     async def provision(self, req: HostRequest) -> Host:
-        return await asyncio.to_thread(self._provision, req)
+        """Create the pod. While RunPod has no matching GPU in stock, retry with backoff
+        for up to `capacity_wait_s`; each attempt gets a fresh name and TTL, so time
+        spent waiting never shortens the pod's life."""
+        deadline = self.clock() + timedelta(seconds=self.settings.capacity_wait_s)
+        for delay in _capacity_backoff():
+            try:
+                return await asyncio.to_thread(self._provision, req)
+            except RunpodApiError as e:
+                if not e.no_capacity:
+                    raise
+                left = (deadline - self.clock()).total_seconds()
+                if left <= 0:
+                    raise
+                wait = min(delay, left)
+                log.warning(
+                    "RunPod has no %s in stock; retrying in %.0f s (%.0f s left)",
+                    req.instance_type,
+                    wait,
+                    left,
+                )
+                await self.sleep(wait)
+        raise AssertionError("unreachable")
 
     # -- host state ---------------------------------------------------------------
 

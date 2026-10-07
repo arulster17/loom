@@ -40,7 +40,8 @@ class FakeRunpod:
     def __init__(self, *, cost_per_hr: float = 1.09, gets_before_ssh: int | None = None) -> None:
         self.pods: dict[str, dict[str, Any]] = {}
         self.requests: list[httpx.Request] = []
-        self.fail: dict[tuple[str, str], list[int]] = {}
+        # Each entry is a status, or (status, error message) to imitate a specific refusal.
+        self.fail: dict[tuple[str, str], list[int | tuple[int, str]]] = {}
         self.rest_delete_status: int | None = None
         self.cost_per_hr = cost_per_hr
         self.created_at = "2026-10-06 07:03:35.426 +0000 UTC"
@@ -86,7 +87,10 @@ class FakeRunpod:
             raise AssertionError(f"Loom must never stop a pod: {request.method} {path}")
         queued = self.fail.get((request.method, path))
         if queued:
-            return httpx.Response(queued.pop(0), json={"error": "injected"})
+            status, error = queued.pop(0), "injected"
+            if isinstance(status, tuple):
+                status, error = status
+            return httpx.Response(status, json={"error": error, "status": status})
         if request.url.host == httpx.URL(GRAPHQL).host:
             return self._graphql(json.loads(request.content))
         rest = path.removeprefix(httpx.URL(REST).path)

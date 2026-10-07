@@ -50,6 +50,27 @@ class RunpodApiError(RuntimeError):
         self.method = method
         self.path = path
         self.status = status
+        self.detail = detail
+
+    @property
+    def no_capacity(self) -> bool:
+        """RunPod refused to create a pod because no matching GPU is free right now.
+
+        The API answers 500 with a message, not a distinct status, so match the text.
+        """
+        return (
+            self.path == "/pods"
+            and self.status is not None
+            and self.status >= 500
+            and _NO_CAPACITY.search(self.detail) is not None
+        )
+
+
+# RunPod's create-pod refusals when the requested GPU is out of stock.
+_NO_CAPACITY = re.compile(
+    r"no instances currently available|not enough free gpus|no longer any instances",
+    re.IGNORECASE,
+)
 
 
 def _keychain_lookup() -> str | None:

@@ -94,7 +94,7 @@ def provider(
         s3=s3,
         ssh=ssh or FakePodExec(),
         requirements=locked,
-        sleep=no_sleep,
+        sleep=kw.pop("sleep", no_sleep),
         ssh_dir=tmp_path / "ssh",
         **kw,
     )
@@ -244,6 +244,93 @@ async def test_a_refused_create_is_not_retried(fake, s3, tmp_path) -> None:
         await provider(fake, s3, tmp_path).provision(request())
     assert len(fake.bodies("POST", "/v1/pods")) == 1
     assert fake.bodies("GET", "/v1/pods") == []
+
+
+# The refusal RunPod returned in quality run 53f38c7b when L40S stock ran out.
+NO_STOCK = (500, "create pod: There are no instances currently available")
+
+
+class FakeTime:
+    """A clock that `sleep` advances, so waits cost no wall time."""
+
+    def __init__(self) -> None:
+        self.now = datetime(2026, 10, 7, 16, 55, tzinfo=UTC)
+        self.slept: list[float] = []
+
+    def clock(self) -> datetime:
+        return self.now
+
+    async def sleep(self, s: float) -> None:
+        self.slept.append(s)
+        self.now += timedelta(seconds=s)
+
+
+async def test_a_create_refused_for_lack_of_stock_is_retried_with_backoff(
+    fake, s3, tmp_path
+) -> None:
+    fake.fail[("POST", "/v1/pods")] = [NO_STOCK, NO_STOCK]
+    t = FakeTime()
+    p = provider(fake, s3, tmp_path, clock=t.clock, sleep=t.sleep)
+    host = await p.provision(request())
+
+    bodies = fake.bodies("POST", "/v1/pods")
+    assert len(bodies) == 3
+    assert t.slept == [30.0, 60.0]
+    assert host.host_id in fake.pods
+    # Each attempt gets a fresh name and TTL, so the wait never shortens the pod's life.
+    assert len({b["name"] for b in bodies}) == 3
+    ttl = {b["env"]["LOOM_TTL"] for b in bodies}
+    assert len(ttl) == 3
+
+
+async def test_the_stock_wait_gives_up_after_capacity_wait_s(fake, s3, tmp_path) -> None:
+    fake.fail[("POST", "/v1/pods")] = [NO_STOCK] * 20
+    t = FakeTime()
+    p = provider(
+        fake, s3, tmp_path, clock=t.clock, sleep=t.sleep, settings=settings(capacity_wait_s=100)
+    )
+    with pytest.raises(RunpodApiError, match="no instances currently available"):
+        await p.provision(request())
+    assert t.slept == [30.0, 60.0, 10.0]
+    assert len(fake.bodies("POST", "/v1/pods")) == 4
+    assert fake.pods == {}
+
+
+async def test_no_stock_wait_when_capacity_wait_s_is_zero(fake, s3, tmp_path) -> None:
+    fake.fail[("POST", "/v1/pods")] = [NO_STOCK]
+    t = FakeTime()
+    p = provider(
+        fake, s3, tmp_path, clock=t.clock, sleep=t.sleep, settings=settings(capacity_wait_s=0)
+    )
+    with pytest.raises(RunpodApiError, match="500"):
+        await p.provision(request())
+    assert t.slept == []
+
+
+async def test_other_server_errors_on_create_are_not_waited_out(fake, s3, tmp_path) -> None:
+    fake.fail[("POST", "/v1/pods")] = [500]
+    t = FakeTime()
+    p = provider(fake, s3, tmp_path, clock=t.clock, sleep=t.sleep)
+    with pytest.raises(RunpodApiError, match="injected"):
+        await p.provision(request())
+    assert t.slept == []
+    assert len(fake.bodies("POST", "/v1/pods")) == 1
+
+
+@pytest.mark.parametrize(
+    ("path", "status", "detail", "expected"),
+    [
+        ("/pods", 500, '{"error":"create pod: There are no instances currently available"}', True),
+        ("/pods", 500, "Not enough free GPUs on the host machine", True),
+        ("/pods", 500, '{"error":"internal"}', False),
+        ("/pods", 400, "There are no instances currently available", False),
+        ("/pods/abc", 500, "There are no instances currently available", False),
+    ],
+)
+def test_no_capacity_matches_only_stock_refusals_of_a_create(
+    path: str, status: int, detail: str, expected: bool
+) -> None:
+    assert RunpodApiError("POST", path, status, detail).no_capacity is expected
 
 
 @pytest.mark.parametrize(
