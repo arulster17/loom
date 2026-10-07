@@ -32,7 +32,9 @@ and, whatever the floor, a hard ceiling (`ceiling_kl`, `ceiling_top1`):
 - otherwise                                                   -> PASS
 
 Without a self-divergence the absolute `max_kl` / `min_top1` are the limits and
-the reason says the check is uncalibrated. A sanity rate above its limit FAILs.
+the reason says the check is uncalibrated. A divergence that should have been measured
+but failed (its capture or scoring raised) is INCONCLUSIVE, with the error as reason;
+the task verdicts are still decided and reported. A sanity rate above its limit FAILs.
 The overall decision is the worst part (FAIL > INCONCLUSIVE > REVIEW > PASS);
 the change is blocked on FAIL, on INCONCLUSIVE unless `inconclusive_blocks` is
 off, and on REVIEW only when `review_blocks` is on.
@@ -339,7 +341,10 @@ def _divergence_verdict(
     self_div: DivergenceResult | None,
     tasks: Sequence[TaskVerdict],
     policy: GatePolicy,
+    error: str | None = None,
 ) -> DivergenceVerdict:
+    if error is not None:
+        return DivergenceVerdict(verdict=Verdict.INCONCLUSIVE, reason=f"not measured: {error}")
     if div is None:
         return DivergenceVerdict(verdict=Verdict.PASS, reason="not measured")
     lim = divergence_limits(policy, self_div)
@@ -406,11 +411,15 @@ def evaluate_gate(
     policy: GatePolicy | None = None,
     *,
     self_divergence: DivergenceResult | None = None,
+    divergence_error: str | None = None,
 ) -> GateDecision:
     """Decide whether `candidate` may replace `baseline`; see the module docstring.
 
     `self_divergence` is the baseline scored against its own divergence reference under
     different batching: the noise floor the divergence limits are calibrated on.
+    `divergence_error` is why a divergence the suite asks for was not measured (its
+    capture or scoring failed): the divergence check is then inconclusive, with that
+    reason, and the task verdicts stand.
     """
     policy = policy or GatePolicy()
     if baseline.keys() != candidate.keys():
@@ -418,7 +427,7 @@ def evaluate_gate(
             f"task sets differ: baseline {sorted(baseline)}, candidate {sorted(candidate)}"
         )
     tasks = [evaluate_task(name, baseline[name], candidate[name], policy) for name in baseline]
-    div = _divergence_verdict(divergence, self_divergence, tasks, policy)
+    div = _divergence_verdict(divergence, self_divergence, tasks, policy, divergence_error)
     san = _sanity_verdict(sanity, policy)
     decision = worst([t.verdict for t in tasks] + [div.verdict, san.verdict])
     blocked = (

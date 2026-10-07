@@ -346,3 +346,13 @@ def test_decision_is_json_able_for_store():
     assert div["limits"]["max_kl"] == pytest.approx(0.1)
     assert (div["limits"]["ceiling_kl"], div["limits"]["ceiling_top1"]) == (0.5, 0.8)
     assert "gate REVIEW" in d.summary()
+
+
+def test_a_failed_divergence_is_inconclusive_and_keeps_the_task_verdicts():
+    d = evaluate_gate(
+        PASSING, PASSING, None, None, FAST, divergence_error="ValueError: no positions"
+    )
+    assert d.divergence.verdict is Verdict.INCONCLUSIVE
+    assert d.divergence.reason == "not measured: ValueError: no positions"
+    assert [t.verdict for t in d.tasks] == [Verdict.PASS]
+    assert d.decision is Verdict.INCONCLUSIVE and d.blocked

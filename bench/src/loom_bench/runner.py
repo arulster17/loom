@@ -10,7 +10,10 @@ load run failed (`judge_runs`).
 
 A failed eval job does not end the experiment: it is recorded (event, experiment
 reason, exit 8), the other engines still run, and a gate missing either side is
-`inconclusive` and blocked. Budget outcomes and a lost host still end it.
+`inconclusive` and blocked. An eval whose divergence half failed keeps its task scores;
+its gate (or, for a failed capture, every candidate's) has an inconclusive divergence
+check with the error as reason, and the experiment ends with exit 8. Budget outcomes and
+a lost host still end it.
 
 Warmup is excluded from every summary and each load point is repeated; a single
 repetition is never trusted (see `metrics.aggregate`).
@@ -190,7 +193,9 @@ class GoodputRow(BaseModel):
 class _Baseline:
     cell: Cell
     result: SuiteResult
-    reference: ReferenceLogprobs | None  # None when the suite has no divergence section
+    # None when the suite has no divergence section, or its capture failed (`why`)
+    reference: ReferenceLogprobs | None
+    divergence_error: str | None = None
 
 
 class GateRow(BaseModel):
@@ -299,6 +304,7 @@ class _Executor:
         self.baselines: dict[str, _Baseline] = {}
         self.failed_baselines: dict[str, tuple[Cell, str]] = {}  # knobs -> (cell, why)
         self.eval_statuses: Counter[str] = Counter()
+        self.divergence_failures = 0  # evals whose scores stand but whose divergence failed
         self.eval_hosts: set[str] = set()  # hosts whose client env has the eval harness
         self.gates: list[GateRow] = []
 
@@ -444,9 +450,12 @@ class _Executor:
         if suite.divergence is not None:
             if cell.variant == quality.baseline_variant:
                 divergence = "capture_and_floor"
-            elif (base := self.baselines.get(canonical_json(cell.knobs))) is not None:
+            elif (
+                base := self.baselines.get(canonical_json(cell.knobs))
+            ) is not None and base.reference is not None:
                 divergence, reference = "score", base.reference
-            # no baseline results (its eval failed): nothing to score divergence against
+            # no baseline results or reference (its eval or capture failed): nothing to
+            # score divergence against
         return EvalJob(
             run_id=str(uuid.uuid4()),
             suite=suite,
@@ -520,6 +529,15 @@ class _Executor:
         out = await self.guard.guarded(self.provider.run_eval(host, job))
         self.eval_hosts.add(host.host_id)
         result = suite_result_of(out)
+        if out.divergence_error is not None:
+            self.divergence_failures += 1
+            self.event(
+                "divergence_failed",
+                cell=cell.key,
+                config_hash=cell.config_hash,
+                mode=job.divergence,
+                error=out.divergence_error,
+            )
         evals_dir = self.run_dir / "evals" / cell.config_hash[:16]
         samples = write_samples(
             evals_dir / "samples.json",
@@ -528,6 +546,7 @@ class _Executor:
             divergence=out.divergence,
             reference_config_hash=job.reference.config_hash if job.reference else None,
             self_divergence=out.reference.self_divergence if out.reference else None,
+            divergence_error=out.divergence_error,
         )
         prov = build_provenance(cell.config, **self._serving_sections(host, cell, endpoint))
         with session_scope(self.ctx.db_url) as s:
@@ -566,7 +585,9 @@ class _Executor:
                     path=str(path),
                     self_divergence=None if floor is None else floor.model_dump(mode="json"),
                 )
-            self.baselines[canonical_json(cell.knobs)] = _Baseline(cell, result, reference)
+            self.baselines[canonical_json(cell.knobs)] = _Baseline(
+                cell, result, reference, out.divergence_error
+            )
             return
         key = canonical_json(cell.knobs)
         base = self.baselines.get(key)
@@ -583,6 +604,7 @@ class _Executor:
             suite,
             out.divergence,
             self_divergence=base.reference.self_divergence if base.reference else None,
+            divergence_error=_missing_divergence(suite, base, out.divergence_error),
         )
         with session_scope(self.ctx.db_url) as s:
             record_gate(
@@ -955,14 +977,15 @@ def _fmt(v: float | None) -> str:
 
 
 def judge_runs(
-    statuses: Counter[str], evals: Counter[str] | None = None
+    statuses: Counter[str], evals: Counter[str] | None = None, divergence_failed: int = 0
 ) -> tuple[ExperimentStatus, str | None, int]:
     """The outcome of an experiment that ran to the end, from its load runs' and quality
-    evals' statuses.
+    evals' statuses, and how many evals kept their scores but lost their divergence.
 
-    Every load run failed: `failed`. Some load runs or any eval failed: `completed`, with
-    the counts as the reason and a non-zero exit, so a sweep with holes never looks
-    finished. Reports only use completed runs, and a gate missing a side is inconclusive.
+    Every load run failed: `failed`. Some load runs or any eval or divergence failed:
+    `completed`, with the counts as the reason and a non-zero exit, so a sweep with holes
+    never looks finished. Reports only use completed runs, and a gate missing a side (or
+    its divergence) is inconclusive.
     """
     total = sum(statuses.values())
     bad = total - statuses[RUN_COMPLETED]
@@ -980,6 +1003,8 @@ def judge_runs(
         reasons.append(f"{bad} of {total} runs failed ({detail})")
     if eval_bad:
         reasons.append(f"{eval_bad} of {eval_total} quality evals failed")
+    if divergence_failed:
+        reasons.append(f"divergence failed in {divergence_failed} of {eval_total} quality evals")
     if not reasons:
         return ExperimentStatus.COMPLETED, None, EXIT_OK
     return ExperimentStatus.COMPLETED, "; ".join(reasons), EXIT_RUNS_FAILED
@@ -1095,7 +1120,7 @@ async def _execute(
     if guard.tripped.is_set() and status is ExperimentStatus.COMPLETED:
         status, reason, code = ExperimentStatus.ABORTED, guard.reason, EXIT_BUDGET_ABORT
     if status is ExperimentStatus.COMPLETED:
-        status, reason, code = judge_runs(ex.run_statuses, ex.eval_statuses)
+        status, reason, code = judge_runs(ex.run_statuses, ex.eval_statuses, ex.divergence_failures)
     spent = _finish(ctx, experiment_id, status, reason)
     if interrupted is not None:
         raise interrupted
@@ -1119,6 +1144,17 @@ async def _execute(
 # --- quality -----------------------------------------------------------------------
 
 
+def _missing_divergence(suite: Suite, base: _Baseline, candidate_error: str | None) -> str | None:
+    """Why a divergence the suite asks for is missing from a candidate's gate, if it is."""
+    if candidate_error is not None:
+        return f"candidate divergence failed: {candidate_error}"
+    if suite.divergence is None or base.reference is not None:
+        return None
+    if base.divergence_error is not None:
+        return f"baseline divergence capture failed: {base.divergence_error}"
+    return "the baseline has no divergence reference"
+
+
 def write_samples(
     path: Path,
     suite_ref: str,
@@ -1127,10 +1163,11 @@ def write_samples(
     divergence: DivergenceResult | None = None,
     reference_config_hash: str | None = None,
     self_divergence: DivergenceResult | None = None,
+    divergence_error: str | None = None,
 ) -> Path:
     """Per-item scores of one suite run, so a gate can be re-decided later, with the
     candidate's divergence (from the reference captured on `reference_config_hash`) or
-    the baseline's self-divergence."""
+    the baseline's self-divergence, or why the divergence failed."""
     path.parent.mkdir(parents=True, exist_ok=True)
     doc = {
         "suite": result.suite,
@@ -1144,6 +1181,7 @@ def write_samples(
         "self_divergence": (
             None if self_divergence is None else self_divergence.model_dump(mode="json")
         ),
+        "divergence_error": divergence_error,
         "tasks": {
             name: {
                 "kind": run.kind,
@@ -1190,6 +1228,7 @@ class SampleDivergences:
     divergence: DivergenceResult | None
     reference_config_hash: str | None  # the config whose reference `divergence` is from
     self_divergence: DivergenceResult | None
+    error: str | None = None  # why this run's divergence (capture or score) failed
 
 
 def read_sample_divergences(path: str | Path) -> SampleDivergences:
@@ -1200,6 +1239,7 @@ def read_sample_divergences(path: str | Path) -> SampleDivergences:
         divergence=None if div is None else DivergenceResult.model_validate(div),
         reference_config_hash=doc.get("divergence_reference"),
         self_divergence=None if floor is None else DivergenceResult.model_validate(floor),
+        error=doc.get("divergence_error"),
     )
 
 
@@ -1242,12 +1282,22 @@ def gate_stored(
     _, base_result = read_samples(base.samples_uri)
     suite_ref, cand_result = read_samples(cand.samples_uri)
     policy = load_quality_suite(suite or suite_ref)
-    floor = read_sample_divergences(base.samples_uri).self_divergence
+    base_div = read_sample_divergences(base.samples_uri)
     measured = read_sample_divergences(cand.samples_uri)
     # A candidate's divergence only applies against the baseline whose reference it used.
     divergence = measured.divergence if measured.reference_config_hash == base.config_hash else None
+    error = None
+    if measured.error is not None:
+        error = f"candidate divergence failed: {measured.error}"
+    elif divergence is None and base_div.error is not None:
+        error = f"baseline divergence capture failed: {base_div.error}"
     decision = gate_against_baseline(
-        base_result, cand_result, policy, divergence, self_divergence=floor
+        base_result,
+        cand_result,
+        policy,
+        divergence,
+        self_divergence=base_div.self_divergence,
+        divergence_error=error,
     )
     with session_scope(db_url) as s:
         record_gate(

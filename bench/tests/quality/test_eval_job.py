@@ -165,3 +165,33 @@ async def test_local_tokenizer_snapshot_reaches_the_tasks(clean_url, tmp_path, m
     stale = tok.model_copy(update={"revision": "7" * 40})
     with pytest.raises(SnapshotMismatch, match="is not the snapshot of"):
         await execute_eval_job(job(clean_url, tasks=["json_schema"], tokenizer=stale))
+
+
+async def test_a_failed_divergence_keeps_the_task_scores(clean_url):
+    base = await execute_eval_job(job(clean_url, divergence="capture"))
+    assert base.reference is not None
+    # A reference the candidate cannot line up with: its first prompt tokenized otherwise.
+    first = base.reference.prompts[0]
+    retokenized = first.model_copy(
+        update={"positions": [p.model_copy(update={"token": "#"}) for p in first.positions]}
+    )
+    reference = base.reference.model_copy(
+        update={"prompts": [retokenized, *base.reference.prompts[1:]]}
+    )
+    cand = await execute_eval_job(job(clean_url, divergence="score", reference=reference))
+    assert cand.divergence is None
+    assert (cand.divergence_error or "").startswith(
+        "ValueError: reference and candidate tokenized the same text differently"
+    )
+    assert set(cand.tasks) == {"arithmetic", "json_schema"}
+    assert all(t.items for t in cand.tasks.values())
+    decision = gate_against_baseline(
+        suite_result_of(base),
+        suite_result_of(cand),
+        SUITE,
+        cand.divergence,
+        divergence_error=cand.divergence_error,
+    )
+    assert decision.divergence.verdict is Verdict.INCONCLUSIVE
+    assert "tokenized the same text differently" in decision.divergence.reason
+    assert len(decision.tasks) == 2 and decision.blocked

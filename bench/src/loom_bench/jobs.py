@@ -188,5 +188,7 @@ class EvalJobResult(BaseModel):
     # after "capture" / "capture_and_floor" (the latter with its self_divergence)
     reference: ReferenceLogprobs | None = None
     divergence: DivergenceResult | None = None  # after divergence "score"
+    # Why the divergence half failed (capture or score); the task scores still stand.
+    divergence_error: str | None = None
     started_at: str  # ISO-8601 UTC wall clock
     finished_at: str
