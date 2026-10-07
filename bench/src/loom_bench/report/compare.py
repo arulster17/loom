@@ -18,9 +18,11 @@ Verdict per metric, on the repetition means (delta = B - A):
 Cost at SLO has no per-run samples, so rule 2 is replaced by overlap of the two
 cost CIs. Goodput is shown with its search bracket; when the two brackets overlap the
 search cannot separate the configs (`resolution.brackets_overlap`) and the comparison
-says so. The comparison as a whole is within normal variance only if every
-metric is, every sweep and point matched, and (except when matching by workload)
-config hashes are identical.
+says so. Every matched sweep also gets a latency table at the loads both sides ran
+(`equal_load`), where a side is lower only when its CI lies entirely below the
+other's. The comparison as a whole is within normal variance only if every metric
+is, every sweep and point matched, and (except when matching by workload) config
+hashes are identical.
 """
 
 from __future__ import annotations
@@ -38,6 +40,12 @@ from loom_bench.cost import MicrosRange
 from loom_bench.metrics.aggregate import HEADLINE_METRICS
 from loom_bench.records import LoadMode
 from loom_bench.report.analyze import COMPLETED, ConfigResult, LoadPoint, load_points
+from loom_bench.report.equal_load import (
+    EqualLoadSide,
+    EqualLoadTable,
+    equal_load,
+    equal_load_markdown,
+)
 from loom_bench.report.format import goodput_bracket, md_table, num, pct, usd
 from loom_bench.report.resolution import brackets_overlap
 from loom_bench.stats import Estimate
@@ -113,6 +121,7 @@ class Comparison(BaseModel):
     confidence: float
     configs: list[ConfigComparison]
     points: list[PointComparison]
+    equal_load: list[EqualLoadTable] = []  # latency at the loads both sides ran
     only_in_a: list[str]
     only_in_b: list[str]
     within_normal_variance: bool
@@ -356,8 +365,27 @@ def compare(
     ]
     configs: list[ConfigComparison] = []
     points: list[PointComparison] = []
+    tables: list[EqualLoadTable] = []
     for k in sorted(set(side_a) & set(side_b)):
         sa, sb = side_a[k], side_b[k]
+        table = equal_load(
+            [
+                EqualLoadSide(
+                    name=f"{label_a}: {sa.name}",
+                    points=sa.points,
+                    goodput=sa.result.goodput if sa.result else None,
+                ),
+                EqualLoadSide(
+                    name=f"{label_b}: {sb.name}",
+                    points=sb.points,
+                    goodput=sb.result.goodput if sb.result else None,
+                ),
+            ],
+            sa.workload,
+            sa.load_mode,
+        )
+        if table is not None:
+            tables.append(table)
         hash_match = sa.config_hash == sb.config_hash
         pb = {p.load: p for p in sb.points}
         pa = {p.load: p for p in sa.points}
@@ -435,6 +463,7 @@ def compare(
         confidence=confidence,
         configs=configs,
         points=points,
+        equal_load=tables,
         only_in_a=only_a,
         only_in_b=only_b,
         within_normal_variance=bool(points)
@@ -550,6 +579,23 @@ def render_markdown(c: Comparison) -> str:
                 ],
             ),
         ]
+    if c.equal_load:
+        parts += [
+            "",
+            "## Latency at equal load",
+            "",
+            "Both sides at the loads they both ran: those at or below the lower goodput, plus "
+            "the highest common load (every common load when a goodput is unknown). Geometric "
+            f"means with {c.confidence:.0%} CIs; a side is lower on a metric only when its CI "
+            "lies entirely below the other's, otherwise there is no significant difference.",
+        ]
+        for t in c.equal_load:
+            parts += [
+                "",
+                f"### {t.workload} ({t.load_mode.value})",
+                "",
+                equal_load_markdown(t),
+            ]
     for p in c.points:
         unit = "req/s" if p.load_mode is LoadMode.OPEN_LOOP else "concurrent"
         parts += [

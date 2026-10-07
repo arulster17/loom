@@ -54,7 +54,8 @@ def test_reports_from_stored_runs(tmp_path, all_runs, price_book, competitors):
     leaderboard = render_leaderboard(results, price_book=price_book)
     competitiveness = render_competitiveness(results, load_registry(), competitors)
     reproduction = render_compare(results, results, label_a="original", label_b="reproduction")
-    assert set(leaderboard) == {"md", "html", "csv"} == set(competitiveness)
+    assert set(leaderboard) == {"md", "html", "csv", "equal_load.csv"}
+    assert set(competitiveness) == {"md", "html", "csv"}
     assert set(reproduction) == {"md", "json"}
     assert "**Verdict: within normal variance**" in reproduction["md"]
     for r in results:
@@ -73,6 +74,7 @@ def test_reports_from_stored_runs(tmp_path, all_runs, price_book, competitors):
         "competitiveness.html",
         "competitiveness.md",
         "leaderboard.csv",
+        "leaderboard.equal_load.csv",
         "leaderboard.html",
         "leaderboard.md",
     ]

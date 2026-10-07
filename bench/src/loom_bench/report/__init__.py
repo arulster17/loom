@@ -1,7 +1,8 @@
 """Reports from the results store: leaderboard, competitiveness view and compare.
 
 Each `render_*` returns `{format: text}` with the format as the file extension
-("md", "html", "csv", "json"); `write_reports` writes them as `<name>.<format>`.
+("md", "html", "csv", "json"; the leaderboard adds "equal_load.csv", its latency at
+equal load in long form); `write_reports` writes them as `<name>.<format>`.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ def render_leaderboard(
         "md": _leaderboard.render_markdown(report),
         "html": _leaderboard.render_html(report),
         "csv": _leaderboard.render_csv(report),
+        "equal_load.csv": _leaderboard.render_equal_load_csv(report),
     }
 
 

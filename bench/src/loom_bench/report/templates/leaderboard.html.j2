@@ -42,6 +42,26 @@
 </tbody>
 </table>
 </div>
+{% if b.equal_load %}
+{% set t = b.equal_load %}
+<h3>Latency at equal load</h3>
+<p class="lede">{{ equal_load_note }}</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th class="num">Load</th><th>Metric</th>{% for n in t.names %}<th class="num">{{ n }}</th>{% endfor %}<th>Verdict</th></tr>
+</thead>
+<tbody>
+{% for p in t.points %}
+<tr><td class="num">{{ load_value(p.load, t.load_mode) }}</td><td>SLO at this load</td>{% for c in p.cells %}<td class="num">{{ slo_text(c.slo_met) }}</td>{% endfor %}<td></td></tr>
+{% for metric, label in equal_load_metrics %}
+<tr><td class="num">{{ load_value(p.load, t.load_mode) }}</td><td>{{ label }}</td>{% for c in p.cells %}<td class="num">{% if p.lower[metric] == c.name %}<strong>{{ estimate(c.metrics.get(metric), equal_load_places.get(metric, 0), 'ms') }}</strong>{% else %}{{ estimate(c.metrics.get(metric), equal_load_places.get(metric, 0), 'ms') }}{% endif %}</td>{% endfor %}<td>{{ p.verdict(metric) }}</td></tr>
+{% endfor %}
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endif %}
 {% set warned = b.rows|map(attribute='result')|selectattr('warnings')|list %}
 {% if warned %}
 <h3>Warnings</h3>

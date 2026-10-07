@@ -10,7 +10,8 @@ One board per (model, workload, load mode): costs measured on different workload
 are not comparable. Rows are ranked cheapest first. Goodput is shown with its search
 bracket, and configs whose brackets overlap are marked as tied within the search
 resolution (`resolution`): their cost comes from the same grid point, so the ranking
-between them is not a measured difference. Configs that failed the
+between them is not a measured difference. Each board with two or more configs also
+compares their latency at the loads they all ran (`equal_load`). Configs that failed the
 quality gate, are untrusted, or have no cost at SLO are still listed, after the
 ranked rows and without a rank, with the reason in their status. Recommendations
 are generated from the numbers alone, so the same data always gives the same text.
@@ -31,6 +32,15 @@ from loom_bench.prices import PriceBook
 from loom_bench.provenance import ContentKind
 from loom_bench.records import LoadMode
 from loom_bench.report.analyze import UNTRUSTING, ColdStartStat, ConfigResult, gate_label
+from loom_bench.report.equal_load import (
+    EQUAL_LOAD_METRICS,
+    EQUAL_LOAD_NOTE,
+    EQUAL_LOAD_PLACES,
+    EqualLoadTable,
+    equal_load_for,
+    equal_load_markdown,
+    slo_text,
+)
 from loom_bench.report.format import (
     BRACKET_NOTE,
     UNBRACKETED_NOTE,
@@ -98,6 +108,7 @@ class Leaderboard(BaseModel):
     content: ContentKind | None
     rows: list[LeaderboardRow]
     price_columns: list[PriceColumn]  # extra cost columns with a value in some row
+    equal_load: EqualLoadTable | None = None  # latency at the loads every config ran
 
     @property
     def side(self) -> str:
@@ -292,14 +303,16 @@ def build_leaderboard(
     boards = []
     for (model, workload, mode), members in sorted(groups.items()):
         contents = {r.content for r in members}
+        rows = rank(members, cold_starts, names)
         boards.append(
             Leaderboard(
                 model=model,
                 workload=workload,
                 load_mode=mode,
                 content=contents.pop() if len(contents) == 1 else None,
-                rows=rank(members, cold_starts, names),
+                rows=rows,
                 price_columns=price_columns(members),
+                equal_load=equal_load_for([row.result for row in rows]),
             )
         )
     ordered = [row.result for b in boards for row in b.rows]
@@ -386,6 +399,15 @@ def render_markdown(report: LeaderboardReport) -> str:
     for b in report.boards:
         rows = [_md_row(row, b.price_columns) for row in b.rows]
         parts += ["", f"## {board_title(b)}", "", md_table(md_headers(b), rows)]
+        if b.equal_load is not None:
+            parts += [
+                "",
+                "### Latency at equal load",
+                "",
+                EQUAL_LOAD_NOTE,
+                "",
+                equal_load_markdown(b.equal_load),
+            ]
         warned = [row.result for row in b.rows if row.result.warnings]
         if warned:
             parts += ["", "**Warnings**", ""]
@@ -407,6 +429,10 @@ def render_html(report: LeaderboardReport) -> str:
             quality_text=quality_text,
             gate_label=gate_label,
             cold_text=cold_text,
+            equal_load_metrics=EQUAL_LOAD_METRICS,
+            equal_load_places=EQUAL_LOAD_PLACES,
+            equal_load_note=EQUAL_LOAD_NOTE,
+            slo_text=slo_text,
             unbracketed=any_unbracketed(
                 row.result.goodput for b in report.boards for row in b.rows
             ),
@@ -554,3 +580,44 @@ def _csv_row(b: Leaderboard, row: LeaderboardRow, m: Methodology) -> dict[str, A
 def render_csv(report: LeaderboardReport) -> str:
     rows = [_csv_row(b, row, report.methodology) for b in report.boards for row in b.rows]
     return to_csv(rows, CSV_COLUMNS)
+
+
+EQUAL_LOAD_CSV_COLUMNS = [
+    "model",
+    "workload",
+    "load_mode",
+    "load",
+    "config",
+    "metric",
+    *estimate_column_names("value"),
+    "slo_met",
+    "significantly_lower",
+    "verdict",
+]
+
+
+def render_equal_load_csv(report: LeaderboardReport) -> str:
+    """One row per (board, load, config, metric): the equal-load comparison in long form."""
+    rows: list[dict[str, Any]] = []
+    for b in report.boards:
+        t = b.equal_load
+        if t is None:
+            continue
+        for p in t.points:
+            for c in p.cells:
+                for metric, _ in EQUAL_LOAD_METRICS:
+                    rows.append(
+                        {
+                            "model": b.model,
+                            "workload": b.workload,
+                            "load_mode": b.load_mode.value,
+                            "load": p.load,
+                            "config": c.name,
+                            "metric": metric,
+                            **estimate_columns("value", c.metrics.get(metric)),
+                            "slo_met": c.slo_met,
+                            "significantly_lower": p.lower[metric] == c.name,
+                            "verdict": p.verdict(metric),
+                        }
+                    )
+    return to_csv(rows, EQUAL_LOAD_CSV_COLUMNS)

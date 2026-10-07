@@ -576,7 +576,8 @@ def report(
     out: ReportDirOpt = Path("reports"),
     db: DbOpt = None,
 ) -> None:
-    """Leaderboard ranked by $/1M output tokens at SLO (md, html, csv)."""
+    """Leaderboard ranked by $/1M output tokens at SLO (md, html, csv; latency at equal
+    load in leaderboard.equal_load.csv)."""
     from loom_bench.report import render_leaderboard, write_reports
 
     results, cold = _analyze(db, experiment)
