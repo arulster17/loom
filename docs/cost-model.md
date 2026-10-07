@@ -41,7 +41,7 @@ failing `lo` up to N times before giving up).
    result is flagged untrusted.
 4. **Goodput** is the highest passing load below the first failing one
    (`slo.find_goodput`); loads above the first failure never count. If no tested load
-   failed, goodput is "at least" the highest load, the result is flagged
+   failed, goodput is "at least" the highest load (shown `≥`), the result is flagged
    `unbracketed_goodput`, and the cost at SLO is an upper bound.
 5. The throughputs at the goodput point (`throughput.output_tok_s`, `input_tok_s`,
    `request_rate`, each an estimate with a CI) are what gets priced.
@@ -86,7 +86,9 @@ of the throughput interval, scaled. Exceptions:
 
 The interval is the run-to-run variation of throughput at the goodput load. It does not
 include the uncertainty of where goodput lies between the passing load and the first
-failing one; `rel_tol` bounds that bracket.
+failing one; `rel_tol` bounds that bracket. Reports show the bracket next to goodput and
+mark configs whose brackets overlap as tied within the search resolution, since their
+costs then come from the same grid point (`docs/benchmark-lab.md`, "Reading the reports").
 
 ## 4. The hourly price H
 

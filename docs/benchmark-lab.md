@@ -36,9 +36,9 @@ To benchmark an endpoint you already run (vLLM, SGLang, or `bench mock-server`),
 | `bench run EXP.yaml [--dry-run] [--db URL] [--out results/]` | Plans, refuses if over a cap, then runs. `--dry-run` stops after the plan. |
 | `bench reproduce RUN_ID \| provenance.json [--tolerance 0.25]` | Re-runs one stored run from its provenance and compares it with the original. |
 | `bench reap [--dry-run]` | Terminates resources whose TTL passed (DB-recorded; all Loom-tagged EC2 instances when AWS is configured; all Loom-managed RunPod pods when a RunPod API key is found). |
-| `bench report [-e EXP]...` | Leaderboard (md, html, csv) by $/1M output tokens at SLO. |
+| `bench report [-e EXP]...` | Leaderboard (md, html, csv) by $/1M output tokens at SLO, with goodput brackets and latency at equal load (also `leaderboard.equal_load.csv`; see "Reading the reports"). |
 | `bench competitiveness [-e EXP]...` | Our cost at SLO vs competitors' list prices. |
-| `bench compare EXP_A EXP_B [--match-by]` | Per-metric deltas with variance verdicts. Exit 6 if outside normal variance. |
+| `bench compare EXP_A EXP_B [--match-by]` | Per-metric deltas with variance verdicts, goodput brackets and latency at equal load. Exit 6 if outside normal variance. |
 | `bench quality run SUITE --base-url URL --model NAME` | Runs a pinned eval suite against an endpoint. |
 | `bench quality gate --baseline X --candidate Y` | Re-decides the gate from stored per-item samples (X, Y: experiment id or config hash). Exit 7 if blocked. |
 | `bench export csv\|parquet --out FILE` | One row per run with summary and provenance flattened. |
@@ -230,6 +230,43 @@ point and repetition as a new experiment named `<name>--reproduce`, and compares
 `report.compare`: the original point's repetitions against the new run. Exit 0 within normal
 variance, 6 outside. A `provenance.json` path works too; the spec is read from the
 experiment's `spec.json` next to it (or `--spec`).
+
+## Reading the reports
+
+**Goodput bracket.** Goodput comes from a search over a grid of loads, so it is known only
+to a bracket: at least the goodput load, below the next tested load, which failed. The
+leaderboard and `bench compare` show both, e.g. `1 req/s (fails at 1.091)`;
+`≥8 req/s (none failed)` when every tested load met the SLO (a lower bound, and cost at SLO
+is an upper bound); `none met the SLO (fails at 0.5)` when even the lowest failed. Loads
+print to four significant figures, since geometric search produces loads like 1.0905.
+
+**Ties within the search resolution.** Below saturation a server delivers what it is
+offered, so two configs whose brackets overlap get their goodput, throughput and cost at
+SLO from the same grid point: identical numbers that are not a measured equality
+(`report/resolution.py`). The leaderboard names the tie in the goodput cell ("tied with
+X"), the recommendation says "Tied for cheapest" or "Tied with X" instead of a percentage,
+and the CSV has `goodput_bracket`, `goodput_at_least` and `goodput_ties`. Brackets are
+half-open: one config passing 6 and another failing at 6 are separated. In the 8B sweep
+565b8d3f, vLLM and SGLang tied on fixed-1k-1k (both `1 req/s (fails at 1.091)`) and
+shared-prefix, and were separated on code-completion (1.297 vs 1.091 req/s). Narrowing a
+tie needs a finer search (`rel_tol`), i.e. more GPU time.
+
+**Latency at equal load** (`report/equal_load.py`). Where goodput cannot separate configs,
+latency at the same offered load can. Each leaderboard board with two or more configs, and
+each matched sweep in `bench compare`, gets a table of TTFT p50 and p95, TPOT p50 and p95
+and E2E p95 at every load all of them ran, with the SLO verdict at that load:
+
+- Loads shown: every common load at or below the lowest goodput, where all configs are
+  compared inside the SLO, plus the highest common load, which shows how they degrade past
+  it. In `bench compare` from raw runs (no SLO verdict), every common load.
+- Values: geometric means across repetitions with 95% log-t CIs, as everywhere else.
+- A config is **lower** on a metric only when its CI lies entirely below every other
+  config's at that load (shown in bold); otherwise the verdict is "no significant
+  difference". A single repetition has no CI and is never significant. CI separation is
+  stricter than the Welch test `bench compare` uses for its per-metric verdicts, so a
+  difference called here is a clear one.
+- `leaderboard.equal_load.csv` has one row per (board, load, config, metric) with the
+  estimate, its bounds, the SLO verdict, `significantly_lower` and the verdict text.
 
 ## Results layout
 
