@@ -51,6 +51,11 @@ backend. A missing or broken eval dependency fails here instead of on a paid pod
 `LOOM_POD_REQUIREMENTS=<file>` checks another requirements set; without `HF_TOKEN`, tasks
 whose tokenizer is license-gated are skipped when another suite runs the same harness task.
 
+`uv run pytest -m network bench/tests/quality/test_divergence_byte_split.py` (seconds;
+downloads Qwen3's `tokenizer.json` once) checks cross-engine divergence on real token
+ids. It renders vLLM's captured prompts 20 and 40 from sweep 565b8d3f as SGLang returns
+them and scores them against the capture.
+
 Postgres-marked tests (`-m postgres`) need `LOOM_TEST_DATABASE_URL`. Each test creates
 and drops its own schema, so the compose database is safe to use:
 

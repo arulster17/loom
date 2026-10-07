@@ -72,6 +72,7 @@ their bootstrap CIs:
 
 | Divergence (checked in order) | Divergence verdict |
 |---|---|
+| asked for by the suite but failed (capture or scoring raised) | INCONCLUSIVE ("not measured: ...", with the error) |
 | not measured | PASS ("not measured") |
 | mean KL > `ceiling_kl` or top-1 < `ceiling_top1` | FAIL |
 | within both calibrated limits | PASS |
@@ -151,11 +152,17 @@ than subtle drift. Each suite file repeats this table next to the tasks.
 
 1. The reference greedily continues each of the 48 pinned prompts
    (`quality/data/divergence_prompts.yaml`) for `max_new_tokens` tokens.
+   A suite can name its prompts by index instead (`divergence.prompt_ids`), and its
+   `hard_prompts`: prompts whose continuations split characters across tokens on that
+   model (Qwen3: 20 and 40). A limited suite (`quality.limit`, the smoke) keeps the hard
+   prompts first, so the smoke meets what the real run meets.
 2. Both endpoints score the identical text prompt + continuation with `/v1/completions`,
    `echo: true, logprobs: k, max_tokens: 1` (vLLM v0.30 and SGLang v0.5.21 both support
    echo with logprobs). Every continuation position is then conditioned on the same tokens
    on both sides (teacher forcing), so differences come from weights and kernels alone.
 3. Per position: top-1 agreement (same argmax token) and approximate KL(ref || cand).
+   Positions are the echoed tokens that start in the continuation; a server that reports
+   no `text_offset` (SGLang: -1 for every token) is first brought to vLLM's form (below).
 4. Per prompt: mean over its positions. Reported: the mean over prompts with a bootstrap CI
    over prompts (positions within a prompt are correlated).
 
@@ -168,6 +175,45 @@ KL of the coarsened distributions, a lower bound on the true KL (data-processing
 inequality). When the sets differ it is an estimate that grows sharply when one side's
 confident token is missing from the other's list, which is the failure that matters. Both
 sides must use the same tokenizer; the measurement refuses otherwise.
+
+**Characters split across tokens.** Byte-level BPE tokenizers (Qwen3, Llama 3) can split
+one character across tokens: Qwen3 splits " √" into the bytes `" \xe2\x88"` and `"\x9a"`.
+Engines render such tokens differently (`loom_bench/detokenize.py`). vLLM renders the
+first token as "" and the one that finishes the character as all of it (" √"), and
+reports text offsets. SGLang renders each token on its own, a fragment as its raw bytes
+in latin-1 (`" â\x88"`, `"\x9a"`), and reports every offset as -1. Before comparing, a
+per-token response is converted to vLLM's form:
+- its tokens are matched against the scored text's UTF-8 bytes, which fixes each token's
+  bytes, lossy U+FFFD fragments included;
+- it is re-rendered with vLLM's own rule (ported from v0.30.0), and its offsets are
+  rebuilt the way vLLM computes them;
+- top-k keys get the same treatment.
+
+A token sequence that does not spell the text is rejected, and a different tokenization
+still fails the position-by-position comparison. One case stays a guess. SGLang's form
+cannot tell a latin-1 letter key from a lone fragment byte ("é" vs the byte 0xE9). Such a
+key reads as a fragment when it holds a C1 control, finishes the previous tokens'
+unfinished character, ends in an unfinished character of two or more bytes, or is a lone
+3- or 4-byte lead byte after CJK or symbol text. Otherwise it reads as the letter it
+shows. This only touches low-ranked alternatives; the echoed token's key is exact. Sweep
+565b8d3f lost SGLang's eval to this before the fix. The real vLLM capture of prompts 20
+and 40 from that sweep is a test fixture, scored against SGLang's rendering of the same
+Qwen3 token ids, with KL 0 and top-1 1.0. A leading special token (BOS) that a server
+counts into its offsets, although the text does not hold it, no longer shifts the
+selected positions.
+
+**A failed divergence keeps the scores.** The divergence half of an eval job (capture,
+floor or score) runs after its tasks. If it raises, the job still returns the task scores,
+with `divergence_error`. The runner then:
+- records a `divergence_failed` event;
+- keeps the task scores;
+- leaves candidates unscored when the baseline's capture failed;
+- gates with the divergence check INCONCLUSIVE ("not measured: candidate divergence
+  failed: ..." or "... baseline divergence capture failed: ..."), blocked, while still
+  deciding and reporting each task.
+
+The experiment ends `completed` with "divergence failed in N of M quality evals" and
+exit 8. `samples.json` keeps the error, so `bench quality gate` decides the same way.
 
 **Noise floor.** Two healthy engines serving the same BF16 weights never agree bit for
 bit: kernels sum in different orders, and an engine's own numerics change with batch
@@ -236,7 +282,8 @@ decision = gate_against_baseline(base, cand, suite, div)
 print(decision.summary())
 ```
 
-`record_suite_result` writes one `bench_eval_runs` row per task (mean, t-interval, task
+`record_suite_result` writes one `bench_eval_runs` row per task (mean, t-interval clipped
+to [0, 1] as scores are fractions, task
 version, provenance including dataset source, revision and license) and `record_gate`
 writes the decision to `bench_gate_decisions`.
 

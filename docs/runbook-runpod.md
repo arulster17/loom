@@ -169,6 +169,13 @@ the failed evals, and any gate missing a side is stored as `inconclusive` (block
 load results stand; fix the cause (the error usually names a missing module or a harness
 failure), prove it with the smoke test, and rerun.
 
+A `divergence_failed` event instead means the eval's task scores were recorded but its
+divergence half raised: the gate's divergence check is `inconclusive` (blocked) with the
+error, and the reason reads "divergence failed in N of M quality evals". When the load
+sweep itself is fine, finish the gate without re-running load: fix the cause, prove it
+with the smoke test, then run the quality-only spec (`qwen3-8b-quality-runpod.yaml`
+for the Qwen sweep). Its evals and gate land on the sweep's config hashes.
+
 ### Pod refused for its price
 
 `pod … costs … $/h, above prices.yaml … x 1.25: terminated`. RunPod's price moved. Check
@@ -237,14 +244,18 @@ once before the sweep pays for hours: both engine images by the same digests (on
 1× L40S pod each), the same three workload profiles under the same geometric rate search
 (2 points with a 1-step descent, 10 s windows) and the same 3 repetitions, the same
 quality subset with every task capped at 4 items (`quality.limit`), divergence capture,
-noise floor and scoring, and the SGLang-vs-vLLM gate. `max_spend: "$2.25"`, TTL 60 min per
+noise floor and scoring on 4 prompts that include the suite's hard prompts (20 and 40,
+whose continuations split characters across tokens), and the SGLang-vs-vLLM gate. `max_spend: "$2.25"`, TTL 60 min per
 pod (worst case $2.20; SGLang's image pull took 226 s in b97dea4c, so 47 min left ~2 min of margin). The repetitions must match: the pass verdict's CI upper bound
 uses t with reps-1 degrees of freedom, and at 2 reps (t ≈ 12.7) smoke 51ad57b0 failed
 every first point, so the climb never ran.
 `bench/tests/runner/test_plan.py` fails if the smoke and the real spec drift apart. It is
 `smoke: true`: left out of default reports and the results site, since its cells share
 config hashes with the real ones. The old smoke ran vLLM only with no eval, and the first
-8B sweep (058128e9) found the missing lm-eval extra hours in, after $3.39.
+8B sweep (058128e9) found the missing lm-eval extra hours in, after $3.39. Smoke 28d301fa
+scored divergence on the first 4 prompts only, all ASCII continuations, so it passed while
+the second sweep (565b8d3f) then lost SGLang's eval to characters split across tokens on
+prompts 20 and 40; the smoke now scores those two.
 
 Dependency bugs are caught for free before that: `uv run pytest -m network` (CI job
 `pod-client-env`) rebuilds the pods' client environment from `uv.lock` and runs every task
@@ -264,8 +275,11 @@ Checklist:
   means a run or an eval failed: read the reason). Goodput may come out empty at smoke
   scale; the search path running is what counts.
 - [ ] Both cells have a `quality` event naming gsm8k, ifeval, tool_calling and
-  json_schema, there is no `quality_failed` event, `reference_captured` has a
-  `self_divergence`, and SGLang has a `gate` event (inconclusive at 4 items is expected).
+  json_schema (tool_calling scored, not rejected), there is no `quality_failed` or
+  `divergence_failed` event, `reference_captured` has a `self_divergence`, and SGLang has
+  a `gate` event (inconclusive at 4 items is expected).
+- [ ] vLLM's `reference.json` holds prompts 20 and 40 (the hard prompts), and SGLang's gate
+  reasons give a measured divergence ("KL ... nats, top-1 ...%"), not "not measured: ...".
 - [ ] The cold start stages include `pod_created`, `image_pulled`, `sshd_ready`,
   `ssh_online`, `weights_ready`, `engine_healthy` and `first_token`.
 - [ ] The run completed, and its `result.json` and `gpu.csv` are under
@@ -276,6 +290,8 @@ Checklist:
 - [ ] The pod shows as terminated (gone from the pod list), not exited.
 - [ ] Section 5 passes.
 
-Smoke test result (redesigned smoke, both engines with evals): pending.
+Smoke test result (redesigned smoke with the hard divergence prompts): pending. Smoke
+28d301fa (2026-10-07, ASCII-only divergence prompts) passed every item; the byte-split bug
+it could not see is fixed and covered offline since.
 
 Earlier smoke test result (the vLLM-only smoke, 2026-10-06): passed on the second attempt, experiment `17d0cb33`, 1x L40S Secure in US-MO-1. `job_isolation ok` was recorded, the pod terminated, `bench reap --dry-run` was clean, and the DB spend ($0.1506 over both attempts) matched the balance drop ($0.1502). The first attempt failed because pods did not follow the 302 redirect on the client Python download (fixed in 0721077).

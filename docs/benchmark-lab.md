@@ -264,11 +264,22 @@ is a name in `bench/evals/` or a YAML path from the repo root. See `docs/quality
 for the method. A failed eval job is recorded (`quality_failed` event, exit 8) and the
 experiment goes on; gates missing a side are `inconclusive`. A task whose requests were
 all errors, or more than 10% non-retryable 4xx rejections, fails its eval job this way
-instead of scoring zeros.
+instead of scoring zeros. A failed divergence (capture or scoring) keeps the job's task
+scores: a `divergence_failed` event, a gate whose divergence check is `inconclusive` with
+the error as reason, and exit 8 ("divergence failed in N of M quality evals").
+
+A quality-only experiment (`workloads: []`, with a `quality` section) runs no load: each
+engine's cold start, then only its eval job, the divergence reference and scoring, and the
+gate. It finishes a gate whose load sweep is already recorded: same model, provider,
+images and quality section give the same config hashes, so its evals and gate attach to
+that sweep's goodput in reports (the latest eval and gate per config win). `bench report`
+checks SLO and cost allocation only across experiments that ran load.
 
 A smoke experiment (`smoke: true`) runs a real experiment's code paths at minimal scale:
 `quality.limit: N` (allowed only there) caps every suite task near N items and divergence
-at N prompts (`Suite.limited`). Smoke experiments share config hashes with the real ones,
+at N prompts (`Suite.limited`), the suite's `divergence.hard_prompts` first (prompts whose
+continuations split characters across byte-level tokens; Qwen3: 20 and 40). Smoke
+experiments share config hashes with the real ones,
 so default `bench report` selection and the site's latest snapshot leave them out; pass
 `-e <id>` to report one.
 
@@ -282,6 +293,7 @@ The real runs are on RunPod Secure Cloud on-demand, since the AWS GPU spot quota
 | `qwen3-8b-vllm-vs-sglang-runpod` | 2x RunPod 1x L40S (one pod per engine), 3.6 h each of a 6 h TTL | $7.92 | $13.21 | $15 |
 | `llama-3.3-70b-tp4-runpod` | 1x RunPod 4x L40S, 2.7 h of a 4 h TTL | $11.73 | $17.58 | $45 |
 | `runpod-smoke` | 2x RunPod 1x L40S (the Qwen sweep at smoke scale), 37 min each of a 60 min TTL | $1.35 | $2.20 | $2.25 |
+| `qwen3-8b-quality-runpod` | 2x RunPod 1x L40S, evals and gate only (finishes 565b8d3f's gate), 45 min each of a 75 min TTL | $1.64 | $2.75 | $2.80 |
 
 The AWS specs stay as the secondary path:
 
