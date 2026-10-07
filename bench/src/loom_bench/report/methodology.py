@@ -147,7 +147,23 @@ def as_run_text(result: ConfigResult) -> str:
         return f"{hourly}, {host}: price-book on-demand price{_storage_text(b.storage_gb)}"
     if b.source == "experiment":
         return f"{hourly}, {host}: declared by the experiment (provider.hourly_price)"
+    if b.source == "observed_api":
+        at = b.observed_at.isoformat() if b.observed_at else "time not recorded"
+        cloud = result.provenance.get("cloud") or "the provider"
+        return (
+            f"{hourly}, {host}: {cloud} API price observed at launch in "
+            f"{_zone_text(b.availability_zone)} ({at}){_storage_text(b.storage_gb)}"
+        )
     return f"unknown, {host}: no spot price was observed for its availability zone at launch"
+
+
+def _zone_text(zone: str | None) -> str:
+    """An AZ or datacenter id; `location:<code>` is a country, so it is said as one."""
+    if not zone:
+        return "an unrecorded datacenter"
+    if zone.startswith("location:"):
+        return f"location {zone.removeprefix('location:')} (datacenter not reported)"
+    return zone
 
 
 def price_source(result: ConfigResult, price_book: PriceBook | None) -> PriceSource:
