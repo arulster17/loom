@@ -54,6 +54,8 @@ class MockConfig(BaseModel):
     # numerics depend on what shares the batch: scoring the same text twice differs a
     # little, which gives the divergence noise floor something to measure.
     logprob_jitter: NonNegativeFloat = 0.0
+    # False reports every completions `text_offset` as -1, as SGLang does.
+    text_offsets: bool = True
 
     # Faults.
     error_rate: Probability = 0.0

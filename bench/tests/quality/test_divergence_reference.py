@@ -100,6 +100,33 @@ async def test_measure_divergence_is_capture_plus_score(clean_url, noisy_url):
     assert got == expected
 
 
+@pytest.fixture(scope="module")
+def no_offsets_url() -> Iterator[str]:
+    # Same weights as `clean_url`, but every text_offset is -1, as SGLang reports them.
+    with serve(time_scale=0.001, text_offsets=False) as url:
+        yield url
+
+
+async def test_a_server_without_text_offsets_scores_against_one_with_them(
+    clean_url, no_offsets_url
+):
+    # The 2026-10-06 smoke run (b97dea4c): a vLLM reference scored against SGLang
+    # failed because SGLang's -1 offsets selected no positions.
+    reference = await capture(clean_url)
+    got = await score(no_offsets_url, reference)
+    same = await score(clean_url, reference)
+    assert got.n_positions == same.n_positions > 0
+    assert got.kl.point == pytest.approx(0.0, abs=1e-9) and got.top1.point == 1.0
+
+
+async def test_a_reference_captured_without_text_offsets(clean_url, no_offsets_url):
+    reference = await capture(no_offsets_url)
+    assert reference.prompts and all(p.positions for p in reference.prompts if p.continuation)
+    assert reference.prompts == (await capture(clean_url)).prompts
+    got = await score(clean_url, reference)
+    assert got.kl.point == pytest.approx(0.0, abs=1e-9) and got.top1.point == 1.0
+
+
 async def test_one_capture_scores_many_candidates(clean_url, noisy_url):
     reference = await capture(clean_url)
     assert reference.model == MODEL and reference.top_k == TOP_K

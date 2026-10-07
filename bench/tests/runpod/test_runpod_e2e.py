@@ -4,6 +4,7 @@ and executes the staged jobs for real."""
 
 import asyncio
 import json
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -101,7 +102,12 @@ class PodSim(FakePodExec):
 
     async def start(self, target: SshTarget, script: str) -> Any:
         served = script_var(script, "SERVED_MODEL")
-        cfg = MockConfig(time_scale=0.01, models=[served], logprob_jitter=0.25)
+        # SGLang reports every completions text_offset as -1; mirror that so divergence
+        # scoring across the two pods is exercised as it runs for real.
+        sglang = re.search(r"^ENGINE_CMD=.*sglang", script, re.MULTILINE) is not None
+        cfg = MockConfig(
+            time_scale=0.01, models=[served], logprob_jitter=0.25, text_offsets=not sglang
+        )
         await self.stop(target, script)
         srv = await asyncio.to_thread(_started_server, cfg)
         self.servers[self._pod(target)] = srv

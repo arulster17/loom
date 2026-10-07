@@ -89,16 +89,44 @@ class Position:
     top: dict[str, float]
 
 
-def scored_positions(logprobs: Mapping[str, Any], start: int, end: int) -> list[Position]:
+def text_offsets(tokens: Sequence[str], offsets: Sequence[int], text: str | None) -> list[int]:
+    """The server's text offsets, or cumulative token lengths when it reports none.
+
+    SGLang's completions endpoint returns -1 for every `text_offset` ("not supported
+    yet"). vLLM computes its offsets as cumulative lengths of its per-token strings, so
+    rebuilding them that way selects the same positions; `compare_positions` still
+    requires identical tokens on both sides. Rebuilt offsets are only trusted when the
+    tokens spell `text` (the generated token may follow it).
+    """
+    if all(o >= 0 for o in offsets):
+        return list(offsets)
+    if any(o >= 0 for o in offsets):
+        raise ValueError("text_offset mixes known and unknown (-1) offsets")
+    if text is not None and not "".join(tokens).startswith(text):
+        raise ValueError(
+            "server returned no text_offset and its echoed tokens do not spell the scored text"
+        )
+    out, pos = [], 0
+    for token in tokens:
+        out.append(pos)
+        pos += len(token)
+    return out
+
+
+def scored_positions(
+    logprobs: Mapping[str, Any], start: int, end: int, *, text: str | None = None
+) -> list[Position]:
     """Echoed positions whose token starts in text[start:end].
 
     `logprobs` is a completions `choices[0].logprobs` object (tokens,
     top_logprobs, text_offset). The final generated token sits at offset
-    `end` and is excluded.
+    `end` and is excluded. `text` is the scored text, used to check offsets rebuilt
+    for a server that reports none (`text_offsets`).
     """
-    tokens, tops, offsets = logprobs["tokens"], logprobs["top_logprobs"], logprobs["text_offset"]
-    if not (len(tokens) == len(tops) == len(offsets)):
+    tokens, tops, raw = logprobs["tokens"], logprobs["top_logprobs"], logprobs["text_offset"]
+    if not (len(tokens) == len(tops) == len(raw)):
         raise ValueError("logprobs arrays differ in length")
+    offsets = text_offsets(tokens, raw, text)
     out = []
     for token, top, offset in zip(tokens, tops, offsets, strict=True):
         if start <= offset < end:
@@ -125,7 +153,8 @@ class PromptDivergence:
 def compare_positions(ref: Sequence[Position], cand: Sequence[Position]) -> PromptDivergence:
     if [p.token for p in ref] != [p.token for p in cand]:
         raise ValueError(
-            "reference and candidate tokenized the same text differently; "
+            "reference and candidate tokenized the same text differently "
+            f"({len(ref)} vs {len(cand)} positions); "
             "divergence needs the same tokenizer on both sides"
         )
     if not ref:
@@ -246,7 +275,7 @@ async def capture_reference(
             return ReferencePrompt(prompt=prompt, continuation="", positions=[])
         text = prompt + cont
         logprobs = await _score(reference, text, top_k)
-        positions = scored_positions(logprobs, len(prompt), len(text))
+        positions = scored_positions(logprobs, len(prompt), len(text), text=text)
         return ReferencePrompt(
             prompt=prompt,
             continuation=cont,
@@ -277,7 +306,8 @@ async def score_against_reference(
         text = p.prompt + p.continuation
         logprobs = await _score(candidate, text, reference.top_k)
         ref = [Position(x.token, dict(x.top)) for x in p.positions]
-        return compare_positions(ref, scored_positions(logprobs, len(p.prompt), len(text)))
+        cand = scored_positions(logprobs, len(p.prompt), len(text), text=text)
+        return compare_positions(ref, cand)
 
     results = await asyncio.gather(*(one(p) for p in reference.prompts))
     kept = [r for r in results if r is not None]

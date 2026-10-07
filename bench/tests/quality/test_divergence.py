@@ -81,6 +81,26 @@ def test_scored_positions_keep_only_the_continuation():
     assert pos[0].top == {" there": -0.5, " all": -1.2}
 
 
+def test_scored_positions_rebuild_offsets_a_server_reports_as_unknown():
+    # SGLang returns text_offset -1 for every token; cumulative token lengths give
+    # vLLM's offsets back, so the same continuation positions are selected.
+    sglang = {**ECHO, "text_offset": [-1, -1, -1, -1]}
+    pos = scored_positions(sglang, 2, 12, text="Hi there you")
+    assert [p.token for p in pos] == [" there", " you"]
+    assert pos == scored_positions(ECHO, 2, 12, text="Hi there you")
+
+
+def test_scored_positions_reject_partly_unknown_offsets():
+    with pytest.raises(ValueError, match="mixes"):
+        scored_positions({**ECHO, "text_offset": [0, -1, 8, 12]}, 2, 12)
+
+
+def test_scored_positions_reject_rebuilt_offsets_that_do_not_spell_the_text():
+    sglang = {**ECHO, "text_offset": [-1, -1, -1, -1]}
+    with pytest.raises(ValueError, match="do not spell"):
+        scored_positions(sglang, 2, 12, text="Hi their you")
+
+
 def test_scored_positions_reject_missing_top_logprobs():
     bad = {**ECHO, "top_logprobs": [None, None, {" you": -0.2}, {" go": -0.1}]}
     with pytest.raises(ValueError):

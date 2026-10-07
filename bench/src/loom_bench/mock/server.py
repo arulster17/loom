@@ -315,11 +315,11 @@ def _chat_logprob(entry: TokenLogprob) -> dict[str, Any]:
 
 
 def _completion_logprobs(
-    tokens: list[str], entries: list[TokenLogprob | None], offset: int
+    tokens: list[str], entries: list[TokenLogprob | None], offset: int, *, known: bool = True
 ) -> dict[str, Any]:
     text_offset = []
     for token in tokens:
-        text_offset.append(offset)
+        text_offset.append(offset if known else -1)  # SGLang reports -1 for every token
         offset += len(token)
     return {
         "tokens": tokens,
@@ -504,6 +504,7 @@ async def _completions(server: MockServer, request: Request) -> Response:
         finally:
             for seq in seqs:
                 server.engine.abort(seq)
+        known = server.config.text_offsets
         choices = []
         for i, (prompt, gen, lps) in enumerate(zip(prompts, gens, logprobs, strict=True)):
             tokens = [*gen.prompt_pieces, *gen.output.pieces] if req.echo else [*gen.output.pieces]
@@ -511,7 +512,11 @@ async def _completions(server: MockServer, request: Request) -> Response:
                 {
                     "index": i,
                     "text": (prompt if req.echo else "") + gen.output.text,
-                    "logprobs": _completion_logprobs(tokens, lps, 0) if lps is not None else None,
+                    "logprobs": (
+                        _completion_logprobs(tokens, lps, 0, known=known)
+                        if lps is not None
+                        else None
+                    ),
                     "finish_reason": gen.finish_reason,
                 }
             )
@@ -542,7 +547,9 @@ async def _completions(server: MockServer, request: Request) -> Response:
                 }
                 if lps is not None:
                     entries = lps[first : first + len(tokens)]
-                    choice["logprobs"] = _completion_logprobs(tokens, entries, offset)
+                    choice["logprobs"] = _completion_logprobs(
+                        tokens, entries, offset, known=server.config.text_offsets
+                    )
                 yield envelope.sse([choice])
                 offset += len(text)
             if req.include_usage:
