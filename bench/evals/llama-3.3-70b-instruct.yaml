@@ -116,9 +116,18 @@ tasks:
 # Teacher-forced divergence vs the BF16 reference: 48 pinned prompts x 64 tokens, top-5.
 # Limits calibrated on the baseline's own noise floor, measured each run at
 # floor_concurrency 1; the reasoning behind each value is in qwen3-8b.yaml.
+#
+# hard_prompts: Llama 3's 128k byte-level vocabulary keeps " √" and common CJK whole (they
+# split under Qwen3) but splits " ∛", " ∑", " ∫", " ÷" and a word-initial " ß" or " ñ"
+# (checked with the real tokenizer, bench/tests/quality/test_divergence_llama.py). Before
+# any Llama capture existed, the real Qwen3 BF16 continuations of all 48 prompts split
+# nothing under Llama's tokenizer, so these are the prompts whose continuations reach for
+# such characters: 20 (a √2 proof: math symbols) and 40 (German that drifted into
+# Chinese). A limited suite always scores them; revisit with the first Llama capture.
 divergence:
   top_k: 5
   max_new_tokens: 64
+  hard_prompts: [20, 40]
   floor_concurrency: 1
   noise_multiple: 5.0
   max_kl: 0.05
