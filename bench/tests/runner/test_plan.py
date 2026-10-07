@@ -24,6 +24,7 @@ from loom_bench.plan import (
 )
 from loom_bench.prices import HOURS_PER_MONTH, load_prices
 from loom_bench.provenance import GitInfo
+from loom_bench.quality.divergence import load_prompts
 from loom_bench.quality.tasks import TASKS
 from loom_bench.registry import load_registry, read_yaml
 from loom_bench.runner import EXIT_REFUSED, plan_experiment
@@ -151,7 +152,16 @@ def test_runpod_smoke_covers_every_code_path_of_the_real_qwen_sweep():
     assert smoke.quality.allow_code_exec == real.quality.allow_code_exec
     assert _eval_paths(smoke) == _eval_paths(real)
     assert smoke.quality.limit is not None and real.quality.limit is None
-    assert smoke.quality.load().divergence is not None  # capture, floor and scoring run
+    smoke_div, real_div = smoke.quality.load().divergence, real.quality.load().divergence
+    assert smoke_div is not None and real_div is not None  # capture, floor and scoring run
+    # Divergence on characters split across byte-level tokens: the smoke's 4 ASCII prompts
+    # never met them and SGLang's eval in sweep 565b8d3f died on prompts 20 and 40. The
+    # smoke's prompts come from the real set and hold at least one of its hard prompts
+    # (bench/tests/quality/test_divergence_byte_split.py proves they split characters).
+    pinned = len(load_prompts())
+    smoke_ids, real_ids = smoke_div.selected_ids(pinned), real_div.selected_ids(pinned)
+    assert set(smoke_ids) <= set(real_ids)
+    assert real_div.hard_prompts and set(real_div.hard_prompts) & set(smoke_ids)
 
 
 def test_the_llama_sweep_runs_no_eval_path_or_load_shape_the_qwen_smoke_misses():

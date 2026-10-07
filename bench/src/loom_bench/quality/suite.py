@@ -11,6 +11,7 @@ pair item for item with a full run of the same tasks.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Any, Self
 
@@ -23,6 +24,7 @@ from pydantic import (
     model_validator,
 )
 
+from loom_bench.quality.divergence import load_prompts
 from loom_bench.quality.gate import (
     GatePolicy,
     MinSamples,
@@ -73,6 +75,12 @@ class GateSpec(_Strict):
 
 class DivergenceSpec(_Strict):
     prompts: Annotated[int, Field(ge=2)] | None = None  # first N pinned prompts; None = all
+    # Or exactly these pinned prompts, by index (`Suite.limited` picks them this way).
+    prompt_ids: Annotated[list[Annotated[int, Field(ge=0)]], Field(min_length=2)] | None = None
+    # Pinned prompts whose reference continuations split characters across byte-level
+    # tokens on this model (565b8d3f: prompts 20 and 40 on Qwen3). Engines render such
+    # tokens differently, so a limited suite always keeps them among its prompts.
+    hard_prompts: list[Annotated[int, Field(ge=0)]] = Field(default_factory=list)
     top_k: Annotated[int, Field(ge=1, le=20)] = 5
     max_new_tokens: Annotated[int, Field(ge=1)] = 64
     # Absolute limits; the noise-calibrated limits are never stricter than these.
@@ -86,6 +94,37 @@ class DivergenceSpec(_Strict):
     # Concurrency of the baseline's second scoring pass (the noise floor); it must differ
     # from the eval job's, so requests land in different batches than at capture.
     floor_concurrency: PositiveInt = 1
+
+    @model_validator(mode="after")
+    def _one_selection(self) -> Self:
+        if self.prompts is not None and self.prompt_ids is not None:
+            raise ValueError("set divergence prompts (first N) or prompt_ids, not both")
+        ids = self.prompt_ids or []
+        if len(set(ids)) != len(ids) or len(set(self.hard_prompts)) != len(self.hard_prompts):
+            raise ValueError("divergence prompt indices must be distinct")
+        return self
+
+    def select(self, pinned: Sequence[str]) -> list[str]:
+        """This spec's prompts out of the pinned set (`divergence.load_prompts`)."""
+        return [pinned[i] for i in self.selected_ids(len(pinned))]
+
+    def selected_ids(self, n_pinned: int) -> list[int]:
+        """Indices into the pinned set of the prompts this spec scores."""
+        ids = self.prompt_ids if self.prompt_ids is not None else range(self.prompts or n_pinned)
+        out = list(ids)
+        if any(i >= n_pinned for i in [*out, *self.hard_prompts]):
+            raise ValueError(f"divergence prompt index out of range of the {n_pinned} pinned")
+        return out[:n_pinned]
+
+    def limited(self, n: int) -> DivergenceSpec:
+        """This spec at `n` of its prompts (at least 2): its hard prompts first, then the
+        others in order, so smoke scale still meets characters split across tokens."""
+        pool = self.selected_ids(len(load_prompts()))
+        hard = [i for i in self.hard_prompts if i in pool]
+        ids = (hard + [i for i in pool if i not in hard])[: max(2, n)]
+        return DivergenceSpec.model_validate(
+            {**self.model_dump(mode="json"), "prompts": None, "prompt_ids": ids}
+        )
 
 
 class Suite(_Strict):
@@ -155,16 +194,15 @@ class Suite(_Strict):
 
     def limited(self, n: int) -> Suite:
         """This suite with every task capped near `n` items and divergence at `n` prompts
-        (at least 2), everything else unchanged: same tasks, datasets, parameters and
-        harness code paths at smoke scale. Raises for a task kind with no item limit."""
+        (at least 2, its hard prompts first), everything else unchanged: same tasks,
+        datasets, parameters and harness code paths at smoke scale. Raises for a task kind
+        with no item limit."""
         if n < 1:
             raise ValueError("limit must be at least 1")
         doc = self.model_dump(mode="json")
         doc["tasks"] = [_limit_task(t, n) for t in self.tasks]
         if self.divergence is not None:
-            cap = max(2, n)
-            prompts = self.divergence.prompts
-            doc["divergence"]["prompts"] = cap if prompts is None else min(prompts, cap)
+            doc["divergence"] = self.divergence.limited(n).model_dump(mode="json")
         doc["item_limit"] = n
         return Suite.model_validate(doc)
 

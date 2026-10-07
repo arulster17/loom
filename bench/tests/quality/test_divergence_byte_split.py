@@ -31,6 +31,7 @@ from loom_bench.quality.divergence import (
     load_prompts,
     scored_positions,
 )
+from loom_bench.quality.suite import load_suite
 
 FIXTURE = Path(__file__).parent / "fixtures" / "divergence_qwen3_byte_split.json"
 QWEN3 = ("Qwen/Qwen3-8B", "b968826d9c46dd6066d109eabc6255188de91218")
@@ -52,6 +53,9 @@ def test_the_fixture_is_the_pinned_prompts_and_splits_characters():
     ids, ref = fixture()
     pinned = load_prompts()
     assert [p.prompt for p in ref.prompts] == [pinned[i] for i in ids]
+    # the Qwen3 suite's hard prompts, which a limited suite (the smoke) always scores
+    suite = load_suite("qwen3-8b").divergence
+    assert suite is not None and suite.hard_prompts == ids
     for p in ref.prompts:
         tokens = [x.token for x in p.positions]
         assert "".join(tokens) == p.continuation

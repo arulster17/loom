@@ -141,9 +141,14 @@ tasks:
 #     80% (one teacher-forced token in five changes). Kernel noise and a sound
 #     quantization stay well inside it; a wrong chat template, RoPE scaling or broken
 #     weights do not.
+#   - hard_prompts: Qwen3's byte-level BPE splits " √" (prompt 20) and Chinese characters
+#     (prompt 40) across tokens in their BF16 continuations, which vLLM and SGLang render
+#     differently (sweep 565b8d3f lost SGLang's eval to it). A limited suite (the smoke)
+#     always scores these two, so the smoke meets what the real sweep meets.
 divergence:
   top_k: 5
   max_new_tokens: 64
+  hard_prompts: [20, 40]
   floor_concurrency: 1
   noise_multiple: 5.0
   max_kl: 0.05

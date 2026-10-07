@@ -261,7 +261,7 @@ class Estimator:
             busy += (t.planned_items() or 0) * EVAL_ITEM_S[t.kind] / concurrency
         div = self.suite.divergence
         if div is not None:
-            prompts = div.prompts or len(load_prompts())
+            prompts = len(div.selected_ids(len(load_prompts())))
             busy += prompts * EVAL_DIVERGENCE_PROMPT_S / EVAL_CONCURRENCY
             if self.is_quality_baseline(cell):
                 busy += prompts * EVAL_FLOOR_PROMPT_S / div.floor_concurrency

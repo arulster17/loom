@@ -156,7 +156,7 @@ async def run_divergence(
     spec = suite.divergence
     if spec is None:
         raise ValueError(f"suite {suite.suite} has no divergence section")
-    prompts = load_prompts()[: spec.prompts]
+    prompts = spec.select(load_prompts())
     common: dict[str, Any] = {
         "api_key": api_key,
         "concurrency": concurrency,
@@ -257,7 +257,7 @@ async def _divergence(job: EvalJob) -> tuple[ReferenceLogprobs | None, Divergenc
             return None, await score_against_reference(client, job.reference, **stats)
         reference = await capture_reference(
             client,
-            load_prompts()[: spec.prompts],
+            spec.select(load_prompts()),
             top_k=spec.top_k,
             max_new_tokens=spec.max_new_tokens,
         )

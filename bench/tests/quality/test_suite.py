@@ -1,6 +1,6 @@
 import pytest
 
-from loom_bench.quality.suite import EVALS_DIR, Suite, load_suite
+from loom_bench.quality.suite import EVALS_DIR, DivergenceSpec, Suite, load_suite
 from loom_bench.registry import load_registry
 
 SUITES = sorted(p.stem for p in EVALS_DIR.glob("*.yaml"))
@@ -198,11 +198,42 @@ def test_limited_caps_every_kind_and_keeps_everything_else():
     assert got["gsm8k"] == (4, {**GSM8K["params"], "limit": 4})
     assert got["mmlu"][0] == 56  # 14 subjects x 4: the planner count scales with the limit
     assert got["g3"][0] == 4 and got["g3"][1]["samples"] == {"gsm8k": [3, 1, 4, 5]}
-    assert small.divergence is not None and small.divergence.prompts == 4
+    assert small.divergence is not None and small.divergence.prompt_ids == [0, 1, 2, 3]
     tiny = full.limited(1).divergence
-    assert tiny is not None and tiny.prompts == 2  # divergence needs at least two prompts
+    assert tiny is not None and tiny.prompt_ids == [0, 1]  # divergence needs two prompts
     assert (small.gate, small.subsets, small.seed) == (full.gate, full.subsets, full.seed)
     assert [t.kind for t in small.tasks] == [t.kind for t in full.tasks]
+
+
+def test_limited_divergence_keeps_the_hard_prompts_first():
+    tasks = [{"name": "a", "kind": "toy_arithmetic", "params": {"n": 10}}]
+    full = _suite(tasks=tasks, divergence={"hard_prompts": [20, 40]})
+    div = full.limited(4).divergence
+    assert div is not None and div.prompt_ids == [20, 40, 0, 1] and div.prompts is None
+    assert div.hard_prompts == [20, 40]
+    # a hard prompt outside the spec's own prompts is not added
+    first = _suite(tasks=tasks, divergence={"prompts": 12, "hard_prompts": [5, 40]})
+    assert first.limited(3).divergence.prompt_ids == [5, 0, 1]  # type: ignore[union-attr]
+
+
+def test_divergence_prompt_selection():
+    pinned = [f"p{i}" for i in range(10)]
+    spec = DivergenceSpec(prompt_ids=[3, 1])
+    assert spec.select(pinned) == ["p3", "p1"]
+    assert DivergenceSpec(prompts=2).select(pinned) == ["p0", "p1"]
+    assert DivergenceSpec().select(pinned) == pinned
+    with pytest.raises(ValueError, match="not both"):
+        DivergenceSpec(prompts=2, prompt_ids=[0, 1])
+    with pytest.raises(ValueError, match="distinct"):
+        DivergenceSpec(prompt_ids=[1, 1])
+    with pytest.raises(ValueError, match="out of range"):
+        DivergenceSpec(prompt_ids=[0, 10]).select(pinned)
+
+
+def test_the_qwen3_suite_names_its_byte_split_prompts():
+    div = load_suite("qwen3-8b").divergence
+    assert div is not None and div.hard_prompts == [20, 40]
+    assert load_suite("qwen3-8b").limited(4).divergence.prompt_ids[:2] == [20, 40]  # type: ignore[union-attr]
 
 
 @pytest.mark.parametrize("name", ["qwen3-8b", "llama-3.3-70b-instruct"])
