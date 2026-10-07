@@ -367,7 +367,8 @@ class Experiment(_Strict):
     variants: Annotated[list[Variant], Field(min_length=1)]
     sweep: dict[str, Annotated[list[Any], Field(min_length=1)]] = Field(default_factory=dict)
     sample: Sample | None = None
-    workloads: Annotated[list[WorkloadEntry], Field(min_length=1)]
+    # Empty only for a quality-only experiment: evals and gates, no load runs.
+    workloads: list[WorkloadEntry] = Field(default_factory=list)
     repetitions: PositiveInt = 3
     allow_single_run: bool = False
     # A smoke check of the real path at minimal scale. Its cells share config hashes with
@@ -386,6 +387,10 @@ class Experiment(_Strict):
         names = [v.name for v in self.variants]
         if len(set(names)) != len(names):
             raise ValueError(f"variant names must be unique: {names}")
+        if not self.workloads and self.quality is None:
+            raise ValueError(
+                "an experiment needs workloads, or a quality section to be quality-only"
+            )
         labels = [w.name for w in self.workloads]
         if len(set(labels)) != len(labels):
             raise ValueError(f"workload labels must be unique (set `label`): {labels}")

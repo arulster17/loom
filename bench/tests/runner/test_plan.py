@@ -36,6 +36,7 @@ from .conftest import (
     LLAMA,
     LLAMA_RUNPOD,
     QWEN,
+    QWEN_QUALITY_RUNPOD,
     QWEN_RUNPOD,
     RUNPOD_SMOKE,
     SMOKE,
@@ -92,6 +93,32 @@ def test_runpod_experiments_fit_their_caps_with_ttl_margin(path, pods):
         assert host.provider == "runpod" and host.market == "on_demand"
         assert host.steps[0].kind == "cold_start"
         assert host.seconds < 0.8 * host.ttl_s  # each pod finishes well inside its TTL
+
+
+def test_the_quality_only_follow_up_fits_its_cap_and_runs_no_load():
+    plan = _plan(load_experiment(QWEN_QUALITY_RUNPOD))
+    assert plan.ok, plan.refusals
+    assert plan.ttl_worst_micros <= plan.caps.effective
+    assert plan.total_micros < plan.caps.effective * 0.6
+    assert plan.n_runs_max == 0 and len(plan.hosts) == 2  # one pod per engine image
+    for host in plan.hosts:
+        kinds = [s.kind for s in host.steps]
+        assert kinds[0] == "cold_start" and kinds.count("eval") == 1
+        assert "workload" not in kinds
+        assert host.seconds < 0.8 * host.ttl_s
+
+
+def test_the_quality_only_follow_up_evaluates_the_real_sweeps_configs():
+    # It finishes 565b8d3f's gate: same engines, images, model, provider and quality
+    # section, so its evals and gate land on that sweep's config hashes.
+    follow, real = load_experiment(QWEN_QUALITY_RUNPOD), load_experiment(QWEN_RUNPOD)
+    assert not follow.workloads and not follow.smoke
+    assert follow.model == real.model and follow.provider == real.provider
+    assert follow.variants == real.variants
+    assert follow.quality == real.quality
+    assert [c.config_hash for c in expand(follow, REGISTRY)] == [
+        c.config_hash for c in expand(real, REGISTRY)
+    ]
 
 
 def test_runpod_smoke_stays_under_two_twenty_five_even_to_ttl():

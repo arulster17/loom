@@ -1,0 +1,42 @@
+# Quality-only follow-up to the RunPod Qwen3-8B sweep (qwen3-8b-vllm-vs-sglang-runpod.yaml):
+# the same model, provider block, both engine images (same digests) and the same quality
+# section, with no workloads. Each engine gets its pod and cold start, then only its eval
+# job: vLLM runs the suite's Phase 0 subset and captures the BF16 divergence reference
+# with its noise floor, SGLang runs the subset and is scored against that reference, and
+# SGLang is gated against vLLM.
+#
+# Sweep 565b8d3f measured every load point but lost SGLang's eval to the byte-split
+# divergence bug (fixed since), so the gate never ran. Its cells' config hashes depend
+# only on model, launch and hardware, all unchanged here, so these evals and the gate
+# land on the same configs as that sweep's goodput; the load is not run again.
+# bench/tests/runner/test_plan.py fails if this spec drifts from the real one.
+name: qwen3-8b-quality-runpod
+description: Qwen3-8B BF16 on RunPod Secure 1x L40S, vLLM v0.30.0 vs SGLang v0.5.21, evals and gate only.
+model: qwen3-8b
+provider:
+  kind: runpod
+  container_disk_gb: 80
+variants:
+  - name: vllm
+    engine:
+      name: vllm
+      version: "0.30.0"
+      image: vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
+  - name: sglang
+    engine:
+      name: sglang
+      version: "0.5.21"
+      image: lmsysorg/sglang@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
+workloads: []
+quality:
+  suite: qwen3-8b
+  subset: phase0
+  baseline_variant: vllm
+# Each pod's TTL holds `bench plan`'s ~45 min estimate (cold start, eval setup, the eval
+# job) with margin; vLLM's eval tasks took ~7 min in 565b8d3f, so the estimate itself is
+# conservative. max_spend holds the worst case of both pods living to their TTL.
+budget:
+  max_spend: "$2.80"
+  ttl_minutes: 75
+  accrual_interval_s: 15
+seed: 0

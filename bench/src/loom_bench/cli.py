@@ -545,7 +545,12 @@ def _analyze(
         if not rows:
             err.print("[red]no matching experiments")
             raise typer.Exit(EXIT_INVALID)
-        specs = [Experiment.model_validate(r.spec) for r in rows]
+        all_specs = [Experiment.model_validate(r.spec) for r in rows]
+        # Quality-only experiments (no workloads) add eval runs and gates, nothing to rank.
+        specs = [x for x in all_specs if x.workloads]
+        if not specs:
+            err.print("[red]the selected experiments ran no load; add the ones that did")
+            raise typer.Exit(EXIT_INVALID)
         slo = specs[0].slo
         same = all(x.slo == slo and x.cost_allocation == specs[0].cost_allocation for x in specs)
         if slo is None or not same:

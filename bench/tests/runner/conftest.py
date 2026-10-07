@@ -17,6 +17,7 @@ LLAMA = EXPERIMENTS_DIR / "llama-3.3-70b-tp4.yaml"
 QWEN_RUNPOD = EXPERIMENTS_DIR / "qwen3-8b-vllm-vs-sglang-runpod.yaml"
 LLAMA_RUNPOD = EXPERIMENTS_DIR / "llama-3.3-70b-tp4-runpod.yaml"
 RUNPOD_SMOKE = EXPERIMENTS_DIR / "runpod-smoke.yaml"
+QWEN_QUALITY_RUNPOD = EXPERIMENTS_DIR / "qwen3-8b-quality-runpod.yaml"
 
 
 @pytest.fixture(autouse=True)
