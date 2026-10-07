@@ -27,6 +27,21 @@ def test_pinned_suite_is_valid_and_fits_the_model(name):
     assert suite.chat_template_kwargs == expected
 
 
+@pytest.mark.parametrize("name", SUITES)
+def test_pinned_native_tasks_can_decide_their_margin(name):
+    """A pinned native set must hold at least its min_samples, and its rule-of-three floor
+    (the gate never claims less than 3/n) must sit below its margin, or the task is
+    inconclusive by construction."""
+    suite = load_suite(name)
+    policy = suite.policy()
+    for t in suite.tasks:
+        if t.kind not in ("json_schema", "tool_calling"):
+            continue
+        n = t.planned_items()
+        assert n is not None and n >= policy.min_samples_for(t.name), t.name
+        assert 3 / n < policy.threshold_for(t.name), t.name
+
+
 # lm-eval tasks whose modules import packages that only an lm-eval extra installs. GPU hosts
 # install the `lmeval` extra from uv.lock, so a missing extra only fails on the host (the
 # first RunPod sweep lost its eval to `No module named 'langdetect'`).
@@ -77,7 +92,8 @@ def test_policy_from_suite():
     assert policy.threshold == 0.01 and policy.min_samples == 300
     assert policy.threshold_for("mmlu_pro") == 0.01
     assert policy.threshold_for("ifeval") == 0.02
-    assert policy.min_samples_for("json_schema") == 50
+    assert policy.min_samples_for("json_schema") == 250
+    assert policy.threshold_for("json_schema") == 0.03
     assert policy.max_kl == suite.divergence.max_kl
     assert (policy.noise_multiple, policy.ceiling_kl, policy.ceiling_top1) == (5.0, 0.5, 0.8)
     assert suite.divergence.floor_concurrency == 1 and not policy.review_blocks

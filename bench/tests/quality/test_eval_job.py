@@ -106,6 +106,17 @@ async def test_task_subset_and_no_divergence(clean_url):
     )
 
 
+async def test_gate_refuses_results_from_different_task_versions(clean_url):
+    """json_schema data version 2 (300 items) never pairs with a version-1 (60 item)
+    baseline: the gate names the task and asks for a baseline rerun."""
+    res = await execute_eval_job(job(clean_url, tasks=["json_schema"]))
+    base, cand = suite_result_of(res), suite_result_of(res)
+    assert base.tasks["json_schema"].version.endswith("+data.2")
+    base.tasks["json_schema"].version = "1+data.1"
+    with pytest.raises(ValueError, match=r"json_schema: baseline ran version 1\+data\.1"):
+        gate_against_baseline(base, cand, SUITE)
+
+
 def test_bench_quality_job_cli(clean_url, tmp_path):
     path = tmp_path / "job.json"
     path.write_text(job(clean_url, run_id="cli-1", divergence="capture").model_dump_json())

@@ -53,6 +53,60 @@ def test_json_pinned_set_is_valid():
     assert len(items) >= 50 and version >= 1
 
 
+# The 60 items of data version 1, in order. Version 2 appended to them; changing or
+# reordering these would silently change what older results measured.
+JSON_V1_IDS = (
+    "person-basic book-record weather-report todo-list recipe-card color-rgb sentiment "
+    "address meeting product planet-facts flight quiz-question invoice-line tags bug-report "
+    "coordinates movie-review employee unit-conversion nested-company http-response "
+    "chess-move workout language-detect semver shopping-cart timezone git-commit animal "
+    "matrix event-ticket country support-ticket grade-book rgb-palette date-parts "
+    "server-config math-answer poem-meta inventory user-profile train-schedule "
+    "classification-multi key-value optional-fields tree nutrition rating-breakdown "
+    "anyof-contact boolean-flags sql-intent dice-roll citation parcel-status geometry "
+    "playlist thermostat word-stats access-policy"
+).split()
+
+
+def _keywords(schema):
+    if isinstance(schema, dict):
+        for key, value in schema.items():
+            yield key
+            if key == "properties":
+                for sub in value.values():
+                    yield from _keywords(sub)
+            else:
+                yield from _keywords(value)
+    elif isinstance(schema, list):
+        for value in schema:
+            yield from _keywords(value)
+
+
+def test_json_set_v2_keeps_v1_and_grows_to_300():
+    items, version = load_items()
+    assert version == 2 and len(items) == 300
+    assert [i.item_id for i in items[:60]] == JSON_V1_IDS
+    # Neither vLLM's nor SGLang's grammar backend implements uniqueItems (HTTP 400 on both
+    # in b1b904dc): only the two v1 items keep it, well under the eval error guard's 10%.
+    unique = {i.item_id for i in items if "uniqueItems" in set(_keywords(i.schema))}
+    assert unique == {"tags", "classification-multi"}
+    # Every required key is declared (YAML 1.1 reads a bare `on` as True, which this catches).
+    for item in items:
+        for node in _objects(item.schema):
+            assert set(node.get("required", [])) <= set(node.get("properties", {})), item.item_id
+
+
+def _objects(schema):
+    if isinstance(schema, dict):
+        if "properties" in schema:
+            yield schema
+        for value in schema.values():
+            yield from _objects(value)
+    elif isinstance(schema, list):
+        for value in schema:
+            yield from _objects(value)
+
+
 async def test_json_task_requests_schema_and_scores(tmp_path):
     items, _ = load_items()
     first = items[0]
@@ -72,7 +126,7 @@ async def test_json_task_requests_schema_and_scores(tmp_path):
     assert [r.score for r in out.items] == [1.0, 0.0, 0.0, 0.0, 0.0]
     assert seen[0]["type"] == "json_schema" and seen[0]["json_schema"]["strict"] is True
     assert out.provenance["dataset"]["license"] == "Apache-2.0"
-    assert out.version == "1+data.1"
+    assert out.version == "1+data.2"
 
 
 # ---------------------------------------------------------------- tool_calling

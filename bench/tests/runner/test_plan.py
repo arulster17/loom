@@ -26,6 +26,7 @@ from loom_bench.prices import HOURS_PER_MONTH, load_prices
 from loom_bench.provenance import GitInfo
 from loom_bench.quality.divergence import load_prompts
 from loom_bench.quality.tasks import TASKS
+from loom_bench.quality.tasks.json_schema import load_items
 from loom_bench.registry import load_registry, read_yaml
 from loom_bench.runner import EXIT_REFUSED, plan_experiment
 from loom_bench.store import repo
@@ -339,6 +340,7 @@ def _quality_suite(tmp_path, tasks, **over):
 
 
 JSON_TASK = {"name": "json_schema", "kind": "json_schema"}
+JSON_ITEMS = len(load_items()[0])  # the pinned json_schema set (300 at data version 2)
 GSM8K = {
     "name": "gsm8k",
     "kind": "lm_eval",
@@ -361,7 +363,7 @@ def test_aws_eval_time_comes_from_the_suite(tmp_path):
     steps = plan.hosts[0].steps
     evals = [s for s in steps if s.kind == "eval"]
     expected = (
-        60 * EVAL_ITEM_S["json_schema"] / EVAL_CONCURRENCY
+        JSON_ITEMS * EVAL_ITEM_S["json_schema"] / EVAL_CONCURRENCY
         + 100 * EVAL_ITEM_S["lm_eval"] / 32
         + 10 * EVAL_DIVERGENCE_PROMPT_S / EVAL_CONCURRENCY
         + EVAL_HARNESS_TASK_S
@@ -388,7 +390,7 @@ def test_eval_subset_and_mock_time_scale(tmp_path):
     scale = exp.provider.time_scale
     assert step.label.endswith("[q]")
     assert step.seconds == pytest.approx(
-        60 * EVAL_ITEM_S["json_schema"] / EVAL_CONCURRENCY * scale + MOCK_EVAL_JOB_S
+        JSON_ITEMS * EVAL_ITEM_S["json_schema"] / EVAL_CONCURRENCY * scale + MOCK_EVAL_JOB_S
     )
 
 

@@ -314,6 +314,14 @@ def gate_against_baseline(
     `divergence_error` says why a divergence that should have been measured was not."""
     if baseline.suite != candidate.suite:
         raise ValueError(f"suites differ: {baseline.suite} vs {candidate.suite}")
+    # A task's version covers its pinned data (e.g. json_schema "1+data.2"): results from
+    # different versions measure different item sets and never pair.
+    for name in baseline.tasks.keys() & candidate.tasks.keys():
+        vb, vc = baseline.tasks[name].version, candidate.tasks[name].version
+        if vb != vc:
+            raise ValueError(
+                f"{name}: baseline ran version {vb}, candidate {vc}; rerun the baseline"
+            )
     gate_policy = policy.policy() if isinstance(policy, Suite) else policy
     return evaluate_gate(
         baseline.scores(),

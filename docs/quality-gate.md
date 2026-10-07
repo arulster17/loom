@@ -22,7 +22,7 @@ Code: `bench/src/loom_bench/quality/`. Suites: `bench/evals/<model>.yaml`.
 | `needle` | `needle` | synthetic, seeded | lengths x depths x samples | the six-digit code appears in the reply |
 | `code` | `code_exec` | openai/openai_humaneval (MIT) + google-research-datasets/mbpp test (CC-BY-4.0), pinned revisions | 164 + 500 | program + tests exit 0 in the sandbox |
 | `tool_calling` | `tool_calling` | self-authored, `quality/data/tool_calling.yaml` (Apache-2.0) | 60 | exactly one call, right name, AST-matched arguments |
-| `json_schema` | `json_schema` | self-authored, `quality/data/json_schema.yaml` (Apache-2.0) | 60 | reply parses and validates under strict `response_format` |
+| `json_schema` | `json_schema` | self-authored, `quality/data/json_schema.yaml` (Apache-2.0), data version 2 | 300 | reply parses and validates under strict `response_format` |
 | `toy_arithmetic` | `toy_arithmetic` | generated, seeded | configurable | "The answer is N" is right; used with the mock backend |
 
 All requests are greedy (temperature 0) with a fixed seed. Qwen3 runs in non-thinking mode
@@ -142,9 +142,14 @@ would need 1.96 * sqrt(2p(1-p) / n), several times wider, which is why the gate 
 To decide a 1-point margin when ~2-5% of items flip takes roughly 1000-2000 items. The
 suites use that where the source data allows (MMLU-Pro 2100, GSM8K 1319, RULER 1000) and
 raise the task threshold where it does not: IFEval (541) and code (664) decide 2 points,
-the native needle (400) 2 points, and the two 60-item pinned sets (tool calling, JSON
-schema) 6 points, which catches broken parsers, templates and grammar backends rather
+the native needle (400) 2 points, the 300-item JSON-schema set 3 points, and the 60-item
+tool-calling set 6 points, which catches broken parsers and templates rather
 than subtle drift. Each suite file repeats this table next to the tasks.
+
+A pinned set's data version is part of its task version (`json_schema` 300 items is
+`1+data.2`, the earlier 60 items `1+data.1`). The gate refuses to pair a baseline and a
+candidate whose versions differ ("rerun the baseline"), so results from different item
+sets never mix.
 
 ## Logprob divergence
 

@@ -3,7 +3,14 @@
 # Schema (draft 2020-12) the reply must satisfy; the request sends the schema as
 # `response_format: {type: json_schema, strict: true}`. Score = 1 when the reply
 # parses as JSON and validates. Bump `version` whenever an item changes.
-version: 1
+#
+# Version 2 (2026-10-07) grew the set from 60 to 300 items: the first 60 are unchanged,
+# and 240 new ones (from `hotel-booking` on) keep the same mix of nested objects and
+# arrays, enums, patterns, numeric bounds, const, nullable types and anyOf. They avoid
+# `uniqueItems`, which neither vLLM's nor SGLang's grammar backend implements (both
+# answer HTTP 400; `tags` and `classification-multi` keep it and score 0 on both).
+# At n=60 the gate could only decide a 6-point margin; 300 decides 3 points.
+version: 2
 items:
   - id: person-basic
     instruction: "Describe a fictional librarian named Mara Quist who is 41 years old."
@@ -185,3 +192,723 @@ items:
   - id: access-policy
     instruction: "Write an access policy that lets the analytics group read the reports bucket."
     schema: {type: object, additionalProperties: false, required: [principal, actions, resource, effect], properties: {principal: {type: string}, actions: {type: array, minItems: 1, items: {type: string, enum: [read, write, delete, list]}}, resource: {type: string}, effect: {type: string, enum: [allow, deny]}}}
+  - id: hotel-booking
+    instruction: "Book a double room for two nights at a seaside hotel for two adults."
+    schema: {type: object, additionalProperties: false, required: [hotel, room_type, nights, guests], properties: {hotel: {type: string}, room_type: {type: string, enum: [single, double, twin, suite]}, nights: {type: integer, minimum: 1, maximum: 30}, guests: {type: integer, minimum: 1, maximum: 6}}}
+  - id: car-rental
+    instruction: "Reserve a compact rental car for a weekend trip, picked up at the airport."
+    schema: {type: object, additionalProperties: false, required: [category, pickup, days, insurance], properties: {category: {type: string, enum: [economy, compact, midsize, suv, van]}, pickup: {type: string}, days: {type: integer, minimum: 1, maximum: 28}, insurance: {type: boolean}}}
+  - id: train-ticket
+    instruction: "Issue a second-class train ticket from Vienna to Munich for one adult."
+    schema: {type: object, additionalProperties: false, required: [origin, destination, class, passengers, price_eur], properties: {origin: {type: string}, destination: {type: string}, class: {type: integer, enum: [1, 2]}, passengers: {type: integer, minimum: 1}, price_eur: {type: number, minimum: 0}}}
+  - id: itinerary-days
+    instruction: "Plan a three-day itinerary for a first visit to Kyoto."
+    schema: {type: object, additionalProperties: false, required: [city, days], properties: {city: {type: string}, days: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [day, activities], properties: {day: {type: integer, minimum: 1, maximum: 3}, activities: {type: array, minItems: 1, maxItems: 5, items: {type: string}}}}}}}
+  - id: visa-application
+    instruction: "Fill a short visa application for a tourist staying 10 days."
+    schema: {type: object, additionalProperties: false, required: [applicant, purpose, stay_days, prior_visits], properties: {applicant: {type: string}, purpose: {type: string, enum: [tourism, business, study, transit]}, stay_days: {type: integer, minimum: 1, maximum: 90}, prior_visits: {type: integer, minimum: 0}}}
+  - id: luggage
+    instruction: "List the luggage for a passenger with one checked bag and one carry-on."
+    schema: {type: object, additionalProperties: false, required: [bags], properties: {bags: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [kind, weight_kg], properties: {kind: {type: string, enum: [checked, carry_on, personal]}, weight_kg: {type: number, minimum: 0, maximum: 32}}}}}}
+  - id: currency-exchange
+    instruction: "Exchange 200 US dollars into euros at a rate of 0.92."
+    schema: {type: object, additionalProperties: false, required: [from_currency, to_currency, amount, rate, result], properties: {from_currency: {type: string, pattern: "^[A-Z]{3}$"}, to_currency: {type: string, pattern: "^[A-Z]{3}$"}, amount: {type: number, exclusiveMinimum: 0}, rate: {type: number, exclusiveMinimum: 0}, result: {type: number, minimum: 0}}}
+  - id: boarding-pass
+    instruction: "Generate a boarding pass for seat 14C on a morning flight."
+    schema: {type: object, additionalProperties: false, required: [passenger, flight, seat, gate, boarding_time], properties: {passenger: {type: string}, flight: {type: string, pattern: "^[A-Z]{2}[0-9]{2,4}$"}, seat: {type: string, pattern: "^[0-9]{1,2}[A-F]$"}, gate: {type: string}, boarding_time: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}}}
+  - id: tour-group
+    instruction: "Describe a walking tour group of six people led by one guide."
+    schema: {type: object, additionalProperties: false, required: [guide, participants, duration_hours], properties: {guide: {type: string}, participants: {type: array, minItems: 6, maxItems: 6, items: {type: string}}, duration_hours: {type: number, minimum: 0.5, maximum: 8}}}
+  - id: campsite
+    instruction: "Describe a campsite in a national park with its amenities."
+    schema: {type: object, additionalProperties: false, required: [name, sites, amenities, open_all_year], properties: {name: {type: string}, sites: {type: integer, minimum: 1}, amenities: {type: array, items: {type: string, enum: [water, toilets, showers, electricity, fire_pits, shop]}, minItems: 1}, open_all_year: {type: boolean}}}
+  - id: patient-vitals
+    instruction: "Record vital signs for a healthy adult at a routine check-up."
+    schema: {type: object, additionalProperties: false, required: [heart_rate, systolic, diastolic, temperature_c, spo2], properties: {heart_rate: {type: integer, minimum: 30, maximum: 220}, systolic: {type: integer, minimum: 60, maximum: 250}, diastolic: {type: integer, minimum: 30, maximum: 150}, temperature_c: {type: number, minimum: 30, maximum: 45}, spo2: {type: integer, minimum: 50, maximum: 100}}}
+  - id: prescription
+    instruction: "Write a prescription entry for a 7-day course of an antibiotic taken twice daily."
+    schema: {type: object, additionalProperties: false, required: [drug, dose_mg, times_per_day, days, refills], properties: {drug: {type: string}, dose_mg: {type: integer, minimum: 1, maximum: 2000}, times_per_day: {type: integer, minimum: 1, maximum: 6}, days: {type: integer, minimum: 1}, refills: {type: integer, minimum: 0, maximum: 5}}}
+  - id: appointment
+    instruction: "Book a dental cleaning appointment for next Friday morning."
+    schema: {type: object, additionalProperties: false, required: [service, weekday, time, duration_minutes], properties: {service: {type: string}, weekday: {type: string, enum: [monday, tuesday, wednesday, thursday, friday, saturday]}, time: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}, duration_minutes: {type: integer, enum: [15, 30, 45, 60, 90]}}}
+  - id: symptom-log
+    instruction: "Log three symptoms of a mild cold with their severity."
+    schema: {type: object, additionalProperties: false, required: [symptoms], properties: {symptoms: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [name, severity], properties: {name: {type: string}, severity: {type: integer, minimum: 1, maximum: 10}}}}}}
+  - id: allergy-card
+    instruction: "Create an allergy card for someone allergic to peanuts and penicillin."
+    schema: {type: object, additionalProperties: false, required: [name, allergies, carries_epipen], properties: {name: {type: string}, allergies: {type: array, minItems: 2, items: {type: object, additionalProperties: false, required: [allergen, reaction], properties: {allergen: {type: string}, reaction: {type: string, enum: [mild, moderate, severe, anaphylaxis]}}}}, carries_epipen: {type: boolean}}}
+  - id: sleep-record
+    instruction: "Record last night's sleep for someone who slept about seven hours."
+    schema: {type: object, additionalProperties: false, required: [bedtime, wake_time, hours, quality], properties: {bedtime: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}, wake_time: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}, hours: {type: number, minimum: 0, maximum: 24}, quality: {type: string, enum: [poor, fair, good, excellent]}}}
+  - id: blood-test
+    instruction: "Summarise a blood test with three results within normal range."
+    schema: {type: object, additionalProperties: false, required: [results], properties: {results: {type: array, minItems: 3, items: {type: object, additionalProperties: false, required: [marker, value, unit, in_range], properties: {marker: {type: string}, value: {type: number}, unit: {type: string}, in_range: {type: boolean}}}}}}
+  - id: vaccination
+    instruction: "Record a flu vaccination given at a pharmacy."
+    schema: {type: object, additionalProperties: false, required: [vaccine, dose_number, site, lot], properties: {vaccine: {type: string}, dose_number: {type: integer, minimum: 1, maximum: 5}, site: {type: string, enum: [left_arm, right_arm, thigh]}, lot: {type: string, pattern: "^[A-Z0-9]{5,10}$"}}}
+  - id: meal-plan
+    instruction: "Plan breakfast, lunch and dinner for a vegetarian day."
+    schema: {type: object, additionalProperties: false, required: [breakfast, lunch, dinner, vegetarian], properties: {breakfast: {type: string}, lunch: {type: string}, dinner: {type: string}, vegetarian: {type: boolean, const: true}}}
+  - id: step-counter
+    instruction: "Summarise a week of daily step counts for a moderately active person."
+    schema: {type: object, additionalProperties: false, required: [steps, goal], properties: {steps: {type: array, minItems: 7, maxItems: 7, items: {type: integer, minimum: 0, maximum: 60000}}, goal: {type: integer, minimum: 1000}}}
+  - id: bank-transfer
+    instruction: "Prepare a bank transfer of 250 euros to a landlord for rent."
+    schema: {type: object, additionalProperties: false, required: [payee, amount, currency, reference], properties: {payee: {type: string}, amount: {type: number, exclusiveMinimum: 0}, currency: {type: string, const: EUR}, reference: {type: string, maxLength: 35}}}
+  - id: budget-categories
+    instruction: "Split a monthly budget of 3000 into four spending categories."
+    schema: {type: object, additionalProperties: false, required: [total, categories], properties: {total: {type: number, minimum: 0}, categories: {type: array, minItems: 4, maxItems: 4, items: {type: object, additionalProperties: false, required: [name, amount], properties: {name: {type: string}, amount: {type: number, minimum: 0}}}}}}
+  - id: stock-quote
+    instruction: "Give a quote for an imaginary company's stock at market close."
+    schema: {type: object, additionalProperties: false, required: [ticker, price, change_pct, volume], properties: {ticker: {type: string, pattern: "^[A-Z]{1,5}$"}, price: {type: number, exclusiveMinimum: 0}, change_pct: {type: number, minimum: -100, maximum: 1000}, volume: {type: integer, minimum: 0}}}
+  - id: loan-terms
+    instruction: "Describe the terms of a five-year car loan."
+    schema: {type: object, additionalProperties: false, required: [principal, annual_rate_pct, term_months, monthly_payment], properties: {principal: {type: number, minimum: 0}, annual_rate_pct: {type: number, minimum: 0, maximum: 40}, term_months: {type: integer, const: 60}, monthly_payment: {type: number, minimum: 0}}}
+  - id: receipt
+    instruction: "Itemise a café receipt for two coffees and a croissant."
+    schema: {type: object, additionalProperties: false, required: [lines, total, paid_by], properties: {lines: {type: array, minItems: 2, items: {type: object, additionalProperties: false, required: [item, qty, price], properties: {item: {type: string}, qty: {type: integer, minimum: 1}, price: {type: number, minimum: 0}}}}, total: {type: number, minimum: 0}, paid_by: {type: string, enum: [cash, card, mobile]}}}
+  - id: tax-bracket
+    instruction: "Describe a simplified income tax bracket of 20 percent between 12000 and 50000."
+    schema: {type: object, additionalProperties: false, required: [lower, upper, rate], properties: {lower: {type: number, minimum: 0}, upper: {type: [number, "null"]}, rate: {type: number, minimum: 0, maximum: 1}}}
+  - id: savings-goal
+    instruction: "Set a savings goal for a holiday costing 1800, saving monthly."
+    schema: {type: object, additionalProperties: false, required: [goal, target_amount, monthly_saving, months], properties: {goal: {type: string}, target_amount: {type: number, exclusiveMinimum: 0}, monthly_saving: {type: number, exclusiveMinimum: 0}, months: {type: integer, minimum: 1, maximum: 120}}}
+  - id: expense-claim
+    instruction: "File an expense claim for a taxi ride to a client meeting."
+    schema: {type: object, additionalProperties: false, required: [employee_id, category, amount, receipt_attached], properties: {employee_id: {type: string, pattern: "^E[0-9]{5}$"}, category: {type: string, enum: [travel, meals, lodging, supplies, other]}, amount: {type: number, minimum: 0}, receipt_attached: {type: boolean}}}
+  - id: crypto-wallet
+    instruction: "Describe a wallet holding two cryptocurrencies."
+    schema: {type: object, additionalProperties: false, required: [holdings], properties: {holdings: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [symbol, amount], properties: {symbol: {type: string, pattern: "^[A-Z]{2,5}$"}, amount: {type: number, minimum: 0}}}}}}
+  - id: subscription
+    instruction: "Describe a monthly streaming subscription that renews automatically."
+    schema: {type: object, additionalProperties: false, required: [service, plan, price, billing, auto_renew], properties: {service: {type: string}, plan: {type: string, enum: [basic, standard, premium]}, price: {type: number, minimum: 0}, billing: {type: string, enum: [monthly, yearly]}, auto_renew: {type: boolean}}}
+  - id: k8s-deployment
+    instruction: "Describe a Kubernetes deployment of a web app with three replicas."
+    schema: {type: object, additionalProperties: false, required: [name, image, replicas, ports], properties: {name: {type: string, pattern: "^[a-z0-9-]+$"}, image: {type: string}, replicas: {type: integer, minimum: 1, maximum: 50}, ports: {type: array, minItems: 1, items: {type: integer, minimum: 1, maximum: 65535}}}}
+  - id: log-entry
+    instruction: "Write a structured log entry for a failed login attempt."
+    schema: {type: object, additionalProperties: false, required: [level, message, user, ip], properties: {level: {type: string, enum: [debug, info, warn, error]}, message: {type: string}, user: {type: string}, ip: {type: string, pattern: "^[0-9]{1,3}([.][0-9]{1,3}){3}$"}}}
+  - id: cron-job
+    instruction: "Define a nightly backup job that runs at 02:30."
+    schema: {type: object, additionalProperties: false, required: [name, hour, minute, command, enabled], properties: {name: {type: string}, hour: {type: integer, minimum: 0, maximum: 23}, minute: {type: integer, minimum: 0, maximum: 59}, command: {type: string}, enabled: {type: boolean}}}
+  - id: dns-record
+    instruction: "Create a DNS A record for the host 'api' in an example domain."
+    schema: {type: object, additionalProperties: false, required: [name, type, value, ttl], properties: {name: {type: string}, type: {type: string, enum: [A, AAAA, CNAME, MX, TXT]}, value: {type: string}, ttl: {type: integer, minimum: 60, maximum: 86400}}}
+  - id: alert-rule
+    instruction: "Define an alert that fires when CPU usage stays above 90 percent for 5 minutes."
+    schema: {type: object, additionalProperties: false, required: [metric, operator, threshold, for_minutes, severity], properties: {metric: {type: string}, operator: {type: string, enum: [">", "<", ">=", "<=", "=="]}, threshold: {type: number}, for_minutes: {type: integer, minimum: 1}, severity: {type: string, enum: [info, warning, critical]}}}
+  - id: docker-service
+    instruction: "Describe a Docker Compose service for a Redis cache."
+    schema: {type: object, additionalProperties: false, required: [service, image, restart, volumes], properties: {service: {type: string}, image: {type: string}, restart: {type: string, enum: ["no", always, on-failure, unless-stopped]}, volumes: {type: array, items: {type: string}}}}
+  - id: api-endpoint
+    instruction: "Document a REST endpoint that lists orders for a customer."
+    schema: {type: object, additionalProperties: false, required: [method, path, auth_required, params], properties: {method: {type: string, enum: [GET, POST, PUT, PATCH, DELETE]}, path: {type: string, pattern: "^/"}, auth_required: {type: boolean}, params: {type: array, items: {type: object, additionalProperties: false, required: [name, required], properties: {name: {type: string}, required: {type: boolean}}}}}}
+  - id: ci-pipeline
+    instruction: "Describe a CI pipeline with build, test and deploy stages."
+    schema: {type: object, additionalProperties: false, required: [stages], properties: {stages: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [name, commands, allow_failure], properties: {name: {type: string, enum: [build, test, deploy]}, commands: {type: array, minItems: 1, items: {type: string}}, allow_failure: {type: boolean}}}}}}
+  - id: firewall-rule
+    instruction: "Write a firewall rule allowing inbound HTTPS from anywhere."
+    schema: {type: object, additionalProperties: false, required: [direction, protocol, port, source, action], properties: {direction: {type: string, enum: [inbound, outbound]}, protocol: {type: string, enum: [tcp, udp, icmp]}, port: {type: integer, minimum: 0, maximum: 65535}, source: {type: string}, action: {type: string, enum: [allow, deny]}}}
+  - id: disk-usage
+    instruction: "Report disk usage for a server with two mounted volumes."
+    schema: {type: object, additionalProperties: false, required: [host, volumes], properties: {host: {type: string}, volumes: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [mount, size_gb, used_pct], properties: {mount: {type: string, pattern: "^/"}, size_gb: {type: number, minimum: 0}, used_pct: {type: number, minimum: 0, maximum: 100}}}}}}
+  - id: feature-flag
+    instruction: "Define a feature flag for a new checkout page rolled out to 10 percent of users."
+    schema: {type: object, additionalProperties: false, required: [key, enabled, rollout_pct, environments], properties: {key: {type: string, pattern: "^[a-z][a-z0-9_]*$"}, enabled: {type: boolean}, rollout_pct: {type: integer, minimum: 0, maximum: 100}, environments: {type: array, minItems: 1, items: {type: string, enum: [dev, staging, prod]}}}}
+  - id: course-syllabus
+    instruction: "Outline a four-week introductory statistics course."
+    schema: {type: object, additionalProperties: false, required: [course, weeks], properties: {course: {type: string}, weeks: {type: array, minItems: 4, maxItems: 4, items: {type: object, additionalProperties: false, required: [week, topic], properties: {week: {type: integer, minimum: 1, maximum: 4}, topic: {type: string}}}}}}
+  - id: student-record
+    instruction: "Create a record for a second-year chemistry student."
+    schema: {type: object, additionalProperties: false, required: [student_id, name, year, major, gpa], properties: {student_id: {type: string, pattern: "^S[0-9]{6}$"}, name: {type: string}, year: {type: integer, minimum: 1, maximum: 6}, major: {type: string}, gpa: {type: number, minimum: 0, maximum: 4}}}
+  - id: exam-result
+    instruction: "Report an exam result of 78 out of 100 with its letter grade."
+    schema: {type: object, additionalProperties: false, required: [score, max_score, grade, passed], properties: {score: {type: integer, minimum: 0}, max_score: {type: integer, const: 100}, grade: {type: string, enum: [A, B, C, D, F]}, passed: {type: boolean}}}
+  - id: flashcard
+    instruction: "Make a flashcard for the French word 'pomme'."
+    schema: {type: object, additionalProperties: false, required: [front, back, language, difficulty], properties: {front: {type: string}, back: {type: string}, language: {type: string, pattern: "^[a-z]{2}$"}, difficulty: {type: integer, minimum: 1, maximum: 5}}}
+  - id: reading-list
+    instruction: "Suggest a reading list of three classic novels."
+    schema: {type: object, additionalProperties: false, required: [books], properties: {books: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [title, author, year], properties: {title: {type: string}, author: {type: string}, year: {type: integer, minimum: 1500, maximum: 2030}}}}}}
+  - id: lab-experiment
+    instruction: "Describe a school lab experiment measuring the boiling point of water."
+    schema: {type: object, additionalProperties: false, required: [title, materials, hypothesis, measured_c], properties: {title: {type: string}, materials: {type: array, minItems: 2, items: {type: string}}, hypothesis: {type: string}, measured_c: {type: number, minimum: 50, maximum: 150}}}
+  - id: timetable-slot
+    instruction: "Add a Wednesday biology lecture to a timetable."
+    schema: {type: object, additionalProperties: false, required: [subject, day, start, end, room], properties: {subject: {type: string}, day: {type: string, enum: [mon, tue, wed, thu, fri]}, start: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}, end: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}, room: {type: string}}}
+  - id: scholarship
+    instruction: "Describe a merit scholarship for engineering students."
+    schema: {type: object, additionalProperties: false, required: [name, amount, renewable, eligibility], properties: {name: {type: string}, amount: {type: number, minimum: 0}, renewable: {type: boolean}, eligibility: {type: object, additionalProperties: false, required: [min_gpa, fields], properties: {min_gpa: {type: number, minimum: 0, maximum: 4}, fields: {type: array, minItems: 1, items: {type: string}}}}}}
+  - id: vocabulary
+    instruction: "List four Spanish words for colours with their English meanings."
+    schema: {type: object, additionalProperties: false, required: [words], properties: {words: {type: object, minProperties: 4, maxProperties: 4, additionalProperties: {type: string}}}}
+  - id: football-match
+    instruction: "Report the final score of an invented football match that ended 2-1."
+    schema: {type: object, additionalProperties: false, required: [home, away, home_goals, away_goals, winner], properties: {home: {type: string}, away: {type: string}, home_goals: {type: integer, minimum: 0}, away_goals: {type: integer, minimum: 0}, winner: {type: string, enum: [home, away, draw]}}}
+  - id: race-result
+    instruction: "Give the top three finishers of a 10 km road race."
+    schema: {type: object, additionalProperties: false, required: [race, podium], properties: {race: {type: string}, podium: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [position, runner, time], properties: {position: {type: integer, minimum: 1, maximum: 3}, runner: {type: string}, time: {type: string, pattern: "^[0-9]{1,2}:[0-5][0-9]:[0-5][0-9]$"}}}}}}
+  - id: player-stats
+    instruction: "Give a basketball player's stats for one game."
+    schema: {type: object, additionalProperties: false, required: [player, points, rebounds, assists, minutes], properties: {player: {type: string}, points: {type: integer, minimum: 0, maximum: 100}, rebounds: {type: integer, minimum: 0}, assists: {type: integer, minimum: 0}, minutes: {type: number, minimum: 0, maximum: 60}}}
+  - id: tennis-set
+    instruction: "Record a tennis set that went to a tiebreak."
+    schema: {type: object, additionalProperties: false, required: [player_a_games, player_b_games, tiebreak], properties: {player_a_games: {type: integer, minimum: 0, maximum: 7}, player_b_games: {type: integer, minimum: 0, maximum: 7}, tiebreak: {type: [object, "null"], additionalProperties: false, required: [a, b], properties: {a: {type: integer, minimum: 0}, b: {type: integer, minimum: 0}}}}}
+  - id: league-table-row
+    instruction: "Give one row of a league table for a team in mid-table."
+    schema: {type: object, additionalProperties: false, required: [team, played, won, drawn, lost, points], properties: {team: {type: string}, played: {type: integer, minimum: 0}, won: {type: integer, minimum: 0}, drawn: {type: integer, minimum: 0}, lost: {type: integer, minimum: 0}, points: {type: integer, minimum: 0}}}
+  - id: swim-session
+    instruction: "Log a swimming training session of 2000 metres."
+    schema: {type: object, additionalProperties: false, required: [distance_m, stroke, sets, pool_length_m], properties: {distance_m: {type: integer, minimum: 0}, stroke: {type: string, enum: [freestyle, backstroke, breaststroke, butterfly, mixed]}, sets: {type: integer, minimum: 1}, pool_length_m: {type: integer, enum: [25, 50]}}}
+  - id: cycling-route
+    instruction: "Describe a hilly 60 km cycling route."
+    schema: {type: object, additionalProperties: false, required: [name, distance_km, elevation_m, difficulty, surface], properties: {name: {type: string}, distance_km: {type: number, minimum: 0}, elevation_m: {type: integer, minimum: 0}, difficulty: {type: string, enum: [easy, moderate, hard, extreme]}, surface: {type: string, enum: [road, gravel, mixed]}}}
+  - id: chess-game
+    instruction: "Summarise a chess game that ended in a draw after 40 moves."
+    schema: {type: object, additionalProperties: false, required: [white, black, result, moves], properties: {white: {type: string}, black: {type: string}, result: {type: string, enum: ["1-0", "0-1", "1/2-1/2"]}, moves: {type: integer, minimum: 1}}}
+  - id: ski-pass
+    instruction: "Issue a three-day ski pass for an adult."
+    schema: {type: object, additionalProperties: false, required: [holder, days, age_group, price], properties: {holder: {type: string}, days: {type: integer, minimum: 1, maximum: 14}, age_group: {type: string, enum: [child, youth, adult, senior]}, price: {type: number, minimum: 0}}}
+  - id: online-order
+    instruction: "Create an online order for two T-shirts shipped by standard delivery."
+    schema: {type: object, additionalProperties: false, required: [order_id, items, shipping, total], properties: {order_id: {type: string, pattern: "^ORD-[0-9]{6}$"}, items: {type: array, minItems: 1, items: {type: object, additionalProperties: false, required: [sku, qty], properties: {sku: {type: string}, qty: {type: integer, minimum: 1}}}}, shipping: {type: string, enum: [standard, express, pickup]}, total: {type: number, minimum: 0}}}
+  - id: return-request
+    instruction: "Request a return for shoes that are too small."
+    schema: {type: object, additionalProperties: false, required: [order_id, reason, refund_method, condition], properties: {order_id: {type: string}, reason: {type: string, enum: [too_small, too_large, damaged, wrong_item, changed_mind]}, refund_method: {type: string, enum: [original_payment, store_credit]}, condition: {type: string, enum: [unworn, worn, damaged]}}}
+  - id: coupon
+    instruction: "Create a 15 percent discount coupon valid for orders over 50."
+    schema: {type: object, additionalProperties: false, required: [code, percent_off, min_order, single_use], properties: {code: {type: string, pattern: "^[A-Z0-9]{4,12}$"}, percent_off: {type: integer, minimum: 1, maximum: 100}, min_order: {type: number, minimum: 0}, single_use: {type: boolean}}}
+  - id: product-variants
+    instruction: "List the size variants of a hoodie with their stock levels."
+    schema: {type: object, additionalProperties: false, required: [product, variants], properties: {product: {type: string}, variants: {type: array, minItems: 3, items: {type: object, additionalProperties: false, required: [size, stock], properties: {size: {type: string, enum: [XS, S, M, L, XL, XXL]}, stock: {type: integer, minimum: 0}}}}}}
+  - id: store-hours
+    instruction: "Give a shop's opening hours, closed on Sundays."
+    schema: {type: object, additionalProperties: false, required: [hours], properties: {hours: {type: object, additionalProperties: false, required: [mon, tue, wed, thu, fri, sat, sun], properties: {mon: {type: [string, "null"]}, tue: {type: [string, "null"]}, wed: {type: [string, "null"]}, thu: {type: [string, "null"]}, fri: {type: [string, "null"]}, sat: {type: [string, "null"]}, sun: {type: "null"}}}}}
+  - id: price-comparison
+    instruction: "Compare the price of the same blender at three shops."
+    schema: {type: object, additionalProperties: false, required: [product, offers, cheapest], properties: {product: {type: string}, offers: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [shop, price], properties: {shop: {type: string}, price: {type: number, exclusiveMinimum: 0}}}}, cheapest: {type: string}}}
+  - id: gift-card
+    instruction: "Issue a gift card worth 40 with an expiry year."
+    schema: {type: object, additionalProperties: false, required: [card_number, balance, expires_year], properties: {card_number: {type: string, pattern: "^[0-9]{16}$"}, balance: {type: number, minimum: 0}, expires_year: {type: integer, minimum: 2024, maximum: 2040}}}
+  - id: warranty
+    instruction: "Register a two-year warranty for a new washing machine."
+    schema: {type: object, additionalProperties: false, required: [product, serial, purchase_year, years], properties: {product: {type: string}, serial: {type: string, minLength: 6, maxLength: 20}, purchase_year: {type: integer, minimum: 2000, maximum: 2030}, years: {type: integer, const: 2}}}
+  - id: loyalty-account
+    instruction: "Describe a loyalty account at the silver tier with some points."
+    schema: {type: object, additionalProperties: false, required: [member_id, tier, points], properties: {member_id: {type: string}, tier: {type: string, enum: [bronze, silver, gold, platinum]}, points: {type: integer, minimum: 0}}}
+  - id: shipping-label
+    instruction: "Create a shipping label for a 2 kg parcel sent within the same country."
+    schema: {type: object, additionalProperties: false, required: [sender, recipient, weight_kg, service], properties: {sender: {type: object, additionalProperties: false, required: [name, city], properties: {name: {type: string}, city: {type: string}}}, recipient: {type: object, additionalProperties: false, required: [name, city], properties: {name: {type: string}, city: {type: string}}}, weight_kg: {type: number, exclusiveMinimum: 0, maximum: 30}, service: {type: string, enum: [economy, standard, priority]}}}
+  - id: job-posting
+    instruction: "Post a job opening for a remote backend engineer."
+    schema: {type: object, additionalProperties: false, required: [title, remote, level, salary_range, skills], properties: {title: {type: string}, remote: {type: boolean}, level: {type: string, enum: [junior, mid, senior, staff]}, salary_range: {type: object, additionalProperties: false, required: [min, max], properties: {min: {type: integer, minimum: 0}, max: {type: integer, minimum: 0}}}, skills: {type: array, minItems: 2, items: {type: string}}}}
+  - id: leave-request
+    instruction: "Request five days of annual leave in August."
+    schema: {type: object, additionalProperties: false, required: [employee, type, days, month], properties: {employee: {type: string}, type: {type: string, enum: [annual, sick, parental, unpaid]}, days: {type: integer, minimum: 1, maximum: 30}, month: {type: integer, minimum: 1, maximum: 12}}}
+  - id: performance-review
+    instruction: "Summarise a performance review with ratings on three competencies."
+    schema: {type: object, additionalProperties: false, required: [employee, ratings, overall], properties: {employee: {type: string}, ratings: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [competency, score], properties: {competency: {type: string}, score: {type: integer, minimum: 1, maximum: 5}}}}, overall: {type: string, enum: [below, meets, exceeds]}}}
+  - id: org-chart
+    instruction: "Describe a small department with a manager and three reports."
+    schema: {type: object, additionalProperties: false, required: [department, manager, reports], properties: {department: {type: string}, manager: {type: string}, reports: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [name, title], properties: {name: {type: string}, title: {type: string}}}}}}
+  - id: interview-slot
+    instruction: "Schedule a 45-minute technical interview with two interviewers."
+    schema: {type: object, additionalProperties: false, required: [candidate, interviewers, duration_minutes, format], properties: {candidate: {type: string}, interviewers: {type: array, minItems: 2, maxItems: 2, items: {type: string}}, duration_minutes: {type: integer, const: 45}, format: {type: string, enum: [onsite, video, phone]}}}
+  - id: timesheet
+    instruction: "Fill a timesheet for a five-day work week of about eight hours a day."
+    schema: {type: object, additionalProperties: false, required: [employee, week, hours], properties: {employee: {type: string}, week: {type: integer, minimum: 1, maximum: 53}, hours: {type: array, minItems: 5, maxItems: 5, items: {type: number, minimum: 0, maximum: 24}}}}
+  - id: onboarding-checklist
+    instruction: "Create an onboarding checklist for a new hire's first day."
+    schema: {type: object, additionalProperties: false, required: [tasks], properties: {tasks: {type: array, minItems: 3, items: {type: object, additionalProperties: false, required: [task, owner, done], properties: {task: {type: string}, owner: {type: string, enum: [hr, it, manager, new_hire]}, done: {type: boolean}}}}}}
+  - id: payslip
+    instruction: "Produce a monthly payslip with gross pay, tax and net pay."
+    schema: {type: object, additionalProperties: false, required: [gross, tax, deductions, net], properties: {gross: {type: number, minimum: 0}, tax: {type: number, minimum: 0}, deductions: {type: array, items: {type: object, additionalProperties: false, required: [name, amount], properties: {name: {type: string}, amount: {type: number, minimum: 0}}}}, net: {type: number, minimum: 0}}}
+  - id: smart-light
+    instruction: "Set a smart bulb to warm white at 60 percent brightness."
+    schema: {type: object, additionalProperties: false, required: [device_id, "on", brightness, color_temp_k], properties: {device_id: {type: string}, "on": {type: boolean}, brightness: {type: integer, minimum: 0, maximum: 100}, color_temp_k: {type: integer, minimum: 1800, maximum: 6500}}}
+  - id: sensor-reading
+    instruction: "Report a temperature and humidity reading from a greenhouse sensor."
+    schema: {type: object, additionalProperties: false, required: [sensor, temperature_c, humidity_pct, battery_pct], properties: {sensor: {type: string}, temperature_c: {type: number, minimum: -40, maximum: 85}, humidity_pct: {type: number, minimum: 0, maximum: 100}, battery_pct: {type: integer, minimum: 0, maximum: 100}}}
+  - id: door-lock
+    instruction: "Lock the front door and record who locked it."
+    schema: {type: object, additionalProperties: false, required: [lock, state, by, method], properties: {lock: {type: string}, state: {type: string, enum: [locked, unlocked, jammed]}, by: {type: string}, method: {type: string, enum: [keypad, app, key, auto]}}}
+  - id: energy-meter
+    instruction: "Report a household's electricity use for one day."
+    schema: {type: object, additionalProperties: false, required: [date_day, kwh, peak_kw, tariff], properties: {date_day: {type: integer, minimum: 1, maximum: 31}, kwh: {type: number, minimum: 0}, peak_kw: {type: number, minimum: 0}, tariff: {type: string, enum: [flat, peak, off_peak]}}}
+  - id: irrigation
+    instruction: "Schedule garden irrigation for two zones in the early morning."
+    schema: {type: object, additionalProperties: false, required: [zones], properties: {zones: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [zone, start, minutes], properties: {zone: {type: integer, minimum: 1, maximum: 8}, start: {type: string, pattern: "^0[4-8]:[0-5][0-9]$"}, minutes: {type: integer, minimum: 1, maximum: 60}}}}}}
+  - id: robot-vacuum
+    instruction: "Start a robot vacuum on the kitchen and hallway."
+    schema: {type: object, additionalProperties: false, required: [rooms, mode, suction], properties: {rooms: {type: array, minItems: 2, items: {type: string}}, mode: {type: string, enum: [vacuum, mop, both]}, suction: {type: string, enum: [quiet, standard, max]}}}
+  - id: air-quality
+    instruction: "Give an indoor air quality reading with a summary label."
+    schema: {type: object, additionalProperties: false, required: [pm25, co2_ppm, voc_index, label], properties: {pm25: {type: number, minimum: 0}, co2_ppm: {type: integer, minimum: 300, maximum: 5000}, voc_index: {type: integer, minimum: 0, maximum: 500}, label: {type: string, enum: [good, moderate, poor, hazardous]}}}
+  - id: ev-charging
+    instruction: "Start an electric car charging session to 80 percent."
+    schema: {type: object, additionalProperties: false, required: [charger_id, target_pct, max_kw, connector], properties: {charger_id: {type: string}, target_pct: {type: integer, minimum: 1, maximum: 100}, max_kw: {type: number, exclusiveMinimum: 0, maximum: 350}, connector: {type: string, enum: [type2, ccs, chademo]}}}
+  - id: game-character
+    instruction: "Create a level 5 fantasy character with three attributes."
+    schema: {type: object, additionalProperties: false, required: [name, class, level, attributes], properties: {name: {type: string}, class: {type: string, enum: [warrior, mage, rogue, cleric, ranger]}, level: {type: integer, minimum: 1, maximum: 99}, attributes: {type: object, additionalProperties: false, required: [strength, agility, intellect], properties: {strength: {type: integer, minimum: 1, maximum: 20}, agility: {type: integer, minimum: 1, maximum: 20}, intellect: {type: integer, minimum: 1, maximum: 20}}}}}
+  - id: inventory-slots
+    instruction: "List a game inventory with a sword, a potion and a map."
+    schema: {type: object, additionalProperties: false, required: [slots], properties: {slots: {type: array, minItems: 3, maxItems: 10, items: {type: object, additionalProperties: false, required: [item, count, rarity], properties: {item: {type: string}, count: {type: integer, minimum: 1, maximum: 99}, rarity: {type: string, enum: [common, rare, epic, legendary]}}}}}}
+  - id: high-score
+    instruction: "Record a new high score on an arcade game."
+    schema: {type: object, additionalProperties: false, required: [initials, score, level], properties: {initials: {type: string, pattern: "^[A-Z]{3}$"}, score: {type: integer, minimum: 0}, level: {type: integer, minimum: 1}}}
+  - id: quest
+    instruction: "Describe a side quest to find a lost ring."
+    schema: {type: object, additionalProperties: false, required: [title, giver, objectives, reward_gold], properties: {title: {type: string}, giver: {type: string}, objectives: {type: array, minItems: 1, maxItems: 5, items: {type: string}}, reward_gold: {type: integer, minimum: 0}}}
+  - id: board-game
+    instruction: "Describe a cooperative board game for two to four players."
+    schema: {type: object, additionalProperties: false, required: [name, min_players, max_players, minutes, cooperative], properties: {name: {type: string}, min_players: {type: integer, minimum: 1}, max_players: {type: integer, minimum: 1, maximum: 12}, minutes: {type: integer, minimum: 5}, cooperative: {type: boolean, const: true}}}
+  - id: match-lobby
+    instruction: "Create an online match lobby for a four-player team game."
+    schema: {type: object, additionalProperties: false, required: [lobby_id, region, players, ranked], properties: {lobby_id: {type: string}, region: {type: string, enum: [eu, na, sa, asia, oce]}, players: {type: array, minItems: 4, maxItems: 4, items: {type: object, additionalProperties: false, required: [name, team], properties: {name: {type: string}, team: {type: integer, enum: [1, 2]}}}}, ranked: {type: boolean}}}
+  - id: song
+    instruction: "Describe a song on an indie folk album."
+    schema: {type: object, additionalProperties: false, required: [title, artist, duration_s, track], properties: {title: {type: string}, artist: {type: string}, duration_s: {type: integer, minimum: 30, maximum: 1200}, track: {type: integer, minimum: 1, maximum: 30}}}
+  - id: podcast-episode
+    instruction: "Describe an episode of a science podcast with two guests."
+    schema: {type: object, additionalProperties: false, required: [show, episode, title, guests, minutes], properties: {show: {type: string}, episode: {type: integer, minimum: 1}, title: {type: string}, guests: {type: array, minItems: 2, maxItems: 2, items: {type: string}}, minutes: {type: integer, minimum: 1, maximum: 300}}}
+  - id: tv-schedule
+    instruction: "List three programmes on a TV channel this evening."
+    schema: {type: object, additionalProperties: false, required: [channel, programmes], properties: {channel: {type: string}, programmes: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [start, title, genre], properties: {start: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}, title: {type: string}, genre: {type: string, enum: [news, drama, comedy, documentary, sport]}}}}}}
+  - id: concert
+    instruction: "Announce a concert at an outdoor venue with ticket prices."
+    schema: {type: object, additionalProperties: false, required: [artist, venue, capacity, tickets], properties: {artist: {type: string}, venue: {type: string}, capacity: {type: integer, minimum: 1}, tickets: {type: array, minItems: 1, items: {type: object, additionalProperties: false, required: [tier, price], properties: {tier: {type: string, enum: [general, premium, vip]}, price: {type: number, minimum: 0}}}}}}
+  - id: photo-metadata
+    instruction: "Give the metadata of a landscape photo taken with a mirrorless camera."
+    schema: {type: object, additionalProperties: false, required: [camera, focal_mm, aperture, iso, shutter], properties: {camera: {type: string}, focal_mm: {type: integer, minimum: 8, maximum: 800}, aperture: {type: number, minimum: 0.9, maximum: 32}, iso: {type: integer, minimum: 50, maximum: 102400}, shutter: {type: string, pattern: "^1/[0-9]+$|^[0-9]+s$"}}}
+  - id: art-piece
+    instruction: "Catalogue an oil painting in a small museum."
+    schema: {type: object, additionalProperties: false, required: [title, artist, year, medium, dimensions_cm], properties: {title: {type: string}, artist: {type: string}, year: {type: integer, minimum: 1000, maximum: 2030}, medium: {type: string, enum: [oil, acrylic, watercolour, ink, mixed]}, dimensions_cm: {type: array, minItems: 2, maxItems: 2, items: {type: number, exclusiveMinimum: 0}}}}
+  - id: film-credits
+    instruction: "Give the main credits of an invented short film."
+    schema: {type: object, additionalProperties: false, required: [title, director, cast, runtime_min], properties: {title: {type: string}, director: {type: string}, cast: {type: array, minItems: 2, items: {type: object, additionalProperties: false, required: [actor, role], properties: {actor: {type: string}, role: {type: string}}}}, runtime_min: {type: integer, minimum: 1, maximum: 59}}}
+  - id: news-article
+    instruction: "Summarise a local news story about a new bike lane."
+    schema: {type: object, additionalProperties: false, required: [headline, section, summary, word_count], properties: {headline: {type: string, maxLength: 120}, section: {type: string, enum: [local, national, world, business, sport, culture]}, summary: {type: string}, word_count: {type: integer, minimum: 50, maximum: 5000}}}
+  - id: bus-route
+    instruction: "Describe a city bus route with four stops."
+    schema: {type: object, additionalProperties: false, required: [route, stops, frequency_min], properties: {route: {type: string, pattern: "^[0-9]{1,3}[A-Z]?$"}, stops: {type: array, minItems: 4, maxItems: 4, items: {type: string}}, frequency_min: {type: integer, minimum: 1, maximum: 120}}}
+  - id: parking
+    instruction: "Pay for two hours of street parking."
+    schema: {type: object, additionalProperties: false, required: [plate, zone, hours, cost], properties: {plate: {type: string, minLength: 2, maxLength: 10}, zone: {type: string}, hours: {type: number, exclusiveMinimum: 0, maximum: 24}, cost: {type: number, minimum: 0}}}
+  - id: vehicle
+    instruction: "Describe a used hatchback for sale."
+    schema: {type: object, additionalProperties: false, required: [make, model, year, mileage_km, fuel], properties: {make: {type: string}, model: {type: string}, year: {type: integer, minimum: 1950, maximum: 2030}, mileage_km: {type: integer, minimum: 0}, fuel: {type: string, enum: [petrol, diesel, hybrid, electric]}}}
+  - id: traffic-incident
+    instruction: "Report a minor traffic incident blocking one lane."
+    schema: {type: object, additionalProperties: false, required: [road, direction, lanes_blocked, severity, cleared], properties: {road: {type: string}, direction: {type: string, enum: [northbound, southbound, eastbound, westbound]}, lanes_blocked: {type: integer, minimum: 0, maximum: 6}, severity: {type: string, enum: [minor, major, severe]}, cleared: {type: boolean}}}
+  - id: ferry
+    instruction: "Describe a car ferry crossing that takes about ninety minutes."
+    schema: {type: object, additionalProperties: false, required: [from_port, to_port, duration_min, vehicles_allowed], properties: {from_port: {type: string}, to_port: {type: string}, duration_min: {type: integer, minimum: 1}, vehicles_allowed: {type: boolean}}}
+  - id: bike-share
+    instruction: "Report the status of a bike-share station."
+    schema: {type: object, additionalProperties: false, required: [station, bikes, docks, ebikes], properties: {station: {type: string}, bikes: {type: integer, minimum: 0}, docks: {type: integer, minimum: 0}, ebikes: {type: integer, minimum: 0}}}
+  - id: delivery-route
+    instruction: "Plan a delivery route with three drop-offs and estimated times."
+    schema: {type: object, additionalProperties: false, required: [driver, stops], properties: {driver: {type: string}, stops: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [order, eta], properties: {order: {type: integer, minimum: 1}, eta: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}}}}}}
+  - id: dish
+    instruction: "Describe a spicy noodle dish on a restaurant menu."
+    schema: {type: object, additionalProperties: false, required: [name, price, spice_level, vegan, allergens], properties: {name: {type: string}, price: {type: number, minimum: 0}, spice_level: {type: integer, minimum: 0, maximum: 5}, vegan: {type: boolean}, allergens: {type: array, items: {type: string, enum: [gluten, nuts, dairy, egg, soy, shellfish, sesame]}}}}
+  - id: table-reservation
+    instruction: "Reserve a table for four at 19:30 on Saturday."
+    schema: {type: object, additionalProperties: false, required: [name, party_size, day, time, notes], properties: {name: {type: string}, party_size: {type: integer, minimum: 1, maximum: 20}, day: {type: string, enum: [monday, tuesday, wednesday, thursday, friday, saturday, sunday]}, time: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}, notes: {type: [string, "null"]}}}
+  - id: wine
+    instruction: "Describe a bottle of red wine for a wine list."
+    schema: {type: object, additionalProperties: false, required: [name, region, vintage, grape, price], properties: {name: {type: string}, region: {type: string}, vintage: {type: integer, minimum: 1900, maximum: 2030}, grape: {type: string}, price: {type: number, minimum: 0}}}
+  - id: pantry
+    instruction: "List four items in a pantry with their quantities and units."
+    schema: {type: object, additionalProperties: false, required: [items], properties: {items: {type: array, minItems: 4, maxItems: 4, items: {type: object, additionalProperties: false, required: [name, quantity, unit], properties: {name: {type: string}, quantity: {type: number, minimum: 0}, unit: {type: string, enum: [g, kg, ml, l, pcs]}}}}}}
+  - id: baking-timer
+    instruction: "Set timers for baking bread: proofing and baking."
+    schema: {type: object, additionalProperties: false, required: [timers], properties: {timers: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [label, minutes], properties: {label: {type: string}, minutes: {type: integer, minimum: 1, maximum: 600}}}}}}
+  - id: coffee-order
+    instruction: "Order a large oat-milk latte with one extra shot."
+    schema: {type: object, additionalProperties: false, required: [drink, size, milk, extra_shots], properties: {drink: {type: string}, size: {type: string, enum: [small, medium, large]}, milk: {type: string, enum: [whole, skim, oat, soy, almond, none]}, extra_shots: {type: integer, minimum: 0, maximum: 4}}}
+  - id: food-truck
+    instruction: "Describe a food truck's location and menu for today."
+    schema: {type: object, additionalProperties: false, required: [truck, location, menu], properties: {truck: {type: string}, location: {type: object, additionalProperties: false, required: [lat, lon], properties: {lat: {type: number, minimum: -90, maximum: 90}, lon: {type: number, minimum: -180, maximum: 180}}}, menu: {type: array, minItems: 2, items: {type: string}}}}
+  - id: grocery-delivery
+    instruction: "Schedule a grocery delivery in a two-hour window."
+    schema: {type: object, additionalProperties: false, required: [window_start, window_end, items_count, contactless], properties: {window_start: {type: string, pattern: "^([01][0-9]|2[0-3]):00$"}, window_end: {type: string, pattern: "^([01][0-9]|2[0-3]):00$"}, items_count: {type: integer, minimum: 1}, contactless: {type: boolean}}}
+  - id: apartment-listing
+    instruction: "List a two-bedroom apartment for rent."
+    schema: {type: object, additionalProperties: false, required: [bedrooms, bathrooms, area_m2, rent, furnished], properties: {bedrooms: {type: integer, minimum: 0, maximum: 10}, bathrooms: {type: integer, minimum: 1, maximum: 6}, area_m2: {type: number, exclusiveMinimum: 0}, rent: {type: number, minimum: 0}, furnished: {type: boolean}}}
+  - id: house-inspection
+    instruction: "Summarise a house inspection that found two minor issues."
+    schema: {type: object, additionalProperties: false, required: [address, issues, pass], properties: {address: {type: string}, issues: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [area, severity], properties: {area: {type: string}, severity: {type: string, enum: [minor, moderate, major]}}}}, pass: {type: boolean}}}
+  - id: mortgage-quote
+    instruction: "Quote a 25-year fixed mortgage."
+    schema: {type: object, additionalProperties: false, required: [amount, years, rate_pct, fixed], properties: {amount: {type: number, minimum: 0}, years: {type: integer, const: 25}, rate_pct: {type: number, minimum: 0, maximum: 20}, fixed: {type: boolean}}}
+  - id: maintenance-request
+    instruction: "File a maintenance request for a leaking kitchen tap."
+    schema: {type: object, additionalProperties: false, required: [unit, category, urgency, description], properties: {unit: {type: string}, category: {type: string, enum: [plumbing, electrical, heating, appliance, other]}, urgency: {type: string, enum: [low, normal, urgent, emergency]}, description: {type: string, maxLength: 500}}}
+  - id: floor-plan
+    instruction: "Describe the rooms in a small cottage with their areas."
+    schema: {type: object, additionalProperties: false, required: [rooms], properties: {rooms: {type: array, minItems: 3, items: {type: object, additionalProperties: false, required: [name, area_m2], properties: {name: {type: string}, area_m2: {type: number, exclusiveMinimum: 0}}}}}}
+  - id: utility-bill
+    instruction: "Itemise a quarterly water bill."
+    schema: {type: object, additionalProperties: false, required: [account, period, usage_m3, amount, paid], properties: {account: {type: string, pattern: "^[0-9]{8}$"}, period: {type: string, enum: [Q1, Q2, Q3, Q4]}, usage_m3: {type: number, minimum: 0}, amount: {type: number, minimum: 0}, paid: {type: boolean}}}
+  - id: crop-plan
+    instruction: "Plan the crops for three fields on a small farm."
+    schema: {type: object, additionalProperties: false, required: [fields], properties: {fields: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [field, crop, hectares], properties: {field: {type: string}, crop: {type: string, enum: [wheat, barley, maize, potatoes, beans, fallow]}, hectares: {type: number, exclusiveMinimum: 0}}}}}}
+  - id: livestock
+    instruction: "Record a herd of dairy cows on a farm."
+    schema: {type: object, additionalProperties: false, required: [species, count, purpose, vaccinated], properties: {species: {type: string, enum: [cattle, sheep, goats, pigs, chickens]}, count: {type: integer, minimum: 0}, purpose: {type: string, enum: [dairy, meat, wool, eggs, mixed]}, vaccinated: {type: boolean}}}
+  - id: soil-test
+    instruction: "Report the results of a garden soil test."
+    schema: {type: object, additionalProperties: false, required: [ph, nitrogen, phosphorus, potassium], properties: {ph: {type: number, minimum: 0, maximum: 14}, nitrogen: {type: string, enum: [low, medium, high]}, phosphorus: {type: string, enum: [low, medium, high]}, potassium: {type: string, enum: [low, medium, high]}}}
+  - id: harvest
+    instruction: "Record an apple harvest from an orchard."
+    schema: {type: object, additionalProperties: false, required: [orchard, variety, kg, grade], properties: {orchard: {type: string}, variety: {type: string}, kg: {type: number, minimum: 0}, grade: {type: string, enum: [A, B, C]}}}
+  - id: beehive
+    instruction: "Log an inspection of a beehive in spring."
+    schema: {type: object, additionalProperties: false, required: [hive, queen_seen, frames_brood, temper], properties: {hive: {type: integer, minimum: 1}, queen_seen: {type: boolean}, frames_brood: {type: integer, minimum: 0, maximum: 20}, temper: {type: string, enum: [calm, nervous, aggressive]}}}
+  - id: solar-array
+    instruction: "Describe a rooftop solar installation."
+    schema: {type: object, additionalProperties: false, required: [panels, panel_watts, orientation, battery_kwh], properties: {panels: {type: integer, minimum: 1}, panel_watts: {type: integer, minimum: 50, maximum: 800}, orientation: {type: string, enum: [north, south, east, west, flat]}, battery_kwh: {type: [number, "null"], minimum: 0}}}
+  - id: wind-turbine
+    instruction: "Report the output of a wind turbine over one hour."
+    schema: {type: object, additionalProperties: false, required: [turbine, wind_mps, output_kw, status], properties: {turbine: {type: string}, wind_mps: {type: number, minimum: 0, maximum: 80}, output_kw: {type: number, minimum: 0}, status: {type: string, enum: [running, idle, maintenance, fault]}}}
+  - id: fuel-log
+    instruction: "Log a fuel fill-up for a car."
+    schema: {type: object, additionalProperties: false, required: [litres, price_per_litre, odometer_km, full_tank], properties: {litres: {type: number, exclusiveMinimum: 0}, price_per_litre: {type: number, exclusiveMinimum: 0}, odometer_km: {type: integer, minimum: 0}, full_tank: {type: boolean}}}
+  - id: power-outage
+    instruction: "Report a planned power outage in a neighbourhood."
+    schema: {type: object, additionalProperties: false, required: [area, start, end, customers_affected, planned], properties: {area: {type: string}, start: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}, end: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}, customers_affected: {type: integer, minimum: 0}, planned: {type: boolean}}}
+  - id: warehouse-pick
+    instruction: "Create a warehouse pick list for three items from different aisles."
+    schema: {type: object, additionalProperties: false, required: [picker, lines], properties: {picker: {type: string}, lines: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [sku, aisle, bin, qty], properties: {sku: {type: string}, aisle: {type: integer, minimum: 1, maximum: 99}, bin: {type: string, pattern: "^[A-Z][0-9]{2}$"}, qty: {type: integer, minimum: 1}}}}}}
+  - id: purchase-order
+    instruction: "Raise a purchase order for office chairs from a supplier."
+    schema: {type: object, additionalProperties: false, required: [po_number, supplier, lines, currency], properties: {po_number: {type: string, pattern: "^PO[0-9]{6}$"}, supplier: {type: string}, lines: {type: array, minItems: 1, items: {type: object, additionalProperties: false, required: [item, qty, unit_cost], properties: {item: {type: string}, qty: {type: integer, minimum: 1}, unit_cost: {type: number, minimum: 0}}}}, currency: {type: string, pattern: "^[A-Z]{3}$"}}}
+  - id: container
+    instruction: "Describe a shipping container leaving a port."
+    schema: {type: object, additionalProperties: false, required: [container_id, size_ft, contents, weight_kg, reefer], properties: {container_id: {type: string, pattern: "^[A-Z]{4}[0-9]{7}$"}, size_ft: {type: integer, enum: [20, 40, 45]}, contents: {type: string}, weight_kg: {type: number, minimum: 0, maximum: 32000}, reefer: {type: boolean}}}
+  - id: stock-transfer
+    instruction: "Transfer 50 units of a product between two warehouses."
+    schema: {type: object, additionalProperties: false, required: [sku, from_site, to_site, qty, status], properties: {sku: {type: string}, from_site: {type: string}, to_site: {type: string}, qty: {type: integer, minimum: 1}, status: {type: string, enum: [requested, in_transit, received, cancelled]}}}
+  - id: fleet-vehicle
+    instruction: "Record the service status of a delivery van in a fleet."
+    schema: {type: object, additionalProperties: false, required: [van_id, km_since_service, next_service_km, available], properties: {van_id: {type: string}, km_since_service: {type: integer, minimum: 0}, next_service_km: {type: integer, minimum: 0}, available: {type: boolean}}}
+  - id: customs-declaration
+    instruction: "Fill a customs declaration for a parcel containing books."
+    schema: {type: object, additionalProperties: false, required: [contents, value, origin_country, gift], properties: {contents: {type: array, minItems: 1, items: {type: object, additionalProperties: false, required: [description, qty, value], properties: {description: {type: string}, qty: {type: integer, minimum: 1}, value: {type: number, minimum: 0}}}}, value: {type: number, minimum: 0}, origin_country: {type: string, pattern: "^[A-Z]{2}$"}, gift: {type: boolean}}}
+  - id: password-policy
+    instruction: "Define a password policy for an internal application."
+    schema: {type: object, additionalProperties: false, required: [min_length, require_digit, require_symbol, max_age_days, history], properties: {min_length: {type: integer, minimum: 8, maximum: 128}, require_digit: {type: boolean}, require_symbol: {type: boolean}, max_age_days: {type: [integer, "null"], minimum: 1}, history: {type: integer, minimum: 0, maximum: 24}}}
+  - id: incident-report
+    instruction: "Write an incident report for a phishing email reported by staff."
+    schema: {type: object, additionalProperties: false, required: [id, category, severity, affected_users, contained], properties: {id: {type: string, pattern: "^INC-[0-9]{4,6}$"}, category: {type: string, enum: [phishing, malware, data_leak, ddos, other]}, severity: {type: string, enum: [low, medium, high, critical]}, affected_users: {type: integer, minimum: 0}, contained: {type: boolean}}}
+  - id: role-permissions
+    instruction: "Define an editor role with permissions on documents."
+    schema: {type: object, additionalProperties: false, required: [role, permissions], properties: {role: {type: string}, permissions: {type: array, minItems: 1, items: {type: object, additionalProperties: false, required: [resource, actions], properties: {resource: {type: string}, actions: {type: array, minItems: 1, items: {type: string, enum: [create, read, update, delete]}}}}}}}
+  - id: tls-cert
+    instruction: "Describe a TLS certificate for a public website."
+    schema: {type: object, additionalProperties: false, required: [common_name, issuer, valid_days, key_type, wildcard], properties: {common_name: {type: string}, issuer: {type: string}, valid_days: {type: integer, minimum: 1, maximum: 398}, key_type: {type: string, enum: [rsa2048, rsa4096, ecdsa256, ecdsa384]}, wildcard: {type: boolean}}}
+  - id: audit-event
+    instruction: "Record an audit event for a user changing their email address."
+    schema: {type: object, additionalProperties: false, required: [actor, action, target, success], properties: {actor: {type: string}, action: {type: string, const: update_email}, target: {type: string}, success: {type: boolean}}}
+  - id: vuln-finding
+    instruction: "Report a medium-severity vulnerability found in a dependency."
+    schema: {type: object, additionalProperties: false, required: [package, version, cvss, fixed_in], properties: {package: {type: string}, version: {type: string, pattern: "^[0-9]+[.][0-9]+[.][0-9]+$"}, cvss: {type: number, minimum: 0, maximum: 10}, fixed_in: {type: [string, "null"]}}}
+  - id: backup-status
+    instruction: "Report the status of last night's database backups for two databases."
+    schema: {type: object, additionalProperties: false, required: [backups], properties: {backups: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [database, ok, size_mb], properties: {database: {type: string}, ok: {type: boolean}, size_mb: {type: number, minimum: 0}}}}}}
+  - id: contract-summary
+    instruction: "Summarise a one-year service contract with monthly payments."
+    schema: {type: object, additionalProperties: false, required: [parties, term_months, monthly_fee, auto_renew], properties: {parties: {type: array, minItems: 2, maxItems: 2, items: {type: string}}, term_months: {type: integer, const: 12}, monthly_fee: {type: number, minimum: 0}, auto_renew: {type: boolean}}}
+  - id: court-case
+    instruction: "Describe a small claims case about an unpaid invoice."
+    schema: {type: object, additionalProperties: false, required: [case_number, claimant, respondent, amount, status], properties: {case_number: {type: string, pattern: "^SC-[0-9]{4}-[0-9]{3,5}$"}, claimant: {type: string}, respondent: {type: string}, amount: {type: number, minimum: 0}, status: {type: string, enum: [filed, scheduled, settled, judged, dismissed]}}}
+  - id: nda
+    instruction: "Record the key terms of a mutual non-disclosure agreement."
+    schema: {type: object, additionalProperties: false, required: [mutual, duration_years, governing_law, exclusions], properties: {mutual: {type: boolean}, duration_years: {type: integer, minimum: 1, maximum: 10}, governing_law: {type: string}, exclusions: {type: array, items: {type: string}}}}
+  - id: trademark
+    instruction: "File a trademark application for a coffee brand name."
+    schema: {type: object, additionalProperties: false, required: [mark, owner, classes, word_mark], properties: {mark: {type: string}, owner: {type: string}, classes: {type: array, minItems: 1, items: {type: integer, minimum: 1, maximum: 45}}, word_mark: {type: boolean}}}
+  - id: consent-record
+    instruction: "Record a user's marketing consent choices."
+    schema: {type: object, additionalProperties: false, required: [user_id, email, sms, analytics], properties: {user_id: {type: string}, email: {type: boolean}, sms: {type: boolean}, analytics: {type: boolean}}}
+  - id: element
+    instruction: "Give basic facts about the chemical element oxygen."
+    schema: {type: object, additionalProperties: false, required: [symbol, atomic_number, group, state_at_room_temp], properties: {symbol: {type: string, pattern: "^[A-Z][a-z]?$"}, atomic_number: {type: integer, minimum: 1, maximum: 118}, group: {type: integer, minimum: 1, maximum: 18}, state_at_room_temp: {type: string, enum: [solid, liquid, gas]}}}
+  - id: star
+    instruction: "Describe a nearby star visible to the naked eye."
+    schema: {type: object, additionalProperties: false, required: [name, constellation, distance_ly, magnitude, spectral_class], properties: {name: {type: string}, constellation: {type: string}, distance_ly: {type: number, exclusiveMinimum: 0}, magnitude: {type: number, minimum: -2, maximum: 7}, spectral_class: {type: string, enum: [O, B, A, F, G, K, M]}}}
+  - id: species
+    instruction: "Describe the red fox as a species."
+    schema: {type: object, additionalProperties: false, required: [common_name, scientific_name, diet, conservation], properties: {common_name: {type: string}, scientific_name: {type: string, pattern: "^[A-Z][a-z]+ [a-z]+$"}, diet: {type: string, enum: [herbivore, carnivore, omnivore]}, conservation: {type: string, enum: [LC, NT, VU, EN, CR, EW, EX]}}}
+  - id: earthquake
+    instruction: "Report a moderate earthquake that struck offshore."
+    schema: {type: object, additionalProperties: false, required: [magnitude, depth_km, lat, lon, tsunami_warning], properties: {magnitude: {type: number, minimum: 0, maximum: 10}, depth_km: {type: number, minimum: 0, maximum: 700}, lat: {type: number, minimum: -90, maximum: 90}, lon: {type: number, minimum: -180, maximum: 180}, tsunami_warning: {type: boolean}}}
+  - id: molecule
+    instruction: "Describe the water molecule."
+    schema: {type: object, additionalProperties: false, required: [formula, atoms, molar_mass, polar], properties: {formula: {type: string}, atoms: {type: array, minItems: 1, items: {type: object, additionalProperties: false, required: [element, count], properties: {element: {type: string}, count: {type: integer, minimum: 1}}}}, molar_mass: {type: number, exclusiveMinimum: 0}, polar: {type: boolean}}}
+  - id: experiment-trial
+    instruction: "Record one trial of a pendulum experiment."
+    schema: {type: object, additionalProperties: false, required: [trial, length_m, period_s, notes], properties: {trial: {type: integer, minimum: 1}, length_m: {type: number, exclusiveMinimum: 0, maximum: 10}, period_s: {type: number, exclusiveMinimum: 0}, notes: {type: [string, "null"]}}}
+  - id: telescope
+    instruction: "Describe an amateur reflector telescope."
+    schema: {type: object, additionalProperties: false, required: [type, aperture_mm, focal_length_mm, mount], properties: {type: {type: string, enum: [reflector, refractor, catadioptric]}, aperture_mm: {type: integer, minimum: 50, maximum: 1000}, focal_length_mm: {type: integer, minimum: 200, maximum: 5000}, mount: {type: string, enum: [altaz, equatorial, dobsonian]}}}
+  - id: weather-forecast
+    instruction: "Give a three-day weather forecast for a mountain village."
+    schema: {type: object, additionalProperties: false, required: [location, days], properties: {location: {type: string}, days: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [high_c, low_c, precip_pct], properties: {high_c: {type: number, minimum: -50, maximum: 50}, low_c: {type: number, minimum: -60, maximum: 40}, precip_pct: {type: integer, minimum: 0, maximum: 100}}}}}}
+  - id: tide-table
+    instruction: "Give the high and low tides for a harbour today."
+    schema: {type: object, additionalProperties: false, required: [harbour, tides], properties: {harbour: {type: string}, tides: {type: array, minItems: 2, maxItems: 4, items: {type: object, additionalProperties: false, required: [kind, time, height_m], properties: {kind: {type: string, enum: [high, low]}, time: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}, height_m: {type: number, minimum: -3, maximum: 17}}}}}}
+  - id: volunteer-shift
+    instruction: "Sign up a volunteer for a food bank shift."
+    schema: {type: object, additionalProperties: false, required: [volunteer, role, shift, first_time], properties: {volunteer: {type: string}, role: {type: string, enum: [sorting, packing, driving, reception]}, shift: {type: string, enum: [morning, afternoon, evening]}, first_time: {type: boolean}}}
+  - id: donation
+    instruction: "Record a monthly donation to a wildlife charity."
+    schema: {type: object, additionalProperties: false, required: [donor, charity, amount, frequency, gift_aid], properties: {donor: {type: string}, charity: {type: string}, amount: {type: number, exclusiveMinimum: 0}, frequency: {type: string, enum: [one_off, monthly, yearly]}, gift_aid: {type: boolean}}}
+  - id: club-membership
+    instruction: "Register a new member of a hiking club."
+    schema: {type: object, additionalProperties: false, required: [name, membership, emergency_contact], properties: {name: {type: string}, membership: {type: string, enum: [junior, adult, family, senior]}, emergency_contact: {type: object, additionalProperties: false, required: [name, phone], properties: {name: {type: string}, phone: {type: string, pattern: "^[+]?[0-9 ]{6,20}$"}}}}}
+  - id: petition
+    instruction: "Describe a local petition for a new playground."
+    schema: {type: object, additionalProperties: false, required: [title, target, signatures, goal, open], properties: {title: {type: string}, target: {type: string}, signatures: {type: integer, minimum: 0}, goal: {type: integer, minimum: 1}, open: {type: boolean}}}
+  - id: election-result
+    instruction: "Report the result of a club committee election with three candidates."
+    schema: {type: object, additionalProperties: false, required: [position, candidates, winner], properties: {position: {type: string}, candidates: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [name, votes], properties: {name: {type: string}, votes: {type: integer, minimum: 0}}}}, winner: {type: string}}}
+  - id: library-loan
+    instruction: "Record a library loan of two books due in three weeks."
+    schema: {type: object, additionalProperties: false, required: [member, books, loan_days, renewals_left], properties: {member: {type: string}, books: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [isbn, title], properties: {isbn: {type: string, pattern: "^[0-9]{13}$"}, title: {type: string}}}}, loan_days: {type: integer, const: 21}, renewals_left: {type: integer, minimum: 0, maximum: 3}}}
+  - id: pet
+    instruction: "Register a rescue dog at a vet clinic."
+    schema: {type: object, additionalProperties: false, required: [name, species, breed, age_years, microchipped], properties: {name: {type: string}, species: {type: string, enum: [dog, cat, rabbit, bird, other]}, breed: {type: [string, "null"]}, age_years: {type: number, minimum: 0, maximum: 40}, microchipped: {type: boolean}}}
+  - id: aquarium
+    instruction: "Describe a freshwater aquarium with three fish species."
+    schema: {type: object, additionalProperties: false, required: [litres, water, fish], properties: {litres: {type: integer, minimum: 1}, water: {type: string, enum: [fresh, brackish, marine]}, fish: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [species, count], properties: {species: {type: string}, count: {type: integer, minimum: 1}}}}}}
+  - id: plant-care
+    instruction: "Give care instructions for a peace lily houseplant."
+    schema: {type: object, additionalProperties: false, required: [plant, light, water_every_days, toxic_to_pets], properties: {plant: {type: string}, light: {type: string, enum: [low, medium, bright_indirect, direct]}, water_every_days: {type: integer, minimum: 1, maximum: 60}, toxic_to_pets: {type: boolean}}}
+  - id: wedding-guest
+    instruction: "Record a wedding RSVP for a guest bringing a plus-one."
+    schema: {type: object, additionalProperties: false, required: [guest, attending, plus_one, meal], properties: {guest: {type: string}, attending: {type: boolean}, plus_one: {type: [string, "null"]}, meal: {type: string, enum: [meat, fish, vegetarian, vegan, child]}}}
+  - id: party-plan
+    instruction: "Plan a birthday party for twelve children."
+    schema: {type: object, additionalProperties: false, required: [guests, theme, activities, budget], properties: {guests: {type: integer, minimum: 1}, theme: {type: string}, activities: {type: array, minItems: 2, items: {type: string}}, budget: {type: number, minimum: 0}}}
+  - id: moving-checklist
+    instruction: "Create a checklist for moving house with four tasks."
+    schema: {type: object, additionalProperties: false, required: [move_month, tasks], properties: {move_month: {type: integer, minimum: 1, maximum: 12}, tasks: {type: array, minItems: 4, maxItems: 4, items: {type: object, additionalProperties: false, required: [task, weeks_before], properties: {task: {type: string}, weeks_before: {type: integer, minimum: 0, maximum: 12}}}}}}
+  - id: habit-tracker
+    instruction: "Track a reading habit over one week."
+    schema: {type: object, additionalProperties: false, required: [habit, days_done, streak], properties: {habit: {type: string}, days_done: {type: array, minItems: 7, maxItems: 7, items: {type: boolean}}, streak: {type: integer, minimum: 0}}}
+  - id: journal-entry
+    instruction: "Write metadata for a short journal entry about a rainy day."
+    schema: {type: object, additionalProperties: false, required: [mood, tags, words], properties: {mood: {type: string, enum: [happy, calm, tired, sad, anxious, excited]}, tags: {type: array, maxItems: 5, items: {type: string, pattern: "^[a-z]+$"}}, words: {type: integer, minimum: 0}}}
+  - id: alarm-clock
+    instruction: "Set a weekday alarm at 06:45 with snooze enabled."
+    schema: {type: object, additionalProperties: false, required: [time, days, snooze_minutes, label], properties: {time: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}, days: {type: array, minItems: 1, maxItems: 7, items: {type: string, enum: [mon, tue, wed, thu, fri, sat, sun]}}, snooze_minutes: {type: integer, minimum: 0, maximum: 30}, label: {type: string}}}
+  - id: contact-card
+    instruction: "Create a contact card for a plumber with a work phone."
+    schema: {type: object, additionalProperties: false, required: [name, company, phones], properties: {name: {type: string}, company: {type: [string, "null"]}, phones: {type: array, minItems: 1, items: {type: object, additionalProperties: false, required: [label, number], properties: {label: {type: string, enum: [mobile, work, home]}, number: {type: string}}}}}}
+  - id: calendar-event
+    instruction: "Create an all-day calendar event for a public holiday."
+    schema: {type: object, additionalProperties: false, required: [title, all_day, month, day, reminders], properties: {title: {type: string}, all_day: {type: boolean, const: true}, month: {type: integer, minimum: 1, maximum: 12}, day: {type: integer, minimum: 1, maximum: 31}, reminders: {type: array, items: {type: integer, minimum: 0}}}}
+  - id: email-draft
+    instruction: "Draft metadata for an email inviting a colleague to lunch."
+    schema: {type: object, additionalProperties: false, required: [to, subject, priority, body], properties: {to: {type: array, minItems: 1, items: {type: string}}, subject: {type: string, maxLength: 100}, priority: {type: string, enum: [low, normal, high]}, body: {type: string}}}
+  - id: file-metadata
+    instruction: "Describe a PDF report stored in a shared drive."
+    schema: {type: object, additionalProperties: false, required: [name, size_bytes, mime, shared_with], properties: {name: {type: string, pattern: "[.]pdf$"}, size_bytes: {type: integer, minimum: 0}, mime: {type: string, const: application/pdf}, shared_with: {type: array, items: {type: string}}}}
+  - id: url-parts
+    instruction: "Split the address of a website's pricing page into its parts."
+    schema: {type: object, additionalProperties: false, required: [scheme, host, path, query], properties: {scheme: {type: string, enum: [http, https]}, host: {type: string}, path: {type: string, pattern: "^/"}, query: {type: object, additionalProperties: {type: string}}}}
+  - id: color-scheme
+    instruction: "Define a dark colour scheme for a code editor with four colours."
+    schema: {type: object, additionalProperties: false, required: [name, dark, colors], properties: {name: {type: string}, dark: {type: boolean}, colors: {type: object, additionalProperties: false, required: [background, foreground, accent, comment], properties: {background: {type: string, pattern: "^#[0-9a-fA-F]{6}$"}, foreground: {type: string, pattern: "^#[0-9a-fA-F]{6}$"}, accent: {type: string, pattern: "^#[0-9a-fA-F]{6}$"}, comment: {type: string, pattern: "^#[0-9a-fA-F]{6}$"}}}}}
+  - id: font-spec
+    instruction: "Specify the font settings for a document's body text."
+    schema: {type: object, additionalProperties: false, required: [family, size_pt, weight, italic, line_height], properties: {family: {type: string}, size_pt: {type: number, minimum: 6, maximum: 72}, weight: {type: integer, enum: [100, 200, 300, 400, 500, 600, 700, 800, 900]}, italic: {type: boolean}, line_height: {type: number, minimum: 1, maximum: 3}}}
+  - id: form-field
+    instruction: "Define a required email field for a sign-up form."
+    schema: {type: object, additionalProperties: false, required: [name, label, input_type, required, max_length], properties: {name: {type: string}, label: {type: string}, input_type: {type: string, enum: [text, email, password, number, date, checkbox]}, required: {type: boolean}, max_length: {type: integer, minimum: 1, maximum: 1000}}}
+  - id: ui-button
+    instruction: "Describe a primary 'Save' button in a settings dialog."
+    schema: {type: object, additionalProperties: false, required: [label, variant, disabled, icon], properties: {label: {type: string}, variant: {type: string, enum: [primary, secondary, danger, link]}, disabled: {type: boolean}, icon: {type: [string, "null"]}}}
+  - id: table-schema
+    instruction: "Define a database table for storing customer orders with four columns."
+    schema: {type: object, additionalProperties: false, required: [table, columns, primary_key], properties: {table: {type: string, pattern: "^[a-z_]+$"}, columns: {type: array, minItems: 4, maxItems: 4, items: {type: object, additionalProperties: false, required: [name, type, nullable], properties: {name: {type: string}, type: {type: string, enum: [integer, bigint, text, boolean, timestamp, numeric]}, nullable: {type: boolean}}}}, primary_key: {type: string}}}
+  - id: query-plan
+    instruction: "Describe a search query for laptops under 1000, sorted by rating."
+    schema: {type: object, additionalProperties: false, required: [category, max_price, sort, page], properties: {category: {type: string}, max_price: {type: number, minimum: 0}, sort: {type: object, additionalProperties: false, required: [field, order], properties: {field: {type: string, enum: [price, rating, newest]}, order: {type: string, enum: [asc, desc]}}}, page: {type: integer, minimum: 1}}}
+  - id: pagination
+    instruction: "Return the pagination block for page 3 of 10 with 20 items per page."
+    schema: {type: object, additionalProperties: false, required: [page, per_page, total_pages, has_next], properties: {page: {type: integer, minimum: 1}, per_page: {type: integer, minimum: 1, maximum: 100}, total_pages: {type: integer, minimum: 0}, has_next: {type: boolean}}}
+  - id: error-payload
+    instruction: "Return an API error for a request missing a required field."
+    schema: {type: object, additionalProperties: false, required: [error], properties: {error: {type: object, additionalProperties: false, required: [code, message, field], properties: {code: {type: string, pattern: "^[A-Z_]+$"}, message: {type: string}, field: {type: [string, "null"]}}}}}
+  - id: webhook
+    instruction: "Register a webhook for payment events."
+    schema: {type: object, additionalProperties: false, required: [url, events, secret_set, active], properties: {url: {type: string, pattern: "^https://"}, events: {type: array, minItems: 1, items: {type: string, enum: [payment.succeeded, payment.failed, refund.created, dispute.opened]}}, secret_set: {type: boolean}, active: {type: boolean}}}
+  - id: rate-limit
+    instruction: "Describe an API rate limit of 100 requests per minute."
+    schema: {type: object, additionalProperties: false, required: [limit, window_seconds, scope, burst], properties: {limit: {type: integer, minimum: 1}, window_seconds: {type: integer, enum: [1, 60, 3600, 86400]}, scope: {type: string, enum: [ip, user, api_key]}, burst: {type: [integer, "null"], minimum: 0}}}
+  - id: queue-message
+    instruction: "Enqueue a job that resizes an uploaded image."
+    schema: {type: object, additionalProperties: false, required: [queue, job, payload, attempts], properties: {queue: {type: string}, job: {type: string, const: resize_image}, payload: {type: object, additionalProperties: false, required: [image_id, width, height], properties: {image_id: {type: string}, width: {type: integer, minimum: 1, maximum: 10000}, height: {type: integer, minimum: 1, maximum: 10000}}}, attempts: {type: integer, minimum: 0, maximum: 10}}}
+  - id: cache-entry
+    instruction: "Describe a cache entry for a user profile that expires in an hour."
+    schema: {type: object, additionalProperties: false, required: [key, ttl_seconds, size_bytes, hit_count], properties: {key: {type: string, pattern: "^[a-z]+:[0-9]+$"}, ttl_seconds: {type: integer, minimum: 0}, size_bytes: {type: integer, minimum: 0}, hit_count: {type: integer, minimum: 0}}}
+  - id: package-manifest
+    instruction: "Write a minimal package manifest for a small JavaScript library."
+    schema: {type: object, additionalProperties: false, required: [name, version, license, dependencies], properties: {name: {type: string, pattern: "^[a-z0-9-]+$"}, version: {type: string, pattern: "^[0-9]+[.][0-9]+[.][0-9]+$"}, license: {type: string, enum: [MIT, Apache-2.0, BSD-3-Clause, ISC]}, dependencies: {type: object, additionalProperties: {type: string}}}}
+  - id: test-report
+    instruction: "Summarise a test run where two of fifty tests failed."
+    schema: {type: object, additionalProperties: false, required: [total, passed, failed, failures], properties: {total: {type: integer, minimum: 0}, passed: {type: integer, minimum: 0}, failed: {type: integer, minimum: 0}, failures: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [test, message], properties: {test: {type: string}, message: {type: string}}}}}}
+  - id: pull-request
+    instruction: "Describe a pull request that fixes a typo in the docs."
+    schema: {type: object, additionalProperties: false, required: [number, title, draft, labels, reviewers], properties: {number: {type: integer, minimum: 1}, title: {type: string, maxLength: 120}, draft: {type: boolean}, labels: {type: array, items: {type: string}}, reviewers: {type: array, items: {type: string}}}}
+  - id: model-card
+    instruction: "Describe a small text classification model."
+    schema: {type: object, additionalProperties: false, required: [name, task, parameters_m, accuracy, languages], properties: {name: {type: string}, task: {type: string, enum: [classification, ner, summarisation, translation]}, parameters_m: {type: number, exclusiveMinimum: 0}, accuracy: {type: number, minimum: 0, maximum: 1}, languages: {type: array, minItems: 1, items: {type: string, pattern: "^[a-z]{2}$"}}}}
+  - id: dataset-split
+    instruction: "Describe a dataset split into train, validation and test sets."
+    schema: {type: object, additionalProperties: false, required: [dataset, splits], properties: {dataset: {type: string}, splits: {type: object, additionalProperties: false, required: [train, validation, test], properties: {train: {type: integer, minimum: 0}, validation: {type: integer, minimum: 0}, test: {type: integer, minimum: 0}}}}}
+  - id: hyperparams
+    instruction: "Give hyperparameters for fine-tuning a small language model."
+    schema: {type: object, additionalProperties: false, required: [learning_rate, batch_size, epochs, optimizer, warmup_steps], properties: {learning_rate: {type: number, exclusiveMinimum: 0, maximum: 1}, batch_size: {type: integer, minimum: 1, maximum: 4096}, epochs: {type: integer, minimum: 1, maximum: 100}, optimizer: {type: string, enum: [sgd, adam, adamw, adafactor]}, warmup_steps: {type: integer, minimum: 0}}}
+  - id: gpu-node
+    instruction: "Describe a GPU server node with four accelerators."
+    schema: {type: object, additionalProperties: false, required: [hostname, gpus, cpu_cores, memory_gb], properties: {hostname: {type: string}, gpus: {type: array, minItems: 4, maxItems: 4, items: {type: object, additionalProperties: false, required: [index, memory_gb], properties: {index: {type: integer, minimum: 0, maximum: 7}, memory_gb: {type: integer, minimum: 1}}}}, cpu_cores: {type: integer, minimum: 1}, memory_gb: {type: integer, minimum: 1}}}
+  - id: confusion-matrix
+    instruction: "Give a 2x2 confusion matrix for a spam filter."
+    schema: {type: object, additionalProperties: false, required: [labels, matrix], properties: {labels: {type: array, minItems: 2, maxItems: 2, items: {type: string}}, matrix: {type: array, minItems: 2, maxItems: 2, items: {type: array, minItems: 2, maxItems: 2, items: {type: integer, minimum: 0}}}}}
+  - id: survey-response
+    instruction: "Record a customer satisfaction survey response."
+    schema: {type: object, additionalProperties: false, required: [nps, satisfied, comment, channel], properties: {nps: {type: integer, minimum: 0, maximum: 10}, satisfied: {type: boolean}, comment: {type: [string, "null"], maxLength: 500}, channel: {type: string, enum: [web, email, phone, in_store]}}}
+  - id: ab-test
+    instruction: "Summarise an A/B test of two headlines."
+    schema: {type: object, additionalProperties: false, required: [variants, winner, significant], properties: {variants: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [name, visitors, conversions], properties: {name: {type: string, enum: [A, B]}, visitors: {type: integer, minimum: 0}, conversions: {type: integer, minimum: 0}}}}, winner: {type: [string, "null"], enum: [A, B, null]}, significant: {type: boolean}}}
+  - id: kpi-dashboard
+    instruction: "Report three weekly KPIs for an online shop."
+    schema: {type: object, additionalProperties: false, required: [week, kpis], properties: {week: {type: integer, minimum: 1, maximum: 53}, kpis: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [name, value, trend], properties: {name: {type: string}, value: {type: number}, trend: {type: string, enum: [up, down, flat]}}}}}}
+  - id: histogram
+    instruction: "Give a histogram of exam scores in five bins."
+    schema: {type: object, additionalProperties: false, required: [bins], properties: {bins: {type: array, minItems: 5, maxItems: 5, items: {type: object, additionalProperties: false, required: [from, to, count], properties: {from: {type: number}, to: {type: number}, count: {type: integer, minimum: 0}}}}}}
+  - id: poll
+    instruction: "Create a poll asking which day to hold a team lunch."
+    schema: {type: object, additionalProperties: false, required: [question, options, multiple_choice, closes_in_hours], properties: {question: {type: string}, options: {type: array, minItems: 2, maxItems: 6, items: {type: string}}, multiple_choice: {type: boolean}, closes_in_hours: {type: integer, minimum: 1, maximum: 168}}}
+  - id: time-series
+    instruction: "Give hourly visitor counts for a website over four hours."
+    schema: {type: object, additionalProperties: false, required: [metric, points], properties: {metric: {type: string}, points: {type: array, minItems: 4, maxItems: 4, items: {type: object, additionalProperties: false, required: [hour, value], properties: {hour: {type: integer, minimum: 0, maximum: 23}, value: {type: integer, minimum: 0}}}}}}
+  - id: translation-pair
+    instruction: "Translate 'good morning' into German."
+    schema: {type: object, additionalProperties: false, required: [source, target, source_lang, target_lang], properties: {source: {type: string}, target: {type: string}, source_lang: {type: string, const: en}, target_lang: {type: string, const: de}}}
+  - id: spelling-fix
+    instruction: "Correct the spelling in: 'I recieved the pakage yesterday.'"
+    schema: {type: object, additionalProperties: false, required: [original, corrected, corrections], properties: {original: {type: string}, corrected: {type: string}, corrections: {type: array, minItems: 2, items: {type: object, additionalProperties: false, required: [wrong, right], properties: {wrong: {type: string}, right: {type: string}}}}}}
+  - id: entity-extraction
+    instruction: "Extract the entities from: 'Ana met Ravi in Lisbon on Monday.'"
+    schema: {type: object, additionalProperties: false, required: [entities], properties: {entities: {type: array, minItems: 3, items: {type: object, additionalProperties: false, required: [text, type], properties: {text: {type: string}, type: {type: string, enum: [person, place, date, organisation]}}}}}}
+  - id: text-stats
+    instruction: "Give statistics for the sentence 'The quick brown fox jumps over the lazy dog.'"
+    schema: {type: object, additionalProperties: false, required: [words, characters, sentences, longest_word], properties: {words: {type: integer, minimum: 0}, characters: {type: integer, minimum: 0}, sentences: {type: integer, minimum: 0}, longest_word: {type: string}}}
+  - id: intent-slots
+    instruction: "Parse the request: 'Play some jazz in the living room at volume 30.'"
+    schema: {type: object, additionalProperties: false, required: [intent, slots], properties: {intent: {type: string, enum: [play_music, set_alarm, weather, timer, other]}, slots: {type: object, additionalProperties: false, required: [genre, room, volume], properties: {genre: {type: string}, room: {type: string}, volume: {type: integer, minimum: 0, maximum: 100}}}}}
+  - id: summary-bullets
+    instruction: "Summarise the benefits of regular exercise in three bullet points."
+    schema: {type: object, additionalProperties: false, required: [topic, bullets], properties: {topic: {type: string}, bullets: {type: array, minItems: 3, maxItems: 3, items: {type: string, maxLength: 160}}}}
+  - id: toxicity-label
+    instruction: "Label the comment 'This recipe is fantastic, thanks!' for moderation."
+    schema: {type: object, additionalProperties: false, required: [toxic, categories, score], properties: {toxic: {type: boolean}, categories: {type: array, items: {type: string, enum: [insult, threat, profanity, harassment, spam]}}, score: {type: number, minimum: 0, maximum: 1}}}
+  - id: keyword-extract
+    instruction: "Extract keywords from a product description of a waterproof hiking boot."
+    schema: {type: object, additionalProperties: false, required: [keywords], properties: {keywords: {type: array, minItems: 3, maxItems: 8, items: {type: object, additionalProperties: false, required: [term, weight], properties: {term: {type: string}, weight: {type: number, minimum: 0, maximum: 1}}}}}}
+  - id: date-range
+    instruction: "Express the first quarter of a year as a date range."
+    schema: {type: object, additionalProperties: false, required: [start_month, start_day, end_month, end_day], properties: {start_month: {type: integer, const: 1}, start_day: {type: integer, const: 1}, end_month: {type: integer, const: 3}, end_day: {type: integer, const: 31}}}
+  - id: fraction
+    instruction: "Represent three quarters as a fraction and a decimal."
+    schema: {type: object, additionalProperties: false, required: [numerator, denominator, decimal], properties: {numerator: {type: integer}, denominator: {type: integer, minimum: 1}, decimal: {type: number}}}
+  - id: polynomial
+    instruction: "Give the coefficients of the polynomial 2x^2 - 3x + 1."
+    schema: {type: object, additionalProperties: false, required: [degree, coefficients], properties: {degree: {type: integer, const: 2}, coefficients: {type: array, minItems: 3, maxItems: 3, items: {type: number}}}}
+  - id: vector
+    instruction: "Give a unit vector pointing along the x axis in three dimensions."
+    schema: {type: object, additionalProperties: false, required: [x, y, z, length], properties: {x: {type: number}, y: {type: number}, z: {type: number}, length: {type: number, minimum: 0}}}
+  - id: prime-check
+    instruction: "Say whether 91 is prime and give its factors."
+    schema: {type: object, additionalProperties: false, required: [number, is_prime, factors], properties: {number: {type: integer}, is_prime: {type: boolean}, factors: {type: array, items: {type: integer, minimum: 1}}}}
+  - id: statistics-summary
+    instruction: "Summarise the numbers 4, 8, 15, 16, 23 and 42."
+    schema: {type: object, additionalProperties: false, required: [count, mean, median, min, max], properties: {count: {type: integer, minimum: 0}, mean: {type: number}, median: {type: number}, min: {type: number}, max: {type: number}}}
+  - id: shape-list
+    instruction: "List a circle and a rectangle with their dimensions."
+    schema: {type: object, additionalProperties: false, required: [shapes], properties: {shapes: {type: array, minItems: 2, maxItems: 2, items: {anyOf: [{type: object, additionalProperties: false, required: [kind, radius], properties: {kind: {type: string, const: circle}, radius: {type: number, exclusiveMinimum: 0}}}, {type: object, additionalProperties: false, required: [kind, width, height], properties: {kind: {type: string, const: rectangle}, width: {type: number, exclusiveMinimum: 0}, height: {type: number, exclusiveMinimum: 0}}}]}}}}
+  - id: payment-method
+    instruction: "Record a payment made by bank transfer."
+    schema: {type: object, additionalProperties: false, required: [payment], properties: {payment: {anyOf: [{type: object, additionalProperties: false, required: [method, last4], properties: {method: {type: string, const: card}, last4: {type: string, pattern: "^[0-9]{4}$"}}}, {type: object, additionalProperties: false, required: [method, iban_country], properties: {method: {type: string, const: bank_transfer}, iban_country: {type: string, pattern: "^[A-Z]{2}$"}}}]}}}
+  - id: notification
+    instruction: "Send a push notification that a package has been delivered."
+    schema: {type: object, additionalProperties: false, required: [channel, title, body, data], properties: {channel: {type: string, enum: [push, email, sms]}, title: {type: string, maxLength: 60}, body: {type: string, maxLength: 200}, data: {anyOf: [{type: "null"}, {type: object, additionalProperties: {type: string}}]}}}
+  - id: geo-feature
+    instruction: "Describe a park as a point feature with properties."
+    schema: {type: object, additionalProperties: false, required: [type, geometry, properties], properties: {type: {type: string, const: Feature}, geometry: {type: object, additionalProperties: false, required: [type, coordinates], properties: {type: {type: string, const: Point}, coordinates: {type: array, minItems: 2, maxItems: 2, items: {type: number}}}}, properties: {type: object, additionalProperties: false, required: [name, area_ha], properties: {name: {type: string}, area_ha: {type: number, minimum: 0}}}}}
+  - id: menu-tree
+    instruction: "Describe an app's navigation menu with two sections, each with two links."
+    schema: {type: object, additionalProperties: false, required: [sections], properties: {sections: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [title, links], properties: {title: {type: string}, links: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [label, href], properties: {label: {type: string}, href: {type: string, pattern: "^/"}}}}}}}}}
+  - id: family-tree
+    instruction: "Describe a person with two parents and one grandparent known."
+    schema: {type: object, additionalProperties: false, required: [name, parents], properties: {name: {type: string}, parents: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [name, parents], properties: {name: {type: string}, parents: {type: array, maxItems: 2, items: {type: object, additionalProperties: false, required: [name], properties: {name: {type: string}}}}}}}}}
+  - id: config-env
+    instruction: "Write environment settings for a staging deployment."
+    schema: {type: object, additionalProperties: false, required: [environment, debug, log_level, variables], properties: {environment: {type: string, const: staging}, debug: {type: boolean}, log_level: {type: string, enum: [debug, info, warning, error]}, variables: {type: object, minProperties: 2, additionalProperties: {type: string}}}}
+  - id: translation-memory
+    instruction: "Give the word 'thank you' in three languages."
+    schema: {type: object, additionalProperties: false, required: [phrase, translations], properties: {phrase: {type: string}, translations: {type: object, additionalProperties: false, required: [fr, es, it], properties: {fr: {type: string}, es: {type: string}, it: {type: string}}}}}
+  - id: sport-event-mixed
+    instruction: "Describe a triathlon with its three legs and distances."
+    schema: {type: object, additionalProperties: false, required: [name, legs], properties: {name: {type: string}, legs: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [discipline, km], properties: {discipline: {type: string, enum: [swim, bike, run]}, km: {type: number, exclusiveMinimum: 0, maximum: 200}}}}}}
+  - id: museum-visit
+    instruction: "Plan a museum visit for a family of four with ticket types."
+    schema: {type: object, additionalProperties: false, required: [museum, tickets, total], properties: {museum: {type: string}, tickets: {type: array, minItems: 1, items: {type: object, additionalProperties: false, required: [type, count, price], properties: {type: {type: string, enum: [adult, child, student, senior]}, count: {type: integer, minimum: 1}, price: {type: number, minimum: 0}}}}, total: {type: number, minimum: 0}}}
+  - id: recycling
+    instruction: "Sort five household items into recycling bins."
+    schema: {type: object, additionalProperties: false, required: [items], properties: {items: {type: array, minItems: 5, maxItems: 5, items: {type: object, additionalProperties: false, required: [item, bin], properties: {item: {type: string}, bin: {type: string, enum: [paper, plastic, glass, metal, compost, general]}}}}}}
+  - id: phone-plan
+    instruction: "Describe a mobile phone plan with unlimited calls and 20 GB of data."
+    schema: {type: object, additionalProperties: false, required: [name, data_gb, unlimited_calls, monthly_price, contract_months], properties: {name: {type: string}, data_gb: {type: [number, "null"], minimum: 0}, unlimited_calls: {type: boolean}, monthly_price: {type: number, minimum: 0}, contract_months: {type: integer, enum: [0, 12, 24, 36]}}}
+  - id: insurance-claim
+    instruction: "File a home insurance claim for water damage."
+    schema: {type: object, additionalProperties: false, required: [policy, peril, estimated_cost, photos, emergency], properties: {policy: {type: string, pattern: "^POL[0-9]{7}$"}, peril: {type: string, enum: [fire, water, theft, storm, accidental]}, estimated_cost: {type: number, minimum: 0}, photos: {type: integer, minimum: 0}, emergency: {type: boolean}}}
+  - id: gym-class
+    instruction: "List a yoga class on a gym timetable."
+    schema: {type: object, additionalProperties: false, required: [class, instructor, start, capacity, booked], properties: {class: {type: string}, instructor: {type: string}, start: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}, capacity: {type: integer, minimum: 1}, booked: {type: integer, minimum: 0}}}
+  - id: route-directions
+    instruction: "Give walking directions with three steps from a station to a museum."
+    schema: {type: object, additionalProperties: false, required: [from, to, steps, total_minutes], properties: {from: {type: string}, to: {type: string}, steps: {type: array, minItems: 3, maxItems: 3, items: {type: object, additionalProperties: false, required: [instruction, metres], properties: {instruction: {type: string}, metres: {type: integer, minimum: 0}}}}, total_minutes: {type: integer, minimum: 0}}}
+  - id: haiku-meta
+    instruction: "Write a haiku about autumn and give its syllable counts."
+    schema: {type: object, additionalProperties: false, required: [lines, syllables], properties: {lines: {type: array, minItems: 3, maxItems: 3, items: {type: string}}, syllables: {type: array, minItems: 3, maxItems: 3, items: {type: integer, enum: [5, 7]}}}}
+  - id: room-booking
+    instruction: "Book a meeting room for six people with a projector."
+    schema: {type: object, additionalProperties: false, required: [room, attendees, equipment, hours], properties: {room: {type: string}, attendees: {type: integer, minimum: 1, maximum: 50}, equipment: {type: array, items: {type: string, enum: [projector, whiteboard, video_call, speakerphone]}}, hours: {type: number, minimum: 0.5, maximum: 10}}}
+  - id: lost-and-found
+    instruction: "Log a lost umbrella handed in at a train station."
+    schema: {type: object, additionalProperties: false, required: [item, colour, location, claimed], properties: {item: {type: string}, colour: {type: string}, location: {type: string}, claimed: {type: boolean}}}
+  - id: rainfall-month
+    instruction: "Give monthly rainfall in millimetres for the first six months of a year."
+    schema: {type: object, additionalProperties: false, required: [station, mm], properties: {station: {type: string}, mm: {type: array, minItems: 6, maxItems: 6, items: {type: number, minimum: 0, maximum: 2000}}}}
+  - id: knitting-pattern
+    instruction: "Describe a simple knitting pattern for a scarf."
+    schema: {type: object, additionalProperties: false, required: [yarn_weight, needle_mm, stitches, rows, stitch_pattern], properties: {yarn_weight: {type: string, enum: [lace, fingering, dk, worsted, chunky]}, needle_mm: {type: number, minimum: 2, maximum: 15}, stitches: {type: integer, minimum: 1}, rows: {type: integer, minimum: 1}, stitch_pattern: {type: string}}}
+  - id: elevator-status
+    instruction: "Report the status of two lifts in an office building."
+    schema: {type: object, additionalProperties: false, required: [lifts], properties: {lifts: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [id, floor, direction, in_service], properties: {id: {type: string}, floor: {type: integer, minimum: -3, maximum: 60}, direction: {type: string, enum: [up, down, idle]}, in_service: {type: boolean}}}}}}
+  - id: tree-survey
+    instruction: "Record an oak tree surveyed in a city park."
+    schema: {type: object, additionalProperties: false, required: [species, height_m, trunk_cm, health, protected], properties: {species: {type: string}, height_m: {type: number, minimum: 0, maximum: 120}, trunk_cm: {type: integer, minimum: 1}, health: {type: string, enum: [good, fair, poor, dead]}, protected: {type: boolean}}}
+  - id: print-job
+    instruction: "Send a double-sided colour print job of a 12-page document."
+    schema: {type: object, additionalProperties: false, required: [document, pages, copies, color, duplex], properties: {document: {type: string}, pages: {type: integer, minimum: 1}, copies: {type: integer, minimum: 1, maximum: 100}, color: {type: boolean}, duplex: {type: boolean}}}
+  - id: sauna-session
+    instruction: "Log a sauna session with two rounds and cool-downs."
+    schema: {type: object, additionalProperties: false, required: [temperature_c, rounds], properties: {temperature_c: {type: integer, minimum: 50, maximum: 110}, rounds: {type: array, minItems: 2, maxItems: 2, items: {type: object, additionalProperties: false, required: [minutes, cooldown_minutes], properties: {minutes: {type: integer, minimum: 1, maximum: 30}, cooldown_minutes: {type: integer, minimum: 0, maximum: 30}}}}}}

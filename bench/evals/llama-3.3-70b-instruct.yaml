@@ -100,16 +100,18 @@ tasks:
       datasets: [humaneval, mbpp]
       max_tokens: 1024
 
-  # 60 pinned items each: floor 3/60 = 5 pts, decided at 6 points (catches broken parsers,
-  # templates and structured-output backends).
+  # Tool calling: 60 pinned items, floor 3/60 = 5 pts, decided at 6 points (catches broken
+  # parsers and chat templates).
   - name: tool_calling
     kind: tool_calling
     threshold: 0.06
     min_samples: 50
+  # JSON schema: 300 pinned items (data version 2), floor 1 pt, decided at 3 points; the
+  # sizing is in qwen3-8b.yaml.
   - name: json_schema
     kind: json_schema
-    threshold: 0.06
-    min_samples: 50
+    threshold: 0.03
+    min_samples: 250
 
 # Teacher-forced divergence vs the BF16 reference: 48 pinned prompts x 64 tokens, top-5.
 # Limits calibrated on the baseline's own noise floor, measured each run at

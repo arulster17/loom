@@ -115,11 +115,13 @@ tasks:
     threshold: 0.06
     min_samples: 50
 
-  # JSON-schema validity under strict response_format: 60 pinned items, as above.
+  # JSON-schema validity under strict response_format: 300 pinned items (data version 2).
+  # Floor 3/300 = 1 pt; d=2% -> ±1.6 pts, d=5% -> ±2.5 pts, so it decides a 3-point
+  # margin. (At 60 items sweep b1b904dc came out inconclusive at 6: ±7 pts with d~2%.)
   - name: json_schema
     kind: json_schema
-    threshold: 0.06
-    min_samples: 50
+    threshold: 0.03
+    min_samples: 250
 
 # Teacher-forced logprob divergence vs the BF16 reference on the 48 pinned prompts,
 # 64 continuation tokens each (~3000 positions), top-5 logprobs.
