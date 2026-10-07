@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from loom_bench import __version__
+from loom_bench.mock import bytelevel
 from loom_bench.mock.config import MockConfig
 from loom_bench.mock.content import (
     TOKENIZER,
@@ -30,9 +31,10 @@ from loom_bench.mock.content import (
     json_text,
     message_text,
     render_chat_prompt,
+    seeded_rng,
 )
 from loom_bench.mock.engine import AsyncEngine
-from loom_bench.mock.logprobs import MAX_LOGPROBS, TokenLogprob, token_logprobs
+from loom_bench.mock.logprobs import MAX_LOGPROBS, VOCAB, TokenLogprob, token_logprobs
 from loom_bench.mock.metrics import CONTENT_TYPE, render_metrics
 from loom_bench.mock.sim import SimRequest, SimSequence, prompt_block_hashes
 
@@ -251,7 +253,10 @@ class MockServer:
         answer = arithmetic_answer(question, seed=seed, prompt=prompt, degrade=degrade)
         if answer is not None:
             return answer
-        return free_text(seed=seed, prompt=prompt, mean_tokens=self.config.mean_output_tokens)
+        text = free_text(seed=seed, prompt=prompt, mean_tokens=self.config.mean_output_tokens)
+        if self.config.byte_level:
+            text = bytelevel.with_multibyte(text, seeded_rng(seed, "multibyte", prompt))
+        return text
 
     def submit(self, gen: Generation) -> SimSequence:
         return self.engine.add(
@@ -275,16 +280,26 @@ class MockServer:
     ) -> list[TokenLogprob | None]:
         """Per-token logprobs for the output, preceded by the prompt's when asked
         (the first prompt token has none, as in vLLM)."""
-        start = 1 if include_prompt else gen.prompt_tokens
+        tokens: list[str] = [*gen.prompt_pieces, *gen.output.pieces]
+        n_prompt = gen.prompt_tokens
+        vocab: tuple[str, ...] = ()
+        if self.config.byte_level:
+            prompt_units = bytelevel.split_pieces(gen.prompt_pieces)
+            units = [*prompt_units, *bytelevel.split_pieces(gen.output.pieces)]
+            tokens = [bytelevel.identity(u) for u in units]
+            n_prompt = len(prompt_units)
+            vocab = (*VOCAB, *bytelevel.FRAGMENT_ALTERNATIVES)
+        start = 1 if include_prompt else n_prompt
         entries: list[TokenLogprob | None] = [None] if include_prompt else []
         entries += token_logprobs(
-            [*gen.prompt_pieces, *gen.output.pieces],
+            tokens,
             seed=self.config.seed,
             start=start,
             k=k,
             noise=self.config.logprob_noise,
             jitter=self.config.logprob_jitter,
             draw=next(self._jitter_draws),
+            vocab=vocab,
         )
         return entries
 
@@ -327,6 +342,29 @@ def _completion_logprobs(
         # vLLM returns the top-k plus the sampled token.
         "top_logprobs": [{**dict(e.top), e.token: e.logprob} if e else None for e in entries],
         "text_offset": text_offset,
+    }
+
+
+def _byte_level_logprobs(
+    gen: Generation, entries: list[TokenLogprob | None], *, echo: bool, incremental: bool
+) -> dict[str, Any]:
+    """`_completion_logprobs` for `MockConfig.byte_level`: byte tokens, rendered over the
+    whole sequence (a token's vLLM text depends on the tokens before it), then cut to the
+    part the response covers."""
+    prompt_units = bytelevel.split_pieces(gen.prompt_pieces)
+    units = [*prompt_units, *bytelevel.split_pieces(gen.output.pieces)]
+    skip = 0 if echo else len(prompt_units)
+    full: list[TokenLogprob | None] = [None] * skip
+    full += entries
+    out = bytelevel.completion_logprobs(units, full, incremental=incremental)
+    if not skip:
+        return out
+    offsets = [o - out["text_offset"][skip] if o >= 0 else o for o in out["text_offset"]]
+    return {
+        "tokens": out["tokens"][skip:],
+        "token_logprobs": out["token_logprobs"][skip:],
+        "top_logprobs": out["top_logprobs"][skip:],
+        "text_offset": offsets[skip:],
     }
 
 
@@ -508,15 +546,16 @@ async def _completions(server: MockServer, request: Request) -> Response:
         choices = []
         for i, (prompt, gen, lps) in enumerate(zip(prompts, gens, logprobs, strict=True)):
             tokens = [*gen.prompt_pieces, *gen.output.pieces] if req.echo else [*gen.output.pieces]
+            rendered = None
+            if lps is not None and server.config.byte_level:
+                rendered = _byte_level_logprobs(gen, lps, echo=req.echo, incremental=known)
+            elif lps is not None:
+                rendered = _completion_logprobs(tokens, lps, 0, known=known)
             choices.append(
                 {
                     "index": i,
                     "text": (prompt if req.echo else "") + gen.output.text,
-                    "logprobs": (
-                        _completion_logprobs(tokens, lps, 0, known=known)
-                        if lps is not None
-                        else None
-                    ),
+                    "logprobs": rendered,
                     "finish_reason": gen.finish_reason,
                 }
             )

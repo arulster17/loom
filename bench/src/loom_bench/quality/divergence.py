@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
@@ -47,6 +48,7 @@ import numpy as np
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from loom_bench.detokenize import MAX_CONTEXT, REPLACEMENT, incremental_text
 from loom_bench.quality.client import EvalClient
 from loom_bench.stats import Interval, bootstrap_ci
 
@@ -89,28 +91,186 @@ class Position:
     top: dict[str, float]
 
 
-def text_offsets(tokens: Sequence[str], offsets: Sequence[int], text: str | None) -> list[int]:
-    """The server's text offsets, or cumulative token lengths when it reports none.
+# --- per-token servers -------------------------------------------------------------
+#
+# SGLang's completions endpoint reports every `text_offset` as -1 ("not supported yet")
+# and renders each token on its own (`detokenize.per_token_text`), so a character split
+# across byte-level tokens comes back as raw-byte fragments where vLLM, the reference,
+# renders "" and then the whole character (`detokenize.incremental_text`). To compare
+# the two position by position, a per-token response is brought to vLLM's form: its
+# tokens are matched against the scored text's UTF-8 bytes (which fixes every token's
+# bytes exactly), re-rendered with vLLM's rule, and the offsets rebuilt as vLLM computes
+# them (cumulative lengths of those strings). A token sequence that does not spell the
+# text is rejected, so `compare_positions` still sees a real tokenizer mismatch.
+#
+# Top-k keys carry no ids either. A key's bytes are those of the echoed token when it
+# is that token; otherwise its UTF-8 bytes, or its latin-1 bytes when it is a fragment
+# (SGLang uses latin-1 only for bytes that are not valid UTF-8). Both readings fit only a
+# key of latin-1 letters, and SGLang's form itself cannot tell those apart ("é" is a
+# letter and also the lone byte 0xE9). Such a key reads as a fragment when it holds a C1
+# control (never decoded text), finishes the character the previous tokens left
+# unfinished, ends in an unfinished character of two or more bytes, or is a lone lead
+# byte of a 3- or 4-byte character after text in such characters (CJK, symbols); as the
+# letters it shows otherwise. A key with U+FFFD (a lossy fragment) has unknown bytes and
+# joins vLLM's "" bucket. Keys that collide in vLLM's form keep the last value written,
+# as in vLLM's own dict (SGLang lists the top-k by rank, as vLLM writes them). The
+# guesswork only touches low-ranked alternatives: the echoed token's key is exact.
 
-    SGLang's completions endpoint returns -1 for every `text_offset` ("not supported
-    yet"). vLLM computes its offsets as cumulative lengths of its per-token strings, so
-    rebuilding them that way selects the same positions; `compare_positions` still
-    requires identical tokens on both sides. Rebuilt offsets are only trusted when the
-    tokens spell `text` (the generated token may follow it).
-    """
-    if all(o >= 0 for o in offsets):
-        return list(offsets)
-    if any(o >= 0 for o in offsets):
-        raise ValueError("text_offset mixes known and unknown (-1) offsets")
-    if text is not None and not "".join(tokens).startswith(text):
-        raise ValueError(
-            "server returned no text_offset and its echoed tokens do not spell the scored text"
-        )
-    out, pos = [], 0
-    for token in tokens:
-        out.append(pos)
-        pos += len(token)
+_C1_CONTROL = re.compile("[\x80-\x9f]")
+# A per-token string with U+FFFD stands for at most this many bytes per character.
+_MAX_FRAGMENT_BYTES = 4
+
+
+def _readings(token: str) -> list[bytes]:
+    """The raw bytes a per-token string can stand for, likeliest first."""
+    out = [] if REPLACEMENT in token else [token.encode("utf-8")]
+    try:
+        raw = token.encode("latin-1")
+    except UnicodeEncodeError:
+        return out
+    if raw in out:
+        return out
+    try:
+        raw.decode("utf-8")
+        return out  # valid UTF-8 is never rendered as latin-1
+    except UnicodeDecodeError:
+        pass
+    if _C1_CONTROL.search(token):
+        out.insert(0, raw)
+    else:
+        out.append(raw)
     return out
+
+
+def _incomplete_tail(raw: bytes) -> int:
+    """Length of an unfinished UTF-8 character ending `raw` (0 if none, or if `raw` is
+    invalid before it)."""
+    for cut in (1, 2, 3):
+        head, tail = raw[:-cut], raw[-cut:]
+        if len(tail) < cut:
+            return 0
+        lead = tail[0]
+        need = 2 if 0xC2 <= lead <= 0xDF else 3 if 0xE0 <= lead <= 0xEF else 4
+        if not 0xC2 <= lead <= 0xF4 or cut >= need:
+            continue
+        if any(not 0x80 <= b <= 0xBF for b in tail[1:]):
+            return 0
+        try:
+            head.decode("utf-8")
+        except UnicodeDecodeError:
+            return 0
+        return cut
+    return 0
+
+
+def _token_bytes(tokens: Sequence[str], tops: Sequence[Any], data: bytes) -> list[bytes]:
+    """Each echoed token's raw bytes, all but a final generated token together spelling
+    `data` exactly. A leading special token with no logprobs (BOS) may stand outside it."""
+    n = len(tokens)
+
+    def options(i: int, pos: int) -> list[bytes]:
+        tok = tokens[i]
+        opts = [r for r in _readings(tok) if data.startswith(r, pos) and (r or not tok)]
+        if REPLACEMENT in tok:
+            for size in range(1, _MAX_FRAGMENT_BYTES * tok.count(REPLACEMENT) + len(tok) + 1):
+                piece = data[pos : pos + size]
+                if len(piece) < size:
+                    break
+                if piece.decode("utf-8", "replace") == tok and piece not in opts:
+                    opts.append(piece)
+        if i == 0 and not tops[0] and not opts:
+            opts.append(b"")
+        return opts
+
+    chosen: list[bytes] = []
+    cursor = [0]
+    pending = [iter(options(0, 0))] if n else []
+    failed: set[tuple[int, int]] = set()
+    while pending:
+        i, pos = len(chosen), cursor[-1]
+        if pos == len(data) and n - i <= 1:
+            return chosen
+        nxt = next(pending[-1], None)
+        if nxt is None:
+            failed.add((i, pos))
+            pending.pop()
+            if chosen:
+                chosen.pop()
+                cursor.pop()
+            continue
+        j, after = i + 1, pos + len(nxt)
+        if (j, after) in failed:
+            continue
+        chosen.append(nxt)
+        cursor.append(after)
+        if after == len(data) and n - j <= 1:
+            return chosen
+        if j == n or after > len(data):
+            failed.add((j, after))
+            chosen.pop()
+            cursor.pop()
+            continue
+        pending.append(iter(options(j, after)))
+    raise ValueError(
+        "server returned no text_offset and its echoed tokens do not spell the scored text"
+    )
+
+
+def _key_bytes(key: str, context: Sequence[bytes]) -> bytes | None:
+    readings = _readings(key)
+    if len(readings) < 2:
+        return readings[0] if readings else None
+    first, second = readings
+    if _C1_CONTROL.search(key):
+        return first  # the fragment reading, put first by `_readings`
+    fragment = second
+    before = b"".join(context[-MAX_CONTEXT:]).decode("utf-8", "replace")
+    if before.endswith(REPLACEMENT) and incremental_text(fragment, context):
+        return fragment  # it finishes the character the previous tokens left unfinished
+    tail = _incomplete_tail(fragment)
+    if tail >= 2:
+        return fragment
+    # A lone lead byte of a 3- or 4-byte character ("è" is also 0xE8, which starts many
+    # CJK characters): a fragment in text of such characters, a letter elsewhere.
+    last = before.rstrip()[-1:]
+    if tail == 1 and fragment[-1] >= 0xE0 and last and ord(last) >= 0x800:
+        return fragment
+    return first
+
+
+def incremental_logprobs(
+    tokens: Sequence[str], tops: Sequence[Mapping[str, float] | None], text: str
+) -> tuple[list[str], list[dict[str, float] | None], list[int]]:
+    """A per-token completions response in vLLM's form: (tokens, top_logprobs,
+    text_offset) as vLLM would have reported them for the same token ids."""
+    data = text.encode("utf-8")
+    spans = _token_bytes(tokens, tops, data)
+    out_tokens: list[str] = []
+    out_tops: list[dict[str, float] | None] = []
+    for i, (tok, top) in enumerate(zip(tokens, tops, strict=True)):
+        context = spans[:i]
+        if i < len(spans):
+            own = spans[i]
+            rendered = incremental_text(own, context) if own or not tok else ""
+        else:  # the generated token, past the scored text
+            own, rendered = None, tok
+        out_tokens.append(rendered)
+        if not top:
+            out_tops.append(None if top is None else {})
+            continue
+        converted: dict[str, float] = {}
+        for key, lp in top.items():
+            if own is not None and key == tok:
+                converted[rendered] = lp
+                continue
+            raw = _key_bytes(key, context)
+            converted["" if raw is None else incremental_text(raw, context)] = lp
+        out_tops.append(converted)
+    offsets, pos = [], 0
+    for rendered in out_tokens:
+        offsets.append(pos)
+        pos += len(rendered)
+    return out_tokens, out_tops, offsets
 
 
 def scored_positions(
@@ -120,13 +280,26 @@ def scored_positions(
 
     `logprobs` is a completions `choices[0].logprobs` object (tokens,
     top_logprobs, text_offset). The final generated token sits at offset
-    `end` and is excluded. `text` is the scored text, used to check offsets rebuilt
-    for a server that reports none (`text_offsets`).
+    `end` and is excluded. `text` is the scored text, needed for a server that
+    reports no offsets (`incremental_logprobs`).
     """
     tokens, tops, raw = logprobs["tokens"], logprobs["top_logprobs"], logprobs["text_offset"]
     if not (len(tokens) == len(tops) == len(raw)):
         raise ValueError("logprobs arrays differ in length")
-    offsets = text_offsets(tokens, raw, text)
+    if all(o >= 0 for o in raw):
+        offsets = list(raw)
+        bos = bool(tokens) and bool(tokens[0]) and not tops[0]
+        if bos and text is not None and not text.startswith(tokens[0]):
+            # A leading special token (BOS) the server counted into its offsets although
+            # it is not part of the text: offsets shift back by its length.
+            shift = len(tokens[0])
+            offsets = [-1] + [o - shift for o in offsets[1:]]
+    elif any(o >= 0 for o in raw):
+        raise ValueError("text_offset mixes known and unknown (-1) offsets")
+    elif text is None:
+        raise ValueError("server returned no text_offset; scoring needs the scored text")
+    else:
+        tokens, tops, offsets = incremental_logprobs(tokens, tops, text)
     out = []
     for token, top, offset in zip(tokens, tops, offsets, strict=True):
         if start <= offset < end:

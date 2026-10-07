@@ -102,11 +102,16 @@ class PodSim(FakePodExec):
 
     async def start(self, target: SshTarget, script: str) -> Any:
         served = script_var(script, "SERVED_MODEL")
-        # SGLang reports every completions text_offset as -1; mirror that so divergence
-        # scoring across the two pods is exercised as it runs for real.
+        # Both pods split multi-byte characters across tokens, as Qwen3's byte-level BPE
+        # does; SGLang reports every completions text_offset as -1 and renders each token
+        # alone (565b8d3f). Mirror that so divergence across the two pods runs as for real.
         sglang = re.search(r"^ENGINE_CMD=.*sglang", script, re.MULTILINE) is not None
         cfg = MockConfig(
-            time_scale=0.01, models=[served], logprob_jitter=0.25, text_offsets=not sglang
+            time_scale=0.01,
+            models=[served],
+            logprob_jitter=0.25,
+            text_offsets=not sglang,
+            byte_level=True,
         )
         await self.stop(target, script)
         srv = await asyncio.to_thread(_started_server, cfg)

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 MAX_LOGPROBS = 20
 
-_VOCAB = tuple(
+VOCAB = tuple(
     [str(d) for d in range(10)]
     + list(".,;:!?()")
     + [
@@ -52,13 +52,15 @@ def token_logprobs(
     noise: float,
     jitter: float = 0.0,
     draw: int = 0,
+    vocab: Sequence[str] = (),
 ) -> list[TokenLogprob]:
-    """Logprobs of tokens[start:], each conditioned on the tokens before it."""
+    """Logprobs of tokens[start:], each conditioned on the tokens before it. `vocab`
+    (default: the mock's word vocabulary) is where alternatives are drawn from."""
     ctx = hashlib.blake2b(str(seed).encode(), digest_size=16)
     out: list[TokenLogprob] = []
     for i, token in enumerate(tokens):
         if i >= start:
-            out.append(_distribution(ctx.digest(), token, k, noise, jitter, draw))
+            out.append(_distribution(ctx.digest(), token, k, noise, jitter, draw, vocab or VOCAB))
         data = token.encode()
         ctx.update(len(data).to_bytes(4, "big"))
         ctx.update(data)
@@ -66,10 +68,10 @@ def token_logprobs(
 
 
 def _distribution(
-    ctx: bytes, token: str, k: int, noise: float, jitter: float, draw: int
+    ctx: bytes, token: str, k: int, noise: float, jitter: float, draw: int, vocab: Sequence[str]
 ) -> TokenLogprob:
     rng = random.Random(ctx)
-    alternatives = [t for t in rng.sample(_VOCAB, MAX_LOGPROBS) if t != token]
+    alternatives = [t for t in rng.sample(vocab, MAX_LOGPROBS) if t != token]
     candidates = [token, *alternatives[: MAX_LOGPROBS - 1]]
     logits = [0.0] + [-rng.uniform(0.5, 8.0) for _ in candidates[1:]]
     if noise:

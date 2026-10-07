@@ -138,3 +138,34 @@ async def test_one_capture_scores_many_candidates(clean_url, noisy_url):
     noisy = await score(noisy_url, reference)
     assert noisy.n_prompts == same.n_prompts and noisy.n_positions == same.n_positions
     assert noisy.kl.point > 0.05
+
+
+@pytest.fixture(scope="module")
+def byte_level_urls() -> Iterator[tuple[str, str]]:
+    # A byte-level tokenizer splitting multi-byte characters across tokens, rendered as
+    # vLLM does (offsets known, "" then the whole character) and as SGLang does (offsets
+    # -1, every token alone, fragments as latin-1 bytes): the 565b8d3f sweep's failure.
+    with (
+        serve(time_scale=0.001, byte_level=True) as vllm,
+        serve(time_scale=0.001, byte_level=True, text_offsets=False) as sglang,
+    ):
+        yield vllm, sglang
+
+
+async def test_byte_split_characters_score_across_renderings(byte_level_urls):
+    vllm, sglang = byte_level_urls
+    reference = await capture(vllm)
+    tokens = [x.token for p in reference.prompts for x in p.positions]
+    assert "" in tokens and any(ord(c) > 127 for t in tokens for c in t)
+    same = await score(vllm, reference)
+    got = await score(sglang, reference)
+    assert got.n_positions == same.n_positions > 0
+    assert got.kl.point == pytest.approx(0.0, abs=1e-9) and got.top1.point == 1.0
+
+
+async def test_a_byte_split_reference_captured_per_token(byte_level_urls):
+    vllm, sglang = byte_level_urls
+    reference = await capture(sglang)
+    assert reference.prompts == (await capture(vllm)).prompts
+    got = await score(vllm, reference)
+    assert got.kl.point == pytest.approx(0.0, abs=1e-9) and got.top1.point == 1.0

@@ -56,6 +56,11 @@ class MockConfig(BaseModel):
     logprob_jitter: NonNegativeFloat = 0.0
     # False reports every completions `text_offset` as -1, as SGLang does.
     text_offsets: bool = True
+    # Imitate a byte-level BPE tokenizer (mock/bytelevel.py): free text mixes in multi-byte
+    # characters split across two tokens, and non-streaming completions logprobs render
+    # them as vLLM does ("" then the whole character) with text_offsets on, or as SGLang
+    # does (each token alone, a fragment as latin-1 bytes) with it off.
+    byte_level: bool = False
 
     # Faults.
     error_rate: Probability = 0.0
