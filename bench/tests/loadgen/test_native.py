@@ -1,3 +1,4 @@
+import asyncio
 import time
 
 import numpy as np
@@ -67,37 +68,97 @@ async def open_loop(server, arrivals, **kw):
     )
 
 
+class LoopLag:
+    """Worst timer lateness of the running event loop while a test's body runs.
+
+    On a loaded machine the whole process can be descheduled for 100+ ms; every
+    timer due in that window fires late, the load generator's sends included. That
+    lateness is the machine's, not the generator's, so wall-clock bounds in tests
+    add it as measured here rather than assume a quiet machine.
+    """
+
+    TICK_S = 0.005
+
+    def __init__(self) -> None:
+        self.worst_s = 0.0
+
+    async def _probe(self) -> None:
+        while True:
+            start = time.perf_counter()
+            await asyncio.sleep(self.TICK_S)
+            self.worst_s = max(self.worst_s, time.perf_counter() - start - self.TICK_S)
+
+    async def __aenter__(self) -> "LoopLag":
+        self._task = asyncio.create_task(self._probe())
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self._task.cancel()
+
+    @property
+    def slack_s(self) -> float:
+        # A stall can begin up to one tick before the probe's next timer is due.
+        return self.worst_s + self.TICK_S
+
+
 async def test_open_loop_follows_schedule_and_flags_warmup():
     server = FakeServer(ttft_s=0.01, itl_s=0.005, tokens=3)
     arrivals = constant(25.0, 0.4)  # every 40 ms
-    res = await open_loop(server, arrivals, model="m")
+    async with LoopLag() as lag:
+        res = await open_loop(server, arrivals, model="m")
     assert res.mode is LoadMode.OPEN_LOOP
     assert len(res.records) == 10 and all(r.ok for r in res.records)
     assert [r.scheduled_at_s for r in res.records] == pytest.approx(list(arrivals))
     delays = np.array([r.queue_delay_s for r in res.records])
-    assert delays.min() >= 0 and delays.max() < 0.05
+    # Unsaturated, a send's only lag is its timer firing late: 50 ms of slack plus
+    # however long the machine stalled the loop. Lag the generator adds itself
+    # (drift, a wrong sleep, waiting on responses) does not stall the probe, so
+    # it still fails here.
+    assert delays.min() >= 0 and delays.max() < 0.05 + lag.slack_s
     assert [r.warmup for r in res.records] == [True] * 3 + [False] * 7
     assert res.load_value == pytest.approx(7 / 0.3)
     assert (res.t_measure_start_s, res.t_measure_end_s) == (0.1, 0.4)
     assert res.client_saturated_count == 0 and res.meta["unsent"] == 0
     gaps = np.diff(server.arrivals)
-    assert gaps.mean() == pytest.approx(0.04, abs=0.01)
+    # The mean gap spans first to last arrival; a stall can shift either by the loop lag.
+    assert gaps.mean() == pytest.approx(0.04, abs=0.01 + lag.slack_s / gaps.size)
     assert all(b["model"] == "m" and b["stream"] for b in server.bodies)
     assert res.records[4].meta == {"i": 4} and res.records[4].completion_tokens == 3
 
 
 async def test_open_loop_records_client_saturation():
-    server = FakeServer(ttft_s=0.12, tokens=1)
-    arrivals = constant(50.0, 0.3)  # 15 arrivals, ~3 slots' worth of service capacity
-    # A generous drain: the stragglers finish within ~0.25 s; the deadline is not under test.
+    # The server holds every request until the test releases it, so which requests
+    # get a slot is decided by events, not by service times racing the deadline:
+    # requests 0 and 1 fill both slots; request 0 is released 0.1 s after it arrives,
+    # so request 2 (scheduled at 0.04 s) can only be sent after waiting >= 0.06 s for
+    # its slot; everything else stays held past the dispatch deadline, so arrivals
+    # 3..14 never get a slot and go unsent. Machine load can only delay the release,
+    # which lengthens request 2's wait; the 0.9 s left before the deadline is the margin.
+    duration_s = 1.0
+    loop = asyncio.get_running_loop()
+    released = [asyncio.Event() for _ in range(15)]
+
+    def release_all() -> None:
+        for event in released:
+            event.set()
+
+    async def gate(index: int) -> None:
+        if index == 0:
+            loop.call_later(0.1, released[0].set)
+            loop.call_later(duration_s + 0.1, release_all)  # past the deadline (>= t0)
+        await released[index].wait()
+
+    server = FakeServer(tokens=1, gate=gate)
+    arrivals = constant(50.0, 0.3)  # 15 arrivals, all due well before the deadline
     res = await open_loop(
-        server, arrivals, duration_s=0.3, warmup_s=0.0, max_inflight=2, drain_timeout_s=5.0
+        server, arrivals, duration_s=duration_s, warmup_s=0.0, max_inflight=2, drain_timeout_s=5.0
     )
     assert server.max_inflight <= 2
     assert res.client_saturated_count > 0
-    assert res.meta["unsent"] > 0
-    assert res.meta["unsent"] + len(res.records) == 15
-    assert max(r.queue_delay_s for r in res.records) > 0.05
+    assert len(res.records) == 3 and res.meta["unsent"] == 12
+    # A lower bound only: load can delay any send, but request 2 cannot go before
+    # request 0's release frees a slot.
+    assert res.records[2].queue_delay_s >= 0.06
     assert all(r.ok for r in res.records)
 
 

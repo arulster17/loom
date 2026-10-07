@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,12 +35,18 @@ DONE = b"data: [DONE]\n\n"
 
 @dataclass
 class FakeServer:
-    """Streams `tokens` chat chunks after `ttft_s`, `itl_s` apart; tracks concurrency."""
+    """Streams `tokens` chat chunks after `ttft_s`, `itl_s` apart; tracks concurrency.
+
+    `gate`, if set, is awaited with the request's arrival index before the response
+    starts, so a test can hold and release individual requests on events instead of
+    racing wall-clock sleeps.
+    """
 
     ttft_s: float = 0.0
     itl_s: float = 0.0
     tokens: int = 4
     stall: bool = False
+    gate: Callable[[int], Awaitable[Any]] | None = None
     inflight: int = 0
     max_inflight: int = 0
     bodies: list[dict[str, Any]] = field(default_factory=list)
@@ -52,13 +58,15 @@ class FakeServer:
     async def handle(self, request: httpx.Request) -> httpx.Response:
         self.bodies.append(json.loads(request.content))
         self.arrivals.append(asyncio.get_running_loop().time())
-        return httpx.Response(200, content=self._stream())
+        return httpx.Response(200, content=self._stream(len(self.arrivals) - 1))
 
-    async def _stream(self) -> AsyncIterator[bytes]:
+    async def _stream(self, index: int) -> AsyncIterator[bytes]:
         self.inflight += 1
         self.max_inflight = max(self.max_inflight, self.inflight)
         finished = False
         try:
+            if self.gate is not None:
+                await self.gate(index)
             await asyncio.sleep(self.ttft_s)
             if self.stall:
                 await asyncio.Event().wait()
