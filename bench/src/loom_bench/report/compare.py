@@ -16,7 +16,9 @@ Verdict per metric, on the repetition means (delta = B - A):
 3. otherwise, or with fewer than two repetitions on either side → outside.
 
 Cost at SLO has no per-run samples, so rule 2 is replaced by overlap of the two
-cost CIs. The comparison as a whole is within normal variance only if every
+cost CIs. Goodput is shown with its search bracket; when the two brackets overlap the
+search cannot separate the configs (`resolution.brackets_overlap`) and the comparison
+says so. The comparison as a whole is within normal variance only if every
 metric is, every sweep and point matched, and (except when matching by workload)
 config hashes are identical.
 """
@@ -36,7 +38,8 @@ from loom_bench.cost import MicrosRange
 from loom_bench.metrics.aggregate import HEADLINE_METRICS
 from loom_bench.records import LoadMode
 from loom_bench.report.analyze import COMPLETED, ConfigResult, LoadPoint, load_points
-from loom_bench.report.format import md_table, num, pct, usd
+from loom_bench.report.format import goodput_bracket, md_table, num, pct, usd
+from loom_bench.report.resolution import brackets_overlap
 from loom_bench.stats import Estimate
 from loom_bench.store.models import BenchRun
 
@@ -92,6 +95,9 @@ class ConfigComparison(BaseModel):
     config_hash_match: bool
     goodput_load_a: float | None
     goodput_load_b: float | None
+    goodput_bracket_a: str | None = None  # `format.goodput_bracket`
+    goodput_bracket_b: str | None = None
+    goodput_tie: bool = False  # brackets overlap: a tie within the search resolution
     metrics: list[MetricDelta]
     cost: list[CostDelta]
     within_normal_variance: bool
@@ -408,6 +414,9 @@ def compare(
                     config_hash_match=hash_match,
                     goodput_load_a=ra.goodput.max_load,
                     goodput_load_b=rb.goodput.max_load,
+                    goodput_bracket_a=goodput_bracket(ra.goodput),
+                    goodput_bracket_b=goodput_bracket(rb.goodput),
+                    goodput_tie=brackets_overlap(ra.goodput, rb.goodput),
                     metrics=gmetrics,
                     cost=costs,
                     within_normal_variance=all(m.within_normal_variance for m in gmetrics)
@@ -512,9 +521,14 @@ def render_markdown(c: Comparison) -> str:
             "",
             f"Config hash {'matches' if cfg.config_hash_match else 'differs'}: "
             f"`{cfg.config_hash_a}` vs `{cfg.config_hash_b}`. Goodput load "
-            f"{cfg.goodput_load_a if cfg.goodput_load_a is not None else 'none'} vs "
-            f"{cfg.goodput_load_b if cfg.goodput_load_b is not None else 'none'}. "
-            f"Verdict: {_verdict(cfg.within_normal_variance)}.",
+            f"{cfg.goodput_bracket_a or 'none'} vs {cfg.goodput_bracket_b or 'none'}"
+            + (
+                ": the brackets overlap, a tie within the search resolution; goodput and "
+                "cost below come from the same grid point, so compare latency at equal load"
+                if cfg.goodput_tie
+                else ""
+            )
+            + f". Verdict: {_verdict(cfg.within_normal_variance)}.",
             "",
             md_table(METRIC_HEADERS, _metric_rows(cfg.metrics)),
             "",

@@ -24,10 +24,17 @@ CSV_FLOAT_PLACES = 4
 MIN_SIG_FIGS = 2  # small values never round to "0"
 MAX_PLACES = 6
 
-# Explains the "+" goodput notation; shown once per table, not per row.
+# Explains the "≥" goodput notation; shown once per table, not per row.
 UNBRACKETED_NOTE = (
-    "+ after a goodput load: not bracketed. Every tested load met the SLO, so goodput is at "
+    "≥ before a goodput load: not bracketed. Every tested load met the SLO, so goodput is at "
     "least that load (it may be higher) and cost at SLO is an upper bound."
+)
+# Explains the goodput bracket; shown once per table.
+BRACKET_NOTE = (
+    "Goodput is searched on a grid of loads, so it is known only to a bracket: at least "
+    'the goodput load, below the load that failed (shown as "fails at"). Configs whose '
+    "brackets overlap are tied within the search resolution: their goodput, throughput "
+    "and cost at SLO come from the same grid point and are not a measured equality."
 )
 
 
@@ -93,19 +100,36 @@ def load_unit(mode: LoadMode) -> str:
     return "req/s" if mode is LoadMode.OPEN_LOOP else "concurrency"
 
 
+def load_num(load: float) -> str:
+    """A load to 4 significant figures: search grids produce loads like 1.0905077."""
+    return f"{load:.4g}"
+
+
 def load_value(load: float | None, mode: LoadMode, *, at_least: bool = False) -> str:
-    """`8 req/s` or `8 concurrent`; `at_least` marks an unbracketed goodput: `8+ req/s`."""
+    """`8 req/s` or `8 concurrent`; `at_least` marks an unbracketed goodput: `≥8 req/s`."""
     if load is None:
         return NA
-    value = f"{load:g}{'+' if at_least else ''}"
+    value = f"{'≥' if at_least else ''}{load_num(load)}"
     return f"{value} req/s" if mode is LoadMode.OPEN_LOOP else f"{value} concurrent"
 
 
 def goodput_load(g: GoodputResult) -> str:
-    """The goodput load, with `+` when no tested load failed (see UNBRACKETED_NOTE)."""
+    """The goodput load, with `≥` when no tested load failed (see UNBRACKETED_NOTE)."""
     if g.max_load is None:
         return "none met the SLO"
     return load_value(g.max_load, g.load_mode, at_least=not g.bracketed)
+
+
+def goodput_bracket(g: GoodputResult) -> str:
+    """The goodput load and the load above it that failed (see BRACKET_NOTE):
+    `1 req/s (fails at 1.09)`, `≥8 req/s (none failed)`, or `none (fails at 0.5)`."""
+    if g.max_load is None:
+        if g.first_failing_load is None:
+            return "none met the SLO"
+        return f"none met the SLO (fails at {load_num(g.first_failing_load)})"
+    if g.first_failing_load is None:
+        return f"{load_value(g.max_load, g.load_mode, at_least=True)} (none failed)"
+    return f"{load_value(g.max_load, g.load_mode)} (fails at {load_num(g.first_failing_load)})"
 
 
 def any_unbracketed(goodputs: Iterable[GoodputResult]) -> bool:
@@ -200,9 +224,11 @@ GLOBALS: dict[str, Any] = {
     "load_mode_label": load_mode_label,
     "load_value": load_value,
     "goodput_load": goodput_load,
+    "goodput_bracket": goodput_bracket,
     "places_for": places_for,
     "any_unbracketed": any_unbracketed,
     "unbracketed_note": UNBRACKETED_NOTE,
+    "bracket_note": BRACKET_NOTE,
 }
 
 

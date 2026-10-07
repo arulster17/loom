@@ -7,7 +7,10 @@ reproducible from the price book; spot, committed-1y and as-run costs of the sam
 side are shown next to it where a board has them.
 
 One board per (model, workload, load mode): costs measured on different workloads
-are not comparable. Rows are ranked cheapest first. Configs that failed the
+are not comparable. Rows are ranked cheapest first. Goodput is shown with its search
+bracket, and configs whose brackets overlap are marked as tied within the search
+resolution (`resolution`): their cost comes from the same grid point, so the ranking
+between them is not a measured difference. Configs that failed the
 quality gate, are untrusted, or have no cost at SLO are still listed, after the
 ranked rows and without a rank, with the reason in their status. Recommendations
 are generated from the numbers alone, so the same data always gives the same text.
@@ -29,13 +32,14 @@ from loom_bench.provenance import ContentKind
 from loom_bench.records import LoadMode
 from loom_bench.report.analyze import UNTRUSTING, ColdStartStat, ConfigResult, gate_label
 from loom_bench.report.format import (
+    BRACKET_NOTE,
     UNBRACKETED_NOTE,
     any_unbracketed,
     describe_slo,
     est,
     estimate_column_names,
     estimate_columns,
-    goodput_load,
+    goodput_bracket,
     html_env,
     load_value,
     md_table,
@@ -53,6 +57,7 @@ from loom_bench.report.methodology import (
     methodology,
     methodology_markdown,
 )
+from loom_bench.report.resolution import brackets_overlap, goodput_ties
 
 
 class RowStatus(StrEnum):
@@ -71,6 +76,15 @@ class LeaderboardRow(BaseModel):
     result: ConfigResult
     cold_start: ColdStartStat | None
     recommendation: str
+    goodput_ties: list[str] = []  # configs on the board whose goodput bracket overlaps
+
+    @property
+    def goodput_text(self) -> str:
+        """The goodput bracket, and the configs tied with it within the search resolution."""
+        text = goodput_bracket(self.result.goodput)
+        if self.goodput_ties:
+            text += f"; tied with {', '.join(self.goodput_ties)}"
+        return text
 
 
 # Price columns shown next to the on-demand ranking cost, when any row has one.
@@ -175,6 +189,13 @@ def _quality_clause(r: ConfigResult, names: Mapping[str, str]) -> str:
     return f"quality gate inconclusive vs {base}{detail}"
 
 
+def _tie(r: ConfigResult) -> str:
+    return (
+        f"goodput brackets overlap ({goodput_bracket(r.goodput)}), so the search cannot "
+        "separate them; compare latency at equal load"
+    )
+
+
 def recommend(
     r: ConfigResult, status: RowStatus, ranked: Sequence[ConfigResult], names: Mapping[str, str]
 ) -> str:
@@ -204,6 +225,8 @@ def recommend(
         if len(ranked) == 1:
             return f"Only ranked config at SLO; {quality}"
         runner = ranked[1]
+        if brackets_overlap(r.goodput, runner.goodput):
+            return f"Tied for cheapest at SLO with {runner.name}: {_tie(r)}; {quality}"
         runner_cost = _out_cost(runner)
         assert runner_cost is not None
         text = f"Cheapest at SLO; {pct(-_rel(cost, runner_cost))} cheaper than {runner.name}"
@@ -211,12 +234,17 @@ def recommend(
             text += " (cost CIs overlap)"
         return f"{text}; {quality}"
 
+    if brackets_overlap(r.goodput, leader.goodput):
+        return f"Tied with {leader.name} at SLO: {_tie(r)}; {quality}"
     text = f"{pct(_rel(cost, lead_cost))} more expensive than {leader.name} at SLO"
     if _overlap(r, leader):
         text += " (cost CIs overlap)"
     if r.ttft_p95_ms and leader.ttft_p95_ms and r.ttft_p95_ms.mean < leader.ttft_p95_ms.mean:
         gain = 1 - r.ttft_p95_ms.mean / leader.ttft_p95_ms.mean
         text += f"; {pct(gain)} lower p95 TTFT at goodput"
+    peers = [o.name for o in ranked if o is not r and brackets_overlap(r.goodput, o.goodput)]
+    if peers:
+        text += f"; tied with {', '.join(peers)} within the search resolution"
     return f"{text}; {quality}"
 
 
@@ -244,6 +272,7 @@ def rank(
                 result=r,
                 cold_start=(cold_starts or {}).get(r.config_hash),
                 recommendation=recommend(r, status, ranked, names),
+                goodput_ties=[t.name for t in goodput_ties(r, ordered)],
             )
         )
     return rows
@@ -302,7 +331,7 @@ MD_HEAD = ("#", "Config", "$/1M out at SLO, on-demand", "$/1M in at SLO, on-dema
 MD_TAIL = (
     "Goodput out tok/s per replica",
     "per GPU",
-    "Load at goodput",
+    "Goodput load (search bracket)",
     "p95 TTFT at goodput",
     "p95 TPOT at goodput",
     "Raw peak out tok/s (no SLO)",
@@ -328,7 +357,7 @@ def _md_row(row: LeaderboardRow, columns: Sequence[PriceColumn]) -> list[Any]:
         *(usd_ci(ranking_cost(r, c)) for c in columns),
         est(r.goodput.output_tok_s, 1),
         est(r.goodput_output_tok_s_per_gpu, 1),
-        goodput_load(r.goodput),
+        row.goodput_text,
         est(r.ttft_p95_ms, 0, "ms"),
         est(r.tpot_p95_ms, 1, "ms"),
         f"{est(r.peak_output_tok_s, 1)} at {load_value(r.peak_load, r.load_mode)}",
@@ -351,6 +380,7 @@ def render_markdown(report: LeaderboardReport) -> str:
         "SLO; raw peak throughput ignores the SLO and is not goodput. Unranked rows (quality "
         "gate failed, untrusted, or no cost) are listed last."
     )
+    parts += ["", BRACKET_NOTE]
     if any_unbracketed(row.result.goodput for b in report.boards for row in b.rows):
         parts += ["", UNBRACKETED_NOTE]
     for b in report.boards:
@@ -409,6 +439,9 @@ CSV_COLUMNS = [
     "allocation",
     "goodput_load",
     "first_failing_load",
+    "goodput_bracket",
+    "goodput_at_least",
+    "goodput_ties",
     *estimate_column_names("goodput_output_tok_s"),
     *estimate_column_names("goodput_output_tok_s_per_gpu"),
     *estimate_column_names("goodput_request_rate"),
@@ -478,6 +511,9 @@ def _csv_row(b: Leaderboard, row: LeaderboardRow, m: Methodology) -> dict[str, A
         "allocation": r.allocation,
         "goodput_load": r.goodput.max_load,
         "first_failing_load": r.goodput.first_failing_load,
+        "goodput_bracket": goodput_bracket(r.goodput),
+        "goodput_at_least": None if r.goodput.max_load is None else not r.goodput.bracketed,
+        "goodput_ties": " ".join(row.goodput_ties),
         **estimate_columns("goodput_output_tok_s", r.goodput.output_tok_s),
         **estimate_columns("goodput_output_tok_s_per_gpu", r.goodput_output_tok_s_per_gpu),
         **estimate_columns("goodput_request_rate", r.goodput.request_rate),

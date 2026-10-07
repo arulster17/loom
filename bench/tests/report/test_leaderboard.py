@@ -136,7 +136,7 @@ def test_markdown_table_and_footer(report, price_book):
     assert cells[4] == "$0.8613 [0.8402, 0.8830]"  # spot from the price book
     assert cells[5] == "$0.8717 [0.8503, 0.8936]"  # as run: an on-demand host
     assert cells[6] == "600.0 [585.3, 615.1]"  # geometric mean, log-t CI
-    assert cells[8] == "6 req/s"
+    assert cells[8] == "6 req/s (fails at 8)"
     assert cells[9] == "413 [393, 434] ms"
     assert cells[11] == "800.0 [780.4, 820.2] at 8 req/s"
     assert cells[12] == "-0.010 (gsm8k) · pass"
@@ -303,8 +303,9 @@ def test_unbracketed_goodput_is_marked_and_explained_once(report):
         if line.startswith("| ") and "**" in line
         for cells in [[c.strip() for c in line.strip("|").split(" | ")]]
     }
-    assert rows["sglang-bf16"][8] == "6 req/s"  # bracketed: a failing load above it
-    assert rows["sglang-1rep"][8] == "8+ req/s"  # every tested load met the SLO
+    assert rows["sglang-bf16"][8] == "6 req/s (fails at 8)"  # bracketed: 8 failed
+    # every tested load met the SLO; its [8, ∞) bracket overlaps vllm-awq's [8, 10)
+    assert rows["sglang-1rep"][8] == "≥8 req/s (none failed); tied with vllm-awq"
     assert md.count(UNBRACKETED_NOTE) == 1
     assert render_html(report).count(UNBRACKETED_NOTE) == 1
 
