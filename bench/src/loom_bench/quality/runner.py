@@ -50,9 +50,16 @@ class TaskRun:
     kind: str
     version: str
     items: list[ItemResult]
-    estimate: Estimate  # mean score with a Student-t CI over items
+    estimate: Estimate  # mean score with a Student-t CI over items, clipped to [0, 1]
     provenance: dict[str, Any] = field(default_factory=dict)
     seconds: float = 0.0
+
+
+def score_estimate(items: Sequence[ItemResult]) -> Estimate:
+    """Mean item score with its Student-t CI. Scores are fractions in [0, 1], so the
+    interval is clipped to that range ("t_clipped"): near a perfect score the plain
+    interval reaches past 1 (vLLM tool_calling 0.967 [0.920, 1.013] in 565b8d3f)."""
+    return mean_ci([i.score for i in items], lower=0.0, upper=1.0)
 
 
 @dataclass(slots=True)
@@ -126,7 +133,7 @@ async def run_suite(
                 kind=spec.kind,
                 version=version,
                 items=out.items,
-                estimate=mean_ci([i.score for i in out.items]),
+                estimate=score_estimate(out.items),
                 provenance=out.provenance,
                 seconds=seconds,
             )
@@ -281,7 +288,7 @@ def suite_result_of(result: EvalJobResult) -> SuiteResult:
                 kind=t.kind,
                 version=t.version,
                 items=t.items,
-                estimate=mean_ci([i.score for i in t.items]),
+                estimate=score_estimate(t.items),
                 provenance=t.provenance,
                 seconds=t.seconds,
             )

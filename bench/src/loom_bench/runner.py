@@ -105,6 +105,7 @@ from loom_bench.quality.runner import (
     gate_against_baseline,
     record_gate,
     record_suite_result,
+    score_estimate,
     suite_result_of,
 )
 from loom_bench.quality.sanity import SanityResult
@@ -115,7 +116,6 @@ from loom_bench.registry import REPO_ROOT, ModelSpec, Registry, read_yaml
 from loom_bench.report.analyze import costs_at, default_price_resolver
 from loom_bench.report.compare import Comparison, compare
 from loom_bench.slo import bisect_next_load, find_goodput, slo_met
-from loom_bench.stats import mean_ci
 from loom_bench.store import repo
 from loom_bench.store.db import session_scope
 from loom_bench.store.models import (
@@ -1208,7 +1208,7 @@ def read_samples(path: str | Path) -> tuple[str, SuiteResult]:
             kind=t["kind"],
             version=t["version"],
             items=items,
-            estimate=mean_ci([i.score for i in items]),
+            estimate=score_estimate(items),
             provenance=t["provenance"],
             seconds=t.get("seconds", 0.0),
         )
