@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import uuid
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
@@ -15,8 +16,8 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from loom_bench.engines import render_launch
-from loom_bench.experiment import RunpodProviderSpec
+from loom_bench.engines import engine_process_argv, render_launch
+from loom_bench.experiment import EXPERIMENTS_DIR, RunpodProviderSpec, expand, load_experiment
 from loom_bench.jobs import (
     EvalJob,
     EvalJobResult,
@@ -41,6 +42,7 @@ from loom_bench.quality.suite import Suite
 from loom_bench.quality.tasks.base import ItemResult
 from loom_bench.records import LoadMode, Market
 from loom_bench.registry import load_registry
+from loom_bench.runner import _host_request
 
 from . import fakes as fakes_mod
 from .conftest import BUCKET, REGION
@@ -120,6 +122,31 @@ def vllm_launch() -> Any:
 
 
 # --- provisioning ---------------------------------------------------------------------
+
+
+async def test_the_shipped_70b_spec_renders_a_4x_l40s_tp4_pod(fake, s3, tmp_path) -> None:
+    """The Llama 3.3 70B RunPod spec end to end through expansion, the runner's host
+    request and the provider: 4x L40S Secure, 250 GB of container disk, CUDA 13.0, and
+    vLLM at tensor parallel 4 with the llama3_json tool parser on loopback."""
+    exp = load_experiment(EXPERIMENTS_DIR / "llama-3.3-70b-tp4-runpod.yaml")
+    (cell,) = expand(exp, load_registry())
+    req = _host_request(exp, cell, uuid.UUID("0f1e2d3c-aaaa-bbbb-cccc-000000000001"))
+    assert isinstance(exp.provider, RunpodProviderSpec)
+    await provider(fake, s3, tmp_path, spec=exp.provider).provision(req)
+
+    (body,) = fake.bodies("POST", "/v1/pods")
+    assert body["gpuTypeIds"] == ["NVIDIA L40S"] and body["gpuCount"] == 4
+    assert body["containerDiskInGb"] == 250 and body["volumeInGb"] == 0
+    assert body["allowedCudaVersions"] == ["13.0"]
+    assert body["imageName"] == VLLM
+    weights_gb = load_registry().get("llama-3.3-70b-instruct").hf.size_bytes / 1e9
+    assert weights_gb + 35 <= body["containerDiskInGb"]  # the planner's headroom rule
+
+    argv = engine_process_argv(cell.launch, host="127.0.0.1")
+    assert argv[argv.index("--tensor-parallel-size") + 1] == "4"
+    assert argv[argv.index("--tool-call-parser") + 1] == "llama3_json"
+    assert "--enable-auto-tool-choice" in argv
+    assert argv[argv.index("--host") + 1] == "127.0.0.1"
 
 
 async def test_pod_body_is_secure_on_demand_with_safety_rails(fake, s3, tmp_path) -> None:

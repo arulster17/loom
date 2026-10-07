@@ -194,6 +194,19 @@ sshd does not answer within `ssh_online_timeout_s` (600 s), fails the experiment
 terminated. L40S Secure stock varies by datacenter and over the day: retry later, or pin
 `provider.data_center_ids` to one with stock.
 
+Multi-GPU pods are scarcer: on 2026-10-07 RunPod listed no 4x L40S Secure stock at all
+(1x was "Low"). Before launching `llama-3.3-70b-tp4-runpod`, check it read-only:
+
+```graphql
+query { gpuTypes(input: {id: "NVIDIA L40S"}) {
+  lowestPrice(input: {gpuCount: 4, secureCloud: true}) { stockStatus uninterruptablePrice }
+} }
+```
+
+A null `stockStatus` means none is listed; wait for "Low" or better. Then run with
+`LOOM_RUNPOD_CAPACITY_WAIT_S=7200`, so a refusal waits up to 2 h rather than 30 min
+(nothing is billed while waiting).
+
 ### Runner gone, or a stuck pod
 
 - If the runner hangs, press Ctrl-C once: pods are terminated and the experiment is
