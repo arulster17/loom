@@ -32,7 +32,10 @@ variants:
   # defaults, 47.1 ms with this (mean 2.28 tokens accepted per step; 2 draft tokens:
   # 46.4 ms). Some random-word continuations accept few drafts and run at the ~60 ms
   # floor, so the TPOT tail depends on the content. Costs KV room: 41k cached tokens
-  # instead of 71k. docs/benchmark-lab.md "70B tuning".
+  # instead of 71k. Those 60-90 s tuning windows understated the tail: the full sweep
+  # 55102ddb (180 s windows) met no load. The median request decodes at 29-48 ms, but
+  # TPOT p95 is 50-84 ms, and shared-prefix TTFT p95 is ~1.0-1.05 s at any load (prefill
+  # all-reduce over host memory). docs/benchmark-lab.md "70B tuning".
   - name: vllm-tp4-eagle3
     engine:
       args:

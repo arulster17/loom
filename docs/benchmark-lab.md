@@ -396,7 +396,8 @@ windows:
 | EAGLE3, 2 draft tokens | fixed-1k-1k 0.25 req/s | 40.5 / 46.4 | 986 | 2.15 |
 | EAGLE3, 2 draft tokens | shared-prefix 0.25 req/s | 32.3 / 39.5 | 1030 | 2.15 |
 
-(Windows of 60-90 s, so 6-21 requests per row.) The spec runs EAGLE3 with 3 draft tokens.
+(Windows of 60-90 s, so 6-21 requests per row: too short, see the full sweep below.) The
+spec runs EAGLE3 with 3 draft tokens.
 Limits:
 
 - **Content-dependent tail.** Per-request TPOT ranges from 26 to 47 ms, with a rare
@@ -407,6 +408,58 @@ Limits:
 - **Less KV room.** The draft costs KV-cache space: 41k cached tokens instead of 71k.
   Raising `max_num_batched_tokens` to 8192 left too little KV for one 32k request, and
   the engine refused to start.
+
+**The full sweep (55102ddb, $5.77) overturned the short tuning windows.** Under the declared
+SLO, no load met it on either workload. The tuning windows ran 60-90 s with 15 s of
+warmup, and 1024-token requests live about 40 s, so concurrency never reached steady state
+and few requests were sampled. The sweep runs 180 s windows over 3 repetitions:
+
+| Workload | Load (req/s) | TPOT p95 per rep (ms) | TTFT p95 per rep (ms) | Fails on |
+|---|---|---|---|---|
+| fixed-1k-1k | 0.25 | 61.6, 67.9, 84.2 | 918, 632, 680 | TPOT |
+| fixed-1k-1k | 0.125 | 77.6, 49.8, 50.1 | 814, 660, 687 | TPOT |
+| fixed-1k-1k | 0.0625 | 68.8, 36.7, 57.8 | 738, 569, 690 | TPOT |
+| shared-prefix | 0.5 | 45.1, 54.6, 60.0 | 922, 1255, 1417 | TTFT, TPOT |
+| shared-prefix | 0.25 | 42.9, 35.4, 39.9 | 1014, 1012, 989 | TTFT |
+| shared-prefix | 0.125 | 39.7, 37.6, 34.4 | 1016, 1008, 1054 | TTFT |
+
+The median request decodes at 29-48 ms per token (BF16 at defaults: 60-75 ms), but the p95
+doesn't. In one fixed-1k-1k repetition at 0.25 req/s, 16 of 43 requests ran over 50 ms,
+and 4 ran 82-105 ms. A random-word continuation that the draft can't predict decodes at
+the ~60 ms floor plus the verify overhead, and with more than 5% of such requests the p95
+lands above 50 ms at any load. A smaller load doesn't help, because the floor is per token.
+
+**The measured floors on this hardware, with P2P off (every P2P setting hangs):**
+
+- **TPOT.** At least 41 ms of weight reads per step. In practice about 60 ms at batch 1,
+  and about 4.4 ms of that is NCCL. EAGLE3 lowers the median, not the floor of requests the
+  draft can't predict.
+- **TTFT.** A 2048-token prefill all-reduces 32 MB 160 times. A second diagnostic pod (on
+  2026-10-08) measured 2.76 ms per all-reduce at the default settings: 441 ms of pure
+  communication per 2k prefill, 222 ms per 1k. The host-memory path runs at about
+  11.6 GB/s. No NCCL setting helped by more than 5%: `NCCL_SHM_USE_CUDA_MEMCPY`,
+  `NCCL_MIN_NCHANNELS` 8 or 16, `NCCL_BUFFSIZE` 16 MB, `NCCL_PROTO=Simple`, `NCCL_ALGO=Tree`.
+  So shared-prefix TTFT p95 sits at about 1.0-1.05 s at any load: compute plus that
+  communication for the ~1,190 uncached tokens. Prefix caching worked (42% of prompt tokens
+  hit, as at the defaults).
+- **Quality is unchanged by EAGLE3.** Against cf4d1614's BF16 reference, the teacher-forced
+  top-k logprobs give KL 0.00022 (top-1 99.87%) on the 37 of 48 prompts whose greedy
+  continuations are identical. That's below either config's own noise floor (self-KL
+  0.00033 and 0.00035). The other 11 prompts flip at a near-tie: with 99.7% per-token
+  self-agreement, about 17% of 64-token continuations flip anyway. Scores: gsm8k 0.956 vs
+  0.955, ifeval 0.891 vs 0.897, json_schema 0.977 vs 0.973, tool_calling 0.450 vs 0.450.
+- **tool_calling 0.450 is Llama 3.3's typing, not the harness.** In the raw outputs, now
+  stored, 29 of the 33 failures pass numbers as JSON strings (`"amount": "250"`), 2 pass
+  booleans as strings (`"true"`), 1 passes an array as a string (`"[6, 9]"`), and 1 has a
+  wrong value. The prompt is the tokenizer's own Llama 3.3 template, Meta's JSON
+  tool-calling format, and vLLM's `llama3_json` keeps the model's JSON as it is. vLLM lists
+  "parameters in an incorrect format" as a known Llama 3 issue. vLLM can constrain
+  arguments to the schema when a tool sets `strict: true`, but the eval sends plain tools,
+  as most clients do, so it measures the model's own typing.
+
+A config that meets 50 ms TPOT p95 on this content needs P2P that works (or NVLink), or
+fewer bytes per token (FP8 weights, a different config), or a target taken per model.
+`bench report --alt-slo tpot_ms.p95=100` shows the 100 ms view.
 
 The draft is a second pinned checkpoint, so `engines.draft_weights` reads it from the
 rendered `--speculative-config` (vLLM) or `--speculative-draft-model-path` and
