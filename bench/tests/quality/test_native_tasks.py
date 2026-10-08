@@ -10,10 +10,13 @@ from loom_bench.quality.tasks.json_schema import failure_meta as json_failure_me
 from loom_bench.quality.tasks.json_schema import load_items, score_reply
 from loom_bench.quality.tasks.needle import NeedleParams, found, generate_items
 from loom_bench.quality.tasks.tool_calling import (
+    ToolCallingStrictTask,
+    ToolCallingTask,
     ToolItem,
     check_call,
     load_data,
     match_call,
+    strict_parameters,
     values_equal,
 )
 
@@ -31,6 +34,7 @@ def reply(content=None, tool_calls=None, finish="stop"):
 
 def test_registry_knows_native_tasks():
     assert {"toy_arithmetic", "json_schema", "tool_calling", "needle"} <= set(TASKS)
+    assert TASKS["tool_calling_strict"] == ToolCallingStrictTask.from_params
     with pytest.raises(ValueError, match="unknown eval task kind"):
         build_task("nope", "x")
     with pytest.raises(ValueError):
@@ -299,6 +303,120 @@ async def test_tool_task_stores_failed_output_and_expectation(tmp_path):
         "arguments": {"amount": [250], "from_currency": ["USD"], "to_currency": ["EUR"]},
     }
     assert "error" not in meta  # stored outputs never trip the request-error guard
+
+
+# ---------------------------------------------------------------- tool_calling_strict
+
+
+def test_strict_parameters_closes_every_object():
+    schema = {
+        "type": "object",
+        "properties": {
+            "a": {"type": "integer"},
+            "b": {"type": "object", "properties": {"c": {"type": "string"}}},
+            "d": {"type": "array", "items": {"type": "object", "properties": {}}},
+        },
+        "required": ["a"],
+    }
+    out = strict_parameters(schema)
+    assert out["additionalProperties"] is False
+    assert out["properties"]["b"]["additionalProperties"] is False
+    assert out["properties"]["d"]["items"]["additionalProperties"] is False
+    assert "additionalProperties" not in out["properties"]["a"]
+    assert out["required"] == ["a"]  # required lists are not widened
+    assert "additionalProperties" not in schema  # the pinned schema is not mutated
+
+
+def test_strict_tools_are_the_plain_tools_plus_strict_mode():
+    data = load_data()
+    for item in data.items:
+        plain, strict = data.tools_for(item), data.tools_for(item, strict=True)
+        assert len(plain) == len(strict)
+        for p, t in zip(plain, strict, strict=True):
+            assert "strict" not in p["function"]  # the headline task sends plain tools
+            assert "additionalProperties" not in p["function"]["parameters"]
+            assert t["type"] == "function" and t["function"]["strict"] is True
+            params = t["function"]["parameters"]
+            assert params["additionalProperties"] is False
+            assert params["properties"] == p["function"]["parameters"]["properties"]
+            assert params.get("required") == p["function"]["parameters"].get("required")
+            rest = {k: v for k, v in t["function"].items() if k not in ("strict", "parameters")}
+            assert rest == {k: v for k, v in p["function"].items() if k != "parameters"}
+
+
+def _tool_handler(seen, answers):
+    """Answers each query with its scripted call (else empty arguments); records bodies."""
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        query = body["messages"][0]["content"]
+        name, args = answers.get(query, (body["tools"][0]["function"]["name"], "{}"))
+        call = {"id": "c", "type": "function", "function": {"name": name, "arguments": args}}
+        return reply(None, [call], "tool_calls")
+
+    return handler
+
+
+async def test_strict_task_sends_strict_tools_and_scores_like_tool_calling(tmp_path):
+    data = load_data()
+    by_id = {i.item_id: i for i in data.items}
+    # A right call, a quoted number (what Llama 3.3 sends unconstrained) and a missing
+    # required argument: both tasks must score each one the same way.
+    answers = {
+        by_id["s-weather-1"].query: ("get_weather", '{"city": "porto", "unit": "celsius"}'),
+        by_id["s-currency-1"].query: (
+            "convert_currency",
+            '{"amount": "250", "from_currency": "USD", "to_currency": "EUR"}',
+        ),
+    }
+    outs, bodies = {}, {}
+    for kind in ("tool_calling", "tool_calling_strict"):
+        seen: list[dict] = []
+        async with fake_client(_tool_handler(seen, answers)) as c:
+            outs[kind] = await build_task(kind, kind, {"categories": ["simple"]}).run(
+                EvalContext(client=c, workdir=tmp_path)
+            )
+        bodies[kind] = seen
+
+    for body in bodies["tool_calling_strict"]:
+        assert body["tool_choice"] == "auto"
+        for tool in body["tools"]:
+            assert tool["function"]["strict"] is True
+            assert tool["function"]["parameters"]["additionalProperties"] is False
+    for body in bodies["tool_calling"]:
+        assert all("strict" not in t["function"] for t in body["tools"])
+
+    plain, strict = outs["tool_calling"], outs["tool_calling_strict"]
+    assert [r.item_id for r in plain.items] == [r.item_id for r in strict.items]
+    for p, t in zip(plain.items, strict.items, strict=True):
+        assert (p.score, p.meta) == (t.score, t.meta)
+        assert p.content_hash != t.content_hash  # the strict request is other content
+    got = {r.item_id: r for r in strict.items}
+    assert got["s-weather-1"].score == 1.0
+    assert got["s-currency-1"].meta["result"] == "wrong_value"
+    assert got["s-timer-2"].meta["result"] == "missing_required_argument"
+    assert sum(r.score for r in strict.items) == 1.0
+
+
+async def test_strict_task_is_versioned_apart_from_tool_calling(tmp_path):
+    data = load_data()
+    assert ToolCallingTask.version == "1"  # the headline task's version is unchanged
+    outs = {}
+    for kind in ("tool_calling", "tool_calling_strict"):
+        async with fake_client(_tool_handler([], {})) as c:
+            outs[kind] = await build_task(kind, kind, {"limit": 1}).run(
+                EvalContext(client=c, workdir=tmp_path)
+            )
+    assert outs["tool_calling"].version == f"1+data.{data.version}"
+    assert outs["tool_calling_strict"].version == f"strict.1+data.{data.version}"
+    assert "tools" not in outs["tool_calling"].provenance
+    assert outs["tool_calling_strict"].provenance["tools"] == (
+        "strict: true, additionalProperties: false"
+    )
+    plain, strict = outs["tool_calling"], outs["tool_calling_strict"]
+    assert strict.provenance["dataset"] == plain.provenance["dataset"]
+    assert build_task("tool_calling_strict", "x", {}).planned_items() == len(data.items)
 
 
 # ---------------------------------------------------------------- needle

@@ -114,6 +114,13 @@ tasks:
     kind: tool_calling
     threshold: 0.06
     min_samples: 50
+  # The same 60 items and scoring with every tool sent `strict: true`, so the engine
+  # constrains the arguments to the schema (docs/quality-gate.md). Reported next to
+  # tool_calling, which stays the headline; same margin, as it has the same items.
+  - name: tool_calling_strict
+    kind: tool_calling_strict
+    threshold: 0.06
+    min_samples: 50
 
   # JSON-schema validity under strict response_format: 300 pinned items (data version 2).
   # Floor 3/300 = 1 pt; d=2% -> ±1.6 pts, d=5% -> ±2.5 pts, so it decides a 3-point

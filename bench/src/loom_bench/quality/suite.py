@@ -218,6 +218,7 @@ _ITEM_LIMIT_PARAM = {
     "lm_eval": "limit",  # first N docs of every (sub)task
     "json_schema": "limit",
     "tool_calling": "limit",
+    "tool_calling_strict": "limit",
     "code_exec": "limit",  # per dataset
     "toy_arithmetic": "n",
 }

@@ -106,6 +106,13 @@ tasks:
     kind: tool_calling
     threshold: 0.06
     min_samples: 50
+  # Strict-mode variant: the same 60 items, every tool sent `strict: true` (vLLM then
+  # constrains the arguments, so numbers cannot come back as strings). Reported next to
+  # tool_calling, which stays the headline; same margin.
+  - name: tool_calling_strict
+    kind: tool_calling_strict
+    threshold: 0.06
+    min_samples: 50
   # JSON schema: 300 pinned items (data version 2), floor 1 pt, decided at 3 points; the
   # sizing is in qwen3-8b.yaml.
   - name: json_schema

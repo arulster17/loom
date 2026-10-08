@@ -22,12 +22,67 @@ Code: `bench/src/loom_bench/quality/`. Suites: `bench/evals/<model>.yaml`.
 | `needle` | `needle` | synthetic, seeded | lengths x depths x samples | the six-digit code appears in the reply |
 | `code` | `code_exec` | openai/openai_humaneval (MIT) + google-research-datasets/mbpp test (CC-BY-4.0), pinned revisions | 164 + 500 | program + tests exit 0 in the sandbox |
 | `tool_calling` | `tool_calling` | self-authored, `quality/data/tool_calling.yaml` (Apache-2.0) | 60 | exactly one call, right name, AST-matched arguments |
+| `tool_calling_strict` | `tool_calling_strict` | the `tool_calling` items, tools sent with `strict: true` (below) | 60 | as `tool_calling` |
 | `json_schema` | `json_schema` | self-authored, `quality/data/json_schema.yaml` (Apache-2.0), data version 2 | 300 | reply parses and validates under strict `response_format` |
 | `toy_arithmetic` | `toy_arithmetic` | generated, seeded | configurable | "The answer is N" is right; used with the mock backend |
 
 All requests are greedy (temperature 0) with a fixed seed. Qwen3 runs in non-thinking mode
 (`chat_template_kwargs: {enable_thinking: false}`, from the suite), which is forwarded to
 native tasks and to lm-eval's chat requests.
+
+### Strict tool calling
+
+`tool_calling_strict` runs the 60 `tool_calling` items with the same matching rules. Only
+the request differs: every offered function carries `"strict": true`, and every object in
+its `parameters` gets `additionalProperties: false` (`strict_parameters` in
+`quality/tasks/tool_calling.py`). `tool_choice` stays `"auto"`, and `required` lists are
+unchanged. OpenAI's strict style would also make every property required, with optional
+ones nullable. Neither engine needs that, and it would change the task: the model would
+have to write `null` for an argument it means to leave out.
+
+Why it exists: Llama 3.3 70B scores 0.450 on `tool_calling` because it writes numbers as
+strings (`"250"` for a number parameter), which the scorer rejects as a real client would.
+With strict tools the engine constrains the arguments to the schema, so that failure
+cannot happen. Both numbers are worth knowing. **`tool_calling` stays the headline**:
+most clients send plain tools, so it measures what they get. `tool_calling_strict` measures
+what a client that opts in gets. Reports list it right after `tool_calling` (task names
+sort together). The model page notes that it is the strict variant and that
+`tool_calling` is the headline, and the site's methodology says the same.
+
+Version `strict.1+data.1` (the plain task is `1+data.1`). Each item's content hash covers
+the strict tools, so the two tasks never pair in a gate, and a change to the strict
+request bumps `strict.1`. Both pinned suites list it with the same 6-point margin and
+`min_samples: 50` as `tool_calling`, since it has the same 60 items. It is gated like any
+other task whenever a run measures it: a full-suite run, or a subset that names it. It is
+not in the `phase0` subsets.
+
+Engine behaviour (checked against vLLM v0.30.0 and SGLang v0.5.21 source):
+
+- **vLLM** (`tool_parsers/structural_tag_registry.py`, `parser/abstract_parser.py`): under
+  `tool_choice: "auto"`, a request with at least one `strict: true` tool gets an xgrammar
+  structural tag when the tool parser has one and `VLLM_ENFORCE_STRICT_TOOL_CALLING` is on
+  (the default). Without a strict tool, auto output is never constrained. The tag lets
+  text through until the model starts a call. From then on, the name must be one of the
+  offered tools and the arguments must match that tool's `parameters` schema. For
+  `llama3_json` (Llama 3.3) that is xgrammar's builtin `llama` format, triggered by
+  `{"name": ` and forcing `{"name": "<tool>", "parameters": <schema JSON>}`. For `hermes`
+  (Qwen3) it is vLLM's own format, triggered by `<tool_call>` and forcing
+  `<tool_call>\n{"name": "<tool>", "arguments": <schema JSON>}\n</tool_call>`. vLLM's docs
+  recommend the OpenAI strict-schema style "for best compatibility" but do not require
+  it. A reply with no tool call is still allowed, and still scores 0.
+- **SGLang** (`function_call/function_call_parser.py`): the same rule. Under `"auto"`, any
+  `strict: true` tool (or `SGLANG_TOOL_STRICT_LEVEL` at `FUNCTION` or above) switches on
+  a structural tag. The `qwen25` detector (Qwen3) has no xgrammar builtin format, so
+  SGLang uses its legacy structural tag: triggered by `<tool_call>`, it forces
+  `<tool_call>\n{"name":"<tool>", "arguments":` followed by the schema-constrained
+  arguments and `}\n</tool_call>`. Only tools marked strict get their schema; the others
+  get `{}`. SGLang's `llama3` detector triggers on `<|python_tag|>`, which Llama 3.3
+  normally does not emit before a JSON call, so strict mode would rarely engage for the
+  70B on SGLang. The 70B runs on vLLM only.
+
+Both engines enforce the schema through their grammar backend (xgrammar by default, as for
+`json_schema`). No extra engine flag is needed beyond the tool parser flags that
+`tool_calling` already uses.
 
 Besides task scores, the gate looks at:
 

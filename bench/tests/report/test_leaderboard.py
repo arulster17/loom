@@ -158,6 +158,26 @@ def test_scores_without_a_gate_are_shown_not_hidden(price_book):
     assert quality_text(result) == "not evaluated"
 
 
+def test_scores_without_a_gate_show_strict_tool_calling_beside_the_headline(price_book):
+    (result,) = analyze_runs(
+        make_runs("only"),
+        slo=SLO,
+        allocation=CostAllocation.all_output(),
+        price_resolver=default_price_resolver(price_book),
+    )
+    evals = [
+        eval_row(result.config_hash, "tool_calling_strict", 0.95),
+        eval_row(result.config_hash, "gsm8k", 0.9553),
+        eval_row(result.config_hash, "tool_calling", 0.45),
+    ]
+    (scored,) = with_quality([result], evals, [])
+    assert quality_text(scored) == (
+        "no gate · gsm8k 0.955, tool_calling 0.450, tool_calling_strict 0.950"
+    )
+    md = render_markdown(build_leaderboard([scored]))
+    assert "tool_calling 0.450, tool_calling_strict 0.950" in md
+
+
 def test_markdown_table_and_footer(report, price_book):
     md = render_markdown(report)
     assert "| " + " | ".join(md_headers(report.boards[0])) + " |" in md

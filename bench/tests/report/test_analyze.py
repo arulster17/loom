@@ -305,6 +305,26 @@ def test_quality_for_candidate_and_baseline(results):
     assert attached["sglang-bf16"].quality is None
 
 
+def test_strict_tool_calling_is_listed_after_tool_calling_and_noted(results):
+    r = by_name(results)
+    base, cand = r["vllm-bf16"].config_hash, r["vllm-awq"].config_hash
+    evals = [
+        eval_row(base, "tool_calling_strict", 0.95),
+        eval_row(base, "tool_calling", 0.45),
+        eval_row(base, "json_schema", 0.97),
+        eval_row(cand, "tool_calling_strict", 0.90),
+        eval_row(cand, "tool_calling", 0.45),
+        eval_row(cand, "json_schema", 0.97),
+    ]
+    q = quality_for(cand, evals, [gate_row(base, cand, "fail")])
+    assert [t.task for t in q.tasks] == ["json_schema", "tool_calling", "tool_calling_strict"]
+    assert [t.note is not None for t in q.tasks] == [False, False, True]
+    assert "tool_calling is the headline" in q.tasks[2].note
+    # Gated like any other task: its own delta, so it can be the worst one.
+    assert q.worst().task == "tool_calling_strict"
+    assert q.worst().delta == pytest.approx(-0.05)
+
+
 def test_cold_starts_attributed_only_when_unambiguous(results, vllm_runs, price_book):
     solo_exp = uuid.UUID(int=2)
     (solo,) = analyze(

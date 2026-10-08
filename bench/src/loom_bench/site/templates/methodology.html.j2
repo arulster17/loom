@@ -160,6 +160,7 @@
 <li>Above the limit with any task failing or inconclusive, the gate fails.</li>
 <li>Beyond a hard ceiling (KL above 0.5 nats or top-1 agreement below 80%) the gate fails regardless of the noise floor: those outputs are broken, not noisy.</li>
 </ul>
+<p>Tool calling is scored two ways on the same items. <code>tool_calling</code> sends the tools as most clients do and is the headline score. <code>tool_calling_strict</code> sends each tool with <code>strict: true</code>, so the engine constrains the call's arguments to the tool's schema; it shows what a client that opts in gets (a model that writes numbers as strings, for one, cannot) and is listed next to it.</p>
 <p>Each model page shows every task's score, its interval and the difference from the baseline, and the divergence with the limit it was held to. A config with scores but no gate decision (an experiment with one config has nothing to gate against) is shown as "scored, no gate" with its scores; one with no scores, as "not evaluated".</p>
 </section>
 

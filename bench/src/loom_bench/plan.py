@@ -121,6 +121,7 @@ EVAL_ITEM_S: dict[str, float] = {
     "code_exec": 16.0,  # ~300-token program, then the sandboxed tests
     "needle": 40.0,  # 8k-28k-token prompts: prefill-bound while every slot holds one
     "tool_calling": 6.0,  # one call, ~60 tokens
+    "tool_calling_strict": 6.0,  # the same call, its arguments under a grammar
     "json_schema": 8.0,  # one object, ~100 tokens, under a grammar
     "toy_arithmetic": 2.0,  # one short sentence
 }

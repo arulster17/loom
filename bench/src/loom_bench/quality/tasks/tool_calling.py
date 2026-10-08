@@ -34,6 +34,17 @@ parser's.
 A failed item stores its raw tool calls and text (capped) and the expected call
 in `meta`, plus the parameter that failed, so a low score can be explained from
 the samples without re-running the model.
+
+`tool_calling_strict` is the same items and scoring with each tool sent in
+strict mode: `"strict": true` on the function and `additionalProperties: false`
+on every object schema (`strict_parameters`). With tool_choice "auto", vLLM
+v0.30 and SGLang v0.5.21 then constrain the call to the schema with an xgrammar
+structural tag once the model starts one, so a quoted number can no longer be
+emitted. `tool_calling` stays the headline: most clients send plain tools, and
+the strict variant measures what a client that opts in gets. Required lists are
+left as they are (OpenAI's strict style would require every property and make
+optional ones nullable): neither engine asks for that, and it would change what
+the model is asked to do and how an omitted argument is scored.
 """
 
 from __future__ import annotations
@@ -83,11 +94,32 @@ class ToolData:
     items: tuple[ToolItem, ...]
     version: int
 
-    def tools_for(self, item: ToolItem) -> list[dict[str, Any]]:
-        return [
-            {"type": "function", "function": {"name": name, **self.functions[name]}}
-            for name in item.functions
-        ]
+    def tools_for(self, item: ToolItem, *, strict: bool = False) -> list[dict[str, Any]]:
+        """The item's functions as request `tools`; `strict` sends them in strict mode."""
+        tools = []
+        for name in item.functions:
+            function = {"name": name, **self.functions[name]}
+            if strict:
+                function["parameters"] = strict_parameters(function["parameters"])
+                function["strict"] = True
+            tools.append({"type": "function", "function": function})
+        return tools
+
+
+def strict_parameters(schema: dict[str, Any]) -> dict[str, Any]:
+    """`schema` with `additionalProperties: false` on every object, nested ones included.
+
+    Grammar backends differ on whether a schema that is silent about extra keys
+    allows them; stating it keeps the constraint the same on every engine.
+    """
+    out = dict(schema)
+    if out.get("type") == "object":
+        out["additionalProperties"] = False
+    if "properties" in out:
+        out["properties"] = {k: strict_parameters(v) for k, v in out["properties"].items()}
+    if isinstance(out.get("items"), dict):
+        out["items"] = strict_parameters(out["items"])
+    return out
 
 
 def _validate(data: ToolData) -> None:
@@ -247,6 +279,7 @@ class ToolCallingParams(TaskParams):
 class ToolCallingTask(ParamTask[ToolCallingParams]):
     Params = ToolCallingParams
     version: ClassVar[str] = "1"
+    strict: ClassVar[bool] = False  # send tools in strict mode (`tool_calling_strict`)
 
     def planned_items(self) -> int:
         n = sum(i.category in self.params.categories for i in load_data().items)
@@ -259,7 +292,7 @@ class ToolCallingTask(ParamTask[ToolCallingParams]):
             items = items[: self.params.limit]
 
         async def score(item: ToolItem) -> tuple[ItemResult, Completion | None]:
-            tools = data.tools_for(item)
+            tools = data.tools_for(item, strict=self.strict)
             content = item_hash(
                 {"query": item.query, "tools": tools, "expected": item.expected_args}
             )
@@ -297,4 +330,17 @@ class ToolCallingTask(ParamTask[ToolCallingParams]):
                 "license": "Apache-2.0",
             }
         }
+        if self.strict:
+            out.provenance["tools"] = "strict: true, additionalProperties: false"
         return out
+
+
+class ToolCallingStrictTask(ToolCallingTask):
+    """`tool_calling_strict`: the `tool_calling` items and scoring, tools sent strict.
+
+    Its version ("strict.1+data.N") never equals `tool_calling`'s, and every item's
+    content hash covers the strict tools, so the two never pair in a gate.
+    """
+
+    version: ClassVar[str] = "strict.1"
+    strict: ClassVar[bool] = True

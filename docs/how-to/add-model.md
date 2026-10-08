@@ -180,7 +180,8 @@ every command at a scratch copy of the registry.
 - **Quality suite.** The gate needs a pinned suite for the model:
   `bench/evals/<model id>.yaml` (copy `bench/evals/qwen3-8b.yaml`). `test_suite.py`
   requires the `lm_eval`, `needle`, `code_exec`, `tool_calling` and `json_schema` task
-  kinds, a `divergence` section, context lengths within `max_context`, and
+  kinds, a `tool_calling_strict` task right after `tool_calling` with the same margin, a
+  `divergence` section, context lengths within `max_context`, and
   `chat_template_kwargs` equal to the registry's.
 - **Competitor prices.** Add public list prices for the model to `bench/competitors.yaml`
   (`model_id` is the registry id) if you want the competitiveness view to compare it.
