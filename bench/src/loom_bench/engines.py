@@ -226,7 +226,7 @@ def _sglang_args(spec: ModelSpec, extra: list[str]) -> list[str]:
     ]
 
 
-def _validate_env(env: dict[str, str]) -> dict[str, str]:
+def validate_engine_env(env: dict[str, str]) -> dict[str, str]:
     for name in env:
         if not _ENV_NAME_RE.match(name):
             raise ValueError(f"invalid environment variable name {name!r}")
@@ -273,7 +273,7 @@ def engine_process_argv(launch: EngineLaunch, *, host: str) -> list[str]:
     """
     if launch.engine not in ENTRYPOINTS:
         raise ValueError(f"no entrypoint for engine {launch.engine!r}")
-    _validate_env(launch.env)
+    validate_engine_env(launch.env)
     args = list(launch.args)
     at = [i for i, a in enumerate(args) if a == "--host"]
     if len(at) != 1 or at[0] + 1 >= len(args):
@@ -314,7 +314,7 @@ def docker_run_argv(launch: EngineLaunch, *, weights_dir: str, container_name: s
         "--env",
         "TRANSFORMERS_OFFLINE=1",
     ]
-    for name in sorted(_validate_env(launch.env)):
+    for name in sorted(validate_engine_env(launch.env)):
         argv += ["--env", name]
     argv += ["--entrypoint", entry[0], launch.image, *entry[1:], *launch.args]
     return argv

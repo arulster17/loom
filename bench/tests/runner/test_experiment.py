@@ -315,10 +315,39 @@ def test_runpod_cells_on_one_image_share_a_pod():
     assert a.config_hash != b.config_hash
 
 
+P2P_OFF = {"engine_env": {"NCCL_P2P_DISABLE": "1"}}
+
+
 def test_runpod_llama_uses_four_gpus():
-    (cell,) = expand(runpod_experiment(LLAMA), REGISTRY)
+    (cell,) = expand(runpod_experiment(LLAMA, **P2P_OFF), REGISTRY)
     assert cell.hardware["instance_type"] == "l40s-x4"
     assert cell.hardware["gpus"] == 4 == cell.gpus
+
+
+def test_multi_gpu_runpod_pod_must_decide_nccl_p2p():
+    # 874110b6: a 4x L40S pod across two sockets hung at NCCL init with P2P on.
+    with pytest.raises(ExpansionError, match="4-GPU RunPod pod must set NCCL_P2P_DISABLE"):
+        expand(runpod_experiment(LLAMA), REGISTRY)
+    for env in ({"NCCL_P2P_DISABLE": "1"}, {"NCCL_P2P_LEVEL": "PIX"}):
+        (cell,) = expand(runpod_experiment(LLAMA, engine_env=env), REGISTRY)
+        assert cell.launch.env == env
+    # One GPU has no peers: no decision needed, and no env is added.
+    vllm, _ = expand(runpod_experiment(), REGISTRY)
+    assert vllm.launch.env == {}
+
+
+def test_runpod_engine_env_is_part_of_the_config_hash():
+    (off,) = expand(runpod_experiment(LLAMA, **P2P_OFF), REGISTRY)
+    (level,) = expand(runpod_experiment(LLAMA, engine_env={"NCCL_P2P_LEVEL": "PIX"}), REGISTRY)
+    assert off.config["launch"]["env"] == {"NCCL_P2P_DISABLE": "1"}
+    assert off.config_hash != level.config_hash
+    assert off.host_key == level.host_key  # the same pod shape either way
+
+
+def test_runpod_engine_env_rejects_secret_and_bad_names():
+    for env in ({"HF_TOKEN": "x"}, {"nccl_debug": "INFO"}):
+        with pytest.raises(ExpansionError, match=r"provider\.engine_env"):
+            expand(runpod_experiment(engine_env=env), REGISTRY)
 
 
 def test_runpod_spec_defaults_and_rejects_bad_fields():

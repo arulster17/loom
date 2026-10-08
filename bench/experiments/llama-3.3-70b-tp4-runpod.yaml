@@ -16,6 +16,11 @@ model: llama-3.3-70b-instruct
 provider:
   kind: runpod
   container_disk_gb: 250
+  # 4x L40S pods can span both CPU sockets (874110b6: GPU0 on socket 0, SYS links),
+  # where NCCL P2P is reported available but init hangs; a 4-rank all_reduce hung by
+  # default and passed with this set. vLLM already disables its custom all-reduce on
+  # more than two PCIe-only GPUs, so NCCL is the only P2P user.
+  engine_env: {NCCL_P2P_DISABLE: "1"}
 variants:
   - name: vllm-tp4
 workloads:
@@ -45,13 +50,13 @@ quality:
   suite: llama-3.3-70b-instruct
   subset: phase0
   baseline_variant: vllm-tp4
-# The pod's TTL: `bench plan` puts it at ~2.7 h (the 141 GB download dominates the cold
-# start), so 4 h leaves ~50% margin; worst case to TTL is ~$17.6, and max_spend sits just
-# above it. 4x L40S Secure stock is scarce (none listed on 2026-10-07): check it before
+# The pod's TTL: `bench plan` puts it at ~2.7 h; the real 141 GB download took ~5 min
+# (874110b6), so 3.5 h leaves ~30% margin. Worst case to TTL is ~$15.4, which fits the
+# 70B work's $20 total after the hung first attempt and its diagnosis (~$3.1). 4x L40S Secure stock is scarce (none listed on 2026-10-07): check it before
 # launching and run with LOOM_RUNPOD_CAPACITY_WAIT_S=7200 so a stock refusal waits up to
 # 2 h instead of 30 min (nothing is billed while waiting; docs/runbook-runpod.md).
 budget:
   max_spend: "$20"
-  ttl_minutes: 240
+  ttl_minutes: 210
   accrual_interval_s: 15
 seed: 0

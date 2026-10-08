@@ -30,7 +30,7 @@ from pydantic import (
 )
 
 from loom_bench.cost import CostAllocation
-from loom_bench.engines import render_launch
+from loom_bench.engines import render_launch, validate_engine_env
 from loom_bench.jobs import TokenizerSpec
 from loom_bench.loadgen.arrivals import parse_arrivals
 from loom_bench.loadgen.base import LOAD_GENERATORS
@@ -121,6 +121,18 @@ class RunpodProviderSpec(_Strict):
         default_factory=lambda: ["13.0"]
     )
     data_center_ids: Annotated[list[str], Field(min_length=1)] | None = None  # None: any
+    # Set in the engine's environment (validated: no secret names). It is part of the
+    # cell's launch, so its config hash. A multi-GPU pod must decide NCCL peer-to-peer
+    # explicitly (see RUNPOD_NCCL_P2P_VARS): RunPod can place a pod's GPUs on both CPU
+    # sockets, where P2P is reported available but NCCL hangs at init.
+    engine_env: dict[str, str] = Field(default_factory=dict)
+
+
+# A multi-GPU RunPod pod's engine_env must set one of these. Experiment 874110b6
+# (4x L40S, GPU0 on the other socket: SYS links) hung after NCCL init until the ready
+# timeout; a 4-rank all_reduce on the same topology hung by default and passed with
+# NCCL_P2P_DISABLE=1 (docs/runbook-runpod.md).
+RUNPOD_NCCL_P2P_VARS = ("NCCL_P2P_DISABLE", "NCCL_P2P_LEVEL")
 
 
 ProviderSpec = Annotated[
@@ -607,7 +619,28 @@ def _launch(exp: Experiment, spec: ModelSpec, mock: MockConfig | None) -> Engine
         return mock_launch(spec, mock)
     if isinstance(exp.provider, LocalProviderSpec):
         return local_launch(spec, exp.provider)
-    return render_launch(spec)
+    launch = render_launch(spec)
+    if isinstance(exp.provider, RunpodProviderSpec):
+        launch = _runpod_engine_env(exp.provider, spec, launch)
+    return launch
+
+
+def _runpod_engine_env(
+    p: RunpodProviderSpec, spec: ModelSpec, launch: EngineLaunch
+) -> EngineLaunch:
+    try:
+        env = validate_engine_env(p.engine_env)
+    except ValueError as e:
+        raise ExpansionError(f"provider.engine_env: {e}") from None
+    if launch.gpus > 1 and not any(v in env for v in RUNPOD_NCCL_P2P_VARS):
+        raise ExpansionError(
+            f"{spec.id}: a {launch.gpus}-GPU RunPod pod must set "
+            f"{' or '.join(RUNPOD_NCCL_P2P_VARS)} in provider.engine_env: pods can span "
+            "CPU sockets, where NCCL peer-to-peer hangs at init (docs/runbook-runpod.md)"
+        )
+    if not env:
+        return launch
+    return launch.model_copy(update={"env": {**launch.env, **env}})
 
 
 def hardware_for(exp: Experiment, spec: ModelSpec) -> tuple[str, dict[str, Any]]:
@@ -731,6 +764,8 @@ def expand(exp: Experiment, registry: Registry) -> list[Cell]:
                 cells.append(
                     build_cell(exp, variant=variant.name, knobs=knobs, spec=spec, mock=mock)
                 )
+            except ExpansionError as e:  # already names the problem
+                raise ExpansionError(f"cell {key}: {e}") from None
             except ValueError as e:  # pydantic ValidationError, or a launch that cannot render
                 raise ExpansionError(f"cell {key}: invalid overrides:\n{e}") from None
     keys = [c.key for c in cells]

@@ -450,10 +450,11 @@ def test_runpod_hourly_price_is_the_price_book_plus_container_disk():
 
 
 def test_runpod_llama_needs_a_container_disk_that_fits_the_weights():
-    refusals = _plan(_runpod(LLAMA)).refusals
+    p2p_off = {"NCCL_P2P_DISABLE": "1"}  # a multi-GPU pod must decide NCCL P2P
+    refusals = _plan(_runpod(LLAMA, engine_env=p2p_off)).refusals
     (refusal,) = [r for r in refusals if "container_disk_gb" in r]
     assert "container_disk_gb 80 is below the 177 GB" in refusal
-    plan = _plan(_runpod(LLAMA, container_disk_gb=250))
+    plan = _plan(_runpod(LLAMA, container_disk_gb=250, engine_env=p2p_off))
     assert not [r for r in plan.refusals if "container_disk_gb" in r]
     assert plan.hosts[0].instance_type == "l40s-x4"
 
