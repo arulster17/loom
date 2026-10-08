@@ -113,6 +113,27 @@ than the engine. Each item's per-pass scores are kept in the samples
 (`meta["replicate_scores"]`), so within-instance noise can be compared with the
 cross-instance figures in the table.
 
+Measured within one instance in b03b3c52 (three passes each): vLLM IFEval pass means were
+0.8096, 0.8262 and 0.8170, with 32 items unstable and 18-27 disagreements per pair of
+passes. SGLang's were 0.8059, 0.8096 and 0.8133, with 19 items unstable and 8-16
+disagreements. So noise within one instance is as large as noise across pods. The
+resulting gate:
+
+| Task | delta (SGLang - vLLM), 3 passes each | Margin | Verdict |
+|---|---|---|---|
+| gsm8k (1319) | +0.03 pts [-0.35, +0.40] | 1 | PASS |
+| ifeval (541) | -0.80 pts [-2.03, +0.37] | 2 | INCONCLUSIVE (lower bound 0.03 pts past the margin; no measurable drop) |
+| json_schema (300) | -0.22 pts [-1.22, +0.78] | 3 | PASS |
+| tool_calling (60) | +0.00 pts [-5.00, +5.00] | 6 | PASS |
+
+The single-pass gate in b1b904dc read IFEval as -1.29 [-2.96, +0.37]; most of that drop
+was run noise. A post-hoc pool of every stored pass (vLLM 6 across four pods, SGLang 4
+across two) gives -1.16 [-2.26, -0.14]. It mixes instances, and the bootstrap over items
+does not model instance-to-instance variance, so that CI is optimistic. The defensible
+reading: on IFEval, SGLang is between equal and about 2 points below vLLM, with roughly 1
+point most likely. That is not shown to be within the 2-point margin, so the gate stays
+blocked.
+
 Logprob divergence (below) is held to limits calibrated on the baseline's measured noise
 floor, with self-KL taken at the upper and self top-1 agreement at the lower bound of
 their bootstrap CIs:
