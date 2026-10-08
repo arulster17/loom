@@ -1,3 +1,4 @@
+import json
 from typing import Any, get_args
 
 import pytest
@@ -8,6 +9,7 @@ from loom_bench.engines import (
     ARG_RENDERERS,
     ENTRYPOINTS,
     docker_run_argv,
+    draft_weights,
     quantization_flag,
     render_args,
     render_launch,
@@ -150,6 +152,67 @@ def test_tools_without_a_parser_for_the_engine_cannot_launch(qwen: ModelSpec) ->
         render_launch(on_sglang(qwen, tool_call_parsers={"vllm": "hermes"}))
     no_tools = patched(qwen, capabilities__tools=False, tool_call_parsers={})
     assert "--tool-call-parser" not in render_launch(no_tools).args
+
+
+EAGLE3 = "RedHatAI/Llama-3.3-70B-Instruct-speculator.eagle3"
+EAGLE3_REV = "42864f78d503693ae5fd317419f099ab3b7c13e4"
+
+
+def test_a_pinned_speculative_draft_is_downloaded_with_the_model(llama: ModelSpec) -> None:
+    spec = patched(
+        llama,
+        engine__args={
+            "speculative_config": {
+                "method": "eagle3",
+                "model": EAGLE3,
+                "revision": EAGLE3_REV,
+                "num_speculative_tokens": 3,
+            }
+        },
+    )
+    launch = render_launch(spec)
+    cfg = launch.args[launch.args.index("--speculative-config") + 1]
+    assert json.loads(cfg)["model"] == EAGLE3
+    assert draft_weights("vllm", launch.args) == [(EAGLE3, EAGLE3_REV)]
+    assert draft_weights("vllm", render_launch(llama).args) == []
+
+
+@pytest.mark.parametrize("revision", [None, "main", "42864f7"])
+def test_a_speculative_draft_must_be_pinned_to_a_commit(llama: ModelSpec, revision) -> None:
+    cfg = {"method": "eagle3", "model": EAGLE3, "num_speculative_tokens": 3}
+    if revision is not None:
+        cfg["revision"] = revision
+    with pytest.raises(ValueError, match="pin its revision to a 40-hex commit"):
+        render_launch(patched(llama, engine__args={"speculative_config": cfg}))
+
+
+def test_a_speculative_draft_must_be_a_hub_repo(llama: ModelSpec) -> None:
+    cfg = {"method": "eagle3", "model": "/models/eagle", "revision": EAGLE3_REV}
+    with pytest.raises(ValueError, match="must be a Hugging Face repo id"):
+        render_launch(patched(llama, engine__args={"speculative_config": cfg}))
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        {"method": "ngram", "num_speculative_tokens": 4, "prompt_lookup_max": 4},
+        {"model": "ngram", "num_speculative_tokens": 4},
+        {"method": "suffix", "num_speculative_tokens": 8},
+    ],
+)
+def test_draftless_speculation_downloads_nothing(llama: ModelSpec, cfg: dict) -> None:
+    launch = render_launch(patched(llama, engine__args={"speculative_config": cfg}))
+    assert draft_weights("vllm", launch.args) == []
+
+
+def test_sglang_draft_flags_are_pinned_and_downloaded(llama: ModelSpec) -> None:
+    sglang = on_sglang(llama)
+    args = {"speculative_draft_model_path": EAGLE3, "speculative_algorithm": "EAGLE3"}
+    with pytest.raises(ValueError, match="pin its revision"):
+        render_launch(patched(sglang, engine__args=args))
+    pinned = {**args, "speculative_draft_model_revision": EAGLE3_REV}
+    launch = render_launch(patched(sglang, engine__args=pinned))
+    assert draft_weights("sglang", launch.args) == [(EAGLE3, EAGLE3_REV)]
 
 
 @pytest.mark.parametrize("engine", ["vllm", "sglang"])

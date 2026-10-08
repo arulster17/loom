@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 
 from loom_bench.budget import BudgetConfig, caps_for, load_budget
 from loom_bench.cli import app
+from loom_bench.engines import draft_weights
 from loom_bench.experiment import ExpansionError, Experiment, expand, load_experiment
 from loom_bench.money import parse_usd
 from loom_bench.plan import (
@@ -205,8 +206,19 @@ def test_the_llama_sweep_runs_no_eval_path_or_load_shape_the_qwen_smoke_misses()
     smoke, llama = load_experiment(RUNPOD_SMOKE), load_experiment(LLAMA_RUNPOD)
     assert _eval_paths(llama) <= _eval_paths(smoke)
     assert set(_load_shape(llama).items()) <= set(_load_shape(smoke).items())
-    smoke_images = {v.engine.image for v in smoke.variants if v.engine}
-    assert {v.engine.image for v in llama.variants if v.engine} <= smoke_images
+    smoke_images = {c.launch.image for c in expand(smoke, REGISTRY)}
+    llama_cells = expand(llama, REGISTRY)
+    assert {c.launch.image for c in llama_cells} <= smoke_images
+    # The one engine path the Qwen smoke does not run: EAGLE3 speculative decoding with
+    # its pinned draft. The 2026-10-08 70B tuning pod ran exactly this image, draft and
+    # revision (docs/benchmark-lab.md "70B tuning"); anything else added here must be
+    # covered by the smoke first.
+    (cell,) = llama_cells
+    eagle3 = "RedHatAI/Llama-3.3-70B-Instruct-speculator.eagle3"
+    eagle3_rev = "42864f78d503693ae5fd317419f099ab3b7c13e4"
+    assert draft_weights(cell.launch.engine, cell.launch.args) == [(eagle3, eagle3_rev)]
+    extra = {v.name: set((v.engine.args or {}) if v.engine else {}) for v in llama.variants}
+    assert extra == {"vllm-tp4-eagle3": {"speculative_config"}}
 
 
 def test_runpod_specs_match_their_aws_counterparts_apart_from_the_provider():

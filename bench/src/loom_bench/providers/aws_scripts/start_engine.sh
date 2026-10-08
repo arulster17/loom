@@ -1,10 +1,16 @@
-# requires: WARM REGION HF_SECRET_ID IMAGE MODEL_REPO MODEL_REVISION WEIGHTS_DIR CONTAINER PORT SERVED_MODEL READY_TIMEOUT_S LOG_DIR STAGE_FILE ENGINE_ENV ENGINE_CMD
+# requires: WARM REGION HF_SECRET_ID IMAGE MODEL_REPO MODEL_REVISION EXTRA_WEIGHTS WEIGHTS_DIR CONTAINER PORT SERVED_MODEL READY_TIMEOUT_S LOG_DIR STAGE_FILE ENGINE_ENV ENGINE_CMD
 # Pull the engine image, download weights at the pinned revision (cold only),
 # start the engine container and wait until it serves one token.
+# EXTRA_WEIGHTS: more pinned checkpoints the engine loads (a speculative draft), as
+# flat repo revision pairs; downloaded with the model, since the engine runs offline.
 
 DOWNLOAD_PY='import sys
 from huggingface_hub import snapshot_download
-snapshot_download(sys.argv[1], revision=sys.argv[2], ignore_patterns=["original/*", "*.pth", "*.gguf"])'
+a = sys.argv[1:]
+assert len(a) % 2 == 0, "repo/revision pairs"
+for repo, rev in zip(a[::2], a[1::2]):
+    snapshot_download(repo, revision=rev, ignore_patterns=["original/*", "*.pth", "*.gguf"])'
+WEIGHTS=("$MODEL_REPO" "$MODEL_REVISION" ${EXTRA_WEIGHTS[@]+"${EXTRA_WEIGHTS[@]}"})
 
 mkdir -p "$LOG_DIR" "$WEIGHTS_DIR"
 
@@ -26,7 +32,7 @@ if [ "$WARM" = 0 ]; then
   export HF_TOKEN
   if ! docker run --rm --env HF_TOKEN --env HF_HUB_DISABLE_PROGRESS_BARS=1 \
     --volume "$WEIGHTS_DIR:/root/.cache/huggingface" --entrypoint python3 "$IMAGE" \
-    -c "$DOWNLOAD_PY" "$MODEL_REPO" "$MODEL_REVISION" >>"$LOG_DIR/weights.log" 2>&1; then
+    -c "$DOWNLOAD_PY" "${WEIGHTS[@]}" >>"$LOG_DIR/weights.log" 2>&1; then
     unset HF_TOKEN
     fail_log "weight download failed" "$LOG_DIR/weights.log"
   fi

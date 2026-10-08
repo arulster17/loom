@@ -14,7 +14,16 @@ provider:
   market: spot
   disk_gb: 400
 variants:
-  - name: vllm-tp4
+  # EAGLE3 speculative decoding, as in the RunPod twin (llama-3.3-70b-tp4-runpod.yaml
+  # explains why: the BF16 per-token floor on 4x L40S is ~60 ms).
+  - name: vllm-tp4-eagle3
+    engine:
+      args:
+        speculative_config:
+          method: eagle3
+          model: RedHatAI/Llama-3.3-70B-Instruct-speculator.eagle3
+          revision: 42864f78d503693ae5fd317419f099ab3b7c13e4
+          num_speculative_tokens: 3
 workloads:
   - profile: fixed-1k-1k
     load:
@@ -41,7 +50,7 @@ slo:
 quality:
   suite: llama-3.3-70b-instruct
   subset: phase0
-  baseline_variant: vllm-tp4
+  baseline_variant: vllm-tp4-eagle3
 budget:
   max_spend: "$45"
   ttl_minutes: 210

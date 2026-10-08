@@ -22,7 +22,25 @@ provider:
   # more than two PCIe-only GPUs, so NCCL is the only P2P user.
   engine_env: {NCCL_P2P_DISABLE: "1"}
 variants:
-  - name: vllm-tp4
+  # EAGLE3 speculative decoding: a 4.9 GB draft head proposes 3 tokens per step and the
+  # target model verifies them, so outputs keep the target's distribution (vLLM's
+  # rejection sampling is lossless; same BF16 weights). Why: at defaults the per-token
+  # floor is ~60 ms (cf4d1614: TPOT p95 >= 60.3 ms at any load). One step reads 35 GB of
+  # weights per GPU at 864 GB/s (>= 41 ms) plus ~4.4 ms of NCCL all-reduce with P2P off,
+  # so no NCCL or scheduler knob reaches 50 ms. The 2026-10-08 tuning pod (same image,
+  # cross-socket 4x L40S) measured fixed-1k-1k at 0.25 req/s: TPOT p95 77.3 ms at
+  # defaults, 47.1 ms with this (mean 2.28 tokens accepted per step; 2 draft tokens:
+  # 46.4 ms). Some random-word continuations accept few drafts and run at the ~60 ms
+  # floor, so the TPOT tail depends on the content. Costs KV room: 41k cached tokens
+  # instead of 71k. docs/benchmark-lab.md "70B tuning".
+  - name: vllm-tp4-eagle3
+    engine:
+      args:
+        speculative_config:
+          method: eagle3
+          model: RedHatAI/Llama-3.3-70B-Instruct-speculator.eagle3
+          revision: 42864f78d503693ae5fd317419f099ab3b7c13e4
+          num_speculative_tokens: 3
 workloads:
   - profile: fixed-1k-1k
     load:
@@ -49,7 +67,7 @@ slo:
 quality:
   suite: llama-3.3-70b-instruct
   subset: phase0
-  baseline_variant: vllm-tp4
+  baseline_variant: vllm-tp4-eagle3
 # The pod's TTL: `bench plan` puts it at ~2.7 h; the real 141 GB download took ~5 min
 # (874110b6), so 3.5 h leaves ~30% margin. Worst case to TTL is ~$15.4, which fits the
 # 70B work's $20 total after the hung first attempt and its diagnosis (~$3.1). 4x L40S Secure stock is scarce (none listed on 2026-10-07): check it before

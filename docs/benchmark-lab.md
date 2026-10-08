@@ -330,7 +330,7 @@ The real runs are on RunPod Secure Cloud on-demand, since the AWS GPU spot quota
 | Experiment | Host | Estimate | Worst case (TTL) | Cap |
 |---|---|---|---|---|
 | `qwen3-8b-vllm-vs-sglang-runpod` | 2x RunPod 1x L40S (one pod per engine), 3.6 h each of a 6 h TTL | $7.92 | $13.21 | $15 |
-| `llama-3.3-70b-tp4-runpod` | 1x RunPod 4x L40S, 2.7 h of a 4 h TTL | $11.88 | $17.58 | $20 |
+| `llama-3.3-70b-tp4-runpod` | 1x RunPod 4x L40S, 2.7 h of a 3.5 h TTL | $11.88 | $15.38 | $20 |
 | `runpod-smoke` | 2x RunPod 1x L40S (the Qwen sweep at smoke scale), 37 min each of a 60 min TTL | $1.35 | $2.20 | $2.25 |
 | `qwen3-8b-quality-runpod` | 2x RunPod 1x L40S, evals and gate only, 3 eval passes per engine (finishes 565b8d3f's gate), 105 min each of a 135 min TTL (planned; ~35 min at b1b904dc's measured pass time) | $3.85 | $4.95 | $5.00 |
 
@@ -355,4 +355,54 @@ calling, JSON schema, divergence and sanity; about 27 min per config) and the ev
 install. The full suites would take about 1.8 h per config and push the Qwen host past its
 TTL. RunPod and AWS run the same variants, workloads, SLO and quality subset on the same
 GPUs (L40S).
+
+### 70B tuning
+
+Llama 3.3 70B BF16 at TP=4 on 4x L40S missed the 50 ms TPOT p95 SLO at every load in
+cf4d1614 (at least 60.3 ms, even at 0.06 req/s). Before calling that a hardware limit,
+a 47-minute tuning pod (2026-10-08, $3.40) measured the levers on the same image, with
+the bench client running cf4d1614's own fixed-1k-1k and shared-prefix jobs over shorter
+windows:
+
+- **Physics.** One decode step reads each GPU's 35 GB weight shard. At the L40S's
+  864 GB/s that's at least 41 ms. vLLM's defaults were already right: CUDA graphs (full
+  and piecewise), `torch.compile`, chunked prefill, no eager mode.
+- **NCCL.** On these hosts every P2P setting hangs: `NCCL_P2P_LEVEL=PIX`, `=NODE` and
+  the default all timed out in a 4-rank all-reduce. Only `NCCL_P2P_DISABLE=1` works.
+  With it a 16 KB all-reduce, one decode token's worth, takes 27.6 µs: 4.4 ms over a
+  token's 160 all-reduces. `NCCL_PROTO=LL` cuts that to 20.5 µs but doubles 1 MB
+  transfers (prefill), and `NCCL_ALGO=Tree` gives 25.1 µs. So NCCL is worth at most
+  about 1 ms per token.
+- **Speculative decoding** is the lever. EAGLE3 (`RedHatAI/Llama-3.3-70B-Instruct-
+  speculator.eagle3`, pinned) drafts tokens that the 70B model verifies, so outputs
+  keep its distribution.
+
+| Config | Load | TPOT p50 / p95 (ms) | TTFT p95 (ms) | Accepted per step |
+|---|---|---|---|---|
+| defaults (`NCCL_P2P_DISABLE=1`) | fixed-1k-1k 0.125 req/s | 62.4 / 63.1 | 619 | 1 |
+| defaults | fixed-1k-1k 0.25 req/s | 75.1 / 77.3 | 945 | 1 |
+| EAGLE3, 3 draft tokens | fixed-1k-1k 0.125 req/s | 28.7 / 56.8 | 649 | 2.28 |
+| EAGLE3, 3 draft tokens | fixed-1k-1k 0.25 req/s | 38.5 / 47.1 | 999 | 2.28 |
+| EAGLE3, 3 draft tokens | shared-prefix 0.25 req/s | 30.8 / 35.4 | 1022 | 2.39 |
+| EAGLE3, 2 draft tokens | fixed-1k-1k 0.125 req/s | 33.4 / 55.1 | 645 | 2.15 |
+| EAGLE3, 2 draft tokens | fixed-1k-1k 0.25 req/s | 40.5 / 46.4 | 986 | 2.15 |
+| EAGLE3, 2 draft tokens | shared-prefix 0.25 req/s | 32.3 / 39.5 | 1030 | 2.15 |
+
+(Windows of 60-90 s, so 6-21 requests per row.) The spec runs EAGLE3 with 3 draft tokens.
+Limits:
+
+- **Content-dependent tail.** Per-request TPOT ranges from 26 to 47 ms, with a rare
+  outlier at 69 ms: a random-word continuation where few drafts are accepted, so it runs
+  at the ~60 ms floor plus the verify overhead. A few such requests set the p95.
+- **TTFT now binds** at 0.25 req/s: about 1 s for 1k-2k-token prompts, the prefill
+  compute plus queueing behind another arrival.
+- **Less KV room.** The draft costs KV-cache space: 41k cached tokens instead of 71k.
+  Raising `max_num_batched_tokens` to 8192 left too little KV for one 32k request, and
+  the engine refused to start.
+
+The draft is a second pinned checkpoint, so `engines.draft_weights` reads it from the
+rendered `--speculative-config` (vLLM) or `--speculative-draft-model-path` and
+`--speculative-draft-model-revision` (SGLang). Both providers download it next to the
+model, since the engine runs offline. A draft must be a Hugging Face repo pinned to a
+40-hex commit.
 

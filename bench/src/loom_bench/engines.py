@@ -242,6 +242,58 @@ ARG_RENDERERS: dict[str, Callable[[ModelSpec, list[str]], list[str]]] = {
 }
 
 
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+# vLLM speculative methods that need no draft checkpoint (n-gram/suffix lookups, MTP heads
+# inside the target model).
+_VLLM_DRAFTLESS = frozenset({"ngram", "[ngram]", "suffix", "mtp"})
+
+
+def _flag_value(args: list[str], flag: str) -> str | None:
+    at = [i for i, a in enumerate(args) if a == flag]
+    if len(at) > 1:
+        raise ValueError(f"{flag} is set more than once")
+    if not at:
+        return None
+    if at[0] + 1 >= len(args):
+        raise ValueError(f"{flag} has no value")
+    return args[at[0] + 1]
+
+
+def draft_weights(engine: str, args: list[str]) -> list[tuple[str, str]]:
+    """The speculative-decoding draft checkpoints a launch loads, as (repo, revision).
+
+    Hosts download them next to the target weights (the engine runs offline), so a
+    draft must be a Hugging Face repo pinned to a 40-hex commit. vLLM names it in
+    `--speculative-config {"model": ..., "revision": ...}`; SGLang in
+    `--speculative-draft-model-path` / `--speculative-draft-model-revision`.
+    """
+    if engine == "vllm":
+        raw = _flag_value(args, "--speculative-config")
+        if raw is None:
+            return []
+        cfg = json.loads(raw)
+        if not isinstance(cfg, dict):
+            raise ValueError("--speculative-config must be a JSON object")
+        method, repo = cfg.get("method"), cfg.get("model")
+        if repo is None or method in _VLLM_DRAFTLESS or repo in _VLLM_DRAFTLESS:
+            return []
+        revision = cfg.get("revision")
+    elif engine == "sglang":
+        repo = _flag_value(args, "--speculative-draft-model-path")
+        if repo is None:
+            return []
+        revision = _flag_value(args, "--speculative-draft-model-revision")
+    else:
+        return []
+    if not isinstance(repo, str) or repo.startswith(("/", ".")) or repo.count("/") != 1:
+        raise ValueError(f"speculative draft {repo!r} must be a Hugging Face repo id (owner/name)")
+    if not isinstance(revision, str) or not _COMMIT_RE.match(revision):
+        raise ValueError(
+            f"speculative draft {repo}: pin its revision to a 40-hex commit (got {revision!r})"
+        )
+    return [(repo, revision)]
+
+
 def render_launch(spec: ModelSpec) -> EngineLaunch:
     """Render the engine invocation for `spec`; an engine without a renderer is an error."""
     renderer = ARG_RENDERERS.get(spec.engine.name)
@@ -251,6 +303,7 @@ def render_launch(spec: ModelSpec) -> EngineLaunch:
             f"(known: {', '.join(sorted(ARG_RENDERERS))}); see docs/how-to/add-engine.md"
         )
     args = renderer(spec, render_args(spec.engine.name, spec.engine.args))
+    draft_weights(spec.engine.name, args)  # a draft must be a pinned HF repo
     return EngineLaunch(
         engine=spec.engine.name,
         image=spec.engine.image,

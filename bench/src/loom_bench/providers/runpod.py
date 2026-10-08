@@ -46,7 +46,7 @@ from typing import Annotated, Any
 import boto3  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
-from loom_bench.engines import engine_process_argv
+from loom_bench.engines import draft_weights, engine_process_argv
 from loom_bench.experiment import RUNPOD_GPU_TYPE_IDS, RunpodProviderSpec
 from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult, TokenizerSpec
 from loom_bench.money import Micros
@@ -595,6 +595,7 @@ class RunpodProvider:
             WARM=int(warm),
             MODEL_REPO=launch.model_repo,
             MODEL_REVISION=launch.model_revision,
+            EXTRA_WEIGHTS=[x for pair in draft_weights(launch.engine, launch.args) for x in pair],
             WEIGHTS_DIR=runpod_layout.WEIGHTS_DIR,
             PORT=launch.port,
             SERVED_MODEL=launch.served_model,

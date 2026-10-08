@@ -29,6 +29,7 @@ START_VARS: dict[str, Any] = {
     "IMAGE": "vllm/vllm-openai@sha256:" + "a" * 64,
     "MODEL_REPO": "Qwen/Qwen3-8B",
     "MODEL_REVISION": "b" * 40,
+    "EXTRA_WEIGHTS": [],
     "WEIGHTS_DIR": "/opt/dlami/nvme/loom-hf",
     "CONTAINER": "loom-engine",
     "PORT": 8000,

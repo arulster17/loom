@@ -147,6 +147,13 @@ async def test_the_shipped_70b_spec_renders_a_4x_l40s_tp4_pod(fake, s3, tmp_path
     assert argv[argv.index("--tool-call-parser") + 1] == "llama3_json"
     assert "--enable-auto-tool-choice" in argv
     assert argv[argv.index("--host") + 1] == "127.0.0.1"
+    # The EAGLE3 draft is declared in the config (hashed) and staged with the weights,
+    # since the engine runs offline.
+    spec = json.loads(argv[argv.index("--speculative-config") + 1])
+    assert spec["method"] == "eagle3" and spec["num_speculative_tokens"] == 3
+    draft = f"EXTRA_WEIGHTS=({spec['model']} {spec['revision']})"
+    script = provider(fake, s3, tmp_path, spec=exp.provider).engine_script(cell.launch, warm=False)
+    assert draft in script
 
 
 async def test_pod_body_is_secure_on_demand_with_safety_rails(fake, s3, tmp_path) -> None:

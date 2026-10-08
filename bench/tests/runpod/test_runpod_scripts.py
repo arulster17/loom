@@ -52,6 +52,7 @@ START_VARS: dict[str, Any] = {
     "WARM": 0,
     "MODEL_REPO": "Qwen/Qwen3-8B",
     "MODEL_REVISION": "b" * 40,
+    "EXTRA_WEIGHTS": [],
     "WEIGHTS_DIR": "/opt/loom/hf",
     "PORT": 8000,
     "SERVED_MODEL": "qwen3-8b",
@@ -597,6 +598,22 @@ def test_start_engine_downloads_with_the_images_python(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     assert read_env(w["logs"] / "download_env")["HF_TOKEN"] == TOKEN
     assert re.search(r"^loom-stage weights_ready ", proc.stdout, re.MULTILINE)
+
+
+def test_start_engine_downloads_a_speculative_draft_with_the_model(tmp_path: Path) -> None:
+    # The engine runs offline (HF_HUB_OFFLINE=1), so a draft named in
+    # --speculative-config must be in the cache before it starts: 2026-10-08's tuning
+    # pod failed with "Cannot reach .../model.safetensors: offline mode is enabled".
+    w = engine_env_world(tmp_path)
+    draft = ["RedHatAI/Llama-3.3-70B-Instruct-speculator.eagle3", "c" * 40]
+    values = {**w["values"], "EXTRA_WEIGHTS": draft}
+    try:
+        proc = run_bash(render_script("start_engine", template_dir=DIR, **values), env=w["env"])
+    finally:
+        kill_engine(w["pidfile"])
+    assert proc.returncode == 0, proc.stderr
+    args = (w["logs"] / "download_args").read_text().split()
+    assert args[-4:] == ["Qwen/Qwen3-8B", "b" * 40, *draft]
 
 
 def test_start_engine_fails_when_the_image_has_no_python(tmp_path: Path) -> None:
