@@ -1,6 +1,6 @@
 # Loom build plan
 
-Status: Phase 0 in progress. Later phases start only after the previous phase is approved.
+Status: Phase 0 leaderboards done (8B and 70B on RunPod); the FP8 70B row and strict tool calling are next. Phase 1 is approved (2026-10-08). Later phases start only after the previous phase is approved.
 
 ## Decisions so far
 
@@ -10,6 +10,10 @@ Status: Phase 0 in progress. Later phases start only after the previous phase is
 | Phase 0 GPU provider (2026-10-05) | RunPod Secure Cloud on-demand: Qwen3-8B on 1x L40S, Llama 3.3 70B on 4x L40S. The `runpod` provider is built (2026-10-06): one pod per engine image, driven over direct SSH, jobs as an unprivileged user, results through presigned S3 URLs ([runbook-runpod.md](runbook-runpod.md)). EC2 (`aws_ec2`) stays as the secondary path; a spot quota increase is pending with AWS. | The AWS GPU spot quota is 0. Secure Cloud over Community for steadier latency. AWS support is still needed later. |
 | Phase 0 region | AWS `us-east-1` | Deepest GPU capacity and spot pools; prices in `bench/prices.yaml`. |
 | License | Apache-2.0 | Permissive with patent grant; same as vLLM / SGLang. |
+| Quality standard for candidates (2026-10-08) | A candidate config (other precision, engine or serving technique) can ship if the quality gate passes it against the BF16 baseline, within each task's margin. Its precision always appears in the row name, and BF16 always stays the reference row. | Byte-identical output to BF16 is not the bar: BF16 itself is not identical from run to run (measured self-divergence and per-item eval noise, [quality-gate.md](quality-gate.md)). |
+| 70B on 4x L40S (2026-10-08) | BF16 stays the reference and headline row, with its measured 50 ms TPOT p95 miss. FP8 is tried as its own labeled row ("Llama 3.3 70B FP8"), gated against BF16, with a $15 cap. If the gate fails FP8, record the score cost and accept the miss. No per-model SLO. BF16 on H100/H200 is a possible later run. | The measured floors are the PCIe host's (no working P2P across sockets). FP8 halves the bytes per token on the same hardware. Moving the SLO would hide the result. |
+| Tool calling scores | The current task (plain tools, as most clients send them) stays the headline score. A strict-mode variant (`strict: true`, so vLLM constrains arguments to the schema) is added and reported next to it. | Llama 3.3 70B sends numbers as strings (0.450); both behaviours are useful to know, and the headline keeps measuring the default. |
+| Phase 1 (2026-10-08) | Approved; gateway and web app can start. The results site is not published yet (hold until the user says so). | |
 
 ## Stack
 
