@@ -119,15 +119,18 @@ tasks:
 #
 # hard_prompts: Llama 3's 128k byte-level vocabulary keeps " √" and common CJK whole (they
 # split under Qwen3) but splits " ∛", " ∑", " ∫", " ÷" and a word-initial " ß" or " ñ"
-# (checked with the real tokenizer, bench/tests/quality/test_divergence_llama.py). Before
-# any Llama capture existed, the real Qwen3 BF16 continuations of all 48 prompts split
-# nothing under Llama's tokenizer, so these are the prompts whose continuations reach for
-# such characters: 20 (a √2 proof: math symbols) and 40 (German that drifted into
-# Chinese). A limited suite always scores them; revisit with the first Llama capture.
+# (checked with the real tokenizer, bench/tests/quality/test_divergence_llama.py). In the
+# first real Llama capture (70B run cf4d1614) no echoed continuation token splits a
+# character, but the top-5 alternatives hold incomplete-UTF-8 fragments (vLLM renders them
+# "") at 3 positions of prompt 16 (a speed calculation; rank 2 at logprob -1.28) and 1 each
+# of prompts 2 and 40 - the per-token rendering a cross-engine comparison must align. These
+# are the hard prompts, most split positions first; the evidence is pinned in
+# bench/tests/quality/fixtures/divergence_llama33_splits.json. A limited suite always
+# scores them.
 divergence:
   top_k: 5
   max_new_tokens: 64
-  hard_prompts: [20, 40]
+  hard_prompts: [16, 2, 40]
   floor_concurrency: 1
   noise_multiple: 5.0
   max_kl: 0.05

@@ -1,0 +1,311 @@
+{
+ "source": "RunPod 70B run cf4d1614 (eval job 7a2daba7), vLLM v0.30.0 reference capture",
+ "model": "llama-3.3-70b-instruct",
+ "top_k": 5,
+ "max_new_tokens": 64,
+ "prompts": [
+  {
+   "index": 0,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 1,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 2,
+   "echoed_splits": 0,
+   "topk_split_positions": 1
+  },
+  {
+   "index": 3,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 4,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 5,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 6,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 7,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 8,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 9,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 10,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 11,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 12,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 13,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 14,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 15,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 16,
+   "echoed_splits": 0,
+   "topk_split_positions": 3
+  },
+  {
+   "index": 17,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 18,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 19,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 20,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 21,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 22,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 23,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 24,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 25,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 26,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 27,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 28,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 29,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 30,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 31,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 32,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 33,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 34,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 35,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 36,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 37,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 38,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 39,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 40,
+   "echoed_splits": 0,
+   "topk_split_positions": 1
+  },
+  {
+   "index": 41,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 42,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 43,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 44,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 45,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 46,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  },
+  {
+   "index": 47,
+   "echoed_splits": 0,
+   "topk_split_positions": 0
+  }
+ ],
+ "split_positions": {
+  "2": [
+   {
+    "position": 22,
+    "token": "/",
+    "top": {
+     "/": -0.0021805812139064074,
+     " teaspoon": -6.502180576324463,
+     " minced": -7.877180576324463,
+     "": -8.752181053161621,
+     " ": -10.752181053161621
+    }
+   }
+  ],
+  "16": [
+   {
+    "position": 5,
+    "token": " travelled",
+    "top": {
+     " travelled": -1.0296244621276855,
+     "": -1.2796244621276855,
+     " /": -1.7796244621276855,
+     " traveled": -2.1546244621276855,
+     "/": -2.9046244621276855
+    }
+   },
+   {
+    "position": 6,
+    "token": " /",
+    "top": {
+     " /": -0.41015711426734924,
+     "": -1.5351570844650269,
+     "/": -2.2851572036743164,
+     " Total": -4.785157203674316,
+     "\n": -5.535157203674316
+    }
+   },
+   {
+    "position": 15,
+    "token": " /",
+    "top": {
+     " /": -0.02046867273747921,
+     "/": -4.020468711853027,
+     "": -6.520468711853027,
+     " ": -8.270468711853027,
+     "\n": -8.395468711853027
+    }
+   }
+  ],
+  "40": [
+   {
+    "position": 28,
+    "token": "ßen",
+    "top": {
+     "ßen": -0.11327121406793594,
+     "ße": -2.2382712364196777,
+     "ß": -7.863271236419678,
+     "...\n": -11.92577075958252,
+     "": -12.05077075958252
+    }
+   }
+  ]
+ }
+}

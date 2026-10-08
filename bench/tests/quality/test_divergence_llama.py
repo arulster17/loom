@@ -1,12 +1,12 @@
 """Divergence on Llama 3.3's tokenizer: its hard prompts, byte splits and BOS.
 
 Llama 3's byte-level BPE (128k vocabulary) keeps the characters that split under Qwen3 (" √",
-CJK) whole, but splits others: " ∛", " ∑", " ∫", " ÷" and a word-initial " ß" or " ñ". No
-real Llama 3.3 continuation existed when this was written (the 70B run had not happened);
-under Llama's tokenizer the real Qwen3-8B BF16 continuations of b1b904dc split nothing.
-The suite therefore keeps prompts 20 (a √2 proof, whose continuation reaches for math
-symbols) and 40 (German that turned into Chinese) as its hard prompts, and these tests feed
-them continuations that do split.
+CJK) whole, but splits others: " ∛", " ∑", " ∫", " ÷" and a word-initial " ß" or " ñ". In
+the real Llama 3.3 70B capture (cf4d1614) no echoed token splits a character; only top-5
+alternatives do, at prompts 16, 2 and 40, which are the suite's hard prompts (pinned in
+fixtures/divergence_llama33_splits.json). The tokenizer tests below feed prompts 20 (a √2
+proof) and 40 (German) constructed continuations that do split in the echoed text, the
+case the real capture has not hit yet.
 
 vLLM v0.30.0 echoes a Llama prompt with its BOS: the first prompt token has no logprobs, so
 `_create_completion_logprobs` (vllm/entrypoints/openai/completion/serving.py) decodes it on
@@ -19,8 +19,10 @@ They need the gated tokenizer: run with `-m network` and HF_TOKEN set.
 
 from __future__ import annotations
 
+import json
 import os
 from functools import cache
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -39,10 +41,26 @@ CONTINUATIONS = {
 }
 
 
-def test_the_llama_suite_scores_its_hard_prompts_first_at_smoke_scale():
+SPLITS = Path(__file__).parent / "fixtures" / "divergence_llama33_splits.json"
+
+
+def test_the_llama_hard_prompts_are_where_the_real_capture_splits():
+    """The suite's hard prompts are exactly the pinned prompts whose real Llama 3.3 70B
+    reference (cf4d1614) holds incomplete-UTF-8 fragments, most split positions first."""
+    doc = json.loads(SPLITS.read_text(encoding="utf-8"))
+    counts = {
+        p["index"]: p["echoed_splits"] + p["topk_split_positions"]
+        for p in doc["prompts"]
+        if p["echoed_splits"] + p["topk_split_positions"]
+    }
+    expected = sorted(counts, key=lambda i: (-counts[i], i))
     div = load_suite("llama-3.3-70b-instruct").divergence
-    assert div is not None and div.hard_prompts == sorted(CONTINUATIONS)
-    assert div.limited(4).prompt_ids[:2] == [20, 40]
+    assert div is not None and div.hard_prompts == expected == [16, 2, 40]
+    assert div.limited(4).prompt_ids[:3] == [16, 2, 40]
+    # Every recorded fragment is a top-k alternative vLLM rendered "": none was echoed.
+    for positions in doc["split_positions"].values():
+        for pos in positions:
+            assert pos["token"] != "" and "" in pos["top"]
 
 
 @cache
