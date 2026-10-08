@@ -16,6 +16,7 @@ from typing import Annotated, Any, ClassVar
 
 import yaml
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
+from jsonschema.exceptions import best_match  # type: ignore[import-untyped]
 from pydantic import Field
 
 from loom_bench.quality.client import EvalRequestError
@@ -27,6 +28,7 @@ from loom_bench.quality.tasks.base import (
     ParamTask,
     TaskOutput,
     TaskParams,
+    clip,
     failed_item,
     item_hash,
     score_items,
@@ -69,6 +71,20 @@ def score_reply(text: str, schema: dict[str, Any]) -> tuple[float, str]:
     return 1.0, "valid"
 
 
+def failure_meta(text: str, schema: dict[str, Any], why: str) -> dict[str, Any]:
+    """What a failed item stores: its raw reply and, for a violation, the main reason.
+
+    The expectation is the item's pinned schema, found by item id in the data file.
+    """
+    meta: dict[str, Any] = {"output": clip(text)}
+    if why == "schema_violation":
+        error = best_match(Draft202012Validator(schema).iter_errors(json.loads(text)))
+        if error is not None:
+            where = "/".join(str(p) for p in error.absolute_path) or "(root)"
+            meta["violation"] = clip(f"{where}: {error.message}", 500)
+    return meta
+
+
 class JsonSchemaParams(TaskParams):
     limit: Annotated[int, Field(ge=1)] | None = None
     max_tokens: Annotated[int, Field(ge=1)] = 1024
@@ -104,10 +120,11 @@ class JsonSchemaTask(ParamTask[JsonSchemaParams]):
             except EvalRequestError as e:
                 return failed_item(item.item_id, content, e), None
             value, why = score_reply(res.text, item.schema)
+            meta: dict[str, Any] = {"result": why}
+            if value < 1.0:
+                meta |= failure_meta(res.text, item.schema, why)
             return (
-                ItemResult(
-                    item_id=item.item_id, score=value, content_hash=content, meta={"result": why}
-                ),
+                ItemResult(item_id=item.item_id, score=value, content_hash=content, meta=meta),
                 Completion(item.item_id, res.text, res.finish_reason, kind=OutputKind.JSON),
             )
 

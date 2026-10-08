@@ -300,7 +300,12 @@ the floor. `execute_eval_job` runs it in-process for the mock and local
 providers; `bench quality job --in job.json --out result.json` runs it on a GPU host. The
 `EvalJobResult` carries per-task ItemResults (scores and content hashes), task versions,
 per-task seconds, the sanity rates and the capture (with its self-divergence) or the
-divergence; model outputs stay where the job ran. Each config's `samples.json` keeps its
+divergence; model outputs stay where the job ran, except that the native tasks on
+self-authored data keep a capped copy (`clip`, 2000 characters per string) of each
+*failed* item's output in its `meta`: tool_calling the raw tool calls and text, the
+expected call and the parameter that failed; json_schema the raw reply and the main schema
+violation. A low score can then be explained from the samples (a quoted `"250"` for a
+number parameter shows as such) without re-running the model. Each config's `samples.json` keeps its
 divergence (with the config hash of the reference it was scored on) or its self-divergence,
 so `bench quality gate` re-decides with the same calibrated limits; a divergence scored on
 another baseline's reference is not reused.

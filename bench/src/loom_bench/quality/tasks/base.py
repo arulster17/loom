@@ -38,7 +38,12 @@ class OutputKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Completion:
-    """A model output kept in memory for sanity checks; never persisted or logged."""
+    """A model output kept in memory for sanity checks; never persisted or logged.
+
+    Native tasks on self-authored data keep a capped copy of a *failed* item's output
+    in `ItemResult.meta` (see `clip`), so a low score can be explained from the stored
+    samples; passing items and third-party datasets store only hashes.
+    """
 
     item_id: str
     text: str
@@ -165,6 +170,16 @@ def check_request_errors(task: str, items: Sequence[ItemResult]) -> None:
             f"{task}: all {n} requests failed (HTTP {first.get('status')}); "
             f"first: {first.get('error')}"
         )
+
+
+SAMPLE_CHARS = 2000  # cap on one stored output string of a failed item
+
+
+def clip(text: str, limit: int = SAMPLE_CHARS) -> str:
+    """`text` cut to `limit` characters, with a marker saying how much was dropped."""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}…[+{len(text) - limit} chars]"
 
 
 def failed_item(item_id: str, content_hash: str, error: EvalRequestError) -> ItemResult:

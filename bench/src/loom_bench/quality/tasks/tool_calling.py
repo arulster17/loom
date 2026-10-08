@@ -25,7 +25,15 @@ Value equality, by the parameter's JSON-schema type:
 - object: same keys, values equal per `properties`.
 
 Typed JSON is part of the contract: a string "5" for an integer parameter is
-wrong, as an engine that loses type fidelity would break real clients.
+wrong, as an engine that loses type fidelity would break real clients. This
+matches BFCL's AST checker for Python-style schemas (int accepted for a float,
+numeric strings rejected). vLLM's `llama3_json` parser re-serialises the model's
+own JSON, so a quoted number in the arguments is the model's output, not the
+parser's.
+
+A failed item stores its raw tool calls and text (capped) and the expected call
+in `meta`, plus the parameter that failed, so a low score can be explained from
+the samples without re-running the model.
 """
 
 from __future__ import annotations
@@ -49,6 +57,7 @@ from loom_bench.quality.tasks.base import (
     ParamTask,
     TaskOutput,
     TaskParams,
+    clip,
     failed_item,
     item_hash,
     score_items,
@@ -157,37 +166,76 @@ def values_equal(got: Any, want: Any, schema: dict[str, Any]) -> bool:
             raise ValueError(f"unsupported parameter type {kind!r}")
 
 
-def match_call(
-    calls: tuple[ToolCall, ...], item: ToolItem, function: dict[str, Any]
-) -> tuple[bool, str]:
-    """(matched, reason) for the model's tool calls against the item's expectation."""
+@dataclass(frozen=True, slots=True)
+class Match:
+    ok: bool
+    reason: str
+    argument: str | None = None  # the parameter a value or argument check failed on
+
+
+def check_call(calls: tuple[ToolCall, ...], item: ToolItem, function: dict[str, Any]) -> Match:
+    """The model's tool calls against the item's expectation, naming what failed."""
     if len(calls) != 1:
-        return False, f"expected 1 tool call, got {len(calls)}"
+        return Match(False, f"expected 1 tool call, got {len(calls)}")
     call = calls[0]
     if call.name != item.expected_name:
-        return False, "wrong_function"
+        return Match(False, "wrong_function")
     try:
         args = json.loads(call.arguments or "{}")
     except json.JSONDecodeError:
-        return False, "arguments_not_json"
+        return Match(False, "arguments_not_json")
     if not isinstance(args, dict):
-        return False, "arguments_not_object"
+        return Match(False, "arguments_not_object")
     params = function["parameters"]
     props, required = params["properties"], set(params.get("required", []))
-    if set(args) - set(props):
-        return False, "unexpected_argument"
-    if required - set(args):
-        return False, "missing_required_argument"
+    if extra := sorted(set(args) - set(props)):
+        return Match(False, "unexpected_argument", extra[0])
+    if missing := sorted(required - set(args)):
+        return Match(False, "missing_required_argument", missing[0])
     for name, accepted in item.expected_args.items():
         if name not in args:
             if None not in accepted:
-                return False, "missing_argument"
+                return Match(False, "missing_argument", name)
             continue
         if not any(
             values_equal(args[name], want, props[name]) for want in accepted if want is not None
         ):
-            return False, "wrong_value"
-    return True, "match"
+            return Match(False, "wrong_value", name)
+    return Match(True, "match")
+
+
+def match_call(
+    calls: tuple[ToolCall, ...], item: ToolItem, function: dict[str, Any]
+) -> tuple[bool, str]:
+    """(matched, reason) for the model's tool calls against the item's expectation."""
+    m = check_call(calls, item, function)
+    return m.ok, m.reason
+
+
+MAX_STORED_CALLS = 4
+
+
+def failure_meta(
+    match: Match, calls: tuple[ToolCall, ...], text: str | None, item: ToolItem
+) -> dict[str, Any]:
+    """What a failed item stores beyond its reason: the raw output and the expectation.
+
+    Raw arguments are kept as the server sent them (a string), so a type mismatch
+    such as `"250"` for an integer stays visible; each string is capped by `clip`.
+    """
+    meta: dict[str, Any] = {
+        "output": {
+            "tool_calls": [
+                {"name": c.name, "arguments": clip(c.arguments)} for c in calls[:MAX_STORED_CALLS]
+            ],
+            "n_tool_calls": len(calls),
+            "text": clip(text or ""),
+        },
+        "expected": {"name": item.expected_name, "arguments": item.expected_args},
+    }
+    if match.argument is not None:
+        meta["argument"] = match.argument
+    return meta
 
 
 class ToolCallingParams(TaskParams):
@@ -224,14 +272,17 @@ class ToolCallingTask(ParamTask[ToolCallingParams]):
                 )
             except EvalRequestError as e:
                 return failed_item(item.item_id, content, e), None
-            ok, why = match_call(res.tool_calls, item, data.functions[item.expected_name])
+            match = check_call(res.tool_calls, item, data.functions[item.expected_name])
             text = res.text or "".join(c.arguments for c in res.tool_calls)
+            meta: dict[str, Any] = {"result": match.reason, "category": item.category}
+            if not match.ok:
+                meta |= failure_meta(match, res.tool_calls, res.text, item)
             return (
                 ItemResult(
                     item_id=item.item_id,
-                    score=float(ok),
+                    score=float(match.ok),
                     content_hash=content,
-                    meta={"result": why, "category": item.category},
+                    meta=meta,
                 ),
                 Completion(item.item_id, text, res.finish_reason, kind=OutputKind.JSON),
             )

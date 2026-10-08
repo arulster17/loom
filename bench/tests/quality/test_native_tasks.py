@@ -5,10 +5,17 @@ import pytest
 
 from loom_bench.quality.client import EvalClient, ToolCall
 from loom_bench.quality.tasks import TASKS, build_task
-from loom_bench.quality.tasks.base import EvalContext
+from loom_bench.quality.tasks.base import SAMPLE_CHARS, EvalContext, clip
+from loom_bench.quality.tasks.json_schema import failure_meta as json_failure_meta
 from loom_bench.quality.tasks.json_schema import load_items, score_reply
 from loom_bench.quality.tasks.needle import NeedleParams, found, generate_items
-from loom_bench.quality.tasks.tool_calling import ToolItem, load_data, match_call, values_equal
+from loom_bench.quality.tasks.tool_calling import (
+    ToolItem,
+    check_call,
+    load_data,
+    match_call,
+    values_equal,
+)
 
 
 def fake_client(handler):
@@ -127,6 +134,23 @@ async def test_json_task_requests_schema_and_scores(tmp_path):
     assert seen[0]["type"] == "json_schema" and seen[0]["json_schema"]["strict"] is True
     assert out.provenance["dataset"]["license"] == "Apache-2.0"
     assert out.version == "1+data.2"
+    # A failed item keeps its raw reply so the score can be explained; a passing one does not.
+    assert "output" not in out.items[0].meta
+    assert out.items[1].meta == {"result": "invalid_json", "output": "not json"}
+
+
+def test_json_failure_meta_names_the_violation():
+    meta = json_failure_meta('{"n": -1}', SCHEMA, "schema_violation")
+    assert meta["output"] == '{"n": -1}'
+    assert meta["violation"].startswith("n: -1 is less than the minimum of 0")
+    assert json_failure_meta('{"n": 3', SCHEMA, "invalid_json") == {"output": '{"n": 3'}
+    assert "error" not in meta  # the request-error guard keys on `error`
+
+
+def test_clip_caps_stored_outputs():
+    assert clip("abc", 5) == "abc"
+    assert clip("a" * 12, 5) == "aaaaa…[+7 chars]"
+    assert len(clip("x" * 10_000)) < SAMPLE_CHARS + 20
 
 
 # ---------------------------------------------------------------- tool_calling
@@ -232,6 +256,49 @@ async def test_tool_task_sends_tools_and_scores(tmp_path):
     assert by_id[target.item_id].score == 1.0
     assert sum(r.score for r in out.items) == 1.0
     assert by_id["s-timer-2"].meta["result"] == "missing_required_argument"
+    assert by_id["s-timer-2"].meta["argument"] == "minutes"
+    assert "output" not in by_id[target.item_id].meta
+
+
+def test_check_call_names_the_failing_argument():
+    def check(args):
+        return check_call((ToolCall("calculate_tip", args),), TIP_ITEM, TIP)
+
+    assert check('{"bill_amount": "64.2", "tip_percent": 18}').argument == "bill_amount"
+    assert check('{"bill_amount": 64.2, "tip_percent": 18, "x": 1}').argument == "x"
+    assert check('{"bill_amount": 64.2}').argument == "tip_percent"
+    assert check('{"bill_amount": 64.2, "tip_percent": 18}').argument is None
+
+
+async def test_tool_task_stores_failed_output_and_expectation(tmp_path):
+    """A quoted number (the 70B run's suspected failure) is visible in the stored sample."""
+    data = load_data()
+    item = next(i for i in data.items if i.item_id == "s-currency-1")
+    raw = '{"amount": "250", "from_currency": "USD", "to_currency": "EUR"}'
+
+    def handler(request):
+        body = json.loads(request.content)
+        args = raw if body["messages"][0]["content"] == item.query else "{}"
+        call = {"id": "c", "type": "function", "function": {"name": item.expected_name,
+                "arguments": args}}  # fmt: skip
+        return reply(None, [call], "tool_calls")
+
+    async with fake_client(handler) as c:
+        out = await build_task("tool_calling", "tc", {"categories": ["simple"]}).run(
+            EvalContext(client=c, workdir=tmp_path)
+        )
+    meta = next(r for r in out.items if r.item_id == item.item_id).meta
+    assert meta["result"] == "wrong_value" and meta["argument"] == "amount"
+    assert meta["output"] == {
+        "tool_calls": [{"name": "convert_currency", "arguments": raw}],
+        "n_tool_calls": 1,
+        "text": "",
+    }
+    assert meta["expected"] == {
+        "name": "convert_currency",
+        "arguments": {"amount": [250], "from_currency": ["USD"], "to_currency": ["EUR"]},
+    }
+    assert "error" not in meta  # stored outputs never trip the request-error guard
 
 
 # ---------------------------------------------------------------- needle
