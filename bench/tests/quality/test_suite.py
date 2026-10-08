@@ -35,11 +35,35 @@ def test_pinned_native_tasks_can_decide_their_margin(name):
     suite = load_suite(name)
     policy = suite.policy()
     for t in suite.tasks:
-        if t.kind not in ("json_schema", "tool_calling"):
+        if t.kind not in ("json_schema", "tool_calling", "tool_calling_strict"):
             continue
         n = t.planned_items()
         assert n is not None and n >= policy.min_samples_for(t.name), t.name
         assert 3 / n < policy.threshold_for(t.name), t.name
+
+
+@pytest.mark.parametrize("name", SUITES)
+def test_strict_tool_calling_sits_beside_the_headline_task(name):
+    """tool_calling (plain tools) stays in every suite as the headline; its strict variant
+    runs the same items and is gated on the same margin and sample floor."""
+    suite = load_suite(name)
+    policy = suite.policy()
+    by_name = {t.name: t for t in suite.tasks}
+    plain, strict = by_name["tool_calling"], by_name["tool_calling_strict"]
+    assert (plain.kind, strict.kind) == ("tool_calling", "tool_calling_strict")
+    assert strict.planned_items() == plain.planned_items()
+    assert policy.threshold_for(strict.name) == policy.threshold_for(plain.name)
+    assert policy.min_samples_for(strict.name) == policy.min_samples_for(plain.name)
+    names = [t.name for t in suite.tasks]
+    assert names.index("tool_calling_strict") == names.index("tool_calling") + 1
+    for subset in suite.subsets.values():
+        if "tool_calling_strict" in subset:
+            assert "tool_calling" in subset  # never measured instead of the headline
+    small = suite.limited(2)
+    assert {t.name: t.params.get("limit") for t in small.tasks if "tool_calling" in t.name} == {
+        "tool_calling": 2,
+        "tool_calling_strict": 2,
+    }
 
 
 # lm-eval tasks whose modules import packages that only an lm-eval extra installs. GPU hosts

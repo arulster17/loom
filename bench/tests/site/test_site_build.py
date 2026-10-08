@@ -129,6 +129,14 @@ def test_populated_snapshot_renders_results(full_site, populated):
     assert "Price as run" in model and "observed at launch" in model
     assert "$/1M in at SLO" not in model  # all_output: input has no separate price
     assert "$0.0000" not in model
+    # The strict tool-calling variant (recorded first) is listed right after tool_calling,
+    # labelled as the variant.
+    plain = model.index("<tr><td>tool_calling<span")
+    strict = model.index("<tr><td>tool_calling_strict<span")
+    assert plain < strict and model[plain:strict].count("<tr>") == 1  # adjacent rows
+    assert "version strict.1+data.1" in model
+    assert "strict variant: tools sent with strict: true" in model
+    assert "tool_calling is the headline" in model
 
     methodology = _text(full_site, "methodology.html")
     assert "From the published results" in methodology
@@ -138,6 +146,9 @@ def test_populated_snapshot_renders_results(full_site, populated):
     assert "TTFT p95 ≤ 600 ms" in methodology
     assert "data/experiments/" in methodology
     assert "needs review" in methodology and "noise floor" in methodology
+    assert "<code>tool_calling_strict</code> sends each tool with <code>strict: true</code>" in (
+        methodology
+    )
 
 
 def test_provenance_files_are_published(full_site):

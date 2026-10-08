@@ -155,6 +155,20 @@ class TaskQuality(BaseModel):
     baseline_score: float | None
     delta: float | None  # score - baseline score on the same task
 
+    @property
+    def note(self) -> str | None:
+        """What sets a variant task apart, shown under its name in per-task tables."""
+        return TASK_NOTES.get(self.task)
+
+
+# Variant tasks: listed after the task they vary (names sort together) with this note.
+TASK_NOTES: dict[str, str] = {
+    "tool_calling_strict": (
+        "strict variant: tools sent with strict: true, arguments constrained to the "
+        "schema; tool_calling is the headline"
+    ),
+}
+
 
 GateStatus = Literal["pass", "review", "fail", "inconclusive", "baseline"]
 GATE_LABELS: dict[str, str] = {"review": "needs review"}

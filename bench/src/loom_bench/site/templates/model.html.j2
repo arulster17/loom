@@ -112,7 +112,7 @@
 <thead><tr><th scope="col">Task</th><th scope="col" class="num">n</th><th scope="col" class="num">Score</th><th scope="col" class="num">Baseline</th><th scope="col" class="num">Δ vs baseline</th></tr></thead>
 <tbody>
 {% for t in r.quality.tasks %}
-<tr><td>{{ t.task }}{% if t.task_version %}<span class="sub">version {{ t.task_version }}</span>{% endif %}</td><td class="num">{{ t.n|num }}</td><td class="num">{{ t.score|num(3) }}{% if t.ci_low is not none and t.ci_high is not none %}<span class="ci">{{ t.ci_low|num(3) }} – {{ t.ci_high|num(3) }}</span>{% endif %}</td><td class="num">{{ t.baseline_score|num(3) }}</td><td class="num">{{ '%+.3f'|format(t.delta) if t.delta is not none else 'n/a' }}</td></tr>
+<tr><td>{{ t.task }}{% if t.task_version %}<span class="sub">version {{ t.task_version }}</span>{% endif %}{% if t.note %}<span class="sub">{{ t.note }}</span>{% endif %}</td><td class="num">{{ t.n|num }}</td><td class="num">{{ t.score|num(3) }}{% if t.ci_low is not none and t.ci_high is not none %}<span class="ci">{{ t.ci_low|num(3) }} – {{ t.ci_high|num(3) }}</span>{% endif %}</td><td class="num">{{ t.baseline_score|num(3) }}</td><td class="num">{{ '%+.3f'|format(t.delta) if t.delta is not none else 'n/a' }}</td></tr>
 {% endfor %}
 </tbody>
 </table>

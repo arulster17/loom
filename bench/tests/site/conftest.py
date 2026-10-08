@@ -61,6 +61,23 @@ def populated(tmp_path_factory) -> Store:
                 ci_high=score + 0.02,
                 provenance={},
             )
+        # Tool calling both ways on the baseline: plain (the headline) and strict.
+        for task, version, score in (
+            ("tool_calling_strict", "strict.1+data.1", 0.95),
+            ("tool_calling", "1+data.1", 0.45),
+        ):
+            record_eval_run(
+                s,
+                experiment_id=exp.id,
+                config_hash=hashes["vllm-bf16"],
+                task=task,
+                task_version=version,
+                n=60,
+                score=score,
+                ci_low=None,
+                ci_high=None,
+                provenance={},
+            )
         for cell, decision, details in (
             ("sglang-bf16", "review", review_details()),
             ("vllm-awq", "fail", {}),
