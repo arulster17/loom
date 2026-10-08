@@ -151,6 +151,37 @@
           "message": "llama-3.3-70b-instruct: no measured cost at SLO"
         }
       ]
+    },
+    {
+      "model_id": "llama-3.3-70b-instruct-fp8",
+      "display_name": "Llama 3.3 70B FP8",
+      "workload": null,
+      "load_mode": null,
+      "best_config": null,
+      "best_config_hash": null,
+      "cost_input": null,
+      "cost_output": null,
+      "price": null,
+      "margin_input": null,
+      "margin_output": null,
+      "competitors": [],
+      "flags": [
+        {
+          "kind": "no_price_set",
+          "side": null,
+          "message": "llama-3.3-70b-instruct-fp8: no price set"
+        },
+        {
+          "kind": "no_cost_measurement",
+          "side": null,
+          "message": "llama-3.3-70b-instruct-fp8: no measured cost at SLO"
+        },
+        {
+          "kind": "no_public_comparison",
+          "side": null,
+          "message": "llama-3.3-70b-instruct-fp8: no eligible public list price"
+        }
+      ]
     }
   ],
   "not_offered": [
@@ -230,7 +261,7 @@
         "method": "arithmetic mean, Student-t interval (t)"
       }
     ],
-    "price_book_last_checked": "2026-10-05",
+    "price_book_last_checked": "2026-10-08",
     "configs": []
   }
 }

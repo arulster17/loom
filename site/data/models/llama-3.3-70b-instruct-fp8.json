@@ -1,17 +1,17 @@
 {
-  "model_id": "llama-3.3-70b-instruct",
-  "display_name": "Llama 3.3 70B Instruct",
-  "repo": "meta-llama/Llama-3.3-70B-Instruct",
+  "model_id": "llama-3.3-70b-instruct-fp8",
+  "display_name": "Llama 3.3 70B FP8",
+  "repo": "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic",
   "registry": {
-    "id": "llama-3.3-70b-instruct",
-    "display_name": "Llama 3.3 70B Instruct",
+    "id": "llama-3.3-70b-instruct-fp8",
+    "display_name": "Llama 3.3 70B FP8",
     "hf": {
-      "repo": "meta-llama/Llama-3.3-70B-Instruct",
-      "revision": "6f6073b423013f6a7d4d9f39144961bfbfbc386b",
+      "repo": "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic",
+      "revision": "f50dbad2c84590ca17dc51e207c34321b65ff14b",
       "license": "llama3.3",
-      "gated": "manual",
-      "size_bytes": 141107497872,
-      "quant_method": null,
+      "gated": false,
+      "size_bytes": 72669954704,
+      "quant_method": "compressed-tensors",
       "trust_remote_code": false,
       "trust_remote_code_review": null
     },
@@ -38,7 +38,7 @@
       "ep": 1
     },
     "max_context": 32768,
-    "quantization": "none",
+    "quantization": "fp8",
     "kv_cache_dtype": "auto",
     "pricing": null,
     "scaling": {

@@ -1,5 +1,5 @@
 {
-  "last_checked": "2026-10-05",
+  "last_checked": "2026-10-08",
   "clouds": {
     "aws": {
       "us-east-1": {
@@ -294,6 +294,77 @@
           }
         },
         "storage": null,
+        "data_transfer": null
+      }
+    },
+    "runpod": {
+      "secure": {
+        "instances": {
+          "l40s-x1": {
+            "sources": [
+              "https://www.runpod.io/pricing",
+              "https://docs.runpod.io/pods/pricing"
+            ],
+            "last_checked": "2026-10-06",
+            "verified": true,
+            "note": null,
+            "gpu": "L40S",
+            "gpu_count": 1,
+            "gpu_memory_gb": 48,
+            "vcpus": 16,
+            "memory_gib": 94,
+            "local_nvme_gb": 0,
+            "on_demand_per_hour": 1090000,
+            "spot_per_hour": null,
+            "committed_1y_per_hour": null
+          },
+          "l40s-x4": {
+            "sources": [
+              "https://www.runpod.io/pricing",
+              "https://docs.runpod.io/pods/pricing"
+            ],
+            "last_checked": "2026-10-06",
+            "verified": true,
+            "note": null,
+            "gpu": "L40S",
+            "gpu_count": 4,
+            "gpu_memory_gb": 48,
+            "vcpus": 64,
+            "memory_gib": 752,
+            "local_nvme_gb": 0,
+            "on_demand_per_hour": 4360000,
+            "spot_per_hour": null,
+            "committed_1y_per_hour": null
+          },
+          "h100-sxm-x2": {
+            "sources": [
+              "https://www.runpod.io/pricing",
+              "https://docs.runpod.io/pods/pricing"
+            ],
+            "last_checked": "2026-10-08",
+            "verified": true,
+            "note": null,
+            "gpu": "H100",
+            "gpu_count": 2,
+            "gpu_memory_gb": 80,
+            "vcpus": 56,
+            "memory_gib": 502,
+            "local_nvme_gb": 0,
+            "on_demand_per_hour": 7980000,
+            "spot_per_hour": null,
+            "committed_1y_per_hour": null
+          }
+        },
+        "storage": {
+          "sources": [
+            "https://docs.runpod.io/pods/pricing"
+          ],
+          "last_checked": "2026-10-06",
+          "verified": true,
+          "note": null,
+          "kind": "container-disk",
+          "per_gb_month": 100000
+        },
         "data_transfer": null
       }
     }
