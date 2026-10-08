@@ -103,7 +103,10 @@ Run through all of it before every real run.
   time the guard accrues the larger of that and the pod's API `costPerHr`. Expected
   today: `runpod-smoke` $1.35 estimate, $2.20 worst case, $2.25 cap (two pods);
   `qwen3-8b-vllm-vs-sglang-runpod` $7.92, $13.21, $15 (two pods, one per engine);
-  `llama-3.3-70b-tp4-runpod` $11.73, $17.58, $45. Exit 3 means refused: lower the load
+  `llama-3.3-70b-tp4-runpod` $11.73, $17.58, $45;
+  `llama-3.3-70b-fp8-tp4-runpod` $11.05, $14.24, $15 (plan it against the real results
+  DB: it loads BF16 run cf4d1614's stored samples and reference, and is refused without
+  them); `runpod-smoke-fp8` $0.93, $1.19, $1.25. Exit 3 means refused: lower the load
   points or `budget.ttl_minutes`, never the caps.
 
 ## 2. Running an experiment
@@ -298,6 +301,24 @@ config hashes with the real ones. The old smoke ran vLLM only with no eval, and 
 scored divergence on the first 4 prompts only, all ASCII continuations, so it passed while
 the second sweep (565b8d3f) then lost SGLang's eval to characters split across tokens on
 prompts 20 and 40; the smoke now scores those two.
+
+Before the 70B FP8 run, `runpod-smoke-fp8.yaml` (one 1x L40S pod, about $0.93) runs its
+FP8 path: RedHatAI's FP8-dynamic compressed-tensors checkpoint of Qwen3-8B (made the same
+way as the 70B's) loaded by the same vLLM image with no `--quantization` flag, a warm
+restart onto it from the BF16 checkpoint, its eval job scoring divergence on the BF16
+reference, and its gate, under the 70B FP8 run's load shapes and quality subset
+(`phase0-strict`, so `tool_calling_strict` runs on both). Check
+both cells' `engine_started` events, `quality` events for both, a `gate` event for
+`vllm-fp8` with a measured divergence, and no `quality_failed` or `divergence_failed`.
+What it cannot run (TP=4, the stored-baseline gate) is covered by the BF16 70B runs and
+offline tests (`bench/tests/runner/test_stored_baseline.py`, `test_fp8_70b.py`).
+
+The 2x H100 SXM option (`llama-3.3-70b-h100-tp2-runpod.yaml`, BF16 baseline and FP8 on one
+pod, TP=2) is a draft that is **not approved**. If it is approved, run its smoke
+`runpod-smoke-h100.yaml` first (also a draft, about $6.78): it adds the H100 SXM GPU type,
+sm_90 FP8 GEMMs, TP=2 with NCCL P2P over NVLink (`NCCL_P2P_LEVEL=NVL`) and
+`gpu_memory_utilization: 0.95`. Check its `engine_started.system.gpu_topology` shows
+`NV*` links between the two GPUs. H100 SXM Secure 2x was "Low" stock on 2026-10-08.
 
 Dependency bugs are caught for free before that: `uv run pytest -m network` (CI job
 `pod-client-env`) rebuilds the pods' client environment from `uv.lock` and runs every task

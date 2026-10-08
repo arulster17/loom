@@ -49,13 +49,19 @@ REV = "6f6073b423013f6a7d4d9f39144961bfbfbc386b"
 WORDS = ("hello", "world", "model", "cache", "token")
 
 
-def snapshot(root: Path, repo: str = REPO, revision: str = REV) -> Path:
-    """A Hugging Face cache snapshot holding a tiny word-level tokenizer.json."""
+def snapshot(
+    root: Path, repo: str = REPO, revision: str = REV, *, truncate_at: int | None = None
+) -> Path:
+    """A Hugging Face cache snapshot holding a tiny word-level tokenizer.json, saved with a
+    truncation setting when `truncate_at` is given."""
     path = root / hf_cache_folder(repo) / "snapshots" / revision
     path.mkdir(parents=True)
     vocab = {"[UNK]": 0, **{w: i + 1 for i, w in enumerate(WORDS)}}
     tok = _Tok(models.WordLevel(vocab, unk_token="[UNK]"))
     tok.pre_tokenizer = pre_tokenizers.Whitespace()
+    if truncate_at is not None:
+        tok.enable_truncation(max_length=truncate_at)
+        tok.enable_padding(length=truncate_at)
     tok.save(str(path / "tokenizer.json"))
     return path
 
@@ -74,6 +80,22 @@ def test_hf_tokenizer_loads_a_local_snapshot_without_the_hub(tmp_path, no_hub):
     assert tok.count("hello world model") == 3
     assert tok.truncate("hello world model", 2) == "hello world"
     assert tok.count(tok.random_text(7, random.Random(1))) == 7
+
+
+def test_hf_tokenizer_ignores_a_saved_truncation_setting(tmp_path, no_hub):
+    # RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic (f50dbad2) ships tokenizer.json with
+    # `truncation: {max_length: 2048}` left from its calibration. Counting through it would
+    # cap at 2048, so random_text would keep appending to long prompts. transformers, the
+    # engines' tokenizer, drops the setting; so must the load generator.
+    local = snapshot(tmp_path, truncate_at=4)
+    saved = _Tok.from_file(str(local / "tokenizer.json"))
+    assert len(saved.encode("hello world model cache token hello").ids) == 4  # as saved
+    tok = HFTokenizer(REPO, REV, local_dir=str(local))
+    assert tok.count("hello world model cache token hello") == 6
+    assert tok.count("hello") == 1  # no padding either
+    assert tok.truncate("hello world model cache token hello", 5) == "hello world model cache token"
+    text = tok.random_text(9, random.Random(2))
+    assert tok.count(text) == 9
 
 
 @pytest.mark.parametrize(("repo", "revision"), [(REPO, "0" * 40), ("Qwen/Qwen3-8B", REV)])

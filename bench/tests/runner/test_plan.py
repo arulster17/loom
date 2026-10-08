@@ -36,11 +36,14 @@ from loom_bench.store.models import BenchExperiment
 
 from .conftest import (
     LLAMA,
+    LLAMA_H100_RUNPOD,
     LLAMA_RUNPOD,
     QWEN,
     QWEN_QUALITY_RUNPOD,
     QWEN_RUNPOD,
     RUNPOD_SMOKE,
+    RUNPOD_SMOKE_FP8,
+    RUNPOD_SMOKE_H100,
     SMOKE,
     mock_doc,
     mock_experiment,
@@ -229,7 +232,19 @@ def test_runpod_specs_match_their_aws_counterparts_apart_from_the_provider():
 
 
 @pytest.mark.parametrize(
-    "path", [QWEN, LLAMA, SMOKE, QWEN_RUNPOD, LLAMA_RUNPOD, RUNPOD_SMOKE], ids=lambda p: p.stem
+    "path",
+    [
+        QWEN,
+        LLAMA,
+        SMOKE,
+        QWEN_RUNPOD,
+        LLAMA_RUNPOD,
+        RUNPOD_SMOKE,
+        RUNPOD_SMOKE_FP8,
+        LLAMA_H100_RUNPOD,
+        RUNPOD_SMOKE_H100,
+    ],
+    ids=lambda p: p.stem,
 )
 def test_bench_plan_cli_accepts_shipped_experiments(path, db):
     result = CliRunner().invoke(app, ["plan", str(path), "--db", db])

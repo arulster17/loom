@@ -8,7 +8,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -391,12 +391,34 @@ def gate_against_baseline(
     *,
     self_divergence: DivergenceResult | None = None,
     divergence_error: str | None = None,
+    only_shared_tasks: bool = False,
 ) -> GateDecision:
     """Gate decision for `candidate` vs `baseline`; both must come from the same suite.
     `self_divergence` is the baseline's noise floor (`ReferenceLogprobs.self_divergence`);
-    `divergence_error` says why a divergence that should have been measured was not."""
+    `divergence_error` says why a divergence that should have been measured was not.
+
+    Both sides must have run the same tasks, unless `only_shared_tasks`: then the tasks
+    both ran are gated and the others are listed in `GateDecision.ungated` (a baseline
+    evaluated in an earlier experiment, before a task was added). Sanity rates still
+    cover every candidate output."""
     if baseline.suite != candidate.suite:
         raise ValueError(f"suites differ: {baseline.suite} vs {candidate.suite}")
+    ungated: dict[str, str] = {}
+    if only_shared_tasks:
+        shared = baseline.tasks.keys() & candidate.tasks.keys()
+        if not shared:
+            raise ValueError(
+                f"no task in common: baseline {sorted(baseline.tasks)}, "
+                f"candidate {sorted(candidate.tasks)}"
+            )
+        ungated = {
+            **{name: "the baseline did not run it" for name in candidate.tasks.keys() - shared},
+            **{name: "the candidate did not run it" for name in baseline.tasks.keys() - shared},
+        }
+        baseline = replace(baseline, tasks={k: v for k, v in baseline.tasks.items() if k in shared})
+        candidate = replace(
+            candidate, tasks={k: v for k, v in candidate.tasks.items() if k in shared}
+        )
     # A task's version covers its pinned data (e.g. json_schema "1+data.2"): results from
     # different versions measure different item sets and never pair.
     for name in baseline.tasks.keys() & candidate.tasks.keys():
@@ -416,6 +438,7 @@ def gate_against_baseline(
         divergence_error=divergence_error,
         baseline_replicates=baseline.replicates,
         candidate_replicates=candidate.replicates,
+        ungated=ungated,
     )
 
 

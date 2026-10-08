@@ -6,7 +6,9 @@ bisected on the SLO) x repetitions -> LoadJob -> provider.run_job -> Parquet +
 summary + provenance -> EvalJob -> provider.run_eval (the baseline variant
 captures the divergence reference; every other cell is scored against it and
 gated against the baseline) -> teardown (always) -> completed, or failed when every
-load run failed (`judge_runs`).
+load run failed (`judge_runs`). With `quality.baseline` the baseline is a config
+evaluated in an earlier experiment (`load_stored_baseline`): every cell is a candidate,
+scored on that config's stored reference and gated against its stored samples.
 
 A failed eval job does not end the experiment: it is recorded (event, experiment
 reason, exit 8), the other engines still run, and a gate missing either side is
@@ -53,6 +55,7 @@ from loom_bench.experiment import (
     Cell,
     Experiment,
     LoadSpec,
+    StoredBaseline,
     WorkloadEntry,
     derive_seed,
     expand,
@@ -111,7 +114,8 @@ from loom_bench.quality.runner import (
     suite_result_of,
 )
 from loom_bench.quality.sanity import SanityResult
-from loom_bench.quality.suite import Suite
+from loom_bench.quality.suite import Suite, SuiteTask
+from loom_bench.quality.tasks import build_task
 from loom_bench.quality.tasks.base import ItemResult
 from loom_bench.records import LoadMode, Market
 from loom_bench.registry import REPO_ROOT, ModelSpec, Registry, read_yaml
@@ -193,11 +197,15 @@ class GoodputRow(BaseModel):
 
 @dataclass
 class _Baseline:
-    cell: Cell
+    key: str  # the baseline cell's key; "<experiment[:8]>/<hash[:12]>" for a stored one
+    config_hash: str
     result: SuiteResult
     # None when the suite has no divergence section, or its capture failed (`why`)
     reference: ReferenceLogprobs | None
     divergence_error: str | None = None
+    # From an earlier experiment (`quality.baseline`): the gate pairs the tasks both
+    # sides ran and lists the others as not gated.
+    stored: bool = False
 
 
 class GateRow(BaseModel):
@@ -228,11 +236,113 @@ def _now() -> datetime:
 def plan_experiment(
     exp: Experiment, ctx: RunnerContext, *, exclude: uuid.UUID | None = None
 ) -> tuple[list[Cell], Plan]:
+    """Cells and plan. A stored quality baseline that cannot be loaded, or that cannot
+    pair with this experiment's suite, is a refusal: found before anything is paid for."""
     cells = expand(exp, ctx.registry)
     with session_scope(ctx.db_url) as s:
         prior = billable_spend(s, exclude=exclude)
     caps = caps_for(exp.budget.max_spend, ctx.budget, prior)
-    return cells, build_plan(exp, cells, prices=ctx.prices, caps=caps)
+    plan = build_plan(exp, cells, prices=ctx.prices, caps=caps)
+    quality = exp.quality
+    if quality is not None and quality.baseline is not None:
+        suite = quality.load()
+        try:
+            base = load_stored_baseline(ctx.db_url, quality.baseline, suite, quality.subset)
+        except (LookupError, ValueError, OSError) as e:
+            plan.refusals.append(f"quality.baseline: {e}")
+        else:
+            planned = {t.name for t in suite.select(quality.subset)}
+            shared = sorted(planned & base.result.tasks.keys())
+            note = f"quality gated against stored baseline {base.key} on {', '.join(shared)}"
+            ungated = sorted(planned - base.result.tasks.keys())
+            if ungated:
+                note += f"; not gated (the baseline never ran them): {', '.join(ungated)}"
+            plan.notes.append(note)
+    return cells, plan
+
+
+def load_stored_baseline(
+    db_url: str | None, stored: StoredBaseline, suite: Suite, subset: str | None
+) -> _Baseline:
+    """The baseline config `stored` as its own experiment evaluated it: per-item samples,
+    divergence reference and noise floor, checked against `suite` before anything runs.
+
+    Raises LookupError when the experiment has no eval of that config (or its files are
+    gone), ValueError when it cannot pair with `suite`: another suite, a failed
+    divergence capture, a reference of another config or shape, no task in common with
+    `subset`, or a native task whose version changed since (rerun the baseline).
+    """
+    with session_scope(db_url) as s:
+        rows = list(
+            s.scalars(
+                select(BenchEvalRun)
+                .where(
+                    BenchEvalRun.experiment_id == stored.experiment,
+                    BenchEvalRun.config_hash == stored.config_hash,
+                )
+                .order_by(BenchEvalRun.created_at.desc())
+            )
+        )
+    label = f"{str(stored.experiment)[:8]}/{stored.config_hash[:12]}"
+    if not rows:
+        raise LookupError(
+            f"experiment {stored.experiment} has no eval runs of config {stored.config_hash}"
+        )
+    uri = rows[0].samples_uri
+    if uri is None:
+        raise LookupError(f"the eval runs of {label} have no per-item samples")
+    _, result = read_samples(uri)
+    if result.suite != suite.suite:
+        raise ValueError(f"{label} ran suite {result.suite}, this experiment runs {suite.suite}")
+    divs = read_sample_divergences(uri)
+    if divs.error is not None:
+        raise ValueError(f"{label}'s divergence capture failed ({divs.error}): rerun it")
+    reference = None
+    if suite.divergence is not None:
+        path = Path(uri).parent / "reference.json"
+        if not path.is_file():
+            raise LookupError(f"{label} has no divergence reference at {path}")
+        reference = ReferenceLogprobs.model_validate_json(path.read_text())
+        if reference.config_hash != stored.config_hash:
+            raise ValueError(f"{path} was captured on config {reference.config_hash}")
+        div = suite.divergence
+        if (reference.top_k, reference.max_new_tokens) != (div.top_k, div.max_new_tokens):
+            raise ValueError(
+                f"{label}'s reference has top_k {reference.top_k} and {reference.max_new_tokens}"
+                f" tokens; the suite asks for {div.top_k} and {div.max_new_tokens}"
+            )
+    tasks: list[SuiteTask] = suite.select(subset)
+    if not {t.name for t in tasks} & result.tasks.keys():
+        raise ValueError(
+            f"{label} ran {sorted(result.tasks)}, none of the tasks this experiment runs"
+        )
+    # What can be checked before running; item ids, content hashes and data versions
+    # are checked again by the gate.
+    for t in tasks:
+        ran = result.tasks.get(t.name)
+        if ran is None:
+            continue
+        planned = t.planned_items()
+        if planned is not None and planned != len(ran.items):
+            raise ValueError(
+                f"{t.name}: {label} scored {len(ran.items)} items, this run plans {planned}; "
+                "they would not pair"
+            )
+        if t.kind == "lm_eval":  # lm-eval versions are known at run time
+            continue
+        version = build_task(t.kind, t.name, t.params).version
+        if ran.version.split("+", 1)[0] != version:
+            raise ValueError(
+                f"{t.name}: {label} ran version {ran.version}, this suite runs {version}; "
+                "rerun the baseline"
+            )
+    return _Baseline(
+        key=label,
+        config_hash=stored.config_hash,
+        result=result,
+        reference=reference,
+        stored=True,
+    )
 
 
 def _host_request(exp: Experiment, cell: Cell, experiment_id: uuid.UUID) -> HostRequest:
@@ -283,6 +393,7 @@ class _Executor:
         plan: Plan,
         workloads: Sequence[tuple[WorkloadEntry, WorkloadProfile]],
         repetitions: Sequence[int],
+        stored_baseline: _Baseline | None = None,
     ) -> None:
         self.exp = exp
         self.ctx = ctx
@@ -304,6 +415,7 @@ class _Executor:
         self.events: list[dict[str, Any]] = []
         self.suite = exp.quality.load() if exp.quality is not None else None
         self.baselines: dict[str, _Baseline] = {}
+        self.stored_baseline = stored_baseline  # gates every cell when set
         self.failed_baselines: dict[str, tuple[Cell, str]] = {}  # knobs -> (cell, why)
         self.eval_statuses: Counter[str] = Counter()
         self.divergence_failures = 0  # evals whose scores stand but whose divergence failed
@@ -371,7 +483,21 @@ class _Executor:
 
     # --- cells -----------------------------------------------------------------
 
+    def _baseline_for(self, cell: Cell) -> _Baseline | None:
+        if self.stored_baseline is not None:
+            return self.stored_baseline
+        return self.baselines.get(canonical_json(cell.knobs))
+
     async def run(self, cells: Sequence[Cell]) -> None:
+        if self.stored_baseline is not None:
+            stored = self.stored_baseline
+            self.event(
+                "stored_baseline",
+                baseline=stored.key,
+                config_hash=stored.config_hash,
+                tasks=sorted(stored.result.tasks),
+                reference=stored.reference is not None,
+            )
         if self.exp.quality is not None:  # baselines are evaluated before their candidates
             base = self.exp.quality.baseline_variant
             cells = sorted(cells, key=lambda c: c.variant != base)
@@ -466,9 +592,7 @@ class _Executor:
         if suite.divergence is not None and with_divergence:
             if cell.variant == quality.baseline_variant:
                 divergence = "capture_and_floor"
-            elif (
-                base := self.baselines.get(canonical_json(cell.knobs))
-            ) is not None and base.reference is not None:
+            elif (base := self._baseline_for(cell)) is not None and base.reference is not None:
                 divergence, reference = "score", base.reference
             # no baseline results or reference (its eval or capture failed): nothing to
             # score divergence against
@@ -508,27 +632,33 @@ class _Executor:
             if cell.variant == quality.baseline_variant:
                 self.failed_baselines[canonical_json(cell.knobs)] = (cell, reason)
             else:
-                base = self.baselines.get(canonical_json(cell.knobs))
+                base = self._baseline_for(cell)
                 self._record_inconclusive(
-                    cell, base.cell if base else None, f"candidate eval failed: {reason}"
+                    cell,
+                    (base.key, base.config_hash) if base else None,
+                    f"candidate eval failed: {reason}",
                 )
             return
         self.eval_statuses[RUN_COMPLETED] += 1
 
-    def _record_inconclusive(self, cell: Cell, baseline: Cell | None, reason: str) -> None:
-        """A gate with a side missing: inconclusive and blocked, never a pass."""
+    def _record_inconclusive(
+        self, cell: Cell, baseline: tuple[str, str] | None, reason: str
+    ) -> None:
+        """A gate with a side missing: inconclusive and blocked, never a pass.
+        `baseline` is (key, config hash) when the baseline is known."""
+        key, base_hash = baseline or ("", "")
         with session_scope(self.ctx.db_url) as s:
             repo.record_gate_decision(
                 s,
                 experiment_id=self.experiment_id,
-                baseline_config_hash=baseline.config_hash if baseline else "",
+                baseline_config_hash=base_hash,
                 candidate_config_hash=cell.config_hash,
                 decision="inconclusive",
                 details={"decision": "inconclusive", "blocked": True, "reasons": [reason]},
             )
         row = GateRow(
             cell=cell.key,
-            baseline=baseline.key if baseline else "",
+            baseline=key,
             decision="inconclusive",
             blocked=True,
         )
@@ -615,17 +745,20 @@ class _Executor:
                     self_divergence=None if floor is None else floor.model_dump(mode="json"),
                 )
             self.baselines[canonical_json(cell.knobs)] = _Baseline(
-                cell, result, reference, out.divergence_error
+                cell.key, cell.config_hash, result, reference, out.divergence_error
             )
             return
-        key = canonical_json(cell.knobs)
-        base = self.baselines.get(key)
+        base = self._baseline_for(cell)
         if base is None:
-            failed = self.failed_baselines.get(key)
+            failed = self.failed_baselines.get(canonical_json(cell.knobs))
             if failed is None:
                 self._record_inconclusive(cell, None, "its baseline cell has no quality results")
             else:
-                self._record_inconclusive(cell, failed[0], f"baseline eval failed: {failed[1]}")
+                self._record_inconclusive(
+                    cell,
+                    (failed[0].key, failed[0].config_hash),
+                    f"baseline eval failed: {failed[1]}",
+                )
             return
         decision = gate_against_baseline(
             base.result,
@@ -634,18 +767,19 @@ class _Executor:
             out.divergence,
             self_divergence=base.reference.self_divergence if base.reference else None,
             divergence_error=_missing_divergence(suite, base, out.divergence_error),
+            only_shared_tasks=base.stored,
         )
         with session_scope(self.ctx.db_url) as s:
             record_gate(
                 s,
                 experiment_id=self.experiment_id,
-                baseline_config_hash=base.cell.config_hash,
+                baseline_config_hash=base.config_hash,
                 candidate_config_hash=cell.config_hash,
                 decision=decision,
             )
         row = GateRow(
             cell=cell.key,
-            baseline=base.cell.key,
+            baseline=base.key,
             decision=decision.decision.value,
             blocked=decision.blocked,
         )
@@ -1072,6 +1206,11 @@ async def run_experiment(exp: Experiment, ctx: RunnerContext) -> Outcome:
         )
         raise PlanRefused(plan, experiment_id)
     workloads = [(w, w.resolve()) for w in exp.workloads]
+    stored = None
+    if exp.quality is not None and exp.quality.baseline is not None:  # the plan checked it
+        stored = load_stored_baseline(
+            ctx.db_url, exp.quality.baseline, exp.quality.load(), exp.quality.subset
+        )
     return await _execute(
         exp,
         ctx,
@@ -1081,6 +1220,7 @@ async def run_experiment(exp: Experiment, ctx: RunnerContext) -> Outcome:
         plan=plan,
         workloads=workloads,
         repetitions=range(exp.repetitions),
+        stored_baseline=stored,
     )
 
 
@@ -1094,6 +1234,7 @@ async def _execute(
     plan: Plan,
     workloads: Sequence[tuple[WorkloadEntry, WorkloadProfile]],
     repetitions: Sequence[int],
+    stored_baseline: _Baseline | None = None,
 ) -> Outcome:
     run_dir = ctx.out_dir / str(experiment_id)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1123,6 +1264,7 @@ async def _execute(
         plan=plan,
         workloads=workloads,
         repetitions=repetitions,
+        stored_baseline=stored_baseline,
     )
     status, reason, code = ExperimentStatus.COMPLETED, None, EXIT_OK
     interrupted: BaseException | None = None
@@ -1329,6 +1471,9 @@ def gate_stored(
         divergence,
         self_divergence=base_div.self_divergence,
         divergence_error=error,
+        # Across experiments the two sides may have run different task lists (a task
+        # added since): the shared ones are gated, the rest listed as not gated.
+        only_shared_tasks=base.experiment_id != cand.experiment_id,
     )
     with session_scope(db_url) as s:
         record_gate(

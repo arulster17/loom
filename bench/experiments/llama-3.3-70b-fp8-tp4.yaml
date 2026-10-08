@@ -1,0 +1,52 @@
+# Llama 3.3 70B FP8 (`llama-3.3-70b-instruct-fp8`, RedHatAI's FP8-dynamic compressed-
+# tensors checkpoint, ~73 GB) with TP=4 on one g6e.12xlarge spot host (4x L40S, PCIe),
+# vLLM v0.30.0 at defaults, gated against the BF16 baseline. AWS path (secondary): the
+# account's GPU spot quota is 0, so the real run is on RunPod Secure Cloud:
+# llama-3.3-70b-fp8-tp4-runpod.yaml explains the row, the checkpoint and the gate.
+name: llama-3.3-70b-fp8-tp4
+description: Llama 3.3 70B FP8, TP=4 on g6e.12xlarge spot, vLLM v0.30.0, rate sweeps at SLO, gated against BF16.
+model: llama-3.3-70b-instruct-fp8
+provider:
+  kind: aws_ec2
+  region: us-east-1
+  instance_type: g6e.12xlarge
+  market: spot
+  disk_gb: 250
+variants:
+  # As in the RunPod twin: FP8 at defaults, no speculation.
+  - name: vllm-tp4-fp8
+workloads:
+  - profile: fixed-1k-1k
+    load:
+      mode: open_loop
+      search: {lo: 0.25, hi: 2, rel_tol: 0.15, max_points: 4, scale: geometric, descend: 2}
+      duration_s: 180
+      warmup_s: 30
+      drain_timeout_s: 90
+  - profile: shared-prefix
+    load:
+      mode: open_loop
+      search: {lo: 0.5, hi: 4, rel_tol: 0.15, max_points: 4, scale: geometric, descend: 2}
+      duration_s: 120
+      warmup_s: 20
+      drain_timeout_s: 30
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+# Quality: as in the RunPod twin, gated against the stored BF16 baseline cf4d1614 (a
+# RunPod 4x L40S pod: same GPUs, image and suite), with tool_calling_strict reported but
+# not gated (cf4d1614 never ran it).
+quality:
+  suite: llama-3.3-70b-instruct
+  subset: phase0-strict
+  baseline:
+    experiment: cf4d1614-2453-4ad4-b345-afd6b769a52d
+    config_hash: eff0371d25425c61e0881abfee51e36348b9d4066895604cda30481e84c22d36
+# The $15 hard cap is for the RunPod run; this secondary path is priced at AWS spot.
+budget:
+  max_spend: "$45"
+  ttl_minutes: 195
+  accrual_interval_s: 15
+seed: 0

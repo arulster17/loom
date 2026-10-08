@@ -107,6 +107,13 @@ class HFTokenizer:
 
             path = hf_hub_download(repo, "tokenizer.json", revision=revision, token=token)
         self._tok = _Tok.from_file(path)
+        # Counting must see every token. A tokenizer.json can carry a truncation (or
+        # padding) setting left over from whoever saved it: RedHatAI's Llama 3.3 FP8
+        # checkpoint keeps `truncation: {max_length: 2048}` from its calibration, which
+        # would cap every count at 2048 and grow long prompts without bound. transformers
+        # (the engines' tokenizer) drops both unless asked, so drop them here too.
+        self._tok.no_truncation()
+        self._tok.no_padding()
         self.name = f"{repo}@{revision}"
         vocab = self._tok.get_vocab()
         # Ordinary word-like tokens only; avoids special/control tokens in random prompts.

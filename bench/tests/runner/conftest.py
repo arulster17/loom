@@ -17,6 +17,12 @@ LLAMA = EXPERIMENTS_DIR / "llama-3.3-70b-tp4.yaml"
 QWEN_RUNPOD = EXPERIMENTS_DIR / "qwen3-8b-vllm-vs-sglang-runpod.yaml"
 LLAMA_RUNPOD = EXPERIMENTS_DIR / "llama-3.3-70b-tp4-runpod.yaml"
 RUNPOD_SMOKE = EXPERIMENTS_DIR / "runpod-smoke.yaml"
+LLAMA_FP8 = EXPERIMENTS_DIR / "llama-3.3-70b-fp8-tp4.yaml"
+LLAMA_FP8_RUNPOD = EXPERIMENTS_DIR / "llama-3.3-70b-fp8-tp4-runpod.yaml"
+RUNPOD_SMOKE_FP8 = EXPERIMENTS_DIR / "runpod-smoke-fp8.yaml"
+# Drafts, not approved: the 2x H100 SXM option and its smoke.
+LLAMA_H100_RUNPOD = EXPERIMENTS_DIR / "llama-3.3-70b-h100-tp2-runpod.yaml"
+RUNPOD_SMOKE_H100 = EXPERIMENTS_DIR / "runpod-smoke-h100.yaml"
 QWEN_QUALITY_RUNPOD = EXPERIMENTS_DIR / "qwen3-8b-quality-runpod.yaml"
 
 

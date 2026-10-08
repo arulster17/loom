@@ -181,5 +181,10 @@ sanity_limits:
 # checks always run. Not measured in Phase 0, so their CIs are unbounded until a full-suite
 # run: mmlu_pro (~26 min per config), ruler_niah (~26 min), needle (~17 min) and code (~11
 # min; it also needs allow_code_exec).
+#
+# phase0-strict adds tool_calling_strict (60 items, ~1 min) to phase0. Its items pair with
+# a phase0 run's on the four shared tasks, so a run of it gates against a phase0 baseline
+# on those, and reports the strict task as not gated until a baseline has run it too.
 subsets:
   phase0: [gsm8k, ifeval, tool_calling, json_schema]
+  phase0-strict: [gsm8k, ifeval, tool_calling, tool_calling_strict, json_schema]

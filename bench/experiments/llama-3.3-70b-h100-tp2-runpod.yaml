@@ -1,0 +1,90 @@
+# NOT APPROVED - DRAFT. Do not run this spec. The approved 70B hardware is 4x L40S
+# (llama-3.3-70b-fp8-tp4-runpod.yaml, $15 cap). 2x H100 SXM with TP=2 is the original
+# brief's other option, drafted here so it can be quoted; it needs an explicit approval of
+# hardware and budget first (docs/PLAN.md).
+#
+# Llama 3.3 70B on one RunPod Secure Cloud 2x H100 SXM pod (on-demand, $7.98/h on
+# 2026-10-08, stock "Low"), TP=2, vLLM v0.30.0: the BF16 reference and its FP8 row, both
+# served on the same pod (one cold start, then a warm restart onto the FP8 checkpoint).
+# Why this hardware: on the 4x L40S pods the GPUs sit on both CPU sockets with peer-to-peer
+# off, and one BF16 decode step reads a 35 GB shard per GPU at 864 GB/s, so TPOT p95 never
+# met 50 ms (cf4d1614, 55102ddb). On H100 SXM a step reads 70 GB (BF16) or 35 GB (FP8) per
+# GPU at ~3.35 TB/s (~21 ms / ~11 ms) and the TP all-reduce runs over NVLink.
+#
+# Quality: this run carries its own BF16 baseline (vllm-tp2): it captures the divergence
+# reference and noise floor on this hardware, and the FP8 cell is gated against it in-run,
+# on every phase0-strict task (tool_calling_strict included), divergence and sanity. A
+# BF16 run on other hardware (cf4d1614, L40S) is not used: a same-host baseline isolates
+# precision from the GPU and its kernels.
+#
+# Same workload profiles, durations, repetitions, SLO and quality subset as the 4x L40S
+# FP8 run. The search ranges are wider: H100 is expected to sustain more than the L40S
+# ranges' top (2 and 4 req/s), and a sweep whose every point passes only bounds the
+# answer from below.
+name: llama-3.3-70b-h100-tp2-runpod
+description: "DRAFT, not approved: Llama 3.3 70B BF16 and FP8, TP=2 on RunPod Secure 2x H100 SXM, vLLM v0.30.0, FP8 gated against BF16 in-run."
+model: llama-3.3-70b-instruct
+provider:
+  kind: runpod
+  instance_type: h100-sxm-x2
+  # "NVIDIA H100 80GB HBM3" is RunPod's H100 SXM; "H100" alone also names PCIe and NVL.
+  gpu_type_id: NVIDIA H100 80GB HBM3
+  # Both checkpoints share the pod's disk: 141 GB BF16 + 73 GB FP8 + engine headroom.
+  container_disk_gb: 260
+  # SXM GPUs are NVLinked: keep NCCL peer-to-peer, but only over NVLink. If a pod's two
+  # GPUs ever lacked NVLink, NCCL falls back to shared memory instead of P2P over PCIe
+  # across sockets (the L40S hang, docs/runbook-runpod.md).
+  engine_env: {NCCL_P2P_LEVEL: NVL}
+variants:
+  # BF16 reference. gpu_memory_utilization 0.95 (default 0.90): at TP=2 each GPU holds
+  # ~65.7 GiB of BF16 weights; at 0.90 of 79.6 GiB that leaves ~6 GiB, and after
+  # activations, CUDA graphs and NCCL buffers ~3-4 GiB of KV cache (~160 KiB per token per
+  # GPU), under the 32768 tokens one max-length request needs, so vLLM would refuse to
+  # start. 0.95 leaves ~7-8 GiB (~45-50k tokens, ~20-25 concurrent 1k+1k requests).
+  - name: vllm-tp2
+    hardware: {gpu: H100, gpus_per_replica: 2}
+    parallelism: {tp: 2}
+    engine:
+      args: {gpu_memory_utilization: 0.95}
+  # The FP8 row (llama-3.3-70b-instruct-fp8): the same patches, so the gate measures
+  # precision alone. FP8 weights (~34 GiB per GPU) leave ~38 GiB of KV cache per GPU.
+  # CompressedTensorsW8A8Fp8 runs CUTLASS FP8 GEMMs on sm_90 as on sm_89.
+  - name: vllm-tp2-fp8
+    model: llama-3.3-70b-instruct-fp8
+    hardware: {gpu: H100, gpus_per_replica: 2}
+    parallelism: {tp: 2}
+    engine:
+      args: {gpu_memory_utilization: 0.95}
+workloads:
+  - profile: fixed-1k-1k
+    load:
+      mode: open_loop
+      search: {lo: 0.5, hi: 4, rel_tol: 0.15, max_points: 4, scale: geometric, descend: 2}
+      duration_s: 180
+      warmup_s: 30
+      drain_timeout_s: 90
+  - profile: shared-prefix
+    load:
+      mode: open_loop
+      search: {lo: 1, hi: 8, rel_tol: 0.15, max_points: 4, scale: geometric, descend: 2}
+      duration_s: 120
+      warmup_s: 20
+      drain_timeout_s: 30
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+quality:
+  suite: llama-3.3-70b-instruct
+  subset: phase0-strict
+  baseline_variant: vllm-tp2
+# A quote, not an approval: `bench plan` puts the pod at the estimate in docs/benchmark-
+# lab.md; the TTL holds it with margin and max_spend holds the worst case to TTL. H100 SXM
+# Secure stock was "Low" on 2026-10-08: check it and run with
+# LOOM_RUNPOD_CAPACITY_WAIT_S=7200.
+budget:
+  max_spend: "$45"
+  ttl_minutes: 330
+  accrual_interval_s: 15
+seed: 0

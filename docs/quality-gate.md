@@ -379,6 +379,18 @@ with the config hash and full provenance, and passes the reference in every cand
 eval job, which scores against it when that engine is up later. Prompts, top-k and the continuation length travel with the
 reference, so a candidate is always scored on exactly what the reference saw.
 
+**A baseline from an earlier experiment.** A candidate can be gated against a config that
+another experiment already evaluated (`quality.baseline: {experiment, config_hash}`,
+docs/benchmark-lab.md): its stored `samples.json`, `reference.json` and noise floor take the
+baseline cell's place, so a 141 GB BF16 model is not served again to gate its FP8 row. The
+candidate's eval job scores divergence on the stored reference (the prompts, top-k and
+continuation length travel with it), and `bench plan` refuses a stored baseline that cannot
+pair. When the two sides ran different task lists (a task added since the baseline ran),
+the gate pairs the tasks both ran and lists the others in `GateDecision.ungated` with a
+reason line "`<task>: not gated: the baseline did not run it`"; their scores are still
+recorded. Sanity rates cover every candidate output, ungated tasks included. Within one
+experiment both sides run the same tasks and a mismatch is still an error.
+
 ## Sanity checks
 
 `quality/sanity.py`, no heavy dependencies:

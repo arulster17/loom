@@ -12,6 +12,7 @@ import hashlib
 import itertools
 import math
 import random
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
@@ -180,6 +181,11 @@ class Variant(_Strict):
     """Named overrides of the registry entry; the patched spec is re-validated."""
 
     name: Slug
+    # Another registry entry to patch instead of the experiment's `model`: another
+    # checkpoint of the same model (e.g. its FP8 row) served next to it, so a BF16
+    # baseline and its FP8 candidate share one host. Its cells are that entry's own
+    # config (id, display name, checkpoint), and the quality suite must cover it.
+    model: str | None = None
     engine: EnginePatch | None = None
     hf: HFPatch | None = None
     hardware: HardwarePatch | None = None
@@ -339,14 +345,31 @@ class CostAllocationSpec(_Strict):
         return self
 
 
+ConfigHash = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+
+
+class StoredBaseline(_Strict):
+    """A baseline config already evaluated in an earlier experiment: its stored per-item
+    samples, divergence reference and noise floor (`results/<experiment>/evals/<hash>/`)
+    stand in for a baseline cell, so a candidate is gated against them without paying to
+    serve the baseline again (`runner.load_stored_baseline`)."""
+
+    experiment: uuid.UUID
+    config_hash: ConfigHash
+
+
 class QualitySpec(_Strict):
     """Pinned eval suite run on every cell; non-baseline cells are gated against the
     baseline variant's cell with the same sweep point (policy from the suite). The
-    baseline cell also captures the divergence reference each candidate is scored on."""
+    baseline cell also captures the divergence reference each candidate is scored on.
+
+    With `baseline` instead of `baseline_variant`, every cell is a candidate, gated
+    against that stored config and scored on its stored divergence reference."""
 
     suite: str  # `bench/evals/<name>.yaml` by name, or a suite YAML path from the repo root
     subset: Slug | None = None  # a named subset of the suite's tasks; None runs them all
-    baseline_variant: Slug
+    baseline_variant: Slug | None = None
+    baseline: StoredBaseline | None = None
     allow_code_exec: bool = False  # code_exec tasks run model output in the sandbox
     # Smoke experiments only: cap every task near this many items (`Suite.limited`).
     limit: PositiveInt | None = None
@@ -354,6 +377,12 @@ class QualitySpec(_Strict):
     # (`pool_replicates`) so engine nondeterminism averages out of the gate. The
     # divergence half runs on the first pass only.
     replicates: Annotated[int, Field(ge=1, le=10)] = 1
+
+    @model_validator(mode="after")
+    def _one_baseline(self) -> Self:
+        if (self.baseline_variant is None) == (self.baseline is None):
+            raise ValueError("quality needs exactly one of baseline_variant or baseline")
+        return self
 
     def load(self) -> Suite:
         suite = load_quality_suite(self.suite)
@@ -421,8 +450,17 @@ class Experiment(_Strict):
             raise ValueError(f"unknown loadgen {self.loadgen!r}; known {sorted(LOAD_GENERATORS)}")
         if any(w.load.search is not None for w in self.workloads) and self.slo is None:
             raise ValueError("load.search needs an slo to search against")
-        if self.quality is not None and self.quality.baseline_variant not in names:
+        if (
+            self.quality is not None
+            and self.quality.baseline_variant is not None
+            and self.quality.baseline_variant not in names
+        ):
             raise ValueError(f"quality.baseline_variant {self.quality.baseline_variant!r} unknown")
+        if self.quality is not None and self.quality.baseline is not None and self.smoke:
+            raise ValueError(
+                "a smoke caps its eval items (quality.limit), which never pair with a stored "
+                "full-size baseline: use baseline_variant"
+            )
         if self.quality is not None and self.quality.limit is not None and not self.smoke:
             raise ValueError("quality.limit is for smoke experiments only (set smoke: true)")
         is_mock = self.provider.kind == "mock"
@@ -530,7 +568,7 @@ def apply_variant(base: ModelSpec, variant: Variant) -> dict[str, Any]:
     args; an arg set to null is removed; the registry's max_context is a cap.
     """
     doc = base.model_dump(mode="json")
-    patch = variant.model_dump(exclude_none=True, exclude={"name", "mock"})
+    patch = variant.model_dump(exclude_none=True, exclude={"name", "model", "mock"})
     engine = patch.pop("engine", {})
     args = (variant.engine.args if variant.engine else None) or {}
     if "name" in engine and engine["name"] != base.engine.name:
@@ -743,12 +781,12 @@ def build_cell(
 
 def expand(exp: Experiment, registry: Registry) -> list[Cell]:
     """Cells in a deterministic order: variants as declared, then sweep grid order."""
-    try:
-        base = registry.get(exp.model)
-    except KeyError as e:
-        raise ExpansionError(str(e)) from None
     cells: list[Cell] = []
     for variant in exp.variants:
+        try:
+            base = registry.get(variant.model or exp.model)
+        except KeyError as e:
+            raise ExpansionError(str(e)) from None
         patched = apply_variant(base, variant)
         for knobs in sweep_points(exp):
             model_doc, mock_over = patched, dict(variant.mock)
@@ -789,8 +827,13 @@ def expand(exp: Experiment, registry: Registry) -> list[Cell]:
             suite = exp.quality.load()
         except (FileNotFoundError, ValidationError) as e:
             raise ExpansionError(f"quality suite {exp.quality.suite}: {e}") from None
-        if suite.model != exp.model:
-            raise ExpansionError(f"quality suite {suite.suite} is pinned for {suite.model}")
+        # Every cell's registry entry: a variant may serve another checkpoint (`model`).
+        for model_id in dict.fromkeys([exp.model, *(c.spec.id for c in cells)]):
+            if not suite.covers(model_id):
+                pinned = [suite.model, *suite.also_models]
+                raise ExpansionError(
+                    f"quality suite {suite.suite} is pinned for {pinned}, not {model_id}"
+                )
         try:
             selected = suite.select(exp.quality.subset)
         except ValueError as e:

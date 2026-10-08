@@ -74,6 +74,9 @@ variants:                           # named overrides of the registry entry
   - name: vllm
   - name: sglang
     engine: {name: sglang, version: "0.5.21", image: lmsysorg/sglang@sha256:...}
+  # - name: vllm-fp8
+  #   model: <another registry id>    # patch that entry instead (e.g. the model's FP8 row);
+  #                                   # the quality suite must cover it (also_models)
 sweep:                              # optional: cartesian product, applied to every variant
   engine.args.max_num_seqs: [128, 256]
   kv_cache_dtype: [auto, fp8]
@@ -102,6 +105,8 @@ slo: {ttft_ms: {p95: 1000}, tpot_ms: {p95: 50}, max_error_rate: 0.01}
 cost_allocation: {method: all_output}   # all_input | weighted + output_input_ratio
 budget: {max_spend: "$40", ttl_minutes: 480, accrual_interval_s: 15}
 quality: {suite: qwen3-8b, subset: phase0, baseline_variant: vllm}   # optional
+# or gate every cell against a config evaluated in an earlier experiment:
+# quality: {suite: ..., subset: ..., baseline: {experiment: <uuid>, config_hash: <64 hex>}}
 loadgen: native                     # key in LOAD_GENERATORS; aws_ec2 and runpod take native only
 seed: 0
 ```
@@ -313,6 +318,23 @@ instead of scoring zeros. A failed divergence (capture or scoring) keeps the job
 scores: a `divergence_failed` event, a gate whose divergence check is `inconclusive` with
 the error as reason, and exit 8 ("divergence failed in N of M quality evals").
 
+**Stored baseline.** `quality.baseline: {experiment, config_hash}` (instead of
+`baseline_variant`) gates every cell against a config an earlier experiment evaluated,
+without serving it again: the Llama 3.3 70B FP8 row is gated against BF16 run cf4d1614.
+`runner.load_stored_baseline` reads that config's `samples.json` and `reference.json`
+(through its `bench_eval_runs` rows) and `bench plan` refuses the experiment if they are
+missing, come from another suite, have a failed capture, a reference of another config or
+shape, no task in common, a different item count, or a native task of another version
+(lm-eval versions are only known at run time; the gate checks them, and item ids and
+content hashes, again). Every cell's eval job then scores divergence on the stored
+reference (`score`), and the gate uses the stored noise floor. Tasks only one side ran (one
+added since the baseline, like `tool_calling_strict`) are reported with their scores and
+listed as "not gated" in the decision (`GateDecision.ungated`); the shared tasks,
+divergence and sanity decide. `bench quality gate` does the same for two configs from
+different experiments. A smoke cannot use a stored baseline (its capped items never pair
+with a full run). A suite gates other checkpoints of its model listed in `also_models`
+(the FP8 registry row runs the BF16 suite).
+
 A quality-only experiment (`workloads: []`, with a `quality` section) runs no load: each
 engine's cold start, then only its eval job, the divergence reference and scoring, and the
 gate. It finishes a gate whose load sweep is already recorded: same model, provider,
@@ -340,6 +362,10 @@ The real runs are on RunPod Secure Cloud on-demand, since the AWS GPU spot quota
 | `qwen3-8b-vllm-vs-sglang-runpod` | 2x RunPod 1x L40S (one pod per engine), 3.6 h each of a 6 h TTL | $7.92 | $13.21 | $15 |
 | `llama-3.3-70b-tp4-runpod` | 1x RunPod 4x L40S, 2.7 h of a 3.5 h TTL | $11.88 | $15.38 | $20 |
 | `runpod-smoke` | 2x RunPod 1x L40S (the Qwen sweep at smoke scale), 37 min each of a 60 min TTL | $1.35 | $2.20 | $2.25 |
+| `llama-3.3-70b-fp8-tp4-runpod` | 1x RunPod 4x L40S, Llama 3.3 70B FP8 at defaults, gated against BF16 run cf4d1614 (phase0-strict: tool_calling_strict reported, not gated); 2.5 h of a 3.25 h TTL (planner; cf4d1614 took 81 min) | $11.05 | $14.24 | $15 |
+| `runpod-smoke-fp8` | 1x RunPod 1x L40S, the FP8 run's FP8 path at smoke scale (Qwen3-8B BF16 vs RedHatAI FP8-dynamic), 51 min of a 65 min TTL | $0.93 | $1.19 | $1.25 |
+| `llama-3.3-70b-h100-tp2-runpod` (**draft, not approved**) | 1x RunPod 2x H100 SXM ($7.98/h), BF16 baseline + FP8 at TP=2 on one pod, FP8 gated in-run; 5.1 h of a 5.5 h TTL (planner) | $40.53 | $44.09 | $45 |
+| `runpod-smoke-h100` (**draft, not approved**) | 1x RunPod 2x H100 SXM, the H100 run's paths at smoke scale (Qwen3-8B BF16 vs FP8, TP=2, NVLink P2P), 51 min of a 65 min TTL | $6.78 | $8.66 | $9 |
 | `qwen3-8b-quality-runpod` | 2x RunPod 1x L40S, evals and gate only, 3 eval passes per engine (finishes 565b8d3f's gate), 105 min each of a 135 min TTL (planned; ~35 min at b1b904dc's measured pass time) | $3.85 | $4.95 | $5.00 |
 
 The AWS specs stay as the secondary path:
@@ -348,6 +374,7 @@ The AWS specs stay as the secondary path:
 |---|---|---|---|---|
 | `qwen3-8b-vllm-vs-sglang` | 1x g6e.xlarge spot, 7.1 h of an 8 h TTL | $16.56 | $18.56 | $40 |
 | `llama-3.3-70b-tp4` | 1x g6e.12xlarge spot, 2.7 h of a 3.5 h TTL | $28.04 | $35.86 | $45 |
+| `llama-3.3-70b-fp8-tp4` | 1x g6e.12xlarge spot, 2.6 h of a 3.25 h TTL | $26.48 | $33.25 | $45 |
 
 Rates are searched geometrically, with ranges sized for one L40S from the first RunPod
 sweep (058128e9): Qwen3-8B fixed-1k-1k passed 1.22 req/s and failed 1.94; shared-prefix

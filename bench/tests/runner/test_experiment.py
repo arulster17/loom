@@ -17,12 +17,38 @@ from loom_bench.records import Market
 from loom_bench.registry import Registry, load_registry, read_yaml
 from loom_bench.runner import _host_request, next_search_load
 
-from .conftest import ABORT, LLAMA, QWEN, SMOKE, mock_doc, mock_experiment
+from .conftest import (
+    ABORT,
+    LLAMA,
+    LLAMA_FP8,
+    LLAMA_FP8_RUNPOD,
+    LLAMA_H100_RUNPOD,
+    QWEN,
+    RUNPOD_SMOKE_FP8,
+    RUNPOD_SMOKE_H100,
+    SMOKE,
+    mock_doc,
+    mock_experiment,
+)
 
 REGISTRY = load_registry()
 
 
-@pytest.mark.parametrize("path", [SMOKE, ABORT, QWEN, LLAMA], ids=lambda p: p.stem)
+@pytest.mark.parametrize(
+    "path",
+    [
+        SMOKE,
+        ABORT,
+        QWEN,
+        LLAMA,
+        LLAMA_FP8,
+        LLAMA_FP8_RUNPOD,
+        RUNPOD_SMOKE_FP8,
+        LLAMA_H100_RUNPOD,
+        RUNPOD_SMOKE_H100,
+    ],
+    ids=lambda p: p.stem,
+)
 def test_shipped_experiments_validate_and_expand(path):
     exp = load_experiment(path)
     cells = expand(exp, REGISTRY)

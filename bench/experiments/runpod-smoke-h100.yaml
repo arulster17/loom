@@ -1,0 +1,74 @@
+# NOT APPROVED - DRAFT, like the run it smokes (llama-3.3-70b-h100-tp2-runpod.yaml). Do
+# not run it until that run is approved; then run it first.
+#
+# The H100 run's paths at smoke scale on one RunPod Secure 2x H100 SXM pod ($7.98/h on
+# 2026-10-08): Qwen3-8B BF16 (baseline, captures the divergence reference) and RedHatAI's
+# FP8-dynamic Qwen3-8B (made like the 70B FP8 checkpoint) at TP=2. What it runs that
+# runpod-smoke-fp8 (1x L40S) does not: the H100 SXM GPU type id and price entry, sm_90
+# FP8 GEMMs, TP=2 with NCCL peer-to-peer over NVLink (NCCL_P2P_LEVEL=NVL; the L40S runs
+# disable P2P) and vLLM's custom all-reduce, which it enables on 2 NVLinked GPUs, and
+# gpu_memory_utilization 0.95. Same load shapes, repetitions, SLO and quality subset as
+# the H100 run, with an in-run BF16 baseline as there. The 70B weights (141 GB + 73 GB)
+# and the BF16 KV-cache margin at 0.95 are what it cannot run.
+name: runpod-smoke-h100
+description: "DRAFT, not approved: the 70B H100 run's paths at smoke scale on 2x H100 SXM (Qwen3-8B BF16 vs FP8-dynamic, TP=2)."
+model: qwen3-8b
+smoke: true
+provider:
+  kind: runpod
+  instance_type: h100-sxm-x2
+  gpu_type_id: NVIDIA H100 80GB HBM3
+  container_disk_gb: 80
+  engine_env: {NCCL_P2P_LEVEL: NVL}
+variants:
+  - name: vllm-tp2
+    hardware: {gpu: H100, gpus_per_replica: 2}
+    parallelism: {tp: 2}
+    engine:
+      args: {gpu_memory_utilization: 0.95}
+  # The checkpoint pinned in runpod-smoke-fp8.yaml.
+  - name: vllm-tp2-fp8
+    hf:
+      repo: RedHatAI/Qwen3-8B-FP8-dynamic
+      revision: 05233ce1e0565b5fdc9cfa000ab840152ed30c70
+      license: apache-2.0
+      gated: false
+      size_bytes: 9438581960
+      quant_method: compressed-tensors
+    quantization: fp8
+    hardware: {gpu: H100, gpus_per_replica: 2}
+    parallelism: {tp: 2}
+    engine:
+      args: {gpu_memory_utilization: 0.95}
+workloads:
+  - profile: fixed-1k-1k
+    overrides: {output_len: 128}
+    load:
+      mode: open_loop
+      search: {lo: 0.5, hi: 1, rel_tol: 0.1, max_points: 2, scale: geometric, descend: 1}
+      duration_s: 10
+      warmup_s: 2
+      drain_timeout_s: 15
+  - profile: shared-prefix
+    overrides: {output_len: 32}
+    load:
+      mode: open_loop
+      search: {lo: 1, hi: 2, rel_tol: 0.1, max_points: 2, scale: geometric, descend: 1}
+      duration_s: 10
+      warmup_s: 2
+      drain_timeout_s: 15
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+quality:
+  suite: qwen3-8b
+  subset: phase0-strict
+  baseline_variant: vllm-tp2
+  limit: 4
+budget:
+  max_spend: "$9"
+  ttl_minutes: 65
+  accrual_interval_s: 15
+seed: 0

@@ -186,6 +186,9 @@ class GateDecision(_Strict):
     method: str = GATE_METHOD
     baseline_replicates: int = 1
     candidate_replicates: int = 1
+    # Tasks only one side ran, with why, when the gate pairs the shared tasks only (a
+    # baseline from an earlier experiment that predates a task): reported, not gated.
+    ungated: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
@@ -196,10 +199,14 @@ class GateDecision(_Strict):
 
     @property
     def reasons(self) -> list[str]:
-        return [f"{t.task}: {t.reason}" for t in self.tasks] + [
-            f"divergence: {self.divergence.reason}",
-            f"sanity: {self.sanity.reason}",
-        ]
+        return (
+            [f"{t.task}: {t.reason}" for t in self.tasks]
+            + [f"{task}: not gated: {why}" for task, why in sorted(self.ungated.items())]
+            + [
+                f"divergence: {self.divergence.reason}",
+                f"sanity: {self.sanity.reason}",
+            ]
+        )
 
     def details(self) -> dict[str, Any]:
         """JSON document for `record_gate_decision(details=...)`."""
@@ -439,6 +446,7 @@ def evaluate_gate(
     divergence_error: str | None = None,
     baseline_replicates: int = 1,
     candidate_replicates: int = 1,
+    ungated: Mapping[str, str] | None = None,
 ) -> GateDecision:
     """Decide whether `candidate` may replace `baseline`; see the module docstring.
 
@@ -472,4 +480,5 @@ def evaluate_gate(
         policy=policy,
         baseline_replicates=baseline_replicates,
         candidate_replicates=candidate_replicates,
+        ungated=dict(ungated or {}),
     )

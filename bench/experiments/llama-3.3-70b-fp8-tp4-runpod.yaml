@@ -1,0 +1,76 @@
+# Llama 3.3 70B FP8 (`llama-3.3-70b-instruct-fp8`: RedHatAI's FP8-dynamic compressed-
+# tensors checkpoint, ~73 GB) with TP=4 on one RunPod Secure Cloud 4x L40S pod
+# (on-demand), vLLM v0.30.0 at defaults: its own labeled row next to the BF16 reference
+# (docs/PLAN.md, "70B on 4x L40S"). Why FP8: at BF16 one decode step reads a 35 GB weight
+# shard per GPU (>= 41 ms at 864 GB/s), so no load met the 50 ms TPOT p95 SLO
+# (cf4d1614, 55102ddb). FP8 halves the bytes per token on the same hardware.
+#
+# Everything but the checkpoint matches the BF16 run cf4d1614 (llama-3.3-70b-tp4-runpod at
+# defaults): image, TP, max context, engine env, workloads, search ranges, repetitions and
+# the SLO, which is never changed for this row. Same as the AWS twin
+# (llama-3.3-70b-fp8-tp4.yaml) apart from the provider.
+name: llama-3.3-70b-fp8-tp4-runpod
+description: Llama 3.3 70B FP8, TP=4 on RunPod Secure 4x L40S, vLLM v0.30.0, rate sweeps at SLO, gated against BF16.
+model: llama-3.3-70b-instruct-fp8
+provider:
+  kind: runpod
+  # ~73 GB of weights plus engine headroom (RUNPOD_DISK_HEADROOM_GB).
+  container_disk_gb: 150
+  # As for BF16: 4x L40S pods can span both CPU sockets, where NCCL P2P hangs at init
+  # (874110b6); only NCCL_P2P_DISABLE=1 works on these hosts (docs/runbook-runpod.md).
+  engine_env: {NCCL_P2P_DISABLE: "1"}
+variants:
+  # FP8 weights, FP8 activations (dynamic per token), BF16 KV cache, no speculation. vLLM
+  # reads the compressed-tensors format from config.json: no --quantization flag.
+  # Not added here: FP8 + EAGLE3 (the BF16 run's draft works on an FP8 target in v0.30.0,
+  # which loads the draft with its own BF16 config). A second cell would double the pod
+  # time past the $15 cap; run it as a follow-up if FP8 passes the gate and still misses
+  # the TPOT SLO.
+  - name: vllm-tp4-fp8
+workloads:
+  - profile: fixed-1k-1k
+    load:
+      mode: open_loop
+      search: {lo: 0.25, hi: 2, rel_tol: 0.15, max_points: 4, scale: geometric, descend: 2}
+      duration_s: 180
+      warmup_s: 30
+      drain_timeout_s: 90
+  - profile: shared-prefix
+    load:
+      mode: open_loop
+      search: {lo: 0.5, hi: 4, rel_tol: 0.15, max_points: 4, scale: geometric, descend: 2}
+      duration_s: 120
+      warmup_s: 20
+      drain_timeout_s: 30
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+# Quality: gated against the BF16 baseline already measured on this hardware, instead of
+# paying to serve 141 GB of BF16 again. The FP8 cell is a candidate: its eval job scores
+# divergence on cf4d1614's stored BF16 reference (48 prompts x 64 tokens, top-5, with
+# that run's noise floor) and its task scores pair item for item with cf4d1614's samples.
+# `bench plan` refuses if that baseline cannot be loaded or no longer pairs with the
+# suite (runner.load_stored_baseline). cf4d1614 is BF16 at defaults (no speculation), so
+# the gate measures precision alone; 55102ddb (BF16 + EAGLE3) scored within its noise.
+#
+# phase0-strict is phase0 plus tool_calling_strict (the tool_calling items with tools sent
+# `strict: true`). cf4d1614 never ran the strict task, so the gate reports its score and
+# lists it as "not gated: the baseline did not run it"; gsm8k, ifeval, tool_calling,
+# json_schema, divergence and sanity (over every output, strict included) decide.
+quality:
+  suite: llama-3.3-70b-instruct
+  subset: phase0-strict
+  baseline:
+    experiment: cf4d1614-2453-4ad4-b345-afd6b769a52d
+    config_hash: eff0371d25425c61e0881abfee51e36348b9d4066895604cda30481e84c22d36
+# The pod's TTL holds `bench plan`'s estimate with margin, and the worst case of the pod
+# living to its TTL fits the $15 cap. 4x L40S Secure stock is scarce: check it before
+# launching and run with LOOM_RUNPOD_CAPACITY_WAIT_S=7200 (nothing is billed while
+# waiting, and each create attempt gets a fresh TTL; docs/runbook-runpod.md).
+budget:
+  max_spend: "$15"
+  ttl_minutes: 195
+  accrual_interval_s: 15
+seed: 0

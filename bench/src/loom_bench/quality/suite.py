@@ -130,6 +130,10 @@ class DivergenceSpec(_Strict):
 class Suite(_Strict):
     suite: TaskName
     model: str  # registry id the suite is pinned for
+    # Registry ids of other checkpoints of the same model (another precision, e.g. FP8)
+    # that run this suite to be gated against `model`'s baseline: the same pinned items,
+    # versions and gate policy, so their results pair item for item.
+    also_models: list[str] = Field(default_factory=list)
     seed: int = 0
     chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
     gate: GateSpec = Field(default_factory=GateSpec)
@@ -146,6 +150,8 @@ class Suite(_Strict):
 
     @model_validator(mode="after")
     def _check(self) -> Self:
+        if self.model in self.also_models or len(set(self.also_models)) != len(self.also_models):
+            raise ValueError("also_models must not repeat or include model")
         names = [t.name for t in self.tasks]
         dupes = sorted({n for n in names if names.count(n) > 1})
         if dupes:
@@ -160,6 +166,10 @@ class Suite(_Strict):
                 raise ValueError(f"subset {subset}: unknown or repeated tasks in {members}")
         self.policy()  # validates the divergence limits against the ceiling
         return self
+
+    def covers(self, model_id: str) -> bool:
+        """Whether this suite is pinned for registry model `model_id`."""
+        return model_id == self.model or model_id in self.also_models
 
     def select(self, subset: str | None) -> list[SuiteTask]:
         """The tasks a run of `subset` (None: the whole suite) executes, in suite order."""
