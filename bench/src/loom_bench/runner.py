@@ -91,6 +91,7 @@ from loom_bench.providers import make_provider
 from loom_bench.providers.base import (
     Endpoint,
     EngineLaunch,
+    EngineStartFailed,
     Host,
     HostLost,
     HostRequest,
@@ -415,9 +416,21 @@ class _Executor:
         self.guard.check_next(start_s, what=f"starting {cell.key}")
         if warm:
             await self.guard.guarded(self.provider.stop_engine(host))
-        endpoint = await self.guard.guarded(
-            self.provider.start_engine(host, cell.launch, warm=warm)
-        )
+        try:
+            endpoint = await self.guard.guarded(
+                self.provider.start_engine(host, cell.launch, warm=warm)
+            )
+        except EngineStartFailed as e:
+            self.event(
+                "engine_start_failed",
+                host=host.host_id,
+                cell=cell.key,
+                warm=warm,
+                stages=e.stages,
+                system=e.system,
+                error=str(e)[-2000:],
+            )
+            raise
         stages = endpoint.start_stages
         with session_scope(self.ctx.db_url) as s:
             repo.record_cold_start(

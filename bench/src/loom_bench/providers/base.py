@@ -121,6 +121,17 @@ class SpotInterrupted(HostLost):
     """EC2 reclaimed the spot instance. The runner records it for the interruption rate."""
 
 
+class EngineStartFailed(RuntimeError):
+    """The engine did not come up. Carries what the start reported before it failed
+    (stage offsets, host facts such as the GPU topology), so the runner can record them
+    and a hang can be diagnosed from the events alone."""
+
+    def __init__(self, message: str, *, stages: dict[str, float], system: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.stages = stages
+        self.system = system
+
+
 class Provider(Protocol):
     name: str
 

@@ -54,7 +54,14 @@ from loom_bench.prices import HOURS_PER_MONTH, PriceBook, load_prices
 from loom_bench.provenance import PriceBasis
 from loom_bench.providers import export_requirements, runpod_layout, runpod_reaper
 from loom_bench.providers.aws_ssm import parse_markers, render_script, stage_offsets
-from loom_bench.providers.base import Endpoint, EngineLaunch, Host, HostLost, HostRequest
+from loom_bench.providers.base import (
+    Endpoint,
+    EngineLaunch,
+    EngineStartFailed,
+    Host,
+    HostLost,
+    HostRequest,
+)
 from loom_bench.providers.runpod_api import (
     GRAPHQL_URL,
     REST_URL,
@@ -66,6 +73,7 @@ from loom_bench.providers.runpod_api import (
 from loom_bench.providers.runpod_ssh import (
     SSH_UNREACHABLE,
     OpenSshExec,
+    RemoteCommandError,
     SshExec,
     SshTarget,
     generate_keypair,
@@ -159,6 +167,9 @@ class RunpodSettings(BaseModel):
     # How long to keep retrying a pod create that RunPod refuses for lack of stock.
     # Nothing is billed while waiting; 0 fails on the first refusal.
     capacity_wait_s: Annotated[int, Field(ge=0)] = 1800
+    # Fail an engine start whose log has not grown for this long before it is healthy
+    # (874110b6 hung silently after NCCL init until the 1800 s ready timeout).
+    engine_stall_s: Annotated[int, Field(gt=0)] = 600
 
     @field_validator("hf_secret_name")
     @classmethod
@@ -588,6 +599,7 @@ class RunpodProvider:
             PORT=launch.port,
             SERVED_MODEL=launch.served_model,
             READY_TIMEOUT_S=math.ceil(launch.ready_timeout_s),
+            ENGINE_STALL_S=self.settings.engine_stall_s,
             LOG_DIR=runpod_layout.LOG_DIR,
             STAGE_FILE=runpod_layout.STAGE_FILE,
             ENGINE_ENV=[f"{k}={v}" for k, v in sorted(launch.env.items())],
@@ -615,12 +627,22 @@ class RunpodProvider:
             await self._wait_for_ssh(host, self._target(host, pod))
             controller["ssh_online"] = (self.clock() - t0).total_seconds()
         timeout = math.ceil(launch.ready_timeout_s) + (0 if warm else DOWNLOAD_ALLOWANCE_S)
-        stdout = await self._run(
-            host,
-            self.engine_script(launch, warm=warm),
-            timeout_s=timeout,
-            what=f"start {launch.engine} {launch.served_model}",
-        )
+        try:
+            stdout = await self._run(
+                host,
+                self.engine_script(launch, warm=warm),
+                timeout_s=timeout,
+                what=f"start {launch.engine} {launch.served_model}",
+            )
+        except RemoteCommandError as e:
+            # The script prints the host's facts and stages as it goes: keep what it
+            # reported before failing (the GPU topology, for a hang at NCCL init).
+            failed_stages, failed_system = parse_markers(e.stdout)
+            stages = {k: round(v, 3) for k, v in controller.items()}
+            stages.update(stage_offsets(failed_stages, t0.timestamp()))
+            raise EngineStartFailed(
+                str(e), stages=stages, system={**failed_system, "pod_id": host.host_id}
+            ) from e
         pod_stages, system = parse_markers(stdout)
         if system.get("job_isolation") != "ok":
             raise RuntimeError(f"{host.host_id}: engine start did not prove job isolation")

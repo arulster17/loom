@@ -79,6 +79,7 @@ Run through all of it before every real run.
   | `ssh_online_timeout_s` | 600 | until sshd answers |
   | `max_price_ratio` | 1.25 | refuse a pod whose API price is above prices.yaml × this |
   | `capacity_wait_s` | 1800 | how long to keep retrying a create refused for lack of stock (0: fail at once) |
+  | `engine_stall_s` | 600 | fail an engine start whose log has not grown for this long before it is healthy |
 
 - [ ] **OpenSSH** on the laptop (`ssh`, `ssh-keygen`): the runner drives pods over SSH.
 - [ ] **Results database** is up and migrated, the same one as every other real run. It
@@ -206,6 +207,24 @@ query { gpuTypes(input: {id: "NVIDIA L40S"}) {
 A null `stockStatus` means none is listed; wait for "Low" or better. Then run with
 `LOOM_RUNPOD_CAPACITY_WAIT_S=7200`, so a refusal waits up to 2 h rather than 30 min
 (nothing is billed while waiting).
+
+### A multi-GPU engine hangs at start (NCCL peer-to-peer)
+
+RunPod can place a multi-GPU pod's GPUs on both CPU sockets. On 2026-10-08 the first 70B
+attempt (`874110b6`, 4x L40S) had GPU0 on socket 0 and GPUs 1-3 on socket 1
+(`nvidia-smi topo -m`: SYS between them). `torch.cuda.can_device_access_peer` still said
+yes for every pair, but NCCL hung at init: vLLM's last line was `vLLM is using nccl==…`,
+until the 1800 s ready timeout. On a pod with the same topology, a 4-rank NCCL
+`all_reduce` timed out by default and with `NCCL_SHM_DISABLE=1`, and passed in under a
+second with `NCCL_P2P_DISABLE=1`. vLLM TP=4 then came up in 80 s. vLLM itself disables
+its custom all-reduce on more than two PCIe-only GPUs, so NCCL is the only P2P user.
+
+So expansion refuses a multi-GPU RunPod cell unless `provider.engine_env` sets
+`NCCL_P2P_DISABLE` or `NCCL_P2P_LEVEL`. The value is part of the launch, so of the
+config hash. The shipped 70B spec sets `NCCL_P2P_DISABLE: "1"`. Each engine start also
+records the GPU topology (`gpu_topology` in `engine_started.system`, or in
+`engine_start_failed` when the start fails), so a hang like this can be read from
+`events.jsonl`.
 
 ### Runner gone, or a stuck pod
 

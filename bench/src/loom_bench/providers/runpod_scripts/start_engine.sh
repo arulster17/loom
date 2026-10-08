@@ -1,4 +1,4 @@
-# requires: WARM MODEL_REPO MODEL_REVISION WEIGHTS_DIR PORT SERVED_MODEL READY_TIMEOUT_S LOG_DIR STAGE_FILE ENGINE_ENV ENGINE_CMD ENGINE_PIDFILE PROC1_ENVIRON JOB_UID JOB_HOME SCAN_DIRS
+# requires: WARM MODEL_REPO MODEL_REVISION WEIGHTS_DIR PORT SERVED_MODEL READY_TIMEOUT_S ENGINE_STALL_S LOG_DIR STAGE_FILE ENGINE_ENV ENGINE_CMD ENGINE_PIDFILE PROC1_ENVIRON JOB_UID JOB_HOME SCAN_DIRS
 # Download weights at the pinned revision (cold only), start the engine as a
 # process in this container (RunPod has no Docker in the pod) bound to loopback,
 # wait until it serves one token, and prove the job user is isolated from secrets.
@@ -31,6 +31,30 @@ proc1_value() {
 # only the image's Python has huggingface_hub.
 image_python="$(PATH="$(proc1_value PATH)" && command -v python3)" || true
 [ -n "$image_python" ] || fail "python3 is not on the image's PATH"
+
+# The host's facts come first, so a start that fails or hangs still reports them
+# (the provider records them in engine_start_failed).
+gpus="$(nvidia-smi --query-gpu=name --format=csv,noheader | paste -sd, -)"
+sysinfo gpus "$gpus"
+gpu_count="$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c .)"
+sysinfo gpu_count "$gpu_count"
+sysinfo driver_version "$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)"
+sysinfo cuda_version "$(nvidia-smi | sed -n 's/.*CUDA Version: *\([0-9.]*\).*/\1/p' | head -n 1)"
+sysinfo kernel "$(uname -r)"
+# GPU-to-GPU links from `nvidia-smi topo -m`, one row per GPU: GPU0:X,SYS;GPU1:SYS,X.
+# SYS between GPUs means they sit on different CPU sockets (see the NCCL P2P note in
+# docs/runbook-runpod.md).
+topo="$(nvidia-smi topo -m 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk -v n="$gpu_count" '
+  $1 ~ /^GPU[0-9]+$/ {
+    row = $1 ":"; self = 0
+    for (i = 2; i <= n + 1; i++) { row = row (i > 2 ? "," : "") $i; if ($i == "X") self = 1 }
+    if (self) out = out (out ? ";" : "") row  # the header row has no X diagonal
+  }
+  END { print out }')"
+[ -z "$topo" ] || sysinfo gpu_topology "$topo"
+# RunPod injects the datacenter; the create response does not always carry machine.dataCenterId.
+dc="$(proc1_value RUNPOD_DC_ID)"
+[ -z "$dc" ] || sysinfo data_center "$dc"
 
 if [ "$WARM" = 0 ]; then
   grep -q '^sshd_ready ' "$STAGE_FILE" || fail "pod start did not finish: TTL watchdog state unknown"
@@ -84,10 +108,23 @@ engine_fail() {
   fail "$1"
 }
 
+# Not healthy by the deadline, or no new engine output for ENGINE_STALL_S, fails the
+# start: a hang (874110b6 sat silent after NCCL init) fails fast instead of billing
+# until the ready timeout.
 deadline=$(($(date +%s) + READY_TIMEOUT_S))
+log_size=-1
+last_output=$(date +%s)
 until curl -fs -o /dev/null "http://127.0.0.1:$PORT/health"; do
   kill -0 "$engine_pid" 2>/dev/null || engine_fail "engine process exited"
-  [ "$(date +%s)" -lt "$deadline" ] || engine_fail "engine not healthy after ${READY_TIMEOUT_S}s"
+  now=$(date +%s)
+  [ "$now" -lt "$deadline" ] || engine_fail "engine not healthy after ${READY_TIMEOUT_S}s"
+  size=$(wc -c <"$LOG_DIR/engine.log" 2>/dev/null | tr -d ' ')
+  if [ "${size:-0}" != "$log_size" ]; then
+    log_size="${size:-0}"
+    last_output=$now
+  elif [ $((now - last_output)) -ge "$ENGINE_STALL_S" ]; then
+    engine_fail "engine stalled: no output for ${ENGINE_STALL_S}s before it was healthy"
+  fi
   sleep 2
 done
 stage engine_healthy
@@ -122,12 +159,3 @@ fi
 hf_value="" rp_value=""
 sysinfo job_isolation ok
 
-gpus="$(nvidia-smi --query-gpu=name --format=csv,noheader | paste -sd, -)"
-sysinfo gpus "$gpus"
-sysinfo gpu_count "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c .)"
-sysinfo driver_version "$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)"
-sysinfo cuda_version "$(nvidia-smi | sed -n 's/.*CUDA Version: *\([0-9.]*\).*/\1/p' | head -n 1)"
-sysinfo kernel "$(uname -r)"
-# RunPod injects the datacenter; the create response does not always carry machine.dataCenterId.
-dc="$(proc1_value RUNPOD_DC_ID)"
-[ -z "$dc" ] || sysinfo data_center "$dc"

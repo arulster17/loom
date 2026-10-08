@@ -27,7 +27,7 @@ from loom_bench.jobs import (
     TokenizerSpec,
 )
 from loom_bench.prices import load_prices
-from loom_bench.providers.base import HostLost, HostRequest
+from loom_bench.providers.base import EngineStartFailed, HostLost, HostRequest
 from loom_bench.providers.runpod import (
     MAX_START_CMD_BYTES,
     RunpodProvider,
@@ -36,7 +36,7 @@ from loom_bench.providers.runpod import (
     load_runpod_settings,
 )
 from loom_bench.providers.runpod_api import RunpodApiError
-from loom_bench.providers.runpod_ssh import SshTarget
+from loom_bench.providers.runpod_ssh import RemoteCommandError, SshTarget
 from loom_bench.quality.sanity import SanityResult
 from loom_bench.quality.suite import Suite
 from loom_bench.quality.tasks.base import ItemResult
@@ -560,6 +560,35 @@ async def test_failed_engine_start_raises_with_its_stderr(fake, s3, tmp_path) ->
     host = await p.provision(request())
     with pytest.raises(RuntimeError, match="engine process exited"):
         await p.start_engine(host, vllm_launch(), warm=False)
+
+
+async def test_failed_engine_start_keeps_what_the_script_reported(fake, s3, tmp_path) -> None:
+    # 874110b6 hung at NCCL init: the topology printed before the engine is the evidence.
+    reported = (
+        "loom-sys gpu_count 4\n"
+        "loom-sys gpu_topology GPU0:X,SYS;GPU1:SYS,X\n"
+        "loom-stage image_pulled 1000.0\n"
+        "loom-stage weights_ready 1300.0\n"
+    )
+    stalled = "loom-error engine stalled: no output for 600s before it was healthy"
+    ssh = FakePodExec({"start_engine": lambda t, s: (1, reported, stalled)})
+    p = provider(fake, s3, tmp_path, ssh=ssh)
+    host = await p.provision(request())
+    with pytest.raises(EngineStartFailed, match="engine stalled") as e:
+        await p.start_engine(host, vllm_launch(), warm=False)
+    assert e.value.system["gpu_topology"] == "GPU0:X,SYS;GPU1:SYS,X"
+    assert e.value.system["pod_id"] == host.host_id
+    assert {"pod_created", "pod_running", "ssh_online", "weights_ready"} <= set(e.value.stages)
+    assert isinstance(e.value.__cause__, RemoteCommandError)
+
+
+async def test_engine_stall_window_reaches_the_start_script(fake, s3, tmp_path) -> None:
+    ssh = FakePodExec()
+    p = provider(fake, s3, tmp_path, ssh=ssh)
+    host = await p.provision(request())
+    await p.start_engine(host, vllm_launch(), warm=False)
+    (script,) = ssh.scripts("start_engine")
+    assert script_var(script, "ENGINE_STALL_S") == "600"
 
 
 async def test_a_pod_serves_only_its_own_image(fake, s3, tmp_path) -> None:

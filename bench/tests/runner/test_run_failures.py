@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 
 from loom_bench.cli import app
 from loom_bench.jobs import LoadJob, LoadJobResult
-from loom_bench.providers.base import Host
+from loom_bench.providers.base import Endpoint, EngineLaunch, EngineStartFailed, Host
 from loom_bench.providers.mock import MockProvider
 from loom_bench.runner import (
     EXIT_FAILED,
@@ -99,6 +99,28 @@ async def test_no_failed_runs_is_completed_and_exits_zero(ctx):
         None,
         EXIT_OK,
     )
+
+
+class HangingEngineMock(MockProvider):
+    """Mock provider whose engine start fails the way 874110b6's did."""
+
+    async def start_engine(self, host: Host, launch: EngineLaunch, *, warm: bool) -> Endpoint:
+        raise EngineStartFailed(
+            "start vllm exited 1: loom-error engine stalled: no output for 600s",
+            stages={"weights_ready": 300.0, "engine_started": 300.1},
+            system={"gpu_count": "4", "gpu_topology": "GPU0:X,SYS;GPU1:SYS,X"},
+        )
+
+
+async def test_a_failed_engine_start_is_recorded_with_its_facts(ctx):
+    ctx.provider = HangingEngineMock(hourly_micros=1_000_000)
+    outcome = await run_experiment(mock_experiment(), ctx)
+    assert outcome.status is ExperimentStatus.FAILED
+    (event,) = [e for e in outcome.events if e["kind"] == "engine_start_failed"]
+    assert event["system"]["gpu_topology"] == "GPU0:X,SYS;GPU1:SYS,X"
+    assert event["stages"] == {"weights_ready": 300.0, "engine_started": 300.1}
+    assert "engine stalled" in event["error"]
+    assert any(e["kind"] == "torn_down" for e in outcome.events)
 
 
 @pytest.mark.parametrize(

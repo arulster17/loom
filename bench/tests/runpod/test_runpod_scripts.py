@@ -18,6 +18,7 @@ import signal
 import subprocess
 import tarfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
@@ -55,6 +56,7 @@ START_VARS: dict[str, Any] = {
     "PORT": 8000,
     "SERVED_MODEL": "qwen3-8b",
     "READY_TIMEOUT_S": 1800,
+    "ENGINE_STALL_S": 600,
     "LOG_DIR": "/var/log/loom",
     "STAGE_FILE": "/var/lib/loom/stages",
     "ENGINE_ENV": ["VLLM_LOGGING_LEVEL=INFO"],
@@ -344,8 +346,16 @@ def engine_env_world(tmp_path: Path, *, token: str = TOKEN) -> dict[str, Any]:
         bin_dir,
         "nvidia-smi",
         'case "$*" in\n'
-        '  *--query-gpu=name*) echo "NVIDIA L40S" ;;\n'
+        "  *--query-gpu=name*)\n"
+        '    echo "NVIDIA L40S"; [ -z "$STUB_TWO_GPUS" ] || echo "NVIDIA L40S" ;;\n'
         '  *--query-gpu=driver_version*) echo "580.159.03" ;;\n'
+        '  "topo -m")\n'
+        '    if [ -n "$STUB_TWO_GPUS" ]; then\n'
+        "      printf '\\tGPU0\\tGPU1\\tNIC0\\tCPU Affinity\\n'\n"
+        "      printf 'GPU0\\t X \\tSYS\\tPXB\\t0-31\\nGPU1\\tSYS\\t X \\tNODE\\t32-63\\n'\n"
+        "    else\n"
+        "      printf '\\tGPU0\\tNIC0\\tCPU Affinity\\nGPU0\\t X \\tPXB\\t0-31\\n'\n"
+        "    fi ;;\n"
         '  "") echo "| NVIDIA-SMI 580.159.03  Driver Version: 580.159.03  CUDA Version: 13.0" ;;\n'
         "esac\n",
     )
@@ -410,6 +420,7 @@ def test_start_engine_keeps_secrets_from_the_engine_and_proves_isolation(tmp_pat
         "loom-sys driver_version 580.159.03",
         "loom-sys cuda_version 13.0",
         "loom-sys data_center EUR-IS-2",
+        "loom-sys gpu_topology GPU0:X",
     ]:
         assert line in proc.stdout.splitlines()
     for name in ["weights_ready", "engine_started", "engine_healthy", "first_token"]:
@@ -437,6 +448,69 @@ def test_start_engine_keeps_secrets_from_the_engine_and_proves_isolation(tmp_pat
     args = (w["logs"] / "engine_args").read_text()
     assert "--host 127.0.0.1 --port 8000" in args
     assert "0.0.0.0" not in args
+
+
+def test_start_engine_records_the_gpu_topology_before_the_engine(tmp_path: Path) -> None:
+    w = engine_env_world(tmp_path)
+    try:
+        proc = run_bash(
+            render_script("start_engine", template_dir=DIR, **w["values"]),
+            env={**w["env"], "STUB_TWO_GPUS": "1"},
+        )
+    finally:
+        kill_engine(w["pidfile"])
+    assert proc.returncode == 0, proc.stderr
+    lines = proc.stdout.splitlines()
+    # The NICs and CPU affinity columns are dropped; SYS marks a cross-socket pair.
+    assert "loom-sys gpu_topology GPU0:X,SYS;GPU1:SYS,X" in lines
+    assert "loom-sys gpu_count 2" in lines
+    started = next(i for i, x in enumerate(lines) if x.startswith("loom-stage engine_started"))
+    assert lines.index("loom-sys gpu_topology GPU0:X,SYS;GPU1:SYS,X") < started
+
+
+def stalled_world(tmp_path: Path, engine_body: str, **values: Any) -> dict[str, Any]:
+    w = engine_env_world(tmp_path)
+    bin_dir = tmp_path / "bin"
+    stub(bin_dir, "curl", "exit 7\n")  # never healthy
+    engine = stub(bin_dir, "fake-engine", engine_body)
+    w["values"] = {**w["values"], "ENGINE_CMD": [str(engine)], **values}
+    return w
+
+
+def test_start_engine_fails_fast_when_the_engine_goes_silent(tmp_path: Path) -> None:
+    # 874110b6: vLLM printed its NCCL line, then nothing until the 1800 s timeout.
+    w = stalled_world(tmp_path, 'echo "vLLM is using nccl"\nexec sleep 60\n', ENGINE_STALL_S=3)
+    t0 = time.monotonic()
+    try:
+        proc = run_bash(
+            render_script("start_engine", template_dir=DIR, **w["values"]), env=w["env"]
+        )
+    finally:
+        kill_engine(w["pidfile"])
+    assert proc.returncode == 1
+    assert "loom-error engine stalled: no output for 3s before it was healthy" in proc.stderr
+    assert "vLLM is using nccl" in proc.stderr  # the log tail comes with the error
+    assert time.monotonic() - t0 < 30  # not the 1800 s ready timeout
+    assert "loom-sys gpu_topology GPU0:X" in proc.stdout.splitlines()
+
+
+def test_start_engine_output_resets_the_stall_clock(tmp_path: Path) -> None:
+    # An engine that keeps logging is slow, not stalled: only the deadline stops it.
+    w = stalled_world(
+        tmp_path,
+        "while :; do echo loading; sleep 1; done\n",
+        ENGINE_STALL_S=3,
+        READY_TIMEOUT_S=8,
+    )
+    try:
+        proc = run_bash(
+            render_script("start_engine", template_dir=DIR, **w["values"]), env=w["env"]
+        )
+    finally:
+        kill_engine(w["pidfile"])
+    assert proc.returncode == 1
+    assert "loom-error engine not healthy after 8s" in proc.stderr
+    assert "stalled" not in proc.stderr
 
 
 def test_start_engine_fails_when_the_job_user_can_read_proc1(tmp_path: Path) -> None:
