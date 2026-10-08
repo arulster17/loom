@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
@@ -525,9 +525,11 @@ ReportDirOpt = Annotated[Path, typer.Option("--out", help="Directory for the rep
 
 
 def _analyze(
-    db: str | None, experiments: list[str] | None
+    db: str | None, experiments: list[str] | None, *, slo_overrides: Sequence[str] = ()
 ) -> tuple[list[ConfigResult], dict[str, ColdStartStat]]:
-    """ConfigResults (with quality) and cold-start stats for the selected experiments."""
+    """ConfigResults (with quality) and cold-start stats for the selected experiments,
+    judged against their SLO, or against it with `slo_overrides` applied (see
+    `slo.override_slo`)."""
     from sqlalchemy import select
 
     from loom_bench.report import cold_starts_by_config
@@ -566,6 +568,11 @@ def _analyze(
                 "pick them with --experiment"
             )
             raise typer.Exit(EXIT_INVALID)
+        if slo_overrides:
+            from loom_bench.slo import override_slo
+
+            with _invalid_input("invalid --alt-slo"):
+                slo = override_slo(slo, slo_overrides)
         ids = [r.id for r in rows]
         allocation = specs[0].cost_allocation.allocation()
         results = _analyze_experiments(s, ids, slo, allocation, load_prices())
@@ -582,15 +589,38 @@ def report(
     experiment: ExperimentsOpt = None,
     out: ReportDirOpt = Path("reports"),
     db: DbOpt = None,
+    alt_slo: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--alt-slo",
+            help="Also write leaderboard.alt-slo.* judged with this SLO target replaced, "
+            "repeatable: tpot_ms.p95=100 or max_error_rate=0.02. The main leaderboard "
+            "keeps the experiments' SLO.",
+        ),
+    ] = None,
 ) -> None:
     """Leaderboard ranked by $/1M output tokens at SLO (md, html, csv; latency at equal
     load in leaderboard.equal_load.csv)."""
     from loom_bench.report import render_leaderboard, write_reports
+    from loom_bench.report.format import describe_slo
 
     results, cold = _analyze(db, experiment)
     rendered = render_leaderboard(results, cold_starts=cold, price_book=load_prices())
     console.print(Markdown(rendered["md"]))
     _written(write_reports(out, leaderboard=rendered))
+    if alt_slo:
+        alt, alt_cold = _analyze(db, experiment, slo_overrides=alt_slo)
+        declared = describe_slo(results[0].goodput.slo) if results else "?"
+        used = describe_slo(alt[0].goodput.slo) if alt else "?"
+        title = (
+            f"Alternative SLO view, not the experiments' SLO: {used} "
+            f"(the experiments declare {declared}; the main leaderboard uses that)"
+        )
+        rendered_alt = render_leaderboard(
+            alt, cold_starts=alt_cold, price_book=load_prices(), title=title
+        )
+        console.print(Markdown(rendered_alt["md"]))
+        _written(write_reports(out, **{"leaderboard.alt-slo": rendered_alt}))
 
 
 @app.command()

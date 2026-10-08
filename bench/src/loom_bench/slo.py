@@ -97,6 +97,33 @@ class SloCheck(BaseModel):
     passed: bool
 
 
+def override_slo(slo: Slo, overrides: Sequence[str]) -> Slo:
+    """`slo` with targets replaced, for an alternative report view (never a run's SLO).
+
+    Each override is `metric.pctl=ms` (e.g. `tpot_ms.p95=100`) or `max_error_rate=x`.
+    """
+    doc = slo.model_dump()
+    for item in overrides:
+        key, sep, raw = item.partition("=")
+        if not sep:
+            raise ValueError(f"SLO override {item!r}: expected key=value")
+        try:
+            value = float(raw)
+        except ValueError:
+            raise ValueError(f"SLO override {item!r}: {raw!r} is not a number") from None
+        if key == "max_error_rate":
+            doc[key] = value
+            continue
+        metric, _, pctl = key.partition(".")
+        if metric not in LATENCY_METRICS or pctl not in PERCENTILES:
+            raise ValueError(
+                f"SLO override {item!r}: key must be max_error_rate or <metric>.<pctl> with "
+                f"metric in {', '.join(LATENCY_METRICS)} and pctl in {', '.join(PERCENTILES)}"
+            )
+        doc[metric] = {**(doc.get(metric) or {}), pctl: value}
+    return Slo.model_validate(doc)
+
+
 class SloVerdict(BaseModel):
     met: bool
     trusted: bool  # False when any check had no CI (single repetition)

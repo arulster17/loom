@@ -4,7 +4,7 @@ from pydantic import ValidationError
 from loom_bench.metrics.aggregate import AggregateSummary, aggregate_runs, ci_rule, estimate_metric
 from loom_bench.metrics.summary import summarize_run
 from loom_bench.records import LoadMode, RequestRecord, RequestStatus
-from loom_bench.slo import Slo, bisect_next_load, find_goodput, slo_met
+from loom_bench.slo import Slo, bisect_next_load, find_goodput, override_slo, slo_met
 from loom_bench.stats import Estimate, log_mean_ci
 
 SLO = Slo(ttft_ms={"p95": 1000}, tpot_ms={"p95": 50}, max_error_rate=0.01)
@@ -100,6 +100,30 @@ def test_slo_met_missing_metric_fails():
     verdict = slo_met(SLO, a)
     assert not verdict.met
     assert next(c for c in verdict.checks if c.metric == "tpot_ms.p95").observed is None
+
+
+def test_override_slo_replaces_one_target_and_keeps_the_rest():
+    alt = override_slo(SLO, ["tpot_ms.p95=100"])
+    assert alt.tpot_ms == {"p95": 100} and alt.ttft_ms == {"p95": 1000}
+    assert alt.max_error_rate == 0.01
+    assert SLO.tpot_ms == {"p95": 50}  # the declared SLO is untouched
+    both = override_slo(SLO, ["e2e_ms.p99=5000", "max_error_rate=0.02"])
+    assert both.e2e_ms == {"p99": 5000} and both.max_error_rate == 0.02
+
+
+def test_an_alternative_slo_changes_the_verdict_not_the_data():
+    # TPOT p95 CI upper bound 87 ms: fails the declared 50 ms, meets an alternative 100 ms.
+    point = agg(ttft_hi=900.0, tpot_hi=87.0)
+    assert not slo_met(SLO, point).met
+    assert slo_met(override_slo(SLO, ["tpot_ms.p95=100"]), point).met
+
+
+@pytest.mark.parametrize(
+    "item", ["tpot_ms=100", "tpot_ms.p95", "tpot_ms.p95=fast", "tpot_ms.p42=1", "foo.p95=1"]
+)
+def test_override_slo_rejects_malformed_items(item):
+    with pytest.raises(ValueError):
+        override_slo(SLO, [item])
 
 
 def test_goodput_highest_pass_before_first_failure():

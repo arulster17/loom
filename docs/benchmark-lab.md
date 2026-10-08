@@ -268,6 +268,14 @@ and E2E p95 at every load all of them ran, with the SLO verdict at that load:
 - `leaderboard.equal_load.csv` has one row per (board, load, config, metric) with the
   estimate, its bounds, the SLO verdict, `significantly_lower` and the verdict text.
 
+**Alternative SLO view.** `bench report --alt-slo tpot_ms.p95=100` (repeatable, also
+`max_error_rate=0.02`) re-judges the same runs with those SLO targets replaced. It writes
+a second report, `leaderboard.alt-slo.{md,html,csv,equal_load.csv}`, whose title names
+the SLO it used and the one the experiments declare. The main leaderboard always uses the
+declared SLO, and nothing is stored. A search runs in place against the declared SLO, so
+under a looser alternative the goodput is often only a lower bound, at the highest load
+tested (`≥… (none failed)`).
+
 ## Results layout
 
 ```
