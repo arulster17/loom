@@ -100,7 +100,8 @@ def test_the_quality_only_follow_up_fits_its_cap_and_runs_no_load():
     plan = _plan(load_experiment(QWEN_QUALITY_RUNPOD))
     assert plan.ok, plan.refusals
     assert plan.ttl_worst_micros <= plan.caps.effective
-    assert plan.total_micros < plan.caps.effective * 0.6
+    # Three eval passes per pod: the (conservative) estimate is most of the TTL-bound cap.
+    assert plan.total_micros < plan.caps.effective * 0.8
     assert plan.n_runs_max == 0 and len(plan.hosts) == 2  # one pod per engine image
     for host in plan.hosts:
         kinds = [s.kind for s in host.steps]
@@ -116,7 +117,11 @@ def test_the_quality_only_follow_up_evaluates_the_real_sweeps_configs():
     assert not follow.workloads and not follow.smoke
     assert follow.model == real.model and follow.provider == real.provider
     assert follow.variants == real.variants
-    assert follow.quality == real.quality
+    # The same quality section, except that the follow-up replicates its passes to
+    # settle the gate (replicates change the estimator, not the config hashes).
+    assert follow.quality is not None and real.quality is not None
+    assert follow.quality.replicates > real.quality.replicates == 1
+    assert follow.quality.model_copy(update={"replicates": 1}) == real.quality
     assert [c.config_hash for c in expand(follow, REGISTRY)] == [
         c.config_hash for c in expand(real, REGISTRY)
     ]

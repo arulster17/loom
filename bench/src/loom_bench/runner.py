@@ -104,6 +104,7 @@ from loom_bench.quality.runner import (
     SuiteResult,
     TaskRun,
     gate_against_baseline,
+    pool_replicates,
     record_gate,
     record_suite_result,
     score_estimate,
@@ -455,12 +456,14 @@ class _Executor:
         if self.suite is not None:
             await self._run_quality_or_record_failure(host, cell, endpoint, self.suite)
 
-    def _eval_job(self, cell: Cell, endpoint: Endpoint, suite: Suite) -> EvalJob:
+    def _eval_job(
+        self, cell: Cell, endpoint: Endpoint, suite: Suite, *, with_divergence: bool = True
+    ) -> EvalJob:
         quality = self.exp.quality
         assert quality is not None
         divergence: DivergenceMode | None = None
         reference = None
-        if suite.divergence is not None:
+        if suite.divergence is not None and with_divergence:
             if cell.variant == quality.baseline_variant:
                 divergence = "capture_and_floor"
             elif (
@@ -536,12 +539,21 @@ class _Executor:
         quality = self.exp.quality
         assert quality is not None
         is_baseline = cell.variant == quality.baseline_variant
+        # Pass 1 also runs the divergence half; later passes only re-score the tasks.
         job = self._eval_job(cell, endpoint, suite)
-        setup = 0.0 if host.host_id in self.eval_hosts else self.est.eval_setup_s()
-        self.guard.check_next(self.est.eval_s(cell) + setup, what=f"quality suite on {cell.key}")
-        out = await self.guard.guarded(self.provider.run_eval(host, job))
-        self.eval_hosts.add(host.host_id)
-        result = suite_result_of(out)
+        passes = []
+        for rep in range(quality.replicates):
+            this = job if rep == 0 else self._eval_job(cell, endpoint, suite, with_divergence=False)
+            setup = 0.0 if host.host_id in self.eval_hosts else self.est.eval_setup_s()
+            self.guard.check_next(
+                self.est.eval_s(cell, divergence=rep == 0) + setup,
+                what=f"quality suite pass {rep + 1}/{quality.replicates} on {cell.key}",
+            )
+            got = await self.guard.guarded(self.provider.run_eval(host, this))
+            self.eval_hosts.add(host.host_id)
+            passes.append(got)
+        out = passes[0]
+        result = pool_replicates([suite_result_of(p) for p in passes])
         if out.divergence_error is not None:
             self.divergence_failures += 1
             self.event(
@@ -580,6 +592,10 @@ class _Executor:
             eval_job=job.run_id,
             scores=scores,
             seconds=seconds,
+            replicates=result.replicates,
+            replicate_means={
+                name: run.provenance.get("replicate_means") for name, run in result.tasks.items()
+            },
         )
         if is_baseline:
             reference = None
@@ -1195,6 +1211,7 @@ def write_samples(
             None if self_divergence is None else self_divergence.model_dump(mode="json")
         ),
         "divergence_error": divergence_error,
+        "replicates": result.replicates,
         "tasks": {
             name: {
                 "kind": run.kind,
@@ -1232,6 +1249,7 @@ def read_samples(path: str | Path) -> tuple[str, SuiteResult]:
         sanity=SanityResult.model_validate(doc["sanity"]),
         started_at=datetime.fromisoformat(doc["started_at"]),
         finished_at=datetime.fromisoformat(doc["finished_at"]),
+        replicates=doc.get("replicates", 1),
     )
     return doc["suite_ref"], result
 

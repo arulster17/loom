@@ -70,9 +70,92 @@ class SuiteResult:
     sanity: SanityResult
     started_at: datetime
     finished_at: datetime
+    # Independent passes of the suite pooled into these items (`pool_replicates`): each
+    # item's score is then its mean over the passes.
+    replicates: int = 1
 
     def scores(self) -> dict[str, list[ItemResult]]:
         return {name: run.items for name, run in self.tasks.items()}
+
+
+def pool_replicates(results: Sequence[SuiteResult]) -> SuiteResult:
+    """One SuiteResult from R independent passes of the same suite on the same config.
+
+    Each item's score becomes its mean over the passes, an unbiased estimate of the
+    probability the config passes it. Greedy decoding is not run-to-run deterministic
+    under batching (Qwen3-8B on vLLM: 32 of 541 IFEval items changed score across three
+    runs), and a single pass carries that noise into every paired comparison; averaging
+    R passes divides its variance by R, while item sampling, the part the gate
+    generalises over, is unchanged. The per-pass scores stay in each item's
+    `meta["replicate_scores"]`, so the noise can be measured from the samples.
+    Sanity counts are summed over all passes.
+    """
+    if not results:
+        raise ValueError("pool_replicates needs at least one result")
+    if len(results) == 1:
+        return results[0]
+    first = results[0]
+    for r in results[1:]:
+        if (r.suite, r.model) != (first.suite, first.model):
+            raise ValueError(
+                f"replicates ran different suites or models: {first.suite}/{first.model} "
+                f"vs {r.suite}/{r.model}"
+            )
+        if r.tasks.keys() != first.tasks.keys():
+            raise ValueError(
+                f"replicates ran different tasks: {sorted(first.tasks)} vs {sorted(r.tasks)}"
+            )
+    tasks: dict[str, TaskRun] = {}
+    for name, run in first.tasks.items():
+        runs = [r.tasks[name] for r in results]
+        versions = {t.version for t in runs}
+        if len(versions) != 1:
+            raise ValueError(f"{name}: replicates ran versions {sorted(versions)}")
+        by_id = [{i.item_id: i for i in t.items} for t in runs]
+        if any(len(m) != len(t.items) for m, t in zip(by_id, runs, strict=True)):
+            raise ValueError(f"{name}: duplicate item ids in a replicate")
+        if any(m.keys() != by_id[0].keys() for m in by_id[1:]):
+            raise ValueError(f"{name}: replicates scored different items")
+        items = []
+        for item in run.items:
+            reps = [m[item.item_id] for m in by_id]
+            if len({i.content_hash for i in reps}) != 1:
+                raise ValueError(f"{name}: item {item.item_id!r} has different content")
+            scores = [i.score for i in reps]
+            items.append(
+                item.model_copy(
+                    update={
+                        "score": sum(scores) / len(scores),
+                        "meta": {**item.meta, "replicate_scores": scores},
+                    }
+                )
+            )
+        tasks[name] = TaskRun(
+            name=name,
+            kind=run.kind,
+            version=run.version,
+            items=items,
+            estimate=score_estimate(items),
+            provenance={
+                **run.provenance,
+                "replicates": len(runs),
+                "replicate_means": [t.estimate.mean for t in runs],
+            },
+            seconds=sum(t.seconds for t in runs),
+        )
+    counts: dict[str, int] = {}
+    for r in results:
+        for k, v in r.sanity.counts.items():
+            counts[k] = counts.get(k, 0) + v
+    return SuiteResult(
+        suite=first.suite,
+        model=first.model,
+        tasks=tasks,
+        sanity=SanityResult(n=sum(r.sanity.n for r in results), counts=counts),
+        started_at=min(r.started_at for r in results),
+        finished_at=max(r.finished_at for r in results),
+        replicates=sum(r.replicates for r in results),
+    )
 
 
 async def run_suite(
@@ -331,6 +414,8 @@ def gate_against_baseline(
         gate_policy,
         self_divergence=self_divergence,
         divergence_error=divergence_error,
+        baseline_replicates=baseline.replicates,
+        candidate_replicates=candidate.replicates,
     )
 
 

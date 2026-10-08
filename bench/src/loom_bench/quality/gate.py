@@ -2,7 +2,11 @@
 
 Per task, scores are paired by item id and delta = mean(candidate) -
 mean(baseline), with a percentile-bootstrap CI over items
-(`paired_bootstrap_delta`, items resampled jointly). The CI is then widened to
+(`paired_bootstrap_delta`, items resampled jointly). A side run R > 1 times
+(`quality.replicates`) contributes each item's mean score over its R passes
+(`pool_replicates`): engine nondeterminism then adds var/R instead of its full
+variance to every item's difference, and the bootstrap over items still carries
+what remains of it. The CI is then widened to
 at least ±3/n around the point delta (rule of three): with n items a bootstrap
 cannot see effects rarer than about 1/n, and when the two configs agree on
 every item its interval collapses to a single point, which would "prove"
@@ -15,7 +19,13 @@ With threshold t (default 0.01 = one point absolute) and CI [lo, hi]:
 - lo >= -t                              -> PASS (non-inferiority shown)
 - otherwise                             -> INCONCLUSIVE (needs more samples)
 
-A two-sided 95% CI makes the PASS rule a one-sided test at 2.5%.
+A two-sided 95% CI makes the PASS rule a one-sided test at 2.5%. The verdicts do not
+look at zero, but the reasons do: a CI wholly below zero is a measurable drop and
+is reported as one, whatever the verdict ("non-inferior, but measurably lower";
+"a real drop, not shown to be within the margin"), so an INCONCLUSIVE never hides a
+regression the data already shows.
+
+`GATE_METHOD` names this procedure and is stored with every decision.
 
 Logprob divergence is judged against the noise floor measured on the baseline
 (`self_divergence`: the baseline scored against its own reference under
@@ -59,6 +69,9 @@ Share = Annotated[float, Field(ge=0.0, le=1.0)]
 NoiseMultiple = Annotated[float, Field(ge=1.0)]
 MinSamples = Annotated[int, Field(ge=2)]
 RESOLUTION_FACTOR = 3.0
+# v1: one pass per side. v2: per-item means over each side's replicates, and reasons
+# that name a CI wholly below zero.
+GATE_METHOD = "paired-bootstrap-over-items/replicate-means/v2"
 
 
 class Verdict(StrEnum):
@@ -170,6 +183,9 @@ class GateDecision(_Strict):
     divergence: DivergenceVerdict
     sanity: CheckVerdict
     policy: GatePolicy
+    method: str = GATE_METHOD
+    baseline_replicates: int = 1
+    candidate_replicates: int = 1
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
@@ -261,12 +277,21 @@ def evaluate_task(
     floor = RESOLUTION_FACTOR / n
     lo, hi = min(boot.lo, boot.point - floor), max(boot.hi, boot.point + floor)
     ci = f"{_pts(boot.point)} [{_pts(lo)}, {_pts(hi)}], n={n}"
+    real_drop = hi < 0.0
     if boot.point < -t:
         verdict, why = Verdict.FAIL, f"delta {ci} is a drop of more than {100 * t:.2f} pts"
     elif hi < -t:
         verdict, why = Verdict.FAIL, f"delta {ci}: whole CI below -{100 * t:.2f} pts"
     elif lo >= -t:
         verdict, why = Verdict.PASS, f"delta {ci}: non-inferior at {100 * t:.2f} pts"
+        if real_drop:
+            why += ", but measurably lower (CI below 0)"
+    elif real_drop:
+        verdict, why = (
+            Verdict.INCONCLUSIVE,
+            f"delta {ci}: a real drop (CI below 0), not shown to be within "
+            f"{100 * t:.2f} pts; more samples needed",
+        )
     else:
         verdict, why = (
             Verdict.INCONCLUSIVE,
@@ -412,6 +437,8 @@ def evaluate_gate(
     *,
     self_divergence: DivergenceResult | None = None,
     divergence_error: str | None = None,
+    baseline_replicates: int = 1,
+    candidate_replicates: int = 1,
 ) -> GateDecision:
     """Decide whether `candidate` may replace `baseline`; see the module docstring.
 
@@ -419,7 +446,8 @@ def evaluate_gate(
     different batching: the noise floor the divergence limits are calibrated on.
     `divergence_error` is why a divergence the suite asks for was not measured (its
     capture or scoring failed): the divergence check is then inconclusive, with that
-    reason, and the task verdicts stand.
+    reason, and the task verdicts stand. `*_replicates` is how many passes each side's
+    item scores average (`pool_replicates`); they are recorded with the decision.
     """
     policy = policy or GatePolicy()
     if baseline.keys() != candidate.keys():
@@ -436,5 +464,12 @@ def evaluate_gate(
         or (decision is Verdict.REVIEW and policy.review_blocks)
     )
     return GateDecision(
-        decision=decision, blocked=blocked, tasks=tasks, divergence=div, sanity=san, policy=policy
+        decision=decision,
+        blocked=blocked,
+        tasks=tasks,
+        divergence=div,
+        sanity=san,
+        policy=policy,
+        baseline_replicates=baseline_replicates,
+        candidate_replicates=candidate_replicates,
     )

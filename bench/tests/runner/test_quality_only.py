@@ -2,6 +2,7 @@
 reference and scoring, and the gate. It finishes a gate whose load sweep is already done
 (565b8d3f: every load run passed, SGLang's divergence did not) without re-running load."""
 
+import json
 from collections import Counter
 from pathlib import Path
 
@@ -73,6 +74,51 @@ async def test_a_quality_only_experiment_evaluates_and_gates(ctx, suite):
         assert len(gates) == 1 and gates[0].details["divergence"]["verdict"] != "inconclusive"
     kinds = [e["kind"] for e in outcome.events]
     assert kinds.count("reference_captured") == 1 and kinds.count("gate") == 1
+
+
+def _read_json(path: str) -> dict:
+    return json.loads(Path(path).read_text())
+
+
+def _replicated(suite: str, replicates: int) -> Experiment:
+    exp = quality_only(suite)
+    assert exp.quality is not None
+    quality = exp.quality.model_copy(update={"replicates": replicates})
+    return exp.model_copy(update={"quality": quality})
+
+
+def test_replicated_passes_are_planned_as_one_longer_eval(ctx, suite):
+    _, one = plan_experiment(quality_only(suite), ctx)
+    _, three = plan_experiment(_replicated(suite, 3), ctx)
+    evals = [[s for h in p.hosts for s in h.steps if s.kind == "eval"] for p in (one, three)]
+    assert len(evals[0]) == len(evals[1]) == 2  # one step per cell, however many passes
+    for single, triple in zip(*evals, strict=True):
+        assert triple.label.endswith("x 3 passes")
+        assert triple.seconds > 2 * single.seconds
+
+
+async def test_replicated_passes_pool_into_one_gated_result(ctx, suite):
+    outcome = await run_experiment(_replicated(suite, 3), ctx)
+    assert outcome.exit_code == EXIT_OK, outcome.reason
+    kinds = [e["kind"] for e in outcome.events]
+    # The divergence half (reference capture, scoring) runs on the first pass only.
+    assert kinds.count("reference_captured") == 1 and kinds.count("gate") == 1
+    quality = [e for e in outcome.events if e["kind"] == "quality"]
+    assert [e["replicates"] for e in quality] == [3, 3]
+    with session_scope(ctx.db_url) as s:
+        eid = outcome.experiment_id
+        evals = s.query(BenchEvalRun).filter(BenchEvalRun.experiment_id == eid).all()
+        assert sorted(Counter(r.config_hash for r in evals).values()) == [2, 2]  # pooled rows
+        (gate,) = s.query(BenchGateDecision).filter(BenchGateDecision.experiment_id == eid).all()
+        assert gate.details["baseline_replicates"] == gate.details["candidate_replicates"] == 3
+        assert gate.details["method"].endswith("/v2")
+        assert gate.details["divergence"]["verdict"] != "inconclusive"
+        uri = evals[0].samples_uri
+    assert uri is not None
+    samples = _read_json(uri)
+    assert samples["replicates"] == 3
+    for task in samples["tasks"].values():
+        assert all(len(i["meta"]["replicate_scores"]) == 3 for i in task["items"])
 
 
 def test_a_follow_up_gate_reaches_the_load_experiments_report(db, tmp_path, suite):

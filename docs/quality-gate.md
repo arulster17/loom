@@ -61,6 +61,58 @@ The PASS rule is a one-sided non-inferiority test at 2.5%. The FAIL rule also fi
 point drop beyond t even when the CI is wide: a measured drop larger than the allowed margin
 is not shipped on the hope that it is noise.
 
+The verdicts never test against zero, but the reasons do. When the CI lies wholly below 0
+the drop is real, and the reason says so whatever the verdict: a PASS reads "non-inferior
+at t pts, but measurably lower (CI below 0)", an INCONCLUSIVE reads "a real drop (CI below
+0), not shown to be within t pts". An INCONCLUSIVE therefore never hides a regression the
+data already shows. The procedure is named by `GATE_METHOD`
+(`paired-bootstrap-over-items/replicate-means/v2`), stored in every decision with each
+side's replicate count.
+
+### Replicated passes (engine nondeterminism)
+
+Greedy decoding is not deterministic run to run on a serving engine: batch composition
+changes reduction order, and a near-tie token can flip. Measured on Qwen3-8B / vLLM 0.30
+IFEval (541 prompts, three independent runs on separate pods: 565b8d3f, 53f38c7b,
+b1b904dc):
+
+| Pair | Score A | Score B | Items that differ (A better, B better) |
+|---|---|---|---|
+| vLLM run 1 vs vLLM run 2 | 0.8244 | 0.8262 | 21 (10, 11) |
+| vLLM run 1 vs vLLM run 3 | 0.8244 | 0.8207 | 22 (12, 10) |
+| vLLM run 2 vs vLLM run 3 | 0.8262 | 0.8207 | 21 (12, 9) |
+| vLLM run 3 vs SGLang | 0.8207 | 0.8078 | 21 (14, 7) |
+
+32 of 541 items changed score across the three vLLM runs. So two runs of the same engine
+disagree on as many items as vLLM and SGLang do, and with one pass per side that noise
+alone gives the paired CI about ±1.5 pts: wider than half of IFEval's 2-point margin.
+What separates the engines is the direction of the disagreements (14 vs 7 against SGLang,
+in every pairing with a vLLM run), not their number.
+
+`quality.replicates: R` runs the suite R times on each cell's engine instance (the
+divergence half on the first pass only) and pools them (`pool_replicates`): each item's
+score becomes its mean over the R passes, an unbiased estimate of the probability that
+the config passes it. The gate is unchanged on those means. Writing an item's pass on run
+r as Y_ir = p_i + e_ir, with p_i the config's pass probability and e_ir run noise, the
+paired difference of means is
+
+    D_i = (p_i^cand - p_i^base) + (ebar_i^cand - ebar_i^base),   Var(ebar_i) = Var(e_i) / R
+
+so averaging divides the run-noise variance by R. The between-item spread of the true
+differences, the thing non-inferiority generalises over, is untouched, and resampling items
+with their pooled means is the standard bootstrap for a two-stage (item, pass) design. It
+needs no new statistic, no new margin and no tuning, and it cannot average away a real
+regression, which moves every pass the same way. `bench/tests/quality/test_replicates.py`
+fails the build if a simulated -5 pt regression under this noise stops failing, at R = 1
+and R = 3. Simulated with the measured noise, R = 3 cuts the IFEval CI half-width from
+about 1.4 to 0.8 pts and R = 5 to 0.6.
+
+Passes on one engine instance share its hardware. They sample the batching nondeterminism
+above, not pod-to-pod hardware variation, which is a property of the deployment rather
+than the engine. Each item's per-pass scores are kept in the samples
+(`meta["replicate_scores"]`), so within-instance noise can be compared with the
+cross-instance figures in the table.
+
 Logprob divergence (below) is held to limits calibrated on the baseline's measured noise
 floor, with self-KL taken at the upper and self top-1 agreement at the lower bound of
 their bootstrap CIs:

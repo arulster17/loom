@@ -246,9 +246,10 @@ class Estimator:
         """Eval tasks whose item count is unknown before they run (lm_eval without `items`)."""
         return [t.name for t in self.eval_tasks() if t.planned_items() is None]
 
-    def eval_s(self, cell: Cell) -> float:
-        """One cell's eval job: its suite tasks, its divergence half (with the noise-floor
-        pass on the baseline) and the job overhead."""
+    def eval_s(self, cell: Cell, *, divergence: bool = True) -> float:
+        """One eval job: its suite tasks, its divergence half (with the noise-floor pass on
+        the baseline; only the first of `quality.replicates` passes runs it) and the job
+        overhead."""
         if self.suite is None:
             return 0.0
         busy = 0.0
@@ -260,7 +261,7 @@ class Estimator:
             )
             busy += (t.planned_items() or 0) * EVAL_ITEM_S[t.kind] / concurrency
         div = self.suite.divergence
-        if div is not None:
+        if div is not None and divergence:
             prompts = len(div.selected_ids(len(load_prompts())))
             busy += prompts * EVAL_DIVERGENCE_PROMPT_S / EVAL_CONCURRENCY
             if self.is_quality_baseline(cell):
@@ -568,7 +569,11 @@ def build_plan(
         if exp.quality is not None:
             q = exp.quality
             label = f"{cell.key} / {q.suite}" + (f" [{q.subset}]" if q.subset else "")
-            host.steps.append(Step("eval", label, est.eval_s(cell)))
+            seconds = est.eval_s(cell)
+            if q.replicates > 1:
+                label += f" x {q.replicates} passes"
+                seconds += (q.replicates - 1) * est.eval_s(cell, divergence=False)
+            host.steps.append(Step("eval", label, seconds))
 
     for host in hosts.values():
         host.steps.append(Step("teardown", host.key, est.teardown_s()))

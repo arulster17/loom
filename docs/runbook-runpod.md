@@ -178,6 +178,12 @@ sweep itself is fine, finish the gate without re-running load: fix the cause, pr
 with the smoke test, then run the quality-only spec (`qwen3-8b-quality-runpod.yaml`
 for the Qwen sweep). Its evals and gate land on the sweep's config hashes.
 
+The same spec settles a gate that came back INCONCLUSIVE because the CI crossed a task's
+margin. It runs three eval passes per engine (`quality.replicates: 3`), which averages
+engine nondeterminism out of the paired comparison (docs/quality-gate.md, "Replicated
+passes"). If the reason reads "a real drop (CI below 0)", the drop is measured and more
+passes only narrow it. Report it as a regression of that size, not as noise.
+
 ### Pod refused for its price
 
 `pod … costs … $/h, above prices.yaml … x 1.25: terminated`. RunPod's price moved. Check

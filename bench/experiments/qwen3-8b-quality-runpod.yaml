@@ -32,12 +32,19 @@ quality:
   suite: qwen3-8b
   subset: phase0
   baseline_variant: vllm
-# Each pod's TTL holds `bench plan`'s ~47 min estimate (cold start, eval setup, the eval
-# job) with margin; vLLM's eval tasks took ~7 min in 565b8d3f, so the estimate itself is
-# conservative. max_spend holds the worst case of both pods living to their TTL ($2.75)
-# with margin; the 300-item json_schema set (data version 2) adds ~2 min per pod.
+  # Three passes per engine, pooled into per-item means (docs/quality-gate.md,
+  # "Replicated passes"). With one pass per side, b1b904dc's IFEval gate could not be
+  # decided: two vLLM runs disagree on ~21 of 541 items, as many as vLLM and SGLang do,
+  # so run noise alone made the CI about +-1.5 pts against a 2 pt margin. Three passes
+  # cut that to about +-0.8. Only this follow-up replicates: its job is to settle a gate,
+  # and the sweep (and its AWS twin, held to 480 min) keeps one pass.
+  replicates: 3
+# Each pod's TTL holds `bench plan`'s ~105 min estimate (cold start, eval setup, three
+# eval passes) with margin. The estimate is conservative: one pass of these tasks took
+# ~7.5 min on SGLang in b1b904dc, so the run should take ~35 min per pod. max_spend
+# holds the worst case of both pods living to their TTL ($4.95).
 budget:
-  max_spend: "$3.00"
-  ttl_minutes: 75
+  max_spend: "$5.00"
+  ttl_minutes: 135
   accrual_interval_s: 15
 seed: 0

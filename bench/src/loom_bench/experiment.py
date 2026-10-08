@@ -350,6 +350,10 @@ class QualitySpec(_Strict):
     allow_code_exec: bool = False  # code_exec tasks run model output in the sandbox
     # Smoke experiments only: cap every task near this many items (`Suite.limited`).
     limit: PositiveInt | None = None
+    # Independent passes of the suite per cell, pooled into per-item mean scores
+    # (`pool_replicates`) so engine nondeterminism averages out of the gate. The
+    # divergence half runs on the first pass only.
+    replicates: Annotated[int, Field(ge=1, le=10)] = 1
 
     def load(self) -> Suite:
         suite = load_quality_suite(self.suite)
