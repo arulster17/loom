@@ -1,7 +1,9 @@
 """Acceptance: the whole Lab end to end on the mock backend, through the CLI."""
 
 import asyncio
+import itertools
 import json
+import statistics
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -40,6 +42,7 @@ from loom_bench.store.models import (
 from loom_bench.store.parquet import read_requests
 
 from .conftest import ABORT, SMOKE, mock_experiment, write_yaml
+from .stalls import StallProbe
 
 pytestmark = pytest.mark.timeout(240)
 # One xdist worker runs every test that reads the module-scoped `smoke` run, so the run
@@ -219,20 +222,36 @@ def test_smoke_site_export_build_and_waitlist(smoke, tmp_path):
 
 def test_hard_budget_abort(tmp_path):
     db = f"sqlite:///{tmp_path / 'loom.db'}"
-    result = invoke("run", ABORT, "--db", db, "--out", tmp_path / "results")
+    with StallProbe() as stalls:
+        result = invoke("run", ABORT, "--db", db, "--out", tmp_path / "results")
     assert result.exit_code == EXIT_BUDGET_ABORT, result.output
     spec = load_experiment(ABORT)
     exp = _experiment(db)
     assert exp.status == "aborted"
     assert exp.abort_reason.startswith("budget cap reached")
     cap = spec.budget.max_spend
-    # Worst-case overshoot: one accrual interval at the host's price, plus teardown.
-    per_second = spec.provider.hourly_price / 3600
-    slack_s = spec.budget.accrual_interval_s + 1.0
-    assert cap <= exp.spent_micros <= cap + per_second * slack_s
     with session_scope(db) as s:
+        accruals = list(s.scalars(select(BenchSpend).order_by(BenchSpend.recorded_at)))
         resources = list(s.scalars(select(BenchResource)))
         runs = list(s.scalars(select(BenchRun)))
+    totals = list(itertools.accumulate(a.amount_micros for a in accruals))
+    assert totals[-1] == exp.spent_micros
+    # The guard trips on the first accrual that reaches the cap; the only accrual after
+    # it is teardown's final one (periodic accrual stops once tripped).
+    trip = next(i for i, total in enumerate(totals) if total >= cap)
+    assert trip >= 1 and trip == len(accruals) - 2
+    # It accrues on its interval while the run is live (the median gap shrugs off stalls).
+    times = [a.recorded_at for a in accruals[: trip + 1]]
+    gaps = [(b - a).total_seconds() for a, b in itertools.pairwise(times)]
+    assert statistics.median(gaps) <= 2 * spec.budget.accrual_interval_s
+    # Spend is billed by wall time, so the overshoot is the time from the last accrual
+    # under the cap to teardown's: one accrual interval plus cancel and teardown (1 s),
+    # at the host's price. Process stalls inside that window (a loaded machine) are the
+    # machine's, not the guard's, and are added as measured.
+    window = (accruals[trip - 1].recorded_at, accruals[-1].recorded_at)
+    per_second = spec.provider.hourly_price / 3600
+    slack_s = spec.budget.accrual_interval_s + 1.0 + stalls.stalled_s(*window)
+    assert cap <= exp.spent_micros <= cap + per_second * slack_s
     assert resources and all(r.terminated_by == "runner" for r in resources)
     assert [r.status for r in runs] == ["aborted"]  # the in-flight run was cancelled
     assert not live_host_ids()
