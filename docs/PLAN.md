@@ -14,6 +14,10 @@ Status: Phase 0 leaderboards done (8B and 70B on RunPod); the FP8 70B row and st
 | 70B on 4x L40S (2026-10-08) | BF16 stays the reference and headline row, with its measured 50 ms TPOT p95 miss. FP8 is tried as its own labeled row ("Llama 3.3 70B FP8"), gated against BF16, with a $15 cap. If the gate fails FP8, record the score cost and accept the miss. No per-model SLO. BF16 on H100/H200 is a possible later run. | The measured floors are the PCIe host's (no working P2P across sockets). FP8 halves the bytes per token on the same hardware. Moving the SLO would hide the result. |
 | Tool calling scores | The current task (plain tools, as most clients send them) stays the headline score. A strict-mode variant (`strict: true`, so vLLM constrains arguments to the schema) is added and reported next to it. | Llama 3.3 70B sends numbers as strings (0.450); both behaviours are useful to know, and the headline keeps measuring the default. |
 | Phase 1 (2026-10-08) | Approved; gateway and web app can start. The results site is not published yet (hold until the user says so). | |
+| Gateway language (2026-10-08) | Python FastAPI + uvloop (confirmed) | See the Stack table. Revisit Go only if the p50 overhead test (< 10 ms) fails. |
+| Ledger design (2026-10-08) | The Phase 1 draft below is accepted: double-entry, append-only, integer micro-dollars, idempotency keys, usage debits batched per org per minute, balance cached in Redis and reconciled every minute. | Expensive to reverse, so confirmed before building. |
+| Stripe (2026-10-08) | Test mode only for Phase 1. The user creates the Stripe account; billing is built against a local Stripe stub until test-mode keys exist. | No accounts are created on the user's behalf. |
+| Same-socket 2x L40S FP8 70B (2026-10-08) | Not now. | Considered (FP8 70B fits on 2x L40S with working P2P); outside the approved hardware config. |
 
 ## Stack
 
@@ -29,7 +33,7 @@ Status: Phase 0 leaderboards done (8B and 70B on RunPod); the FP8 70B row and st
 | Quality | lm-evaluation-harness for MMLU-Pro / GSM8K / IFEval; native tasks for code exec (sandboxed), JSON-schema validity, tool calling, needle retrieval, logprob divergence | lm-eval covers the standard tasks; the native ones need control over sandboxing and per-sample scoring. |
 | AWS | boto3 (EC2, SSM, S3, Secrets Manager); Terraform for the bucket, IAM role and reaper Lambda | Least-privilege role and the reaper exist independently of any laptop. |
 | Reports / site | Jinja2 → markdown, HTML, CSV; static site published to GitHub Pages | No server to run; repo is public. |
-| Gateway (Phase 1, proposed) | Python FastAPI + uvloop | Shares registry and pricing code with Lab and billing, so prices cannot drift; one Redis Lua call per request keeps p50 overhead well under 10 ms. Revisit Go if the overhead test fails. |
+| Gateway (Phase 1) | Python FastAPI + uvloop | Shares registry and pricing code with Lab and billing, so prices cannot drift; one Redis Lua call per request keeps p50 overhead well under 10 ms. Revisit Go if the overhead test fails. |
 | Web (Phase 1) | Next.js App Router, Tailwind, Auth.js + Postgres adapter | Per spec. |
 
 ## Phase 0 plan (increments, each committed with tests)
@@ -93,9 +97,9 @@ bench_spend (id uuid, experiment_id uuid, resource_id text, amount_micros bigint
 waitlist_signups (id uuid, email citext UNIQUE, source text, created_at timestamptz)
 ```
 
-### Phase 1 (platform) — proposal, to confirm before building
+### Phase 1 (platform) — accepted 2026-10-08
 
-Billing and ledger design are expensive to reverse, so this is a draft for review at the start of Phase 1.
+Billing and ledger design are expensive to reverse; this draft was reviewed and accepted at the start of Phase 1.
 
 ```sql
 -- Auth.js Postgres adapter tables: users, accounts, sessions, verification_token
@@ -196,7 +200,7 @@ Needed later (will stop and ask when reached):
 1. ~~AWS account access and GPU spot quota~~ → account access is set up and `infra/aws/bench` is applied; the GPU spot quota is 0, so GPU benches move to RunPod (see Decisions).
 2. ~~Hugging Face token with the Llama 3.3 license accepted~~ → done. On AWS it is in Secrets Manager (`loom/hf-token`); on RunPod it is a RunPod secret ([security.md](security.md#runpod-pods-runpod)). Never in the repo.
 3. Waitlist backend for the public results page: a form service (Formspree / Buttondown) or a small AWS Lambda writing to Postgres.
-4. Phase 1: confirm gateway language, ledger design and Stripe account before building.
+4. ~~Phase 1: confirm gateway language, ledger design and Stripe account before building~~ → confirmed 2026-10-08 (see Decisions).
 5. ~~Approval to build the RunPod provider~~ → approved and built (2026-10-06).
 
 Later (RunPod hardening and follow-ups):
