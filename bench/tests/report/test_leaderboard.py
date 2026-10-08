@@ -6,6 +6,8 @@ import pytest
 from loom_bench.cost import CostAllocation, PriceColumn
 from loom_bench.report.analyze import (
     ColdStartStat,
+    Quality,
+    TaskQuality,
     analyze_runs,
     default_price_resolver,
     with_quality,
@@ -17,6 +19,7 @@ from loom_bench.report.leaderboard import (
     build_leaderboard,
     cold_text,
     md_headers,
+    quality_text,
     render_csv,
     render_html,
     render_markdown,
@@ -122,6 +125,37 @@ def test_single_ranked_and_no_cost_recommendations(price_book):
     assert rows[1].recommendation == (
         "No cost at SLO: no tested load met the SLO; test lower loads"
     )
+
+
+def test_scores_without_a_gate_are_shown_not_hidden(price_book):
+    # A single-config experiment (the 70B) evaluates quality but has nothing to gate
+    # against; its scores used to be reported as "not evaluated".
+    (result,) = analyze_runs(
+        make_runs("only"),
+        slo=SLO,
+        allocation=CostAllocation.all_output(),
+        price_resolver=default_price_resolver(price_book),
+    )
+    tasks = [
+        TaskQuality(
+            task=t,
+            task_version="1",
+            n=n,
+            score=s,
+            ci_low=None,
+            ci_high=None,
+            baseline_score=None,
+            delta=None,
+        )
+        for t, n, s in [("gsm8k", 1319, 0.9553), ("tool_calling", 60, 0.45)]
+    ]
+    scored = result.model_copy(
+        update={"quality": Quality(gate=None, baseline_config_hash=None, tasks=tasks)}
+    )
+    assert quality_text(scored) == "no gate · gsm8k 0.955, tool_calling 0.450"
+    (row,) = build_leaderboard([scored]).boards[0].rows
+    assert row.recommendation == "Only ranked config at SLO; quality scored, not gated"
+    assert quality_text(result) == "not evaluated"
 
 
 def test_markdown_table_and_footer(report, price_book):

@@ -64,7 +64,7 @@
 <td class="num">{{ estimate(r.goodput_output_tok_s_per_gpu, 1) }}</td>
 <td class="num">{{ estimate(r.ttft_p95_ms, 0, 'ms') }}</td>
 <td class="num">{{ estimate(r.tpot_p95_ms, 1, 'ms') }}</td>
-<td>{% if r.quality and r.quality.gate %}<span class="badge {{ r.quality.gate }}">{{ gate_label(r.quality.gate) }}</span>{% else %}<span class="muted">not evaluated</span>{% endif %}</td>
+<td>{% if r.quality and r.quality.gate %}<span class="badge {{ r.quality.gate }}">{{ gate_label(r.quality.gate) }}</span>{% elif r.quality and r.quality.tasks %}<span class="muted">scored, no gate</span>{% else %}<span class="muted">not evaluated</span>{% endif %}</td>
 {% endif %}
 </tr>
 {% endfor %}

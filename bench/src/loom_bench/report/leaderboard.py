@@ -183,6 +183,8 @@ def _overlap(a: ConfigResult, b: ConfigResult) -> bool:
 
 def _quality_clause(r: ConfigResult, names: Mapping[str, str]) -> str:
     q = r.quality
+    if q is not None and q.gate is None and q.tasks:
+        return "quality scored, not gated"
     if q is None or q.gate is None:
         return "quality not evaluated"
     if q.gate == "baseline":
@@ -323,6 +325,11 @@ def build_leaderboard(
 
 def quality_text(r: ConfigResult) -> str:
     q = r.quality
+    if q is not None and q.gate is None and q.tasks:
+        # Scored but never gated (a single-config experiment): show the scores rather
+        # than hide them behind "not evaluated".
+        scores = ", ".join(f"{t.task} {t.score:.3f}" for t in q.tasks)
+        return f"no gate · {scores}"
     if q is None or q.gate is None:
         return "not evaluated"
     worst = q.worst()

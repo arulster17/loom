@@ -160,7 +160,7 @@
 <li>Above the limit with any task failing or inconclusive, the gate fails.</li>
 <li>Beyond a hard ceiling (KL above 0.5 nats or top-1 agreement below 80%) the gate fails regardless of the noise floor: those outputs are broken, not noisy.</li>
 </ul>
-<p>Each model page shows every task's score, its interval and the difference from the baseline, and the divergence with the limit it was held to. A config with no gate decision is shown as "not evaluated".</p>
+<p>Each model page shows every task's score, its interval and the difference from the baseline, and the divergence with the limit it was held to. A config with scores but no gate decision (an experiment with one config has nothing to gate against) is shown as "scored, no gate" with its scores; one with no scores, as "not evaluated".</p>
 </section>
 
 <section aria-labelledby="content">
