@@ -77,6 +77,8 @@ variants:                           # named overrides of the registry entry
   # - name: vllm-fp8
   #   model: <another registry id>    # patch that entry instead (e.g. the model's FP8 row);
   #                                   # the quality suite must cover it (also_models)
+  #   host_group: b                   # optional: a separate host for this variant's cells
+  #                                   # (see "Host groups" below)
 sweep:                              # optional: cartesian product, applied to every variant
   engine.args.max_num_seqs: [128, 256]
   kv_cache_dtype: [auto, fp8]
@@ -148,6 +150,24 @@ cell's key is `variant[knob=value,...]`; its `config_hash` is the sha256 of the 
 JSON of `{model: resolved ModelSpec, launch: EngineLaunch, hardware}` and identifies the
 setup across experiments.
 
+**Host groups.** Cells on the same hardware (on RunPod, the same engine image too) share
+one host through warm restarts. A variant's `host_group` puts its cells on a host of
+their own: each group gets its own cold start, eval setup and TTL, and the groups run one
+after the other, the quality baseline's first. It splits a sweep longer than one host's
+TTL limit (8 h on RunPod) without splitting the experiment, so candidates on later hosts
+are still gated in-run against the baseline's stored reference. Only the host key
+changes, never the config hash.
+
+**Datasets on remote hosts.** A `chat_dataset` profile reads `path` (e.g.
+`${LOOM_DATA_DIR}/sharegpt/...`), which exists only where you downloaded it. With a
+`download:` block (Hugging Face dataset, 40-hex revision, file, sha256, size), a RunPod
+pod fetches the file itself: the first load job on the pod downloads it into
+`/opt/loom/data/<sha256>/`, checks the sha256 and leaves it root-owned and world-readable;
+every job's workload `path` points there. `bench plan` refuses a file-reading workload
+(chat dataset or trace) on a cloud host that cannot fetch it: no `download:` on RunPod,
+any such workload on `aws_ec2` (not built there yet). `chat-sharegpt` pins
+ShareGPT_V3_unfiltered_cleaned_split.json at commit `192ab218` (673 MB).
+
 **Open vs closed loop.** Open loop sends on an arrival schedule regardless of the server
 (the honest mode for latency SLOs; `load_value` is req/s). Closed loop keeps a fixed number
 of requests in flight (saturation; `load_value` is concurrency). Every run records
@@ -177,11 +197,20 @@ it there.
    AWS: boot 180 s, image pull 300 s,
    weights at 150 MB/s download and 400 MB/s load, engine init 240 s, 30 s per run on top
    of its duration and full drain timeout (an overloaded point waits it out), 90 s
-   teardown. An eval job takes, per task, items x a per-kind item time / concurrency
-   (`EVAL_ITEM_S`: 24 s for lm-eval, 40 s for needle, 16 s for code, 6-8 s for tool calling
-   and JSON, i.e. an item's share of a full engine decoding at the 50 ms TPOT SLO), plus
-   60 s of harness start-up per lm-eval task, 4 s per divergence prompt over 16 slots (and
-   on the baseline 1 s per prompt, one at a time, for the noise-floor pass), 60 s per job and, once per AWS host, 300 s to install the eval harness. Spot
+   teardown; a chat-dataset run adds 30 s to read the dataset and tokenize its
+   conversations, and a pod downloads a pinned dataset once. An eval job takes, per task,
+   items x an item's slot time / concurrency, plus 60 s of harness start-up per lm-eval
+   task, 4 s per divergence prompt over 16 slots (and on the baseline 1 s per prompt, one
+   at a time, for the noise-floor pass), 60 s per job and, once per host, 300 s to install
+   the eval harness. Tasks timed on real engines (GSM8K, IFEval, JSON schema, tool
+   calling, strict tool calling) scale with the cell's decode-step floor, the weight bytes
+   each GPU reads per step over its memory bandwidth (`EVAL_ITEM_S_PER_STEP_MS`,
+   `decode_step_ms`): calibrated on every stored full pass (8B on L40S, 70B on 4x L40S and
+   on 2x H100, BF16 and FP8) as the largest measured ratio plus ~20%, so a phase0-strict
+   pass plans at ~14 min for Qwen3-8B BF16 on an L40S (measured 7-8), ~26 min for the 70B
+   on 4x L40S (17) and ~15 / ~9 min for the 70B BF16 / FP8 on 2x H100 (7.3 / 4.7).
+   Untimed tasks (MMLU-Pro, RULER, needle, code) keep a fixed `EVAL_ITEM_S` (24, 40, 16 s:
+   an item's share of an engine decoding at the 50 ms TPOT SLO). Spot
    hosts are priced like the provider accrues them: price x its safety multiplier (1.25),
    plus the root EBS volume. On RunPod: boot 60 s, image pull (and sshd install) 240 s,
    30 s teardown, the rest as on AWS; a pod is priced at prices.yaml's on-demand rate plus
@@ -413,6 +442,17 @@ The real runs are on RunPod Secure Cloud on-demand, since the AWS GPU spot quota
 | `llama-3.3-70b-h100-tp2-runpod` (ran 2026-10-09 as 9f0853d7: $25.18, results below) | 1x RunPod 2x H100 SXM ($7.98/h), BF16 baseline + FP8 at TP=2 on one pod, FP8 gated in-run; 5.1 h of a 5.5 h TTL (planner) | $40.53 | $44.09 | $45 |
 | `runpod-smoke-h100` (ran three times: 4e50b5a5, e929eb0c, 4680fa3e, $6.15) | 1x RunPod 2x H100 SXM, the H100 run's paths at smoke scale (Qwen3-8B BF16 vs FP8, TP=2, NVLink P2P), 51 min of a 65 min TTL | $6.78 | $8.66 | $9 |
 | `qwen3-8b-quality-runpod` | 2x RunPod 1x L40S, evals and gate only, 3 eval passes per engine (finishes 565b8d3f's gate), 105 min each of a 135 min TTL (planned; ~35 min at b1b904dc's measured pass time) | $3.85 | $4.95 | $5.00 |
+| `qwen3-8b-config-sweep-runpod` (**proposed** 2026-10-09, not approved) | 3x RunPod 1x L40S in sequence (host groups), 5 vLLM cells: BF16, BF16 + FP8 KV, FP8, FP8 + FP8 KV, FP8 + FP8 KV + `max_num_batched_tokens` 1024; chat-sharegpt and fixed-1k-1k; every candidate gated vs BF16 in-run, 3 passes; 7.0 / 6.6 / 3.4 h of a 7.5 h TTL. [Section below](#qwen3-8b-config-sweep-proposed) | $18.71 | $24.77 | $25 |
+| `runpod-smoke-8b-sweep` (**proposed**, runs first) | The sweep at smoke scale on the same three pods, 68 / 67 / 39 min of a 75 min TTL | $3.20 | $4.13 | $4.25 |
+
+The estimates above were planned when eval time was a fixed per-task constant (~30 min a
+phase0 pass on any model). Since 2026-10-09 it scales with the decode-step floor (Budget
+rails, rail 2), and `bench plan` gives: `qwen3-8b-vllm-vs-sglang-runpod` $7.41,
+`llama-3.3-70b-tp4-runpod` $11.58, `qwen3-8b-quality-runpod` $2.10,
+`llama-3.3-70b-h100-tp2-runpod` $35.78, `llama-3.3-70b-fp8-tp4-runpod` $9.95, the smokes
+unchanged within a cent or two (same worst cases and caps, which are TTL-bound). The 70B
+H100 quality-only rerun ([quality-gate.md](quality-gate.md#what-can-decide-a-60-item-task))
+plans at $10.13 instead of $14.88.
 
 The AWS specs stay as the secondary path:
 
@@ -576,3 +616,82 @@ e929eb0c $2.26; 4680fa3e $2.71): $31.33 in all, under the $45 + $9 caps. Report:
   numbers as strings), and the lever that can decide the task is more items, not
   replicates: [quality-gate.md](quality-gate.md), "Strict tool calling".
 
+
+### Qwen3-8B config sweep (proposed)
+
+`qwen3-8b-config-sweep-runpod` (proposed 2026-10-09, not run; the spec's comments carry
+the full reasoning) looks for the cheapest Qwen3-8B serving config that passes the
+quality gate against BF16, priced at the SLO on a realistic chat workload, to fill
+`qwen3-8b`'s `pricing` (now null) as described in
+[how-to/price-a-model.md](how-to/price-a-model.md).
+
+**Hardware.** RunPod Secure 1x, live from the API on 2026-10-09 16:47 UTC (all "Low"
+stock except A40 "Medium"):
+
+| GPU | $/h | Memory | Bandwidth | GB/s per $ | FP8 tensor cores |
+|---|---|---|---|---|---|
+| L40S (kept) | 1.09 | 48 GB | 864 GB/s | 793 | yes (Ada) |
+| RTX 6000 Ada | 0.99 | 48 GB | 960 GB/s | 970 | yes (Ada) |
+| L40 | 0.82 | 48 GB | 864 GB/s | 1054 | yes (Ada, half the L40S's tensor throughput) |
+| RTX A6000 / A40 | 0.59 | 48 GB | 768 / 696 GB/s | 1302 / 1180 | no (Ampere: W8A16 Marlin) |
+| L4 | 0.59 | 24 GB | 300 GB/s | 508 | yes |
+| H100 SXM | 3.99 | 80 GB | 3350 GB/s | 840 | yes |
+| H100 NVL | 3.19 | 94 GB | 3900 GB/s | 1223 | yes |
+
+An 8B decode at the 50 ms TPOT SLO is bound by memory bandwidth and KV-cache room, so
+$/token follows GB/s per dollar where the batch the SLO allows fits in memory. H100 SXM
+is no cheaper per token than the L40S and runs an 8B at batch sizes where scheduling
+binds; L4 is worse. L40 and RTX 6000 Ada run the same Ada FP8 kernels on 48 GB for 25% /
+9% less and are plausibly cheaper per token, but neither has been run (and the L40's
+halved compute may cost TTFT under chat prefill); the Ampere cards serve FP8 weights
+through a different kernel path. So the sweep stays on the L40S (the prior baseline and
+the registry's GPU), and the winning config can be rerun on an L40 or RTX 6000 Ada pod
+afterwards for about $3 once those are priced in `bench/prices.yaml`.
+
+**Cells** (vLLM v0.30.0 only: it won or tied SGLang on every workload in 565b8d3f). TPOT
+p95 is what fails first (565b8d3f's 1k/1k knee failed TPOT with TTFT p95 at a third of
+its target), and a decode step's time is its weight read plus every running sequence's
+KV read, so the grid varies bytes per step: BF16 (the reference row and gate baseline),
+BF16 with an FP8 KV cache, FP8-dynamic weights (`qwen3-8b-fp8`), FP8 weights with an FP8
+KV cache, and that last with `max_num_batched_tokens: 1024` (vLLM's default chunked-prefill
+budget on a 48 GB GPU is 2048; smaller chunks keep decode steps memory-bound, spending
+some of TTFT's 3x headroom on TPOT). Every candidate is gated against BF16 in-run on
+`phase0-strict` with three replicated passes (IFEval's 2-point margin needs them:
+quality-gate.md, "Replicated passes").
+
+**Sizing load windows.** 565b8d3f's untrusted figures (run-to-run CV 11-15%) were
+sampling, not engine noise. From its stored runs (32 load points x 3 repetitions):
+
+- **Throughput** at a passing open-loop point is the number of Poisson arrivals that land
+  in the window, so its CV is 1/sqrt(N) for N measured requests (output tokens:
+  sqrt((1 + cv_len²) / N) when lengths vary). The observed run-to-run variance was 1.06x
+  (mean; median 0.93x) that prediction. The flagged points measured 100-200 requests (100 s
+  windows at 1-2 req/s: expected CV 7-10%).
+- **Flag probability.** With 3 repetitions the sample variance is s² = σ² χ²₂ / 2, so a
+  point is flagged (sample CV > 10%) with probability exp(-(10% / σ)²): 27% at N = 130,
+  5% at N = 300, 1.8% at N = 400, 0.7% at N = 500.
+- **Latency quantiles** varied 3x (TTFT p95), 19x (TPOT p95) and 22x (E2E p95) more than
+  resampling requests within a run predicts (median variance ratios): run to run, the
+  load trajectory a window draws (bursts, how many long requests overlap) moves them, and
+  more so near the knee. That too shrinks with longer windows.
+- **Edges.** Requests sent in a window's last ~45 s finish after arrivals stop, so they
+  see falling concurrency: on fixed-1k-1k near the knee their mean TPOT was 10-25% below
+  the rest (vLLM at 1.189 req/s: 46.5, 47.9, 47.7, 48.5, then 42.5 ms by fifth of the
+  window), and with 30 s of warmup the first fifth ran ~5% low as well. Short windows
+  flatter TPOT; longer ones dilute it (a `cooldown_s` that keeps arrivals going past the
+  window would remove it, not built).
+
+So the sweep measures chat-sharegpt for 210 s after 45 s of warmup (~630 requests at a
+BF16 knee near 3 req/s: output-token CV ~4.7%) and fixed-1k-1k for 180 s after 60 s
+(~220 requests for BF16, CV ~6.8%, kept for comparability; 450+ for the FP8 cells).
+Searches step by 1.5x from mid-range (chat from 4.5 req/s, 1k/1k from 1.5) so BF16
+descends and FP8 climbs, then bisect to 5%.
+
+**Plan** (`bench plan`, 2026-10-09): three pods in sequence, 7.04 / 6.57 / 3.38 h of a
+7.5 h TTL each (a RunPod pod's TTL is capped at 8 h, so the 17 h sweep is split by
+`host_group`), estimate $18.71, worst case $24.77, cap $25. The smoke
+(`runpod-smoke-8b-sweep`): $3.20, worst $4.13, cap $4.25, run first. Paths it runs that
+no earlier smoke did: the chat workload on a pod (the pinned dataset download and
+multi-turn chat requests), FP8 KV cache on vLLM 0.30 on Ada with BF16 and FP8 weights,
+`--max-num-batched-tokens 1024`, three host groups in one experiment, and three
+replicated phase0-strict passes.

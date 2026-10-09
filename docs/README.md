@@ -28,6 +28,7 @@
 - [how-to/add-gpu-type.md](how-to/add-gpu-type.md): an instance type in `bench/prices.yaml` (config only).
 - [how-to/add-workload-profile.md](how-to/add-workload-profile.md): a workload profile in `bench/workloads/` (config only).
 - [how-to/add-eval-task.md](how-to/add-eval-task.md): an eval task for the quality gate (code).
+- [how-to/price-a-model.md](how-to/price-a-model.md): a swept winner and its price in `config/models.yaml` (cost-plus, market, or both).
 
 ## Policy
 

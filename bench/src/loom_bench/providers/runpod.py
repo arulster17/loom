@@ -40,7 +40,7 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from fractions import Fraction
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
 
 import boto3  # type: ignore[import-untyped]
@@ -83,6 +83,7 @@ from loom_bench.providers.weights import HostWeights, WeightsPlan, flat
 from loom_bench.records import Market
 from loom_bench.registry import read_yaml
 from loom_bench.tokenize import hf_cache_folder
+from loom_bench.workloads.profiles import DatasetDownload
 
 PROVIDER_NAME = "runpod"
 TEMPLATE_DIR = "runpod_scripts"
@@ -101,6 +102,8 @@ DOWNLOAD_ALLOWANCE_S = 3600
 # Run-time allowance for a job on top of its own time budget (Python + wheel install, drain).
 JOB_ALLOWANCE_S = 900
 LOAD_JOB_CMD = ("job", "run")
+# run_job.sh's dataset variables for a job that reads no pinned dataset.
+NO_DATASET: dict[str, str] = {"DATA_URL": "", "DATA_SHA256": "", "DATA_PATH": ""}
 EVAL_JOB_CMD = ("quality", "job")
 LMEVAL_EXTRA = "lmeval"
 
@@ -748,6 +751,7 @@ class RunpodProvider:
         model_cache: Mapping[str, str],
         extras: str = "",
         sample_gpu: bool = False,
+        data: Mapping[str, str] | None = None,
     ) -> tuple[str, str]:
         """Upload the job JSON, the wheel and its locked requirements; return (key prefix,
         rendered script). The presigned URLs exist only inside the returned script."""
@@ -792,18 +796,37 @@ class RunpodProvider:
             JOB_HOME=runpod_layout.JOB_HOME,
             PROC_ROOT=runpod_layout.PROC_ROOT,
             **model_cache,
+            **(data or NO_DATASET),
         )
         return prefix, script
 
+    @staticmethod
+    def _pod_dataset(workload: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+        """The job's workload reading its pinned dataset where run_job.sh downloads it
+        (`DATA_DIR/<sha256>/<file name>`), and the run_job.sh variables that fetch and
+        check it. A workload without a `download` block is returned as is."""
+        download = workload.get("download")
+        if not download:
+            return dict(workload), dict(NO_DATASET)
+        spec = DatasetDownload.model_validate(download)
+        path = f"{runpod_layout.DATA_DIR}/{spec.sha256}/{PurePosixPath(spec.filename).name}"
+        return {**workload, "path": path}, {
+            "DATA_URL": spec.url,
+            "DATA_SHA256": spec.sha256,
+            "DATA_PATH": path,
+        }
+
     def _stage_job(self, host: Host, job: LoadJob) -> tuple[str, str]:
         tokenizer, model_cache = self._pod_tokenizer(job.tokenizer)
+        workload, data = self._pod_dataset(job.workload)
         return self._stage(
             host,
             job.run_id,
-            job.model_copy(update={"tokenizer": tokenizer}).model_dump_json(),
+            job.model_copy(update={"tokenizer": tokenizer, "workload": workload}).model_dump_json(),
             command=LOAD_JOB_CMD,
             model_cache=model_cache,
             sample_gpu=job.sample_gpu,
+            data=data,
         )
 
     def _stage_eval(self, host: Host, job: EvalJob) -> tuple[str, str]:

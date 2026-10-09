@@ -330,6 +330,18 @@ sm_90 FP8 GEMMs, TP=2 with NCCL P2P over NVLink (`NCCL_P2P_LEVEL=NVL`) and
 qwen3-8b-fp8`, a separate registry row, as the run's `model: llama-3.3-70b-instruct-fp8`). Check its `engine_started.system.gpu_topology` shows
 `NV*` links between the two GPUs. H100 SXM Secure 2x was "Low" stock on 2026-10-08.
 
+The proposed Qwen3-8B config sweep (`qwen3-8b-config-sweep-runpod.yaml`, $25 cap, not
+yet approved) has its own smoke, `runpod-smoke-8b-sweep.yaml` ($4.25 cap, about $3.20
+planned): the sweep's five cells on the same three pods (`host_group` a, b, c, run one
+after the other), the chat-sharegpt workload with its pinned dataset download, FP8 KV
+caches, `--max-num-batched-tokens 1024` and three replicated phase0-strict passes, at
+10 s windows and 4 items per task. What to check after it: each pod's first chat job
+logged no `workload dataset checksum mismatch` and
+`/opt/loom/data/35f0e213.../ShareGPT_V3_unfiltered_cleaned_split.json` exists once per
+pod; the KV-FP8 cells started (`engine_started`, not `engine_start_failed`: on sm_89 vLLM
+must pick an attention backend that supports an FP8 cache); every candidate has a gate
+decision against `bf16` (inconclusive is expected at 4 items).
+
 Dependency bugs are caught for free before that: `uv run pytest -m network` (CI job
 `pod-client-env`) rebuilds the pods' client environment from `uv.lock` and runs every task
 of every eval suite at 2 items against the mock backend.

@@ -17,6 +17,7 @@ from pydantic import (
     Field,
     NonNegativeFloat,
     PositiveInt,
+    StringConstraints,
     TypeAdapter,
     model_validator,
 )
@@ -37,6 +38,27 @@ class DatasetProvenance(BaseModel):
     revision: str | None = None
     license: str
     license_url: str | None = None
+
+
+class DatasetDownload(BaseModel):
+    """A public dataset file pinned to a Hugging Face commit and its sha256, which a
+    remote GPU host downloads for itself (the laptop's `path` does not exist there).
+    Locally, `path` is used as given."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    hf_dataset: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][\w.-]*/[\w.-]+$")]
+    revision: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
+    filename: Annotated[str, StringConstraints(pattern=r"^[\w.-]+(/[\w.-]+)*$")]
+    sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    size_bytes: PositiveInt
+
+    @property
+    def url(self) -> str:
+        return (
+            f"https://huggingface.co/datasets/{self.hf_dataset}/resolve/"
+            f"{self.revision}/{self.filename}"
+        )
 
 
 class _Profile(BaseModel):
@@ -90,6 +112,7 @@ class ChatDatasetProfile(_Profile):
     kind: Literal["chat_dataset"] = "chat_dataset"
     endpoint: Literal["chat"] = "chat"
     path: str  # user-supplied; `~` and `$VARS` expanded
+    download: DatasetDownload | None = None  # how a remote host gets the file at `path`
     max_input_len: PositiveInt | None = None  # skip longer conversations
     min_output_len: PositiveInt = 4  # skip near-empty reference replies
     max_output_len: PositiveInt = 1024

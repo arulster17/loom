@@ -17,6 +17,8 @@ SSH_DIR = "/root/.ssh"
 LOG_DIR = "/var/log/loom"
 WEIGHTS_DIR = "/opt/loom/hf"  # HF_HOME for the engine; excluded from the secret scan
 PYTHON_DIR = "/opt/loom/python"  # root-owned client interpreter
+# Root-owned, world-readable copies of pinned workload datasets: <sha256>/<file name>.
+DATA_DIR = "/opt/loom/data"
 CLIENT_ENV_ROOT = "/opt/loom/clientenv"  # root-owned virtualenvs, one per wheel+requirements
 PROC1_ENVIRON = "/proc/1/environ"
 PROC_ROOT = "/proc"

@@ -43,6 +43,8 @@ from loom_bench.quality.tasks.base import ItemResult
 from loom_bench.records import LoadMode, Market
 from loom_bench.registry import load_registry
 from loom_bench.runner import _host_request
+from loom_bench.workloads import load_profile
+from loom_bench.workloads.profiles import ChatDatasetProfile
 
 from . import fakes as fakes_mod
 from .conftest import BUCKET, REGION
@@ -798,6 +800,47 @@ async def test_run_job_reads_the_tokenizer_from_the_pod_snapshot(fake, s3, tmp_p
     (script,) = ssh.scripts("run_job")
     assert script_var(script, "MODEL_CACHE_DIR") == cache
     assert script_var(script, "MODEL_REVISION") == spec.hf.revision
+
+
+async def test_run_job_reads_a_dataset_from_the_pods_pinned_copy(fake, s3, tmp_path) -> None:
+    # The laptop's ${LOOM_DATA_DIR} path does not exist in the pod: the job reads the
+    # pinned file run_job.sh downloads (and checks) under DATA_DIR/<sha256>/.
+    wheel = tmp_path / "loom_bench-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"w")
+    profile = load_profile("chat-sharegpt")
+    assert isinstance(profile, ChatDatasetProfile) and profile.download is not None
+    dl = profile.download
+    ssh = FakePodExec({"run_job": pod_writes(s3, load_result().model_dump_json())})
+    p = provider(fake, s3, tmp_path, ssh=ssh, wheel_path=wheel)
+    host = await p.provision(request())
+    job = load_job(workload=profile.model_dump(mode="json"))
+    await p.run_job(host, job)
+    prefix = f"runs/{host.request.tags['loom:experiment']}/run-7/"
+    stored = LoadJob.model_validate_json(
+        s3.get_object(Bucket=BUCKET, Key=prefix + "job.json")["Body"].read()
+    )
+    pod_path = f"/opt/loom/data/{dl.sha256}/ShareGPT_V3_unfiltered_cleaned_split.json"
+    assert stored.workload == {**job.workload, "path": pod_path}
+    (script,) = ssh.scripts("run_job")
+    assert script_var(script, "DATA_URL") == (
+        "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/"
+        f"{dl.revision}/ShareGPT_V3_unfiltered_cleaned_split.json"
+    )
+    assert script_var(script, "DATA_SHA256") == dl.sha256
+    assert script_var(script, "DATA_PATH") == pod_path
+
+
+async def test_jobs_without_a_dataset_fetch_nothing(fake, s3, tmp_path) -> None:
+    wheel = tmp_path / "loom_bench-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"w")
+    ssh = FakePodExec({"run_job": pod_writes(s3, load_result().model_dump_json())})
+    p = provider(fake, s3, tmp_path, ssh=ssh, wheel_path=wheel)
+    host = await p.provision(request())
+    job = load_job()
+    await p.run_job(host, job)
+    (script,) = ssh.scripts("run_job")
+    for var in ("DATA_URL", "DATA_SHA256", "DATA_PATH"):
+        assert script_var(script, var) == "", var
 
 
 async def test_job_without_the_isolation_marker_fails(fake, s3, tmp_path) -> None:

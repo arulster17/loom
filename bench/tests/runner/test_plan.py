@@ -16,11 +16,13 @@ from loom_bench.plan import (
     EVAL_FLOOR_PROMPT_S,
     EVAL_HARNESS_TASK_S,
     EVAL_ITEM_S,
+    EVAL_ITEM_S_PER_STEP_MS,
     MOCK_EVAL_JOB_S,
     RUNPOD_TIMING,
     Estimator,
     PlanError,
     build_plan,
+    decode_step_ms,
     runpod_accrual_terms,
 )
 from loom_bench.prices import HOURS_PER_MONTH, load_prices
@@ -41,7 +43,9 @@ from .conftest import (
     QWEN,
     QWEN_QUALITY_RUNPOD,
     QWEN_RUNPOD,
+    QWEN_SWEEP_RUNPOD,
     RUNPOD_SMOKE,
+    RUNPOD_SMOKE_8B_SWEEP,
     RUNPOD_SMOKE_FP8,
     RUNPOD_SMOKE_H100,
     SMOKE,
@@ -243,6 +247,8 @@ def test_runpod_specs_match_their_aws_counterparts_apart_from_the_provider():
         RUNPOD_SMOKE_FP8,
         LLAMA_H100_RUNPOD,
         RUNPOD_SMOKE_H100,
+        QWEN_SWEEP_RUNPOD,
+        RUNPOD_SMOKE_8B_SWEEP,
     ],
     ids=lambda p: p.stem,
 )
@@ -394,8 +400,12 @@ def test_aws_eval_time_comes_from_the_suite(tmp_path):
     assert plan.ok, plan.refusals
     steps = plan.hosts[0].steps
     evals = [s for s in steps if s.kind == "eval"]
+    # json_schema was timed on GPUs, so it scales with the cell's decode step; this
+    # fixture's harness task ("gsm8k", not the suites' gsm8k_cot_llama) never was.
+    (cell, _) = expand(exp, REGISTRY)
+    json_item_s = EVAL_ITEM_S_PER_STEP_MS["json_schema"] * decode_step_ms(cell.spec)
     expected = (
-        JSON_ITEMS * EVAL_ITEM_S["json_schema"] / EVAL_CONCURRENCY
+        JSON_ITEMS * json_item_s / EVAL_CONCURRENCY
         + 100 * EVAL_ITEM_S["lm_eval"] / 32
         + 10 * EVAL_DIVERGENCE_PROMPT_S / EVAL_CONCURRENCY
         + EVAL_HARNESS_TASK_S
