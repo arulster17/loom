@@ -11,7 +11,7 @@
 # instance names (l40s-x1, ...) are Loom's names for a GPU type x count. RunPod picks
 # the datacenter; the provider accrues at max(the pod's API costPerHr, this price).
 
-last_checked: 2026-10-08
+last_checked: 2026-10-09
 
 clouds:
   aws:
@@ -248,6 +248,34 @@ clouds:
             - https://www.runpod.io/pricing
             - https://docs.runpod.io/pods/pricing
           last_checked: 2026-10-06
+        # Ada (sm_89) 48 GB cards running the same FP8 kernels as the L40S, for the
+        # 8B sweep's follow-up (qwen3-8b-winner-ada-runpod). RunPod API, 2026-10-09 20:11
+        # UTC (gpuTypes lowestPrice, gpuCount 1, secureCloud: true), both stockStatus
+        # "Low"; vcpus and memory are the API's minVcpu / minMemory.
+        l40-x1:
+          gpu: L40
+          gpu_count: 1
+          gpu_memory_gb: 48
+          vcpus: 18
+          memory_gib: 143
+          local_nvme_gb: 0
+          on_demand_per_hour: 820_000
+          sources:
+            - https://www.runpod.io/pricing
+            - https://docs.runpod.io/pods/pricing
+          last_checked: 2026-10-09
+        rtx6000ada-x1:
+          gpu: RTX 6000 Ada
+          gpu_count: 1
+          gpu_memory_gb: 48
+          vcpus: 16
+          memory_gib: 62
+          local_nvme_gb: 0
+          on_demand_per_hour: 990_000
+          sources:
+            - https://www.runpod.io/pricing
+            - https://docs.runpod.io/pods/pricing
+          last_checked: 2026-10-09
         l40s-x4:
           gpu: L40S
           gpu_count: 4

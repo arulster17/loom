@@ -105,7 +105,11 @@ class AwsEc2ProviderSpec(_Strict):
 
 
 # RunPod GPU type ids by registry GPU name; `provider.gpu_type_id` covers the others.
-RUNPOD_GPU_TYPE_IDS: dict[str, str] = {"L40S": "NVIDIA L40S"}
+RUNPOD_GPU_TYPE_IDS: dict[str, str] = {
+    "L40S": "NVIDIA L40S",
+    "L40": "NVIDIA L40",
+    "RTX 6000 Ada": "NVIDIA RTX 6000 Ada Generation",
+}
 
 
 class RunpodProviderSpec(_Strict):
