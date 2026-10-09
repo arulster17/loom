@@ -111,13 +111,17 @@ class PodSim(FakePodExec):
     tests run the script itself): CACHED_WEIGHTS must be in it, FETCH_WEIGHTS are added
     to it, and the engine, which runs offline, starts only if its checkpoint is in it.
     A job's tokenizer snapshot (MODEL_CACHE_DIR, MODEL_REVISION) must be in it too, as
-    run_job.sh checks."""
+    run_job.sh checks.
 
-    def __init__(self, s3: Any) -> None:
+    `mock` overrides the engine's MockConfig fields (e.g. a slower step cost model, so
+    a load search meets real overload)."""
+
+    def __init__(self, s3: Any, mock: dict[str, Any] | None = None) -> None:
         super().__init__(
             {"start_engine": self.start, "stop_engine": self.stop, "run_job": self.job}
         )
         self.s3 = s3
+        self.mock = mock or {}
         self.servers: dict[str, Any] = {}  # pod (by its known_hosts file) -> mock server
         self.cache: dict[str, set[tuple[str, str]]] = {}  # pod -> its HF cache
         self.downloads: dict[str, list[tuple[str, str]]] = {}  # pod -> downloads, in order
@@ -142,11 +146,14 @@ class PodSim(FakePodExec):
         # alone (565b8d3f). Mirror that so divergence across the two pods runs as for real.
         sglang = re.search(r"^ENGINE_CMD=.*sglang", script, re.MULTILINE) is not None
         cfg = MockConfig(
-            time_scale=0.01,
-            models=[served],
-            logprob_jitter=0.25,
-            text_offsets=not sglang,
-            byte_level=True,
+            **{
+                "time_scale": 0.01,
+                "models": [served],
+                "logprob_jitter": 0.25,
+                "text_offsets": not sglang,
+                "byte_level": True,
+                **self.mock,
+            }
         )
         await self.stop(target, script)
         srv = await asyncio.to_thread(_started_server, cfg)

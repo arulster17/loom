@@ -19,6 +19,7 @@ checkpoint per pod) and two checkpoints with load (9f0853d7), never both togethe
 `quality_run` below drives that combination through the pod simulator."""
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -119,8 +120,8 @@ def at_test_scale(path: Path, tmp: Path, *, replicates: bool = False) -> Experim
 class RecordingPodSim(PodSim):
     """PodSim that keeps each job it ran, as staged."""
 
-    def __init__(self, s3: Any) -> None:
-        super().__init__(s3)
+    def __init__(self, s3: Any, mock: dict[str, Any] | None = None) -> None:
+        super().__init__(s3, mock)
         self.jobs: list[LoadJob | EvalJob] = []
 
     async def job(self, target: Any, script: str) -> Any:
@@ -133,8 +134,16 @@ class RecordingPodSim(PodSim):
         return await super().job(target, script)
 
 
-def run_on_pod_sim(path: Path, tmp: Path, *, replicates: bool = False):
-    """The spec at test scale on the runpod provider against FakeRunpod and PodSim."""
+def run_on_pod_sim(
+    path: Path,
+    tmp: Path,
+    *,
+    replicates: bool = False,
+    scale: Callable[[Path, Path], Experiment] | None = None,
+    pod_sim: Callable[[Any], "RecordingPodSim"] | None = None,
+):
+    """The spec at test scale on the runpod provider against FakeRunpod and PodSim.
+    `scale` replaces `at_test_scale`, `pod_sim` (given the S3 client) the pod simulator."""
     mp = pytest.MonkeyPatch()
     for k, v in {
         "AWS_ACCESS_KEY_ID": "testing",
@@ -159,12 +168,12 @@ def run_on_pod_sim(path: Path, tmp: Path, *, replicates: bool = False):
             prices=load_prices(),
             budget=load_budget(),
         )
-        exp = at_test_scale(path, tmp, replicates=replicates)
+        exp = scale(path, tmp) if scale else at_test_scale(path, tmp, replicates=replicates)
         cells = expand(exp, ctx.registry)
         wheel = tmp / "loom_bench-0.1.0-py3-none-any.whl"
         wheel.write_bytes(b"wheel")
         fake = FakeRunpod(gets_before_ssh=1)
-        sim = RecordingPodSim(s3)
+        sim = pod_sim(s3) if pod_sim else RecordingPodSim(s3)
         ctx.provider = RunpodProvider(
             RunpodSettings(bucket=BUCKET, owner="arul", poll_interval_s=0.01),
             spec=exp.provider,  # type: ignore[arg-type]

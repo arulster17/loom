@@ -1,0 +1,76 @@
+# Forced-failure smoke for the Qwen3-8B config sweep (qwen3-8b-config-sweep-runpod.yaml):
+# the load search's failure branches on a real L40S pod before the sweep pays for them.
+# The sweep smoke (runpod-smoke-8b-sweep, 8bc65cfa) met the SLO at every point it tried,
+# so on a pod it never ran:
+# - descent: a failing first point (`lo`), then lo / step, and so on down to
+#   lo / step**descend, until one passes;
+# - bisection: the geometric midpoint between the highest pass and the lowest failure;
+# - the overloaded drain: at a point the engine cannot keep up with, the client stops
+#   sending at the window's end, waits drain_timeout_s for the requests in flight, then
+#   cancels the stragglers (recorded ABORTED), and the engine must have dropped them by
+#   the next run.
+#
+# Same as the sweep's pod a in everything those paths touch: model, provider block, the
+# two variants pod a serves (bf16 and bf16-kv8, so the same config hashes, image and
+# launch, and an FP8 KV cache under preemption), the fixed-1k-1k profile at full length
+# (1024 in, 1024 out: requests live ~50 s even below the knee, so overload leaves
+# stragglers), open loop, geometric search with step 1.5 and rel_tol 0.05, hi 6, the
+# 60 s drain timeout, request timeout and in-flight cap, 3 repetitions and the SLO.
+# Different, on purpose:
+# - `lo: 3.375`, a certain overload for bf16: 565b8d3f's bf16 1k/1k point at 2.0 req/s
+#   served only 1.34-1.42 req/s and left 83-101 requests aborted at the drain timeout
+#   per run; 3.375 offers 2.4x that, and in a 45 s window bf16's KV cache (~160k tokens)
+#   fills with ~150 requests, so the late ones queue past the drain. bf16-kv8 (twice
+#   the KV room) is expected to fail it too (its knee is near 2 req/s by bytes per step).
+# - `descend: 3, max_points: 5`: the sweep's chat search depth (1k/1k's own is 2 and 4).
+#   The floor, 3.375 / 1.5^3 = 1.0 req/s, is where 565b8d3f's bf16 passed (TPOT p95
+#   43-45 ms over 150 s windows; short windows flatter TPOT), so the descent reaches a
+#   pass and the fifth point bisects. Whatever the knee between 1.0 and 3.375, the
+#   search goes lo (fail), lo / 1.5 (descent), ..., a pass, then a bisection point
+#   (bench/tests/runpod/test_runpod_search_fail.py checks every knee).
+# - 45 s windows after 15 s of warmup (the sweep's are 240 / 60): smoke scale.
+# - One workload and no quality section: chat runs the same search code (its descent
+#   and bisection are the runner's, not the workload's), and the sweep smoke already ran
+#   chat, the evals and the gates on these cells.
+#
+# After the run, from the results database (bench_runs in start order) and goodput.json:
+# each cell's first point is 3.375 and fails; its next point is 2.25 (descent); some
+# later point passes; one point is the geometric midpoint of the highest pass and the
+# lowest failure (bisection); every run at 3.375 completed with counts.aborted > 0 (the
+# drain cancelled stragglers) and took about duration + drain + overhead; and the first
+# requests of the run after each overloaded point have an idle engine's TTFT
+# (requests.parquet), so the cancelled requests did not spill into it.
+name: runpod-smoke-8b-search-fail
+description: The Qwen3-8B sweep's pod a with an overloading first point, so the rate search descends, bisects and drains an overload on a real L40S.
+model: qwen3-8b
+smoke: true
+provider:
+  kind: runpod
+  container_disk_gb: 80
+variants:
+  - name: bf16
+    host_group: a
+  - name: bf16-kv8
+    host_group: a
+    kv_cache_dtype: fp8
+workloads:
+  - profile: fixed-1k-1k
+    load:
+      mode: open_loop
+      search: {lo: 3.375, hi: 6, rel_tol: 0.05, max_points: 5, scale: geometric, step: 1.5, descend: 3}
+      duration_s: 45
+      warmup_s: 15
+      drain_timeout_s: 60
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+# `bench plan`: 1.40 h, $1.54 (every point waiting out its drain, an 11.5 min cold
+# start); the TTL holds it with margin and max_spend the worst case of the pod living to
+# its TTL ($1.83). Expected ~65 min, ~$1.20.
+budget:
+  max_spend: "$2"
+  ttl_minutes: 100
+  accrual_interval_s: 15
+seed: 0

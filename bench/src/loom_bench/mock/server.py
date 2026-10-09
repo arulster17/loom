@@ -615,6 +615,7 @@ def create_app(config: MockConfig | None = None) -> FastAPI:
         await server.engine.stop()
 
     app = FastAPI(title="Loom mock backend", version=__version__, lifespan=lifespan)
+    app.state.mock = server  # tests reach the simulated engine through it
 
     @app.exception_handler(ApiError)
     async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
