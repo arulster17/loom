@@ -1,0 +1,88 @@
+# RunPod smoke test for the Qwen3-8B config sweep (qwen3-8b-config-sweep-runpod.yaml): every
+# code path the sweep uses, at the smallest scale that still runs it, so a broken path
+# costs about a dollar here instead of a $25 sweep. Same model, provider block, variants
+# (names, host groups, checkpoints, KV-cache dtypes, engine args), workload profiles,
+# search shape (geometric, step 1.5, with descent), repetitions, SLO and quality section
+# (phase0-strict, three replicated passes, gated against bf16 in-run), with every suite
+# task capped at 4 items (`quality.limit`) and 10 s load windows.
+# bench/tests/runner/test_plan.py fails if the two drift apart.
+#
+# Paths no earlier smoke ran (docs/runbook-runpod.md):
+# - the chat-sharegpt workload on a pod: run_job.sh downloads the pinned ShareGPT file
+#   (673 MB, sha256-checked) once per pod into /opt/loom/data, the job reads it as the
+#   unprivileged job user, and the native client sends multi-turn chat requests;
+# - `kv_cache_dtype: fp8` on vLLM 0.30.0 on an L40S (sm_89), with BF16 and with
+#   FP8-dynamic weights: the attention backend vLLM picks for an FP8 cache on Ada;
+# - `--max-num-batched-tokens 1024` with an FP8 cache (it must still admit the 32k
+#   context and the default max_num_seqs);
+# - `host_group`: three pods for one image in one experiment, run one after the other,
+#   the later pods' candidates scored against the reference the first pod captured;
+# - three replicated passes of phase0-strict on every cell (b03b3c52 ran replicates on
+#   phase0 only), and the gate on pooled passes for four candidates at once.
+# Already proven elsewhere and repeated here because the sweep uses them: the FP8 row
+# by `Variant.model` with a warm restart onto its checkpoint (runpod-smoke-fp8,
+# runpod-smoke-h100), the divergence hard prompts, and fixed-1k-1k.
+#
+# Its scores and goodput measure nothing (4 items per task: the gates come out
+# inconclusive); `smoke: true` keeps it out of default reports and the results site.
+name: runpod-smoke-8b-sweep
+description: The Qwen3-8B config sweep at smoke scale on three 1x L40S pods, every code path once.
+model: qwen3-8b
+smoke: true
+provider:
+  kind: runpod
+  container_disk_gb: 80
+variants:
+  - name: bf16
+    host_group: a
+  - name: bf16-kv8
+    host_group: a
+    kv_cache_dtype: fp8
+  - name: fp8
+    host_group: b
+    model: qwen3-8b-fp8
+  - name: fp8-kv8
+    host_group: b
+    model: qwen3-8b-fp8
+    kv_cache_dtype: fp8
+  - name: fp8-kv8-mbt1024
+    host_group: c
+    model: qwen3-8b-fp8
+    kv_cache_dtype: fp8
+    engine:
+      args: {max_num_batched_tokens: 1024}
+workloads:
+  - profile: chat-sharegpt
+    overrides: {max_output_len: 64}
+    load:
+      mode: open_loop
+      search: {lo: 1, hi: 1.5, rel_tol: 0.05, max_points: 2, scale: geometric, step: 1.5, descend: 1}
+      duration_s: 10
+      warmup_s: 2
+      drain_timeout_s: 15
+  - profile: fixed-1k-1k
+    overrides: {output_len: 128}
+    load:
+      mode: open_loop
+      search: {lo: 0.5, hi: 0.75, rel_tol: 0.05, max_points: 2, scale: geometric, step: 1.5, descend: 1}
+      duration_s: 10
+      warmup_s: 2
+      drain_timeout_s: 15
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+quality:
+  suite: qwen3-8b
+  subset: phase0-strict
+  baseline_variant: bf16
+  replicates: 3
+  limit: 4
+# Each pod's TTL holds `bench plan`'s estimate with margin; max_spend holds the worst
+# case of all three pods living to their TTL.
+budget:
+  max_spend: "$4.25"
+  ttl_minutes: 75
+  accrual_interval_s: 15
+seed: 0

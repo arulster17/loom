@@ -85,6 +85,9 @@ JOB_VARS: dict[str, Any] = {
     "SAMPLE_GPU": 0,
     "MODEL_CACHE_DIR": "",
     "MODEL_REVISION": "",
+    "DATA_URL": "",
+    "DATA_SHA256": "",
+    "DATA_PATH": "",
     "PROC1_ENVIRON": "/proc/1/environ",
     "JOB_UID": 10001,
     "JOB_HOME": "/var/lib/loom/home",
@@ -954,6 +957,52 @@ def test_run_job_needs_the_tokenizer_snapshot(tmp_path: Path) -> None:
         assert proc.returncode == 0, proc.stderr
     finally:
         w["lingering"].kill()
+
+
+def _dataset_values(w: dict[str, Any], tmp_path: Path, body: bytes) -> dict[str, Any]:
+    """The world serves `body` as a pinned dataset file at its HF resolve URL."""
+    name = "convs.json"
+    (tmp_path / "served" / name).write_bytes(body)
+    return {
+        **w["values"],
+        "DATA_URL": f"https://huggingface.co/datasets/o/d/resolve/{'a' * 40}/{name}",
+        "DATA_SHA256": hashlib.sha256(b"conversations").hexdigest(),
+        "DATA_PATH": str(tmp_path / "data" / ("f" * 64) / name),
+    }
+
+
+def test_run_job_fetches_a_pinned_dataset_once_and_checks_it(tmp_path: Path) -> None:
+    w = job_world(tmp_path)
+    values = _dataset_values(w, tmp_path, b"conversations")
+    try:
+        for _ in range(2):
+            proc = run_bash(render_script("run_job", template_dir=DIR, **values), env=w["env"])
+            assert proc.returncode == 0, proc.stderr
+    finally:
+        w["lingering"].kill()
+    data = Path(values["DATA_PATH"])
+    assert data.read_bytes() == b"conversations"
+    # Root-owned in the pod and readable by the job user, which only reads it.
+    assert data.stat().st_mode & 0o777 == 0o644
+    assert data.parent.stat().st_mode & 0o777 == 0o755
+    assert not data.with_name(data.name + ".part").exists()
+    curl = (w["logs"] / "curl_argv").read_text().splitlines()
+    # inputs, dataset, python, result; then inputs and result: the dataset is reused.
+    assert len(curl) == 3 + 1 + 1 + 1 + 3 + 1
+
+
+def test_run_job_refuses_a_dataset_with_the_wrong_checksum(tmp_path: Path) -> None:
+    w = job_world(tmp_path)
+    values = _dataset_values(w, tmp_path, b"something else")
+    try:
+        proc = run_bash(render_script("run_job", template_dir=DIR, **values), env=w["env"])
+    finally:
+        w["lingering"].kill()
+    assert proc.returncode == 1
+    assert "workload dataset checksum mismatch" in proc.stderr
+    assert not (w["logs"] / "bench_args").exists()
+    data = Path(values["DATA_PATH"])
+    assert not data.exists() and not data.with_name(data.name + ".part").exists()
 
 
 def test_engine_process_argv_rewrites_only_the_host() -> None:

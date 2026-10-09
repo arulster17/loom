@@ -2,11 +2,23 @@ name: chat-sharegpt
 description: >-
   Multi-turn chat from ShareGPT-format conversations; history becomes the
   messages and the reference reply sets the output length. The dataset is not
-  shipped: download it, check its terms, and set LOOM_DATA_DIR (or override path).
+  shipped: locally, download it, check its terms, and set LOOM_DATA_DIR (or
+  override path); a RunPod pod downloads the pinned file below itself.
 kind: chat_dataset
 content: realistic
 endpoint: chat
 path: ${LOOM_DATA_DIR}/sharegpt/ShareGPT_V3_unfiltered_cleaned_split.json
+# Pinned copy a remote GPU host downloads (public, ungated). sha256 is the file's Git LFS
+# oid, checked on download; 2026-10-09 the HF API listed this commit (2023-04-12) as the
+# repo's head. Shapes with the Qwen3-8B tokenizer (2 x 3000 requests, seeds 11 and 12):
+# input mean ~900 tokens (p50 ~800, p90 ~1830, max 4096 by max_input_len), output mean
+# ~320 (p50 ~295, p90 ~620, cv 0.63), ~2.8 input tokens per output token.
+download:
+  hf_dataset: anon8231489123/ShareGPT_Vicuna_unfiltered
+  revision: 192ab2185289094fc556ec8ce5ce1e8e587154ca
+  filename: ShareGPT_V3_unfiltered_cleaned_split.json
+  sha256: 35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4
+  size_bytes: 672837942
 max_input_len: 4096
 min_output_len: 4
 max_output_len: 1024
@@ -15,9 +27,10 @@ seed: 0
 dataset:
   name: ShareGPT_Vicuna_unfiltered (ShareGPT_V3_unfiltered_cleaned_split.json)
   source: https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered
-  revision: null  # pin the HF commit you downloaded before publishing results
+  revision: 192ab2185289094fc556ec8ce5ce1e8e587154ca
   license: >-
-    ShareGPT terms note: conversations scraped from sharegpt.com contain ChatGPT
-    outputs, and the HF card's license does not settle OpenAI's terms of use.
-    Verify before publishing.
+    HF card: apache-2.0. The conversations were scraped from sharegpt.com and contain
+    ChatGPT outputs, and the card's license does not settle OpenAI's terms of use. Loom
+    uses them only as request shapes for load (prompt text in, lengths out), never ships
+    or trains on them, and publishes only latency and cost. Verify before publishing.
   license_url: https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered

@@ -17,9 +17,9 @@
 # One pod: a cold start on BF16, its eval job (divergence reference and noise floor), a
 # warm restart onto the FP8 checkpoint (downloaded then), its eval job, the gate.
 #
-# Budget: `bench plan` puts the pod at 1.89 h, $15.13 at $8.0156/h (a conservative
-# estimate); the 150-minute TTL leaves it 25% headroom, and the worst case (the pod living
-# to its TTL) is $20.04, under the $22 cap.
+# Budget: `bench plan` (eval time calibrated on stored passes) puts the pod at 1.27 h,
+# $10.20 at $8.0156/h; the 150-minute TTL leaves room for a slow 141 GB download, and the
+# worst case (the pod living to its TTL) is $20.04, under the $22 cap.
 # 9f0853d7's timings (BF16 healthy after 16.5 min, suites of 7.3 and 4.7 min, the FP8
 # restart 7 min) put the likely cost near 45 minutes, ~$6. H100 SXM Secure stock was
 # "Low" on 2026-10-08: check it and run with LOOM_RUNPOD_CAPACITY_WAIT_S=7200.

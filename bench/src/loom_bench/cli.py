@@ -25,6 +25,7 @@ from pydantic import ValidationError
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -168,7 +169,9 @@ def render_plan(plan: Plan) -> None:
         table.add_column(col)
     for host in plan.hosts:
         for i, step in enumerate(host.steps):
-            table.add_row(host.key if i == 0 else "", step.kind, step.label, _secs(step.seconds))
+            # Labels carry literal brackets (a quality subset, "[phase0]"), not markup.
+            label = escape(step.label)
+            table.add_row(host.key if i == 0 else "", step.kind, label, _secs(step.seconds))
         table.add_row(
             "",
             "[bold]host total",

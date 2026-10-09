@@ -34,8 +34,9 @@ from loom_bench.prices import HOURS_PER_MONTH, BlockStorage, InstanceType, Price
 from loom_bench.quality.divergence import load_prompts
 from loom_bench.quality.suite import SuiteTask
 from loom_bench.records import LoadMode, Market
-from loom_bench.registry import Cloud
+from loom_bench.registry import Cloud, ModelSpec
 from loom_bench.workloads import WorkloadProfile
+from loom_bench.workloads.profiles import ChatDatasetProfile
 
 
 @dataclass(frozen=True)
@@ -105,21 +106,44 @@ MOCK_EVAL_JOB_S = 0.5
 # these per-request costs: a modest prefill rate and decode at the 50 ms TPOT SLO.
 ASSUMED_PREFILL_TOKENS_PER_S = 4000.0
 ASSUMED_DECODE_S_PER_TOKEN = 0.05
+# A chat_dataset job reads its dataset and tokenizes conversations before it sends the
+# first request: the pinned 673 MB ShareGPT file and 3000 Qwen3 requests took ~17 s on a
+# laptop (bench/workloads/chat-sharegpt.yaml).
+DATASET_JOB_S = 30.0
 # Shape used when a profile gives no length (datasets, traces without clamps).
 DEFAULT_INPUT_TOKENS = 1024
 DEFAULT_OUTPUT_TOKENS = 512
 
 # Quality evals. An eval job takes, summed over its tasks,
-#   items x EVAL_ITEM_S[kind] / concurrency
+#   items x item seconds / concurrency
 # plus EVAL_HARNESS_TASK_S per lm_eval task, the divergence prompts (on the baseline
 # also their noise-floor pass, scored again at the suite's floor_concurrency) and the
-# provider's per-job overhead. EVAL_ITEM_S is how long one item holds one of the
-# task's concurrent request slots on a real engine decoding at the 50 ms TPOT SLO
-# (ASSUMED_DECODE_S_PER_TOKEN) with every slot busy; concurrency is the lm_eval
+# provider's per-job overhead. An item's seconds are how long it holds one of the
+# task's concurrent request slots with every slot busy; concurrency is the lm_eval
 # task's num_concurrent, else EVAL_CONCURRENCY. The mock scales item time by its
 # time_scale.
+#
+# Tasks measured on real engines (EVAL_ITEM_S_PER_STEP_MS) scale with the cell's decode
+# step: an item's slot time is that constant x the step floor in ms, the bytes of weights
+# each GPU reads per step over its memory bandwidth (`decode_step_ms`). The stored runs
+# put an item's slot seconds at a near-constant multiple of that floor across a 4x span
+# of speeds (Qwen3-8B BF16 on L40S, 19.0 ms: 565b8d3f, b1b904dc, b03b3c52; Llama 3.3 70B
+# BF16 TP=4 on L40S, 40.8 ms: cf4d1614; BF16 and FP8 TP=2 on H100 SXM, 21.1 and 10.8 ms:
+# 9f0853d7). Measured seconds per item per ms of floor, all engines and passes:
+#   gsm8k_cot_llama 0.22-0.27, ifeval 0.53-0.67, json_schema (300 items) 0.14-0.23,
+#   tool_calling 0.06-0.08, tool_calling_strict 0.07-0.09.
+# Each constant is the largest measured ratio plus ~20%, so every stored pass comes in
+# under its estimate (8B on L40S: ~14 min planned for a phase0-strict pass that took
+# 7-8 min; 70B on 4x L40S: ~26 min for 17 min) instead of 2-5x under it. Speculative
+# decoding (55102ddb, EAGLE3) only lowers it. bench/tests/runner/test_sweep_8b.py replays
+# those passes against the constants.
+#
+# Tasks never timed on a GPU (MMLU-Pro, RULER, needle, code, the mock's toy task) keep a
+# fixed EVAL_ITEM_S: an item's share of an engine decoding at the 50 ms TPOT SLO
+# (ASSUMED_DECODE_S_PER_TOKEN). Not calibrated: replace with a per-step constant once a
+# run has measured them.
 EVAL_ITEM_S: dict[str, float] = {
-    "lm_eval": 24.0,  # MMLU-Pro / GSM8K chain of thought, IFEval: ~400 tokens + few-shot prefill
+    "lm_eval": 24.0,  # MMLU-Pro chain of thought, RULER: ~400 tokens + few-shot prefill
     "code_exec": 16.0,  # ~300-token program, then the sandboxed tests
     "needle": 40.0,  # 8k-28k-token prompts: prefill-bound while every slot holds one
     "tool_calling": 6.0,  # one call, ~60 tokens
@@ -127,6 +151,28 @@ EVAL_ITEM_S: dict[str, float] = {
     "json_schema": 8.0,  # one object, ~100 tokens, under a grammar
     "toy_arithmetic": 2.0,  # one short sentence
 }
+# Keyed like `eval_task_key`: "lm_eval:<harness tasks>" or the native task kind.
+EVAL_ITEM_S_PER_STEP_MS: dict[str, float] = {
+    "lm_eval:gsm8k_cot_llama": 0.32,  # 8-shot chain of thought, up to 1024 tokens
+    "lm_eval:ifeval": 0.80,  # long free-form answers
+    "json_schema": 0.28,  # one object under a grammar
+    "tool_calling": 0.10,  # one short call
+    "tool_calling_strict": 0.12,  # the same call under the schema grammar
+}
+# HBM bandwidth per GPU (GB/s, vendor spec sheets) for the decode-step floor. Every H100
+# priced in bench/prices.yaml is SXM (AWS p5, GCP a3-highgpu, RunPod H100 SXM); a PCIe or
+# NVL H100 (2.0 / 3.9 TB/s) needs its own GPU name. A100s are priced as the 40 GB part.
+GPU_MEMORY_BANDWIDTH_GB_S: dict[str, float] = {
+    "L4": 300.0,
+    "A10G": 600.0,
+    "L40S": 864.0,
+    "A100": 1555.0,
+    "H100": 3350.0,
+    "H200": 4800.0,
+}
+# Below this a decode step is no longer bound by its weight reads (per-request and
+# scheduling overheads dominate); the fastest measured floor is 10.8 ms (70B FP8, H100).
+MIN_DECODE_STEP_MS = 10.0
 EVAL_DIVERGENCE_PROMPT_S = 4.0  # 64-token greedy continuation, then one echo scoring request
 # One echo scoring request (prefill of prompt + continuation, ~150 tokens, max_tokens 1) with
 # the engine to itself at floor_concurrency 1: well under a second on any Phase 0 GPU.
@@ -146,6 +192,33 @@ def profile_shape(p: WorkloadProfile) -> tuple[int, int]:
     )
     out = getattr(p, "output_len", None) or getattr(p, "max_output_len", None)
     return int(inp), int(out or DEFAULT_OUTPUT_TOKENS)
+
+
+def eval_task_key(task: SuiteTask) -> str:
+    """`lm_eval:<harness tasks>` for harness tasks (their time depends on which), else the
+    task kind."""
+    if task.kind == "lm_eval":
+        tasks = task.params.get("tasks") or []
+        return "lm_eval:" + "+".join(str(t) for t in tasks)
+    return task.kind
+
+
+def decode_step_ms(spec: ModelSpec) -> float:
+    """A served model's decode-step floor: each GPU reads its share of the checkpoint once
+    per step. An unlisted GPU gets the slowest listed bandwidth (a longer, safer estimate)."""
+    hw = spec.hardware
+    bandwidth = GPU_MEMORY_BANDWIDTH_GB_S.get(hw.gpu, min(GPU_MEMORY_BANDWIDTH_GB_S.values()))
+    per_gpu = spec.hf.size_bytes / hw.gpus_per_replica
+    return max(per_gpu / (bandwidth * 1e9) * 1000, MIN_DECODE_STEP_MS)
+
+
+def eval_item_s(task: SuiteTask, cell: Cell) -> float:
+    """Seconds one item of `task` holds a request slot on `cell`'s engine (the mock's
+    simulated GPU has no weights to read: fixed times, scaled by its time_scale)."""
+    per_step = EVAL_ITEM_S_PER_STEP_MS.get(eval_task_key(task))
+    if per_step is None or cell.mock is not None:
+        return EVAL_ITEM_S[task.kind]
+    return per_step * decode_step_ms(cell.spec)
 
 
 def load_points(load: LoadSpec) -> int:
@@ -217,22 +290,36 @@ class Estimator:
             return ms * m.time_scale / 1000
         return inp / ASSUMED_PREFILL_TOKENS_PER_S + out * ASSUMED_DECODE_S_PER_TOKEN
 
-    def run_overhead_s(self) -> float:
-        return MOCK_RUN_OVERHEAD_S if self.timing is None else self.timing.run_overhead_s
+    def run_overhead_s(self, profile: WorkloadProfile | None = None) -> float:
+        """Per run, beyond its duration and drain: staging and, for a dataset profile on a
+        real host, reading the dataset and tokenizing its conversations before the first
+        request is sent (DATASET_JOB_S)."""
+        if self.timing is None:
+            return MOCK_RUN_OVERHEAD_S
+        dataset = DATASET_JOB_S if isinstance(profile, ChatDatasetProfile) else 0.0
+        return self.timing.run_overhead_s + dataset
+
+    def dataset_fetch_s(self, profile: WorkloadProfile) -> float:
+        """A pinned dataset's download onto a host that does not have it yet."""
+        download = getattr(profile, "download", None)
+        if download is None or self.timing is None or self.exp.provider.kind == "local":
+            return 0.0
+        return float(download.size_bytes / self.timing.download_bytes_per_s)
 
     def run_s(self, cell: Cell, load: LoadSpec, profile: WorkloadProfile, value: float) -> float:
+        overhead = self.run_overhead_s(profile)
         if load.mode is LoadMode.OPEN_LOOP:
             # Worst case: an overloaded point waits out its whole drain timeout.
             assert load.duration_s is not None
-            return load.duration_s + load.drain_timeout_s + self.run_overhead_s()
+            return load.duration_s + load.drain_timeout_s + overhead
         if load.duration_s is not None:
-            return load.duration_s + self.run_overhead_s()
+            return load.duration_s + overhead
         # Closed loop by count: rounds of `value` concurrent requests. Engine-side
         # queueing (e.g. max_num_seqs below the concurrency) is not modelled.
         assert load.num_requests is not None
         total = (load.warmup_requests or 0) + load.num_requests
         rounds = math.ceil(total / value)
-        return rounds * self._request_s(cell, profile, value) + self.run_overhead_s()
+        return rounds * self._request_s(cell, profile, value) + overhead
 
     def max_load(self, load: LoadSpec) -> float:
         return max(load.values) if load.values is not None else load.search.hi  # type: ignore[union-attr]
@@ -268,7 +355,7 @@ class Estimator:
                 if t.kind == "lm_eval"
                 else EVAL_CONCURRENCY
             )
-            busy += (t.planned_items() or 0) * EVAL_ITEM_S[t.kind] / concurrency
+            busy += (t.planned_items() or 0) * eval_item_s(t, cell) / concurrency
         div = self.suite.divergence
         if div is not None and divergence:
             prompts = len(div.selected_ids(len(load_prompts())))
@@ -502,6 +589,24 @@ def _runpod_disk_problems(host_key: str, cells: Sequence[Cell]) -> list[str]:
     ]
 
 
+def _remote_dataset_problem(kind: str, name: str, profile: WorkloadProfile) -> str | None:
+    """A workload reading a file (`path`) on a cloud host that has no copy of it would
+    fail every run there; say so before anything is created."""
+    path = getattr(profile, "path", None)
+    if kind not in ("aws_ec2", "runpod") or path is None:
+        return None
+    if kind == "runpod" and getattr(profile, "download", None) is not None:
+        return None
+    fix = (
+        "give the profile a pinned `download:` block (Hugging Face dataset, revision, file, "
+        "sha256), which the pod fetches itself"
+        if kind == "runpod" and isinstance(profile, ChatDatasetProfile)
+        else f"the {kind} provider cannot fetch this profile's file yet; run it on runpod "
+        "with a pinned `download:` block, or locally"
+    )
+    return f"workload {name} reads {path}, which the {kind} host does not have: {fix}"
+
+
 def _hardware_problems(exp: Experiment, cell: Cell, prices: PriceBook) -> list[str]:
     if isinstance(exp.provider, RunpodProviderSpec):
         return _runpod_hardware_problems(cell, prices)
@@ -546,6 +651,10 @@ def build_plan(
             f"run would fail: use loadgen native on {kind}, or run the wrapper against a "
             "local endpoint (docs/load-generators.md)"
         )
+    for entry, profile in profiles:
+        problem = _remote_dataset_problem(kind, entry.name, profile)
+        if problem:
+            refusals.append(problem)
     if est.uncounted_tasks():
         refusals.append(
             f"quality tasks {est.uncounted_tasks()} have no item count to estimate their "
@@ -577,9 +686,13 @@ def build_plan(
             host.steps.append(
                 Step("warm_start", cell.key, est.warm_start_s(started[cell.host_key], cell))
             )
+        first_on_host = cell.host_key not in started
         started.setdefault(cell.host_key, []).append(cell)
         host.cells.append(cell.key)
         for entry, profile in profiles:
+            fetch_s = est.dataset_fetch_s(profile) if first_on_host else 0.0
+            if fetch_s:
+                host.steps.append(Step("dataset", f"{host.key} / {entry.name}", fetch_s))
             label = (
                 f"{cell.key} / {entry.name}: {load_points(entry.load)} pts x {exp.repetitions} reps"
             )

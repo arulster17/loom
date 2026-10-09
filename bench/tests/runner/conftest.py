@@ -26,6 +26,9 @@ RUNPOD_SMOKE_H100 = EXPERIMENTS_DIR / "runpod-smoke-h100.yaml"
 QWEN_QUALITY_RUNPOD = EXPERIMENTS_DIR / "qwen3-8b-quality-runpod.yaml"
 # Approved 2026-10-09: the 70B H100 run's evals and gate again, on tool-calling data v2.
 LLAMA_H100_QUALITY_RUNPOD = EXPERIMENTS_DIR / "llama-3.3-70b-h100-tp2-quality-runpod.yaml"
+# Proposed 2026-10-09 (not yet approved): the Qwen3-8B config sweep and its smoke.
+QWEN_SWEEP_RUNPOD = EXPERIMENTS_DIR / "qwen3-8b-config-sweep-runpod.yaml"
+RUNPOD_SMOKE_8B_SWEEP = EXPERIMENTS_DIR / "runpod-smoke-8b-sweep.yaml"
 
 
 @pytest.fixture(autouse=True)

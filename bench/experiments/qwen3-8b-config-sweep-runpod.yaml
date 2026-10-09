@@ -1,0 +1,135 @@
+# Qwen3-8B config sweep (build prompt 7.4 / 7.5): the cheapest serving config that passes
+# the quality gate against BF16, priced at the SLO on a realistic chat workload, to set
+# qwen3-8b's price in config/models.yaml (docs/how-to/price-a-model.md). vLLM only: it won
+# or tied SGLang on every workload in 565b8d3f, and a second engine needs its own pod and
+# cold start for no expected gain. All cells run vLLM v0.30.0 on RunPod Secure 1x L40S.
+#
+# Hardware (RunPod Secure 1x, live API 2026-10-09 16:47 UTC, all "Low" stock unless
+# noted): L40S $1.09 (48 GB, 864 GB/s, FP8 tensor cores), RTX 6000 Ada $0.99 (48 GB,
+# 960 GB/s, FP8), L40 $0.82 (48 GB, 864 GB/s, FP8, half the L40S's tensor throughput),
+# A6000 $0.59 / A40 $0.59 "Medium" (48 GB, 768 / 696 GB/s, Ampere: no FP8 tensor cores),
+# L4 $0.59 (24 GB, 300 GB/s), H100 SXM $3.99 (80 GB, 3.35 TB/s), H100 NVL $3.19 (94 GB).
+# At the 50 ms TPOT SLO an 8B decode is memory-bound, so $/token tracks price per GB/s
+# and KV-cache room. H100 SXM gives 840 GB/s per $ against the L40S's 793 and serves an
+# 8B at batch sizes where scheduling, not memory, binds: not cheaper per token. L4 is
+# worse (508 GB/s per $, 24 GB). L40 and RTX 6000 Ada run the same Ada FP8 kernels with
+# the same 48 GB for 25% / 9% less and are plausibly cheaper per token, but neither has
+# been run and the L40's halved compute may cost TTFT under chat prefill load. Ampere
+# cards serve FP8 weights through a different (W8A16 Marlin) path. So this sweep keeps
+# the L40S, the prior baseline (565b8d3f) and the registry's GPU, and a follow-up can
+# rerun the winning config on an L40 / RTX 6000 Ada pod (~$3) once they are priced.
+#
+# Cells, and why (TPOT p95 is what fails first: 565b8d3f's fixed-1k-1k knee failed TPOT
+# at 1.414 req/s, while TTFT p95 at the passing 1.189 was ~350 ms, a third of its 1 s
+# target; code-completion and shared-prefix also failed on TPOT first). A decode step reads
+# the weights once (16.4 GB BF16: 19 ms at 864 GB/s) plus every running sequence's KV
+# cache (~0.15 MB per token in BF16), so bytes per step set the batch a 50 ms step allows:
+# - bf16: the reference row and the gate's baseline (captures the divergence reference).
+# - bf16-kv8: FP8 KV cache halves the KV bytes per step and doubles the KV room.
+# - fp8: RedHatAI FP8-dynamic weights (the qwen3-8b-fp8 registry row, `Variant.model`),
+#   ~9.4 GB: the weight read drops to ~11 ms.
+# - fp8-kv8: both; the expected winner (roughly 2.5-3x bf16's batch at the SLO).
+# - fp8-kv8-mbt1024: the one engine knob, on the expected winner. vLLM's chunked-prefill
+#   budget (max_num_batched_tokens, which decode tokens share) has defaulted to 2048 for
+#   the API server on GPUs under 70 GB (the engine log records 0.30's value); a step
+#   carrying a ~2k-token chunk turns compute-bound (~16 GFLOP per token) and every
+#   decoding request waits for it. At 1024 a step's prefill share rides along a
+#   memory-bound decode step, trading some of TTFT's headroom for TPOT, while still
+#   prefilling ~20k tokens/s next to ~200 decodes, above the ~9k/s a chat knee near
+#   9 req/s needs. max_num_seqs was considered and left
+#   out: capping the batch queues Poisson bursts behind requests that live 15-50 s, which
+#   spends TTFT's headroom in seconds, not milliseconds.
+# Every cell but bf16 is gated against bf16 in-run (phase0-strict, three passes each).
+# FP8 KV here has no calibrated scales (the checkpoints ship none), the most likely way
+# for a cell to fail the gate; the gate decides it.
+#
+# Pods: one image, so all cells could share a pod, but the sweep is ~17 h of pod time
+# and a RunPod pod's TTL is capped at 8 h (RunpodSettings.max_ttl_s). `host_group` splits
+# the cells over three pods, run one after the other (a: bf16 and bf16-kv8, b: fp8 and
+# fp8-kv8, c: the knob cell), each with its own cold start. The baseline's pod runs
+# first; the other pods score divergence against its stored reference, as SGLang's pod
+# did against vLLM's in 565b8d3f. Pod-to-pod hardware variation (a few percent) sits in
+# the comparisons between groups; the effects being measured are 1.5-3x.
+#
+# Variance (docs/benchmark-lab.md, "Sizing load windows"). 565b8d3f's untrusted flags
+# (run-to-run CV 11-15%) were sampling, not engine noise: its points measured 100-200
+# requests in 100-150 s windows. Throughput at a passing open-loop point is the number
+# of Poisson arrivals in the window, so its CV is 1/sqrt(N) (output tokens:
+# sqrt((1 + cv_len^2) / N)); across 32 points the observed run-to-run variance was 1.06x
+# that prediction. With 3 repetitions a point is flagged (sample CV > 10%) with
+# probability exp(-(10% / true CV)^2): 27% at N = 130, 1.8% at N = 400. Latency
+# quantiles varied 3-20x more than request resampling predicts, from the load trajectory
+# a window happens to draw; that shrinks with window length too. And requests sent in a
+# window's last ~45 s finish while arrivals stop (TPOT 10-25% lower), so short windows
+# also flatter TPOT. Hence:
+# - chat-sharegpt (the realistic workload, leading): 210 s measured after 45 s of warmup
+#   (a request lives ~15 s on average, under 45 s for 99%): ~630 requests at a bf16 knee
+#   near 3 req/s, so output-token CV ~4.7% (a ~1% chance of a flag); the FP8 cells sample
+#   2-3x more.
+# - fixed-1k-1k (comparability with 565b8d3f and published 1k/1k figures): 180 s after
+#   60 s of warmup (requests live 30-50 s): ~220 requests at bf16's 1.2 req/s (CV ~6.8%,
+#   ~11% chance of a flag; 565b8d3f's bf16 1k/1k figure is already trusted) and 450+ for
+#   the FP8 cells. Four points, as resolution here is secondary.
+# - Searches start mid-range and step by 1.5x (geometric), so the bf16 cells descend and
+#   the FP8 cells climb, then bisect: ~5% brackets on chat for bf16, ~10% for FP8.
+name: qwen3-8b-config-sweep-runpod
+description: Qwen3-8B on RunPod Secure 1x L40S, vLLM v0.30.0, BF16 vs FP8 weights x FP8 KV cache plus one engine knob, chat and 1k/1k at SLO, gated vs BF16.
+model: qwen3-8b
+provider:
+  kind: runpod
+  # Both checkpoints (16.4 + 9.4 GB) plus 35 GB of engine headroom; the dataset (0.7 GB)
+  # fits in the rest.
+  container_disk_gb: 80
+variants:
+  - name: bf16
+    host_group: a
+  - name: bf16-kv8
+    host_group: a
+    kv_cache_dtype: fp8
+  - name: fp8
+    host_group: b
+    model: qwen3-8b-fp8
+  - name: fp8-kv8
+    host_group: b
+    model: qwen3-8b-fp8
+    kv_cache_dtype: fp8
+  - name: fp8-kv8-mbt1024
+    host_group: c
+    model: qwen3-8b-fp8
+    kv_cache_dtype: fp8
+    engine:
+      args: {max_num_batched_tokens: 1024}
+workloads:
+  - profile: chat-sharegpt
+    load:
+      mode: open_loop
+      search: {lo: 4.5, hi: 16, rel_tol: 0.05, max_points: 5, scale: geometric, step: 1.5, descend: 3}
+      duration_s: 255
+      warmup_s: 45
+      drain_timeout_s: 60
+  - profile: fixed-1k-1k
+    load:
+      mode: open_loop
+      search: {lo: 1.5, hi: 6, rel_tol: 0.05, max_points: 4, scale: geometric, step: 1.5, descend: 2}
+      duration_s: 240
+      warmup_s: 60
+      drain_timeout_s: 60
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+quality:
+  suite: qwen3-8b
+  subset: phase0-strict
+  baseline_variant: bf16
+  # IFEval decides a 2-point margin. One pass per side leaves its paired CI at about
+  # +-1.4-1.7 pts from run noise alone (b1b904dc: SGLang read -1.29 [-2.96, +0.37]); three
+  # cut it to ~+-0.8 (b03b3c52), so a sound candidate passes instead of coming out
+  # inconclusive. tool_calling and json_schema do not move across passes.
+  replicates: 3
+budget:
+  max_spend: "$25"
+  ttl_minutes: 450
+  accrual_interval_s: 15
+seed: 0

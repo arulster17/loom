@@ -1,4 +1,4 @@
-# requires: WORK_DIR ENV_ROOT PYTHON_DIR PYTHON_URL PYTHON_SHA256 JOB_URL WHEEL_URL WHEEL_NAME WHEEL_SHA256 REQS_URL REQS_SHA256 BENCH_CMD RESULT_URL GPU_CSV_URL SAMPLE_GPU MODEL_CACHE_DIR MODEL_REVISION PROC1_ENVIRON JOB_UID JOB_HOME PROC_ROOT
+# requires: WORK_DIR ENV_ROOT PYTHON_DIR PYTHON_URL PYTHON_SHA256 JOB_URL WHEEL_URL WHEEL_NAME WHEEL_SHA256 REQS_URL REQS_SHA256 BENCH_CMD RESULT_URL GPU_CSV_URL SAMPLE_GPU MODEL_CACHE_DIR MODEL_REVISION DATA_URL DATA_SHA256 DATA_PATH PROC1_ENVIRON JOB_UID JOB_HOME PROC_ROOT
 # Run one LoadJob (`bench job run`) or EvalJob (`bench quality job`) in the pod:
 # measured latency has no WAN hop and the engine listens only on loopback. Runs as
 # root over SSH; the job itself runs as JOB_UID through `job_exec` (no secrets in
@@ -11,7 +11,9 @@
 # package hash-pinned (pip --require-hashes); the wheel is installed --no-deps and
 # `pip check` confirms the two agree. With MODEL_CACHE_DIR set, the job loads the
 # tokenizer from the MODEL_REVISION snapshot the engine start downloaded, so a gated
-# model needs no token here.
+# model needs no token here. With DATA_URL set (a workload's pinned public dataset),
+# the first job in the pod downloads it to DATA_PATH, checks DATA_SHA256 and leaves it
+# root-owned and world-readable; later jobs reuse it.
 
 assert_job_isolated
 echo "loom-sys job_isolation ok"
@@ -39,6 +41,17 @@ chown -R "$JOB_UID:$JOB_UID" "$WORK_DIR"
 if [ -n "$MODEL_CACHE_DIR" ]; then
   [ -f "$MODEL_CACHE_DIR/snapshots/$MODEL_REVISION/tokenizer.json" ] \
     || fail "no tokenizer.json in snapshot $MODEL_REVISION under $MODEL_CACHE_DIR: was this model's engine started in this pod?"
+fi
+
+if [ -n "$DATA_URL" ] && [ ! -f "$DATA_PATH" ]; then
+  data_dir="$(dirname "$DATA_PATH")"
+  mkdir -p "$data_dir"
+  chmod 755 "$(dirname "$data_dir")" "$data_dir"
+  fetch "$DATA_URL" "$DATA_PATH.part" || { rm -f "$DATA_PATH.part"; fail "could not fetch the workload dataset"; }
+  echo "$DATA_SHA256  $DATA_PATH.part" | sha256sum --check --quiet \
+    || { rm -f "$DATA_PATH.part"; fail "workload dataset checksum mismatch"; }
+  chmod 644 "$DATA_PATH.part"
+  mv "$DATA_PATH.part" "$DATA_PATH"
 fi
 
 if [ ! -x "$PYTHON_DIR/bin/python3" ]; then

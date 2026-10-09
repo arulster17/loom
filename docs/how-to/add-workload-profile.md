@@ -65,6 +65,13 @@ dataset:
 Check the license allows benchmarking and publishing derived numbers before any result
 is published.
 
+A cloud GPU host has no `${LOOM_DATA_DIR}`. For a `chat_dataset` profile on RunPod, add a
+`download:` block naming a public Hugging Face file pinned to a commit and its sha256 (the
+LFS oid in `https://huggingface.co/api/datasets/<org>/<name>/tree/<revision>`); the pod
+fetches and checks it before the first job (`chat-sharegpt.yaml` is the example), and the
+job's `path` points at that copy. Without it `bench plan` refuses the workload on a cloud
+host, as it does any file-reading profile on `aws_ec2` (not built there yet).
+
 ## 3. Rules that reject mistakes
 
 - `range_ratio` must be in [0, 1); `prefix_share` at most 0.95, with room left for a

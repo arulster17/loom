@@ -196,8 +196,8 @@ set grew to 135 items (data version 2, below), and
 `bench/experiments/llama-3.3-70b-h100-tp2-quality-runpod.yaml` (approved 2026-10-09,
 $22 cap) re-runs both configs' quality suite on one 2x H100 pod: `workloads: []`,
 `phase0-strict`, the same cells and config hashes as 9f0853d7, FP8 gated against the
-in-run BF16 cell. `bench plan`: cold start 30.6 min, eval setup 5, BF16 eval 31.4, warm
-start 15.1, FP8 eval 30.6, 1.89 h, $15.13 at $8.0156/h; worst case $20.04 at a
+in-run BF16 cell. `bench plan`: cold start 30.6 min, eval setup 5, BF16 eval 15.9, warm
+start 15.1, FP8 eval 9.3, 1.27 h, $10.20 at $8.0156/h; worst case $20.04 at a
 150-minute TTL. The 9f0853d7 timings (BF16 healthy after 16.5 min, suites of 7.3 min
 BF16 and 4.7 min FP8, FP8 restart 7 min, plus eval setup) put the likely cost near 45
 minutes, ~$6.

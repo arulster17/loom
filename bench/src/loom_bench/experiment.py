@@ -194,6 +194,12 @@ class Variant(_Strict):
     kv_cache_dtype: str | None = None
     max_context: int | None = None
     mock: dict[str, Any] = Field(default_factory=dict)  # MockConfig overrides, mock provider
+    # Cells on the same hardware (and on runpod, the same engine image) share one host
+    # through warm restarts. Variants naming different host groups get separate hosts,
+    # each with its own cold start and TTL, run one after the other: a sweep longer than
+    # one host's TTL limit is split this way. Only the host key changes, never the
+    # config hash, so a cell's results compare with the same config run elsewhere.
+    host_group: Slug | None = None
 
 
 class Sample(_Strict):
@@ -568,7 +574,7 @@ def apply_variant(base: ModelSpec, variant: Variant) -> dict[str, Any]:
     args; an arg set to null is removed; the registry's max_context is a cap.
     """
     doc = base.model_dump(mode="json")
-    patch = variant.model_dump(exclude_none=True, exclude={"name", "model", "mock"})
+    patch = variant.model_dump(exclude_none=True, exclude={"name", "model", "mock", "host_group"})
     engine = patch.pop("engine", {})
     args = (variant.engine.args if variant.engine else None) or {}
     if "name" in engine and engine["name"] != base.engine.name:
@@ -756,9 +762,12 @@ def build_cell(
     knobs: Mapping[str, Any],
     spec: ModelSpec,
     mock: MockConfig | None,
+    host_group: str | None = None,
 ) -> Cell:
     launch = _launch(exp, spec, mock)
     host_key, hardware = hardware_for(exp, spec)
+    if host_group is not None:
+        host_key = f"{host_key}/group={host_group}"
     config: dict[str, Any] = {
         "model": spec.model_dump(mode="json"),
         "launch": launch.model_dump(mode="json"),
@@ -807,7 +816,14 @@ def expand(exp: Experiment, registry: Registry) -> list[Cell]:
                     else None
                 )
                 cells.append(
-                    build_cell(exp, variant=variant.name, knobs=knobs, spec=spec, mock=mock)
+                    build_cell(
+                        exp,
+                        variant=variant.name,
+                        knobs=knobs,
+                        spec=spec,
+                        mock=mock,
+                        host_group=variant.host_group,
+                    )
                 )
             except ExpansionError as e:  # already names the problem
                 raise ExpansionError(f"cell {key}: {e}") from None
