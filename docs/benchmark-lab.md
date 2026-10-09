@@ -743,3 +743,18 @@ no earlier smoke did: the chat workload on a pod (the pinned dataset download an
 multi-turn chat requests), FP8 KV cache on vLLM 0.30 on Ada with BF16 and FP8 weights,
 `--max-num-batched-tokens 1024`, three host groups in one experiment, and three
 replicated phase0-strict passes.
+
+**Follow-up on L40 and RTX 6000 Ada** (`qwen3-8b-winner-ada-runpod`, approved with the
+sweep; a draft until the sweep has run). It runs the sweep's winning config on one
+RunPod Secure 1x L40 pod ($0.82/h) and one 1x RTX 6000 Ada pod ($0.99/h; both "Low"
+stock on 2026-10-09), one after the other: chat-sharegpt only, the workload the price is
+set from, at the sweep's windows and search step, and three phase0-strict passes per card
+gated against the sweep's **stored** BF16 baseline (a new GPU is a new config hash, so it
+ships only on its own gate pass). Before planning it, fill in three things the spec's
+header lists: the winner's config in both variants (the draft holds fp8-kv8), the sweep's
+experiment id and bf16 config hash in `quality.baseline` (placeholders now, so `bench
+plan` refuses it), and chat's `search.lo` at the winner's L40S knee. `bench plan`
+(build_plan, 2026-10-09): 1.98 h + 1.95 h, estimate $3.60, worst case $4.58, cap $5.
+Dropping to three search points brings it to about $3.0 at a coarser knee. Its stored-
+baseline gate has never run on a real pod (the 70B FP8 run on 4x L40S that would have
+used it is on hold); it is covered offline by `bench/tests/runner/test_stored_baseline.py`.

@@ -358,8 +358,8 @@ verified: the pod is gone from the API, no network volume, `bench reap --dry-run
 Launched from a worktree with `--out` set to the main checkout's `results/` and
 `LOOM_DATABASE_URL` set to its `results/loom.db`, so results land with the earlier runs.
 
-The proposed Qwen3-8B config sweep (`qwen3-8b-config-sweep-runpod.yaml`, $25 cap, not
-yet approved) has its own smoke, `runpod-smoke-8b-sweep.yaml` ($4.25 cap, about $3.20
+The Qwen3-8B config sweep (`qwen3-8b-config-sweep-runpod.yaml`, $25 cap, approved
+2026-10-09) has its own smoke, `runpod-smoke-8b-sweep.yaml` ($4.25 cap, about $3.20
 planned): the sweep's five cells on the same three pods (`host_group` a, b, c, run one
 after the other), the chat-sharegpt workload with its pinned dataset download, FP8 KV
 caches, `--max-num-batched-tokens 1024` and three replicated phase0-strict passes, at
@@ -369,6 +369,31 @@ logged no `workload dataset checksum mismatch` and
 pod; the KV-FP8 cells started (`engine_started`, not `engine_start_failed`: on sm_89 vLLM
 must pick an attention backend that supports an FP8 cache); every candidate has a gate
 decision against `bf16` (inconclusive is expected at 4 items).
+
+Result (2026-10-09, `8bc65cfa`, $1.02 against $3.20 planned, exit 0): passed. Three pods
+(`host_group` a, b, c; Secure 1x L40S in SE, SE and US-MO-1) ran one after the other,
+23, 21 and 11 minutes; 60 of 60 load runs completed; each pod fetched the ShareGPT file
+once (its first chat job took ~48 s, later ones ~29 s for a 10 s window, so no checksum
+failure); all five cells started, the KV-FP8 ones too (warm restarts 66 s); five `quality`
+events with 3 replicates and all five phase0-strict tasks; the reference held the two
+hard prompts; four gates against bf16, inconclusive at 4 items, each with a measured
+divergence (KL 0.0026 / 0.0030 / 0.0065 / 0.0047 nats, top-1 98.8 / 98.8 / 95.7 / 97.7%
+against a 94.1% limit); no `quality_failed`, `divergence_failed` or failed run; every pod
+terminated by the runner, `pods: []`, `networkVolumes: []`, `bench reap --dry-run` clean.
+Every step ran well under its planned time (cold start 4.2 min against 11.5, eval
+passes 3.5 min against 9.3), so the sweep's per-pod TTLs keep their margin. What it could
+not run: a failing load point (every smoke point met the SLO, so no descent, bisection
+or overloaded drain), full-length outputs and eval items, and a 7 h pod; those are scale,
+not new paths (565b8d3f ran overloaded points and bisection on RunPod, and the
+pod simulator runs the sweep's three-pod plan in `bench/tests/runpod/test_runpod_sweep_8b.py`).
+Its goodput rows are identical across cells by construction: at a passing open-loop
+point throughput is the offered load, and every cell gets the same seeded requests.
+
+The sweep's follow-up on L40 and RTX 6000 Ada (`qwen3-8b-winner-ada-runpod.yaml`, a
+draft) is filled in from the sweep's result before it is planned
+([benchmark-lab.md](benchmark-lab.md#qwen3-8b-config-sweep-proposed)). Two things in it
+no real run has done yet: pods on those GPU types (`NVIDIA L40`, `NVIDIA RTX 6000 Ada
+Generation`, "Low" stock on 2026-10-09) and a stored-baseline gate.
 
 Dependency bugs are caught for free before that: `uv run pytest -m network` (CI job
 `pod-client-env`) rebuilds the pods' client environment from `uv.lock` and runs every task

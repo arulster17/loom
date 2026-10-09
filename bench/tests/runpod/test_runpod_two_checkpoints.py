@@ -78,9 +78,10 @@ def suite_for(model: str, also: list[str]) -> dict[str, Any]:
     }
 
 
-def at_test_scale(path: Path, tmp: Path) -> Experiment:
+def at_test_scale(path: Path, tmp: Path, *, replicates: bool = False) -> Experiment:
     """The shipped spec's model, provider and variants; a tiny workload and suite (no
-    workload when the spec is quality-only)."""
+    workload when the spec is quality-only), and with `replicates` its replicated eval
+    passes."""
     doc = yaml.safe_load(path.read_text())
     models = {v.get("model") for v in doc["variants"]} - {None, doc["model"]}
     suite = write_yaml(tmp / "suite.yaml", suite_for(doc["model"], sorted(models)))
@@ -104,7 +105,11 @@ def at_test_scale(path: Path, tmp: Path) -> Experiment:
         repetitions=1,
         allow_single_run=True,
         slo={"max_error_rate": 0.01},
-        quality={"suite": str(suite), "baseline_variant": doc["quality"]["baseline_variant"]},
+        quality={
+            "suite": str(suite),
+            "baseline_variant": doc["quality"]["baseline_variant"],
+            "replicates": doc["quality"].get("replicates", 1) if replicates else 1,
+        },
         budget={"max_spend": "$45", "ttl_minutes": 240, "accrual_interval_s": 0.2},
     )
     doc.pop("smoke", None)
@@ -128,7 +133,7 @@ class RecordingPodSim(PodSim):
         return await super().job(target, script)
 
 
-def run_on_pod_sim(path: Path, tmp: Path):
+def run_on_pod_sim(path: Path, tmp: Path, *, replicates: bool = False):
     """The spec at test scale on the runpod provider against FakeRunpod and PodSim."""
     mp = pytest.MonkeyPatch()
     for k, v in {
@@ -154,7 +159,7 @@ def run_on_pod_sim(path: Path, tmp: Path):
             prices=load_prices(),
             budget=load_budget(),
         )
-        exp = at_test_scale(path, tmp)
+        exp = at_test_scale(path, tmp, replicates=replicates)
         cells = expand(exp, ctx.registry)
         wheel = tmp / "loom_bench-0.1.0-py3-none-any.whl"
         wheel.write_bytes(b"wheel")

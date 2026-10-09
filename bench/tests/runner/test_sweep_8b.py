@@ -1,12 +1,19 @@
 """The Qwen3-8B config sweep and what it added: the eval-time calibration, host groups,
-and pinned datasets on RunPod pods."""
+pinned datasets on RunPod pods, and the follow-up on L40 and RTX 6000 Ada."""
 
 from typing import Any
 
 import pytest
 
 from loom_bench.budget import caps_for, load_budget
-from loom_bench.experiment import Experiment, expand, load_experiment, load_quality_suite
+from loom_bench.experiment import (
+    RUNPOD_GPU_TYPE_IDS,
+    Experiment,
+    expand,
+    hardware_for,
+    load_experiment,
+    load_quality_suite,
+)
 from loom_bench.money import parse_usd
 from loom_bench.plan import (
     DATASET_JOB_S,
@@ -23,9 +30,10 @@ from loom_bench.plan import (
 from loom_bench.prices import load_prices
 from loom_bench.quality.suite import SuiteTask
 from loom_bench.registry import ModelSpec, load_registry
+from loom_bench.runner import plan_experiment
 from loom_bench.workloads import load_profile
 
-from .conftest import QWEN, QWEN_SWEEP_RUNPOD, RUNPOD_SMOKE_8B_SWEEP
+from .conftest import QWEN, QWEN_SWEEP_RUNPOD, QWEN_WINNER_ADA_RUNPOD, RUNPOD_SMOKE_8B_SWEEP
 
 REGISTRY = load_registry()
 PRICES = load_prices()
@@ -360,3 +368,73 @@ def test_the_smoke_fits_its_cap_to_ttl():
     assert len(plan.hosts) == 3
     for host in plan.hosts:
         assert host.seconds < 0.95 * host.ttl_s
+
+
+# --- the L40 / RTX 6000 Ada follow-up ---------------------------------------------------
+
+ADA_CARDS = {
+    "winner-l40": ("L40", "l40-x1"),
+    "winner-rtx6000ada": ("RTX 6000 Ada", "rtx6000ada-x1"),
+}
+
+
+def test_the_follow_up_runs_the_sweeps_winner_unchanged_on_each_ada_card():
+    follow, sweep = load_experiment(QWEN_WINNER_ADA_RUNPOD), load_experiment(QWEN_SWEEP_RUNPOD)
+    winner = next(c for c in expand(sweep, REGISTRY) if c.key == "fp8-kv8")
+    cells = {c.key: c for c in expand(follow, REGISTRY)}
+    assert set(cells) == set(ADA_CARDS)
+    for key, cell in cells.items():
+        gpu, instance = ADA_CARDS[key]
+        assert cell.spec.hardware.gpu == gpu
+        # Everything but the GPU is the sweep's cell: checkpoint, KV cache, engine launch.
+        assert cell.spec.id == winner.spec.id and cell.spec.hf == winner.spec.hf
+        assert cell.spec.kv_cache_dtype == winner.spec.kv_cache_dtype
+        assert cell.launch.args == winner.launch.args and cell.launch.image == winner.launch.image
+        assert cell.config_hash != winner.config_hash  # a new GPU is a new config
+        _, hw = hardware_for(follow, cell.spec)
+        assert (hw["instance_type"], hw["gpu_type_id"]) == (instance, RUNPOD_GPU_TYPE_IDS[gpu])
+        assert PRICES.instance("runpod", "secure", instance).gpu == gpu
+    # RunPod's own ids (gpuTypes, 2026-10-09).
+    assert RUNPOD_GPU_TYPE_IDS["L40"] == "NVIDIA L40"
+    assert RUNPOD_GPU_TYPE_IDS["RTX 6000 Ada"] == "NVIDIA RTX 6000 Ada Generation"
+    assert len({c.host_key for c in cells.values()}) == 2  # one pod per card
+
+
+def test_the_follow_up_measures_chat_as_the_sweep_does():
+    follow, sweep = load_experiment(QWEN_WINNER_ADA_RUNPOD), load_experiment(QWEN_SWEEP_RUNPOD)
+    (chat,) = follow.workloads
+    ref = next(w for w in sweep.workloads if w.profile == "chat-sharegpt")
+    assert chat.profile == ref.profile and chat.overrides == ref.overrides
+    for k in ("mode", "duration_s", "warmup_s", "drain_timeout_s"):
+        assert getattr(chat.load, k) == getattr(ref.load, k), k
+    assert chat.load.search is not None and ref.load.search is not None
+    for k in ("rel_tol", "scale", "step"):
+        assert getattr(chat.load.search, k) == getattr(ref.load.search, k), k
+    assert follow.repetitions == sweep.repetitions and follow.slo == sweep.slo
+    assert follow.quality is not None and sweep.quality is not None
+    assert follow.quality.baseline is not None and follow.quality.baseline_variant is None
+    assert (follow.quality.suite, follow.quality.subset, follow.quality.replicates) == (
+        sweep.quality.suite,
+        sweep.quality.subset,
+        sweep.quality.replicates,
+    )
+
+
+def test_the_follow_up_fits_its_cap_to_ttl():
+    plan = _plan(load_experiment(QWEN_WINNER_ADA_RUNPOD))
+    assert plan.ok, plan.refusals
+    assert plan.ttl_worst_micros <= plan.caps.effective == parse_usd("$5")
+    assert plan.total_micros < parse_usd("$4")
+    assert [h.cells for h in plan.hosts] == [["winner-l40"], ["winner-rtx6000ada"]]
+    l40s = PRICES.instance("runpod", "secure", "l40s-x1").on_demand_per_hour
+    rates = [h.hourly_micros for h in plan.hosts]
+    assert rates == sorted(rates) and rates[-1] < l40s  # both cheaper per hour
+    for host in plan.hosts:
+        assert host.seconds < 0.85 * host.ttl_s
+
+
+def test_the_follow_up_draft_is_refused_until_its_baseline_is_filled_in(ctx):
+    # The draft names a placeholder baseline: planning it refuses before any pod exists.
+    _, plan = plan_experiment(load_experiment(QWEN_WINNER_ADA_RUNPOD), ctx)
+    assert not plan.ok
+    assert any(r.startswith("quality.baseline:") for r in plan.refusals)

@@ -1,0 +1,72 @@
+# Follow-up to the Qwen3-8B config sweep (qwen3-8b-config-sweep-runpod, approved
+# 2026-10-09 with this follow-up): the sweep's winning config, re-measured on the two
+# cheaper Ada 48 GB cards, to see whether either serves Qwen3-8B for less per token than
+# the L40S. RunPod Secure 1x, API 2026-10-09: L40S $1.09/h, RTX 6000 Ada $0.99 (960 GB/s,
+# 11% more bandwidth), L40 $0.82 (864 GB/s, half the L40S's tensor throughput, so chat
+# prefill may cost TTFT). Same vLLM image and sm_89 FP8 kernels as the sweep.
+#
+# DRAFT, NOT RUN. Fill in from the sweep before planning it:
+# 1. Both variants: replace the config below the `# winner` marker with the sweep's
+#    cheapest config that passed its gate (the draft holds the expected winner, fp8-kv8:
+#    FP8-dynamic weights by `model: qwen3-8b-fp8`, `kv_cache_dtype: fp8`; add the
+#    `engine.args` of fp8-kv8-mbt1024 if that cell won). Keep each `hardware` block.
+# 2. `quality.baseline`: the sweep's experiment id and its bf16 cell's config hash
+#    (`bench report` or bench_eval_runs), so both cells are gated against the stored
+#    L40S BF16 baseline and scored on its divergence reference, as the 70B FP8 run on
+#    4x L40S was (llama-3.3-70b-fp8-tp4-runpod). Until then `bench plan` refuses it.
+#    A new GPU is a new config (the hardware is in the config hash), so it ships only
+#    on its own gate pass (docs/PLAN.md, quality standard).
+# 3. chat-sharegpt `search.lo`: the winner's chat knee on the L40S from the sweep. The
+#    two cards have about the L40S's bandwidth, so their knees should sit near it; four
+#    points at step 1.5 with a two-step descent bracket it to ~5% either way.
+#
+# Only chat-sharegpt, the workload the price is set from (docs/how-to/price-a-model.md),
+# with the sweep's windows (210 s measured after 45 s of warmup), so the per-token cost
+# compares with the sweep's L40S row point for point. fixed-1k-1k is left out to stay
+# near the ~$3 approved; add it back from the sweep spec if the chat result is close.
+#
+# Each card is its own pod (the instance type is in the host key), run one after the
+# other, each with its own cold start, dataset fetch and three phase0-strict passes.
+name: qwen3-8b-winner-ada-runpod
+description: The Qwen3-8B sweep's winning config on RunPod Secure 1x L40 and 1x RTX 6000 Ada, chat at SLO, gated vs the sweep's stored BF16.
+model: qwen3-8b
+provider:
+  kind: runpod
+  container_disk_gb: 80
+variants:
+  - name: winner-l40
+    hardware: {gpu: L40, instance_types: {runpod: l40-x1}}
+    # winner
+    model: qwen3-8b-fp8
+    kv_cache_dtype: fp8
+  - name: winner-rtx6000ada
+    hardware: {gpu: RTX 6000 Ada, instance_types: {runpod: rtx6000ada-x1}}
+    # winner
+    model: qwen3-8b-fp8
+    kv_cache_dtype: fp8
+workloads:
+  - profile: chat-sharegpt
+    load:
+      mode: open_loop
+      search: {lo: 9, hi: 16, rel_tol: 0.05, max_points: 4, scale: geometric, step: 1.5, descend: 2}
+      duration_s: 255
+      warmup_s: 45
+      drain_timeout_s: 60
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+quality:
+  suite: qwen3-8b
+  subset: phase0-strict
+  replicates: 3
+  # Placeholders: the sweep's experiment id and its bf16 config hash (see step 2 above).
+  baseline:
+    experiment: 00000000-0000-0000-0000-000000000000
+    config_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+budget:
+  max_spend: "$5"
+  ttl_minutes: 150
+  accrual_interval_s: 15
+seed: 0
