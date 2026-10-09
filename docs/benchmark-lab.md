@@ -441,7 +441,7 @@ The real runs are on RunPod Secure Cloud on-demand, since the AWS GPU spot quota
 | `runpod-smoke-fp8` | 1x RunPod 1x L40S, the FP8 run's FP8 path at smoke scale (Qwen3-8B BF16 vs RedHatAI FP8-dynamic), 51 min of a 65 min TTL | $0.93 | $1.19 | $1.25 |
 | `llama-3.3-70b-h100-tp2-runpod` (ran 2026-10-09 as 9f0853d7: $25.18, results below) | 1x RunPod 2x H100 SXM ($7.98/h), BF16 baseline + FP8 at TP=2 on one pod, FP8 gated in-run; 5.1 h of a 5.5 h TTL (planner) | $40.53 | $44.09 | $45 |
 | `runpod-smoke-h100` (ran three times: 4e50b5a5, e929eb0c, 4680fa3e, $6.15) | 1x RunPod 2x H100 SXM, the H100 run's paths at smoke scale (Qwen3-8B BF16 vs FP8, TP=2, NVLink P2P), 51 min of a 65 min TTL | $6.78 | $8.66 | $9 |
-| `llama-3.3-70b-h100-tp2-quality-runpod` (approved 2026-10-09, not run yet) | 1x RunPod 2x H100 SXM, 9f0853d7's BF16 and FP8 cells again, evals and gate only (`workloads: []`), tool-calling data version 2; 1.27 h of a 2.5 h TTL (planner; ~45 min at 9f0853d7's timings) | $10.20 | $20.04 | $22 |
+| `llama-3.3-70b-h100-tp2-quality-runpod` (ran 2026-10-09 as 9e5f7866: $3.29 in 24.6 min, FP8 gate passes, results below) | 1x RunPod 2x H100 SXM, 9f0853d7's BF16 and FP8 cells again, evals and gate only (`workloads: []`), tool-calling data version 2; 1.27 h of a 2.5 h TTL (planner; ~45 min at 9f0853d7's timings) | $10.20 | $20.04 | $22 |
 | `qwen3-8b-quality-runpod` | 2x RunPod 1x L40S, evals and gate only, 3 eval passes per engine (finishes 565b8d3f's gate), 105 min each of a 135 min TTL (planned; ~35 min at b1b904dc's measured pass time) | $3.85 | $4.95 | $5.00 |
 | `qwen3-8b-config-sweep-runpod` (**proposed** 2026-10-09, not approved) | 3x RunPod 1x L40S in sequence (host groups), 5 vLLM cells: BF16, BF16 + FP8 KV, FP8, FP8 + FP8 KV, FP8 + FP8 KV + `max_num_batched_tokens` 1024; chat-sharegpt and fixed-1k-1k; every candidate gated vs BF16 in-run, 3 passes; 7.0 / 6.6 / 3.4 h of a 7.5 h TTL. [Section below](#qwen3-8b-config-sweep-proposed) | $18.71 | $24.77 | $25 |
 | `runpod-smoke-8b-sweep` (**proposed**, runs first) | The sweep at smoke scale on the same three pods, 68 / 67 / 39 min of a 75 min TTL | $3.20 | $4.13 | $4.25 |
@@ -591,14 +591,15 @@ checkpoint, FP8 gated against the in-run BF16 cell. Spend $25.18 (DB), plus $6.1
 three smoke attempts (`runpod-smoke-h100`: 4e50b5a5 $1.18, failed on the second
 checkpoint's weights not being downloaded before its offline engine started, fixed since;
 e929eb0c $2.26; 4680fa3e $2.71): $31.33 in all, under the $45 + $9 caps. Report:
-`reports/70b-h100-v1/`.
+`reports/70b-h100-v2/` (these load results with the quality-only rerun 9e5f7866's evals
+and gate, below); `reports/70b-h100-v1/` is the report as first run.
 
 | Row | Workload | Goodput at SLO | Status | p95 TTFT / TPOT at goodput | $/1M blended | vs lowest eligible list price |
 |---|---|---|---|---|---|---|
 | Llama 3.3 70B (BF16) | fixed-1k-1k | 0.5 req/s (fails at 0.59) | untrusted: TTFT p95 CV 21.8% | 271 ms / 31.1 ms | $2.37 [1.97, 2.84] | 11.27× DeepInfra $0.210 (fp8, not like for like) |
 | Llama 3.3 70B (BF16) | shared-prefix | 2 req/s (fails at 2.83) | untrusted: TTFT p95 CV 10.8% | 411 ms / 42.0 ms | $0.502 [0.419, 0.601] | 4.45× DeepInfra $0.113 |
-| Llama 3.3 70B FP8 | fixed-1k-1k | 2 req/s (fails at 4) | trusted, rank 1 | 304 ms / 29.4 ms | $0.546 [0.532, 0.561] | 2.60× DeepInfra $0.210 (fp8, like for like) |
-| Llama 3.3 70B FP8 | shared-prefix | 4 req/s (fails at 8) | trusted, rank 1 | 417 ms / 38.1 ms | $0.263 [0.239, 0.289] | 2.33× DeepInfra $0.113 (like for like) |
+| Llama 3.3 70B FP8 | fixed-1k-1k | 2 req/s (fails at 4) | trusted, rank 1, gate pass (9e5f7866) | 304 ms / 29.4 ms | $0.546 [0.532, 0.561] | 2.60× DeepInfra $0.210 (fp8, like for like) |
+| Llama 3.3 70B FP8 | shared-prefix | 4 req/s (fails at 8) | trusted, rank 1, gate pass (9e5f7866) | 417 ms / 38.1 ms | $0.263 [0.239, 0.289] | 2.33× DeepInfra $0.113 (like for like) |
 
 - **BF16 meets the 50 ms TPOT SLO on H100.** On 4x L40S (cf4d1614, 55102ddb) no load met
   it; here a decode step reads its 70 GB shard pair over ~3.35 TB/s and the all-reduce
@@ -610,15 +611,58 @@ e929eb0c $2.26; 4680fa3e $2.71): $31.33 in all, under the $45 + $9 caps. Report:
   1M tokens at 1k/1k and $0.263 on shared-prefix. Against public list prices for Llama
   3.3 70B (the FP8 row is compared with its base model's listings), that is 2.60× and
   2.33× DeepInfra's fp8 Turbo listing, and 0.53× and 0.25× Together AI's $1.04.
-- **Quality gate: inconclusive, so FP8 is blocked.** gsm8k (0.957 vs 0.955), ifeval
+- **Quality gate as first run: inconclusive, so FP8 was blocked** (now settled: it passes
+  on the 135-item tool-calling set, next section). gsm8k (0.957 vs 0.955), ifeval
   (0.898 vs 0.889), tool_calling (0.450 vs 0.450), json_schema (0.973 vs 0.970),
   divergence (KL 0.0038 nats, top-1 97.99%) and sanity all pass; tool_calling_strict is
   inconclusive at -1.67 pts [-6.67, +3.33] against its 6-point margin (one item of 60, the
   ±3/n floor). Strict mode never engaged on Llama 3.3 70B (both configs still sent
   numbers as strings), and the lever that can decide the task is more items, not
   replicates: [quality-gate.md](quality-gate.md), "Strict tool calling". The set is now
-  135 items (data version 2); `llama-3.3-70b-h100-tp2-quality-runpod` reruns both
+  135 items (data version 2); `llama-3.3-70b-h100-tp2-quality-runpod` reran both
   configs' evals and the gate on it.
+
+### 70B FP8 gate on tool-calling data version 2 (9e5f7866, 2026-10-09)
+
+`llama-3.3-70b-h100-tp2-quality-runpod`: 9f0853d7's BF16 and FP8 cells again (same config
+hashes) on one RunPod Secure 2x H100 SXM pod, evals and gate only, every phase0-strict
+task re-measured on both, tool-calling at data version 2 (135 items). Spend $3.29 (DB)
+for 24.6 min of pod time, against $10.20 planned and a $22 cap: the image was already
+cached on the host and the BF16 weights took 2.3 min, so BF16 was healthy after 4.9 min
+(16.5 in 9f0853d7); its eval job took 9.0 min with setup, the FP8 warm restart (download
+included) 5.2 min and its eval 5.4 min. Exit 0, no `quality_failed` or
+`divergence_failed`; pod terminated by the runner (gone from the API), no network volume.
+
+**Gate: PASS on every check, so FP8 is shippable** as its own labelled row, "Llama 3.3
+70B FP8", with BF16 the reference row:
+
+| Task | n | BF16 | FP8 | Delta [95% CI] | Margin | Verdict |
+|---|---|---|---|---|---|---|
+| gsm8k | 1319 | 0.955 | 0.955 | +0.08 pts [-0.61, +0.76] | 1 pt | PASS |
+| ifeval | 541 | 0.891 | 0.893 | +0.18 pts [-1.29, +1.66] | 2 pts | PASS |
+| tool_calling | 135 | 0.459 (62) | 0.467 (63) | +0.74 pts [-1.48, +3.70] | 6 pts | PASS |
+| tool_calling_strict | 135 | 0.444 (60) | 0.459 (62) | +1.48 pts [-0.74, +3.70] | 6 pts | PASS |
+| json_schema | 300 | 0.973 | 0.977 | +0.33 pts [-1.00, +2.00] | 3 pts | PASS |
+
+Divergence: KL 0.0040 nats, top-1 98.15% (48 prompts, 3,015 positions; limits KL 0.05,
+top-1 95%; BF16's self-KL ≤ 0.0004). Sanity over 2,428 FP8 outputs: empty 0%, truncated
+0.21%, repetition 0.16%, language drift 0.78%: pass.
+
+- FP8 and BF16 differ on 3 of 135 plain items (FP8 gains s-alarm-1 and s-products-3, loses
+  m-cart-2) and 2 strict ones (FP8 gains s-lights-1 and s-products-3). On the first 60
+  items both score 27 on both tasks, so s-books-1, the strict item FP8 lost in 9f0853d7
+  (its schema is unchanged in version 2), passed on both this time: the flip was not
+  stable across runs. The 75 new items score 35 (BF16) and 36 (FP8) plain, 33 and 35
+  strict.
+- Strict mode still never engaged: of the 148 strict failures over both configs, 147
+  stored replies (`unconstrained_text`) begin `{"type": "function", "name": ...`, the
+  prefix xgrammar's Llama trigger misses, and every one of the 140 wrong values is a
+  string where the schema asks for a number (120), boolean (16) or array (4); the other 8
+  are unexpected arguments. This settles the prefix question in
+  [quality-gate.md](quality-gate.md), "Strict tool calling".
+- The tool-calling scores stay low on both (0.459 / 0.467 plain) because Llama 3.3 70B
+  types numbers as strings, a model trait, not FP8's: the gate compares the two configs,
+  and FP8 costs nothing measurable on any task.
 
 
 ### Qwen3-8B config sweep (proposed)

@@ -140,7 +140,9 @@ allows an optional `"type": "function",` before `name` and triggers on
 `{"type": "function"`, `{"name":` and `{\n  "name":` as well, because Llama 3.x models
 write all of these. The likeliest prefix for the 70B is `{"type": "function", ...`,
 which mirrors how the template prints each tool (`{"type": "function", "function":
-{...}}`).
+{...}}`). The data-version-2 rerun (9e5f7866, below) confirmed it: 147 of the 148 stored
+`unconstrained_text` replies of its strict failures begin `{"type": "function", "name":
+...`.
 
 Classification: engine behaviour, a mismatch between xgrammar's single Llama trigger and
 what Llama 3.3 70B writes. It is not a harness bug: no request shape under
@@ -200,7 +202,10 @@ in-run BF16 cell. `bench plan`: cold start 30.6 min, eval setup 5, BF16 eval 15.
 start 15.1, FP8 eval 9.3, 1.27 h, $10.20 at $8.0156/h; worst case $20.04 at a
 150-minute TTL. The 9f0853d7 timings (BF16 healthy after 16.5 min, suites of 7.3 min
 BF16 and 4.7 min FP8, FP8 restart 7 min, plus eval setup) put the likely cost near 45
-minutes, ~$6.
+minutes, ~$6. It ran as 9e5f7866 in 24.6 min for $3.29 and FP8 passed (below,
+"Results on data version 2"). The s-books-1 flip did not repeat there: both configs
+passed it, so a BF16-vs-FP8 flip on a borderline item is not always stable from run to
+run; more items, not reruns, still decided the task.
 
 #### Tool-calling data version 2
 
@@ -286,6 +291,31 @@ How the new items were checked offline (no GPU spend):
   Alarm") and wrote "Tea countdown" for "for my tea", so the new alarm and timer queries
   now name their label (or say "with no label"), leaving v1's s-timer-2 as the one item
   that tests not inventing an optional argument.
+
+#### Results on data version 2 (9e5f7866, Llama 3.3 70B, 2x H100)
+
+`llama-3.3-70b-h100-tp2-quality-runpod` ran 2026-10-09 as 9e5f7866 ($3.29): both
+9f0853d7 configs re-measured on every phase0-strict task, tool tasks at `1+data.2` /
+`strict.1+data.2` with 135 items, FP8 gated against the in-run BF16 cell.
+
+| Task | BF16 | FP8 | Delta [95% CI], n=135 | Verdict (6-pt margin) |
+|---|---|---|---|---|
+| tool_calling | 0.459 (62) | 0.467 (63) | +0.74 pts [-1.48, +3.70] | PASS |
+| tool_calling_strict | 0.444 (60) | 0.459 (62) | +1.48 pts [-0.74, +3.70] | PASS |
+
+gsm8k (+0.08 pts [-0.61, +0.76], n=1319), ifeval (+0.18 [-1.29, +1.66], n=541),
+json_schema (+0.33 [-1.00, +2.00], n=300), divergence (KL 0.0040 nats, top-1 98.15%) and
+sanity pass too: the gate is PASS and FP8 is shippable as its own row. The two configs
+differ on 3 plain items and 2 strict ones, and on the first 60 items both score 27 of 60
+on both tasks (9f0853d7: BF16 27 and 27, FP8 27 and 26).
+
+Strict mode still never engaged. Every strict wrong value (140 over both configs) is a
+string where the schema asks for a number, boolean or array, and 147 of 148 stored
+replies begin `{"type": "function", "name": ...`. The exception, BF16's m-lights-1, began
+`{"name": "set_lights", ...` under `tool_choice: "none"`, which would trigger the
+grammar, yet its scored call still carried `"turn_on": "true"`: the scored reply evidently
+began differently (the two requests are separate, batched generations), so a single
+`unconstrained_text` shows what the model tends to write, not the scored bytes.
 
 Besides task scores, the gate looks at:
 
