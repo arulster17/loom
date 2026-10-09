@@ -36,7 +36,7 @@ To benchmark an endpoint you already run (vLLM, SGLang, or `bench mock-server`),
 | `bench run EXP.yaml [--dry-run] [--db URL] [--out results/]` | Plans, refuses if over a cap, then runs. `--dry-run` stops after the plan. |
 | `bench reproduce RUN_ID \| provenance.json [--tolerance 0.25]` | Re-runs one stored run from its provenance and compares it with the original. |
 | `bench reap [--dry-run]` | Terminates resources whose TTL passed (DB-recorded; all Loom-tagged EC2 instances when AWS is configured; all Loom-managed RunPod pods when a RunPod API key is found). |
-| `bench report [-e EXP]...` | Leaderboard (md, html, csv) by $/1M output tokens at SLO, with goodput brackets and latency at equal load (also `leaderboard.equal_load.csv`; see "Reading the reports"). |
+| `bench report [-e EXP]... [--alt-slo T=V]` | Leaderboard (md, html, csv): a plain-English summary per model and workload, the boards ranked by $/1M output tokens at SLO with goodput brackets and latency at equal load (also `leaderboard.equal_load.csv`), and a competitiveness section (also `leaderboard.competitiveness.csv`); see "Reading the reports". |
 | `bench competitiveness [-e EXP]...` | Our cost at SLO vs competitors' list prices. |
 | `bench compare EXP_A EXP_B [--match-by]` | Per-metric deltas with variance verdicts, goodput brackets and latency at equal load. Exit 6 if outside normal variance. |
 | `bench quality run SUITE --base-url URL --model NAME` | Runs a pinned eval suite against an endpoint. |
@@ -233,6 +233,46 @@ experiment's `spec.json` next to it (or `--spec`).
 
 ## Reading the reports
 
+A leaderboard reads top to bottom: summary, boards, competitiveness, methodology.
+
+**Summary.** Per model: the hardware and its on-demand price, a table with every config
+on every workload ($/1M input, $/1M output, $/1M blended, goodput bracket, standing,
+quality), then a few sentences per workload, all generated from the numbers
+(`report/summary.py`):
+
+- the cost at SLO of the quoted config, with 95% CIs. The quoted config is the first of:
+  trusted, then quality verified (the gate's reference or a gate pass), then leaderboard
+  rank; a config that failed the gate is never quoted. When it is not rank 1 the text
+  says why (e.g. rank 1's gate is inconclusive);
+- ties within the search resolution;
+- what limits it: each SLO target missed at the first failing load, with its value and
+  CI (the verdict uses the CI upper bound, and the text says so when the mean is inside
+  the target). With no passing load, the targets missed at the lowest load, and engine
+  settings that explain a floor (e.g. `NCCL_P2P_DISABLE=1`, from the provenance);
+- caveats: why a config is untrusted, with the numbers (e.g. "run-to-run CV 14.7%
+  exceeds 10%");
+- "No cost at the declared SLO" with the reason. With `--alt-slo`, the alternative
+  figure follows, labelled "NOT the declared one, for reference only";
+- the public list prices at the workload's mix and our blended cost as a multiple.
+
+Then the quality per config: the reference, or each gate check's verdict with its reason.
+
+**$/1M input, $/1M output and blended.** The headline split charges input tokens the
+replica's measured prefill time (request rate × mean TTFT at goodput) and output tokens
+the rest; blended is the replica's cost over all tokens at the workload's own mix
+(docs/cost-model.md, section 2). The board's "Rank key" column is the cost under the
+experiments' declared allocation (`all_output`), and ranking still uses it.
+
+**Workload order.** A model's boards start with the most representative workload, a chat
+shape, then fixed-1k-1k, then the others by name (`leaderboard.workload_order`), so
+code-completion (short output) comes after them.
+
+**Competitiveness.** Per model: our cost per side and blended, our price ("no price
+set" today) and the break-even price, public list prices with source and date, each also
+at every workload's mix, competitor quantization where disclosed, and the flags
+(`cost_above_market`, `price_above_market`, `negative_margin`, ...). Public list prices
+only (docs/cost-model.md, section 6).
+
 **Goodput bracket.** Goodput comes from a search over a grid of loads, so it is known only
 to a bracket: at least the goodput load, below the next tested load, which failed. The
 leaderboard and `bench compare` show both, e.g. `1 req/s (fails at 1.091)`;
@@ -272,7 +312,9 @@ and E2E p95 at every load all of them ran, with the SLO verdict at that load:
 `max_error_rate=0.02`) re-judges the same runs with those SLO targets replaced. It writes
 a second report, `leaderboard.alt-slo.{md,html,csv,equal_load.csv}`, whose title names
 the SLO it used and the one the experiments declare. The main leaderboard always uses the
-declared SLO, and nothing is stored. A search runs in place against the declared SLO, so
+declared SLO, and nothing is stored. Where no config has a cost at the declared SLO, the
+main leaderboard's summary and competitiveness section quote the alternative figure,
+labelled as such. A search runs in place against the declared SLO, so
 under a looser alternative the goodput is often only a lower bound, at the highest load
 tested (`≥… (none failed)`).
 
