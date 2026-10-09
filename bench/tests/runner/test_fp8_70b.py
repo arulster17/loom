@@ -27,6 +27,8 @@ PRICES = load_prices()
 BUDGET = load_budget()
 BF16 = REGISTRY.get("llama-3.3-70b-instruct")
 FP8 = REGISTRY.get("llama-3.3-70b-instruct-fp8")
+QWEN = REGISTRY.get("qwen3-8b")
+QWEN_FP8 = REGISTRY.get("qwen3-8b-fp8")
 CAP = parse_usd("$15")  # the approved hard cap for the FP8 run (docs/PLAN.md)
 # cf4d1614: llama-3.3-70b-tp4-runpod, BF16 at defaults (variant vllm-tp4).
 BF16_RUN = "cf4d1614-2453-4ad4-b345-afd6b769a52d"
@@ -187,6 +189,12 @@ def test_the_fp8_smoke_runs_the_fp8_path_of_the_70b_run():
     # A BF16 baseline that captures the reference, and a pre-quantized compressed-tensors
     # FP8 candidate scored on it and gated, loaded with no --quantization flag.
     base, cand = cells[smoke.quality.baseline_variant], cells["vllm-fp8"]
+    # Selected as the 70B run selects its FP8 row: a variant naming the FP8 registry
+    # entry (Variant.model), served under that entry's id.
+    (fp8_variant,) = [v for v in smoke.variants if v.name == "vllm-fp8"]
+    assert fp8_variant.model == "qwen3-8b-fp8" and fp8_variant.hf is None
+    assert (base.spec.id, cand.spec.id) == ("qwen3-8b", "qwen3-8b-fp8")
+    assert cand.spec == QWEN_FP8 and cand.launch.served_model == "qwen3-8b-fp8"
     assert (base.spec.hf.quant_method, base.spec.quantization) == (None, "none")
     assert (cand.spec.hf.quant_method, cand.spec.quantization) == (
         real_cell.spec.hf.quant_method,
@@ -212,3 +220,41 @@ def test_the_fp8_smoke_fits_its_cap_to_ttl():
     (host,) = plan.hosts
     assert [s.kind for s in host.steps].count("eval") == 2 == plan.n_cells
     assert host.seconds < 0.8 * host.ttl_s
+
+
+# --- Qwen3 8B FP8: the smokes' FP8 row ----------------------------------------------
+
+
+def test_the_qwen_fp8_row_carries_its_precision_and_a_pinned_checkpoint():
+    assert QWEN_FP8.display_name == "Qwen3 8B FP8"
+    hf = QWEN_FP8.hf
+    assert hf.repo == "RedHatAI/Qwen3-8B-FP8-dynamic"
+    assert hf.revision == "05233ce1e0565b5fdc9cfa000ab840152ed30c70"
+    assert (hf.license, hf.gated, hf.size_bytes) == ("apache-2.0", False, 9_438_581_960)
+    assert hf.quant_method == "compressed-tensors" and QWEN_FP8.quantization == "fp8"
+    assert not hf.trust_remote_code
+    assert QWEN_FP8.status == "preview" and QWEN_FP8.pricing is None
+    assert (QWEN.display_name, QWEN.quantization, QWEN.hf.quant_method) == (
+        "Qwen3 8B",
+        "none",
+        None,
+    )
+
+
+def test_the_qwen_fp8_row_is_the_bf16_row_with_another_checkpoint():
+    differs = {"id", "display_name", "hf", "quantization"}
+    assert QWEN_FP8.model_dump(exclude=differs) == QWEN.model_dump(exclude=differs)
+    keep = {"repo", "revision", "size_bytes", "quant_method"}
+    assert QWEN_FP8.hf.model_dump(exclude=keep) == QWEN.hf.model_dump(exclude=keep)
+    assert quantization_flag(QWEN_FP8) == []
+    swap = {QWEN.hf.repo: QWEN_FP8.hf.repo, QWEN.hf.revision: QWEN_FP8.hf.revision}
+    swap[QWEN.id] = QWEN_FP8.id
+    bf16 = render_launch(QWEN).args
+    assert render_launch(QWEN_FP8).args == [swap.get(a, a) for a in bf16]
+
+
+def test_the_qwen_suite_covers_its_fp8_row_and_nothing_else():
+    suite = load_suite("qwen3-8b")
+    assert suite.also_models == ["qwen3-8b-fp8"]
+    assert suite.covers("qwen3-8b") and suite.covers("qwen3-8b-fp8")
+    assert not suite.covers("llama-3.3-70b-instruct-fp8")

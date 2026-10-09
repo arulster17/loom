@@ -308,7 +308,10 @@ prompts 20 and 40; the smoke now scores those two.
 
 Before the 70B FP8 run, `runpod-smoke-fp8.yaml` (one 1x L40S pod, about $0.93) runs its
 FP8 path: RedHatAI's FP8-dynamic compressed-tensors checkpoint of Qwen3-8B (made the same
-way as the 70B's) loaded by the same vLLM image with no `--quantization` flag, a warm
+way as the 70B's; registry row `qwen3-8b-fp8`, "Qwen3 8B FP8", which the FP8 cell names
+with `model:` as the 70B runs name `llama-3.3-70b-instruct-fp8`, so it is served,
+eval-suite-matched, gated, recorded and reported under its own id) loaded by the same vLLM
+image with no `--quantization` flag, a warm
 restart onto it from the BF16 checkpoint, its eval job scoring divergence on the BF16
 reference, and its gate, under the 70B FP8 run's load shapes and quality subset
 (`phase0-strict`, so `tool_calling_strict` runs on both). Check
@@ -323,7 +326,8 @@ FP8 run on 4x L40S (`llama-3.3-70b-fp8-tp4-runpod.yaml`), which is on hold: 4x L
 stock, and its cross-socket host is the known TPOT floor. Run its smoke
 `runpod-smoke-h100.yaml` first ($9 cap, about $6.78): it adds the H100 SXM GPU type,
 sm_90 FP8 GEMMs, TP=2 with NCCL P2P over NVLink (`NCCL_P2P_LEVEL=NVL`) and
-`gpu_memory_utilization: 0.95`. Check its `engine_started.system.gpu_topology` shows
+`gpu_memory_utilization: 0.95`, with its FP8 cell selected the run's way (`model:
+qwen3-8b-fp8`, a separate registry row, as the run's `model: llama-3.3-70b-instruct-fp8`). Check its `engine_started.system.gpu_topology` shows
 `NV*` links between the two GPUs. H100 SXM Secure 2x was "Low" stock on 2026-10-08.
 
 Dependency bugs are caught for free before that: `uv run pytest -m network` (CI job

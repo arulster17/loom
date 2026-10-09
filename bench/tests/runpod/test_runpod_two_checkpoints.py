@@ -1,7 +1,10 @@
 """One pod serving two checkpoints, end to end on the runpod provider: the shipped specs
-whose cells share a pod but not a checkpoint (runpod-smoke-h100 and runpod-smoke-fp8 by an
-`hf` override, the 70B H100 run by `Variant.model`), with their own provider, variants and
-model, at test scale (one tiny workload, a small suite, one repetition).
+whose cells share a pod but not a checkpoint (runpod-smoke-h100, runpod-smoke-fp8 and the
+70B H100 run, each FP8 cell naming its FP8 registry row by `Variant.model`), with their own
+provider, variants and model, at test scale (one tiny workload, a small suite, one
+repetition). The smokes serve qwen3-8b-fp8 exactly as the 70B run serves
+llama-3.3-70b-instruct-fp8: own served id, suite lookup through also_models, gate against
+the BF16 cell, own recorded model and own report/site row.
 
 runpod-smoke-h100 (4e50b5a5, $1.18) failed at its second cell: warm restarts downloaded no
 weights, so the FP8 cell's offline engine found RedHatAI/Qwen3-8B-FP8-dynamic "not cached".
@@ -23,9 +26,12 @@ from loom_bench.experiment import EXPERIMENTS_DIR, Experiment, expand
 from loom_bench.jobs import EvalJob, LoadJob
 from loom_bench.providers import runpod_api
 from loom_bench.providers.runpod import RunpodProvider, RunpodSettings
+from loom_bench.quality.suite import load_suite
+from loom_bench.registry import load_registry
 from loom_bench.runner import RunnerContext, run_experiment
+from loom_bench.site.snapshot import export_snapshot, load_snapshot
 from loom_bench.store.db import session_scope, upgrade
-from loom_bench.store.models import BenchColdStart, BenchRun
+from loom_bench.store.models import BenchColdStart, BenchEvalRun, BenchRun
 
 from .fakes import FakeRunpod, script_pairs, script_var
 from .test_runpod_e2e import BUCKET, PodSim, s3_key, write_yaml
@@ -37,6 +43,12 @@ SPECS = [
     EXPERIMENTS_DIR / "llama-3.3-70b-h100-tp2-runpod.yaml",
     EXPERIMENTS_DIR / "runpod-smoke-fp8.yaml",
 ]
+# Each spec's (BF16 registry row, FP8 registry row its FP8 cell names by Variant.model).
+ROWS = {
+    "runpod-smoke-h100": ("qwen3-8b", "qwen3-8b-fp8"),
+    "llama-3.3-70b-h100-tp2-runpod": ("llama-3.3-70b-instruct", "llama-3.3-70b-instruct-fp8"),
+    "runpod-smoke-fp8": ("qwen3-8b", "qwen3-8b-fp8"),
+}
 
 
 def suite_for(model: str, also: list[str]) -> dict[str, Any]:
@@ -155,11 +167,30 @@ def pod_run(request, tmp_path_factory):
         finally:
             sim.close()
             mp.undo()
-    return outcome, sim, ctx, cells
+    return outcome, sim, ctx, cells, request.param
+
+
+@pytest.mark.parametrize("path", SPECS, ids=lambda p: p.stem)
+def test_the_fp8_cell_names_its_registry_row_and_patches_nothing_else(path):
+    # The smokes select FP8 as the 70B run does: `model:` on the variant, no `hf:` override.
+    doc = yaml.safe_load(path.read_text())
+    bf16, fp8 = ROWS[path.stem]
+    assert doc["model"] == bf16
+    (cand,) = [v for v in doc["variants"] if v.get("model")]
+    assert cand["model"] == fp8
+    assert not any("hf" in v or "quantization" in v for v in doc["variants"])
+    # The shipped suite covers the FP8 row through also_models, as expand checks.
+    suite = load_suite(doc["quality"]["suite"])
+    assert suite.model == bf16 and fp8 in suite.also_models
+    registry = load_registry()
+    assert registry.get(fp8).quantization == "fp8"
+    assert registry.get(fp8).hf.quant_method == "compressed-tensors"
+    base, cand_cell = expand(Experiment.model_validate(doc), registry)
+    assert (base.spec.id, cand_cell.spec.id) == (bf16, fp8)
 
 
 def test_both_cells_run_on_one_pod(pod_run):
-    outcome, sim, ctx, cells = pod_run
+    outcome, sim, ctx, cells, _ = pod_run
     assert outcome.status.value == "completed", outcome.reason
     assert len(cells) == 2 and cells[0].host_key == cells[1].host_key
     assert len(sim.downloads) == 1  # one pod
@@ -171,7 +202,7 @@ def test_both_cells_run_on_one_pod(pod_run):
 
 
 def test_each_checkpoint_is_downloaded_once_at_its_pin(pod_run):
-    _, sim, _, (base, cand) = pod_run
+    _, sim, _, (base, cand), _ = pod_run
     (downloads,) = sim.downloads.values()
     bf16 = (base.spec.hf.repo, base.spec.hf.revision)
     fp8 = (cand.spec.hf.repo, cand.spec.hf.revision)
@@ -185,15 +216,15 @@ def test_each_checkpoint_is_downloaded_once_at_its_pin(pod_run):
 
 
 def test_the_fp8_cell_serves_and_is_measured_as_its_own_checkpoint(pod_run):
-    _, sim, _, (base, cand) = pod_run
-    _, warm = sim.scripts("start_engine")
+    _, sim, _, (base, cand), path = pod_run
+    assert (base.spec.id, cand.spec.id) == ROWS[path.stem]
+    cold, warm = sim.scripts("start_engine")
+    assert script_var(cold, "SERVED_MODEL") == base.spec.id
     assert script_var(warm, "SERVED_MODEL") == cand.spec.id
-    for job in sim.jobs:
-        assert job.served_model in (base.spec.id, cand.spec.id)
+    half = len(sim.jobs) // 2  # the BF16 cell's jobs, then the FP8 cell's
+    assert {j.served_model for j in sim.jobs[:half]} == {base.spec.id}
     cand_jobs = [j for j in sim.jobs if j.served_model == cand.spec.id]
-    if cand.spec.id == base.spec.id:  # an hf override keeps the registry id
-        cand_jobs = sim.jobs[len(sim.jobs) // 2 :]
-    assert cand_jobs
+    assert cand_jobs and cand_jobs == sim.jobs[half:]
     for job in cand_jobs:  # the tokenizer is the FP8 checkpoint's, read from the pod
         assert job.tokenizer is not None
         assert (job.tokenizer.repo, job.tokenizer.revision) == (
@@ -203,18 +234,22 @@ def test_the_fp8_cell_serves_and_is_measured_as_its_own_checkpoint(pod_run):
 
 
 def test_the_fp8_cell_is_scored_on_the_bf16_reference_and_gated_against_it(pod_run):
-    outcome, sim, _, (base, cand) = pod_run
+    outcome, sim, _, (base, cand), _ = pod_run
     evals = [j for j in sim.jobs if isinstance(j, EvalJob)]
     assert [j.divergence for j in evals] == ["capture_and_floor", "score"]
     assert evals[1].reference is not None
     assert evals[1].reference.config_hash == base.config_hash
+    # Each eval job runs the suite pinned for the BF16 row, which covers the FP8 row.
+    assert [j.served_model for j in evals] == [base.spec.id, cand.spec.id]
+    for job in evals:
+        assert job.suite.model == base.spec.id and job.suite.covers(job.served_model)
     (gate,) = outcome.gates
     assert (gate.cell, gate.baseline) == (cand.key, base.key)
     assert gate.decision in ("pass", "review")
 
 
 def test_runs_record_each_cells_checkpoint_and_precision(pod_run):
-    _, _, ctx, (base, cand) = pod_run
+    _, _, ctx, (base, cand), _ = pod_run
     with session_scope(ctx.db_url) as s:
         runs = list(s.scalars(select(BenchRun)))
     by_hash = {r.config_hash: r.provenance["model"] for r in runs}
@@ -228,3 +263,30 @@ def test_runs_record_each_cells_checkpoint_and_precision(pod_run):
         "revision": cand.spec.hf.revision,
         "quantization": "fp8",
     }
+
+
+def test_eval_runs_are_recorded_per_checkpoint(pod_run):
+    _, _, ctx, (base, cand), _ = pod_run
+    with session_scope(ctx.db_url) as s:
+        evals = list(s.scalars(select(BenchEvalRun)))
+    assert {e.config_hash for e in evals} == {base.config_hash, cand.config_hash}
+
+
+def test_the_fp8_row_gets_its_own_report_and_site_row(pod_run, tmp_path):
+    # Results group by the checkpoint each run recorded, so the FP8 config lands on the
+    # FP8 registry row's page (its display name) and BF16 stays on its own.
+    outcome, _, ctx, (base, cand), _ = pod_run
+    with session_scope(ctx.db_url) as s:
+        export_snapshot(s, tmp_path, [outcome.experiment_id])
+    snap = load_snapshot(tmp_path)
+    models = {m.model_id: m for m in snap.models}
+    for cell in (base, cand):
+        m = models[cell.spec.id]
+        assert (m.display_name, m.repo) == (cell.spec.display_name, cell.spec.hf.repo)
+        assert {r.config_hash for r in m.results} == {cell.config_hash}
+    assert models[cand.spec.id].display_name.endswith(" FP8")
+    entries = {e.id: e for e in snap.manifest.models}
+    assert entries[base.spec.id].configs == entries[cand.spec.id].configs == 1
+    assert snap.competitiveness is not None
+    rows = {r.model_id: r for r in snap.competitiveness.rows}
+    assert rows[cand.spec.id].display_name == cand.spec.display_name

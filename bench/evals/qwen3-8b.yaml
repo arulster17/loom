@@ -24,6 +24,8 @@
 
 suite: qwen3-8b
 model: qwen3-8b
+# The FP8 checkpoint runs this same suite and is gated against the BF16 baseline.
+also_models: [qwen3-8b-fp8]
 seed: 1234
 # Non-thinking mode, as served (config/models.yaml); applied to every chat request.
 chat_template_kwargs: {enable_thinking: false}

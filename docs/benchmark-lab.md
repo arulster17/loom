@@ -378,7 +378,8 @@ listed as "not gated" in the decision (`GateDecision.ungated`); the shared tasks
 divergence and sanity decide. `bench quality gate` does the same for two configs from
 different experiments. A smoke cannot use a stored baseline (its capped items never pair
 with a full run). A suite gates other checkpoints of its model listed in `also_models`
-(the FP8 registry row runs the BF16 suite).
+(the FP8 registry rows `llama-3.3-70b-instruct-fp8` and `qwen3-8b-fp8` run their BF16
+suites; the FP8 smokes serve `qwen3-8b-fp8` by `Variant.model`, as the 70B runs do).
 
 A quality-only experiment (`workloads: []`, with a `quality` section) runs no load: each
 engine's cold start, then only its eval job, the divergence reference and scoring, and the

@@ -135,3 +135,55 @@ models:
     tool_call_parsers: {vllm: llama3_json, sglang: llama3}
     routing_tier: 1
     status: preview
+
+  # Qwen3-8B served in FP8: its own labeled row, gated against the BF16 entry
+  # (qwen3-8b), which stays the reference and headline row. The smokes serve it as the
+  # 70B runs serve llama-3.3-70b-instruct-fp8 (a variant naming another registry entry,
+  # `Variant.model`), so that path runs on a GPU before the 70B does. Everything but the
+  # checkpoint and its precision matches the BF16 entry, so the gate measures the
+  # precision alone.
+  - id: qwen3-8b-fp8
+    display_name: Qwen3 8B FP8
+    hf:
+      # Red Hat (Neural Magic) quantized Qwen/Qwen3-8B with llm-compressor
+      # (`QuantizationModifier`, scheme FP8_dynamic, lm_head left in BF16), made like the
+      # 70B FP8 checkpoint: FP8 weights with per-channel scales, FP8 activations with
+      # dynamic per-token scales, saved as compressed-tensors (`float-quantized`). Weights
+      # uploaded 2025-05-02 (0276b68b); every later commit, up to this pin, only edits
+      # README.md. 2 safetensors shards, no .bin/.pt/pickle. tokenizer.json matches the
+      # BF16 pin's (no saved truncation or padding); tokenizer_config.json carries an
+      # earlier Qwen3 chat template that renders string message content the same way.
+      repo: RedHatAI/Qwen3-8B-FP8-dynamic
+      revision: 05233ce1e0565b5fdc9cfa000ab840152ed30c70
+      license: apache-2.0
+      gated: false
+      size_bytes: 9438581960
+      quant_method: compressed-tensors  # config.json quantization_config.quant_method
+      trust_remote_code: false
+    engine:
+      name: vllm
+      version: "0.30.0"
+      # vllm/vllm-openai:v0.30.0 multi-arch index digest (CUDA 13.0, needs driver >= 580).
+      # Its CompressedTensorsW8A8Fp8 scheme needs compute capability 8.9 (L40S sm_89,
+      # H100 sm_90). No --quantization flag: vLLM reads the method from config.json
+      # (registry pair table: compressed-tensors + fp8).
+      image: vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
+      args: {}
+      chat_template_kwargs: {enable_thinking: false}
+    hardware:
+      gpu: L40S
+      gpus_per_replica: 1
+      nodes_per_replica: 1
+      instance_types: {aws: g6e.xlarge, runpod: l40s-x1}
+    parallelism: {tp: 1, pp: 1, ep: 1}
+    # Same cap as BF16 so both rows serve the same window.
+    max_context: 32768
+    quantization: fp8
+    kv_cache_dtype: auto
+    pricing: null
+    scaling: {min_replicas: 0, max_replicas: 1}
+    clouds: [aws, runpod]
+    capabilities: {tools: true, json_schema: true, vision: false, reasoning: true}
+    tool_call_parsers: {vllm: hermes, sglang: qwen25}
+    routing_tier: 1
+    status: preview

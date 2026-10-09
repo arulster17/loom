@@ -31,18 +31,12 @@ provider:
 variants:
   # The BF16 registry checkpoint: the baseline, capturing the divergence reference.
   - name: vllm
-  # RedHatAI/Qwen3-8B-FP8-dynamic: Apache-2.0 like the base model, not gated. Weights
-  # uploaded 2025-05-02 (0276b68b); every later commit, up to this pin, only edits
-  # README.md. 2 safetensors shards (9.4 GB), no .bin/.pt/pickle files.
+  # The FP8 registry row (qwen3-8b-fp8: RedHatAI/Qwen3-8B-FP8-dynamic, pinned and
+  # described in config/models.yaml), served by naming it as the 70B FP8 runs name
+  # llama-3.3-70b-instruct-fp8 (`Variant.model`: its own served id, suite lookup through
+  # also_models, report and site row).
   - name: vllm-fp8
-    hf:
-      repo: RedHatAI/Qwen3-8B-FP8-dynamic
-      revision: 05233ce1e0565b5fdc9cfa000ab840152ed30c70
-      license: apache-2.0
-      gated: false
-      size_bytes: 9438581960
-      quant_method: compressed-tensors
-    quantization: fp8
+    model: qwen3-8b-fp8
 workloads:
   - profile: fixed-1k-1k
     overrides: {output_len: 128}

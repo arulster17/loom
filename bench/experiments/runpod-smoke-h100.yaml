@@ -26,16 +26,11 @@ variants:
     parallelism: {tp: 2}
     engine:
       args: {gpu_memory_utilization: 0.95}
-  # The checkpoint pinned in runpod-smoke-fp8.yaml.
+  # The FP8 registry row (qwen3-8b-fp8, RedHatAI/Qwen3-8B-FP8-dynamic), served by
+  # naming it as the 70B run's FP8 cell names llama-3.3-70b-instruct-fp8 (`Variant.model`:
+  # its own served id, suite lookup through also_models, report and site row).
   - name: vllm-tp2-fp8
-    hf:
-      repo: RedHatAI/Qwen3-8B-FP8-dynamic
-      revision: 05233ce1e0565b5fdc9cfa000ab840152ed30c70
-      license: apache-2.0
-      gated: false
-      size_bytes: 9438581960
-      quant_method: compressed-tensors
-    quantization: fp8
+    model: qwen3-8b-fp8
     hardware: {gpu: H100, gpus_per_replica: 2}
     parallelism: {tp: 2}
     engine:

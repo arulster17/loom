@@ -154,9 +154,17 @@ def test_the_h100_smoke_runs_the_h100_paths():
         assert c.launch.args[c.launch.args.index("--gpu-memory-utilization") + 1] == "0.95"
     fp8 = cells[1]
     assert (fp8.spec.hf.quant_method, fp8.spec.quantization) == ("compressed-tensors", "fp8")
-    # The same FP8 smoke checkpoint as the L40S smoke.
+    # The FP8 cell is selected as the run's is: `model:` names the FP8 registry row
+    # (Variant.model), so it is served, gated, recorded and reported under that row's id.
+    assert [v.model for v in smoke.variants] == [None, "qwen3-8b-fp8"]
+    assert [v.model for v in real.variants] == [None, FP8.id]
+    assert all(v.hf is None for v in (*smoke.variants, *real.variants))
+    assert (cells[0].spec.id, fp8.spec.id) == ("qwen3-8b", "qwen3-8b-fp8")
+    assert fp8.launch.served_model == "qwen3-8b-fp8"
+    assert smoke.quality.load().covers(fp8.spec.id)
+    # The same FP8 smoke row as the L40S smoke.
     l40s_fp8 = expand(load_experiment(RUNPOD_SMOKE_FP8), REGISTRY)[1]
-    assert fp8.spec.hf == l40s_fp8.spec.hf
+    assert fp8.spec.id == l40s_fp8.spec.id and fp8.spec.hf == l40s_fp8.spec.hf
     plan = _plan(smoke)
     assert plan.ok, plan.refusals
     assert plan.ttl_worst_micros <= plan.caps.effective == parse_usd("$9")
