@@ -412,6 +412,7 @@ The real runs are on RunPod Secure Cloud on-demand, since the AWS GPU spot quota
 | `runpod-smoke-fp8` | 1x RunPod 1x L40S, the FP8 run's FP8 path at smoke scale (Qwen3-8B BF16 vs RedHatAI FP8-dynamic), 51 min of a 65 min TTL | $0.93 | $1.19 | $1.25 |
 | `llama-3.3-70b-h100-tp2-runpod` (ran 2026-10-09 as 9f0853d7: $25.18, results below) | 1x RunPod 2x H100 SXM ($7.98/h), BF16 baseline + FP8 at TP=2 on one pod, FP8 gated in-run; 5.1 h of a 5.5 h TTL (planner) | $40.53 | $44.09 | $45 |
 | `runpod-smoke-h100` (ran three times: 4e50b5a5, e929eb0c, 4680fa3e, $6.15) | 1x RunPod 2x H100 SXM, the H100 run's paths at smoke scale (Qwen3-8B BF16 vs FP8, TP=2, NVLink P2P), 51 min of a 65 min TTL | $6.78 | $8.66 | $9 |
+| `llama-3.3-70b-h100-tp2-quality-runpod` (approved 2026-10-09, not run yet) | 1x RunPod 2x H100 SXM, 9f0853d7's BF16 and FP8 cells again, evals and gate only (`workloads: []`), tool-calling data version 2; 1.89 h of a 2.5 h TTL (planner; ~45 min at 9f0853d7's timings) | $15.13 | $20.04 | $22 |
 | `qwen3-8b-quality-runpod` | 2x RunPod 1x L40S, evals and gate only, 3 eval passes per engine (finishes 565b8d3f's gate), 105 min each of a 135 min TTL (planned; ~35 min at b1b904dc's measured pass time) | $3.85 | $4.95 | $5.00 |
 
 The AWS specs stay as the secondary path:
@@ -574,5 +575,7 @@ e929eb0c $2.26; 4680fa3e $2.71): $31.33 in all, under the $45 + $9 caps. Report:
   inconclusive at -1.67 pts [-6.67, +3.33] against its 6-point margin (one item of 60, the
   ±3/n floor). Strict mode never engaged on Llama 3.3 70B (both configs still sent
   numbers as strings), and the lever that can decide the task is more items, not
-  replicates: [quality-gate.md](quality-gate.md), "Strict tool calling".
+  replicates: [quality-gate.md](quality-gate.md), "Strict tool calling". The set is now
+  135 items (data version 2); `llama-3.3-70b-h100-tp2-quality-runpod` reruns both
+  configs' evals and the gate on it.
 

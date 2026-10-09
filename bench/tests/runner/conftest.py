@@ -24,6 +24,8 @@ RUNPOD_SMOKE_FP8 = EXPERIMENTS_DIR / "runpod-smoke-fp8.yaml"
 LLAMA_H100_RUNPOD = EXPERIMENTS_DIR / "llama-3.3-70b-h100-tp2-runpod.yaml"
 RUNPOD_SMOKE_H100 = EXPERIMENTS_DIR / "runpod-smoke-h100.yaml"
 QWEN_QUALITY_RUNPOD = EXPERIMENTS_DIR / "qwen3-8b-quality-runpod.yaml"
+# Approved 2026-10-09: the 70B H100 run's evals and gate again, on tool-calling data v2.
+LLAMA_H100_QUALITY_RUNPOD = EXPERIMENTS_DIR / "llama-3.3-70b-h100-tp2-quality-runpod.yaml"
 
 
 @pytest.fixture(autouse=True)

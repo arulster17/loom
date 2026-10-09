@@ -1,0 +1,56 @@
+# APPROVED 2026-10-09 at a $22 cap: quality-only rerun of the 2x H100 70B run (9f0853d7)
+# on tool-calling data version 2. Not run yet.
+#
+# Why: 9f0853d7 measured everything, but its FP8 gate is blocked on tool_calling_strict,
+# -1.67 pts [-6.67, +3.33] against a 6-point margin: at 60 items the rule-of-three floor
+# (±5 pts) means one net lost item can never pass (docs/quality-gate.md, "What can decide
+# a 60-item task"). The tool-calling set now has 135 items (data version 2, which also
+# fixes a YAML bug in two descriptions), where the observed loss rate passes with room.
+# The gate never pairs task results of different versions (1+data.1 vs 1+data.2), so the
+# BF16 baseline is re-measured too: this spec carries its own in-run baseline, as the
+# real run does, and re-measures every phase0-strict task, divergence and sanity on both.
+#
+# The same model, provider block, variants and quality section as
+# llama-3.3-70b-h100-tp2-runpod.yaml, with no workloads: the cells' config hashes depend
+# only on model, launch and hardware, so these evals and the gate land on that run's
+# BF16 and FP8 configs (bench/tests/runner/test_h100_70b.py fails if this spec drifts).
+# One pod: a cold start on BF16, its eval job (divergence reference and noise floor), a
+# warm restart onto the FP8 checkpoint (downloaded then), its eval job, the gate.
+#
+# Budget: `bench plan` puts the pod at 1.89 h, $15.13 at $8.0156/h (a conservative
+# estimate); the 150-minute TTL leaves it 25% headroom, and the worst case (the pod living
+# to its TTL) is $20.04, under the $22 cap.
+# 9f0853d7's timings (BF16 healthy after 16.5 min, suites of 7.3 and 4.7 min, the FP8
+# restart 7 min) put the likely cost near 45 minutes, ~$6. H100 SXM Secure stock was
+# "Low" on 2026-10-08: check it and run with LOOM_RUNPOD_CAPACITY_WAIT_S=7200.
+name: llama-3.3-70b-h100-tp2-quality-runpod
+description: "Llama 3.3 70B BF16 and FP8, TP=2 on RunPod Secure 2x H100 SXM, vLLM v0.30.0, evals and gate only (tool-calling data version 2)."
+model: llama-3.3-70b-instruct
+provider:
+  kind: runpod
+  instance_type: h100-sxm-x2
+  gpu_type_id: NVIDIA H100 80GB HBM3
+  container_disk_gb: 260
+  engine_env: {NCCL_P2P_LEVEL: NVL}
+variants:
+  - name: vllm-tp2
+    hardware: {gpu: H100, gpus_per_replica: 2}
+    parallelism: {tp: 2}
+    engine:
+      args: {gpu_memory_utilization: 0.95}
+  - name: vllm-tp2-fp8
+    model: llama-3.3-70b-instruct-fp8
+    hardware: {gpu: H100, gpus_per_replica: 2}
+    parallelism: {tp: 2}
+    engine:
+      args: {gpu_memory_utilization: 0.95}
+workloads: []
+quality:
+  suite: llama-3.3-70b-instruct
+  subset: phase0-strict
+  baseline_variant: vllm-tp2
+budget:
+  max_spend: "$22"
+  ttl_minutes: 150
+  accrual_interval_s: 15
+seed: 0

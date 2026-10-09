@@ -330,6 +330,28 @@ sm_90 FP8 GEMMs, TP=2 with NCCL P2P over NVLink (`NCCL_P2P_LEVEL=NVL`) and
 qwen3-8b-fp8`, a separate registry row, as the run's `model: llama-3.3-70b-instruct-fp8`). Check its `engine_started.system.gpu_topology` shows
 `NV*` links between the two GPUs. H100 SXM Secure 2x was "Low" stock on 2026-10-08.
 
+The 70B run (9f0853d7) left FP8's gate inconclusive on the 60-item `tool_calling_strict`
+task alone. Its quality-only rerun, `llama-3.3-70b-h100-tp2-quality-runpod.yaml`
+(approved 2026-10-09, $22 cap; `bench plan`: 1.89 h, $15.13, worst case $20.04 at a
+150-minute TTL; likely ~45 min, ~$6), runs the same two cells on one 2x H100 SXM pod with
+`workloads: []`: BF16 cold start and eval job (divergence reference and noise floor), a
+warm restart onto the FP8 checkpoint, its eval job, the in-run gate, on tool-calling data
+version 2 (135 items; docs/quality-gate.md, "Tool-calling data version 2"). Same config
+hashes as 9f0853d7, so its evals and gate land on that run's configs. No smoke is needed
+first: every step ran on this hardware in 9f0853d7 and smoke 4680fa3e, a quality-only pod
+ran in b1b904dc, and the one combination never run for real (a warm restart onto a
+second checkpoint with no load job before it) is covered by the pod simulator
+(`bench/tests/runpod/test_runpod_two_checkpoints.py`, `quality_run`).
+
+```sh
+uv run bench plan bench/experiments/llama-3.3-70b-h100-tp2-quality-runpod.yaml
+LOOM_RUNPOD_CAPACITY_WAIT_S=7200 uv run bench run bench/experiments/llama-3.3-70b-h100-tp2-quality-runpod.yaml
+```
+
+Check: both cells' `quality` events name gsm8k, ifeval, tool_calling, tool_calling_strict
+and json_schema with tool tasks at version `1+data.2` / `strict.1+data.2` and 135 items,
+no `quality_failed` or `divergence_failed` event, and a `gate` event for `vllm-tp2-fp8`.
+
 Dependency bugs are caught for free before that: `uv run pytest -m network` (CI job
 `pod-client-env`) rebuilds the pods' client environment from `uv.lock` and runs every task
 of every eval suite at 2 items against the mock backend.

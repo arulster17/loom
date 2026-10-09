@@ -9,28 +9,45 @@
 # acceptable values; `null` in a list means the argument may be omitted.
 # Matching rules live in loom_bench.quality.tasks.tool_calling. Bump `version`
 # whenever a function or item changes.
-version: 1
+#
+# Version 2 (135 items: 90 simple, 45 multiple) keeps the 60 version-1 items, ids,
+# order and queries, and appends 75 (50 simple, 25 multiple) over 17 more functions,
+# adding nested objects, arrays of strings, enums and objects, and string arguments
+# that look like numbers (postal codes, ids, tracking numbers). It also fixes the
+# `from_currency`/`to_currency` descriptions, which version 1 wrote unquoted
+# (`ISO 4217 code, e.g. USD` inside `{...}` parsed as a truncated description plus a
+# stray `"e.g. USD": null` key that the prompt printed). Two version-1 golds were too
+# narrow and accept more: "Renew your passport" on s-reminder-1 (a paraphrase Qwen3-8B
+# and Llama 3.3 70B both write), and an empty label wherever a timer's label may be
+# omitted (s-timer-1, s-timer-2, m-timer-1; "" is no label, as BFCL also accepts).
+#
+# YAML pitfalls (checked by schema_problems in the task module and its test): every
+# description is double-quoted (a comma ends a plain scalar inside `{...}`, and `: `
+# starts a key); so are strings YAML would read as something else: `"19:30"` (a
+# base-60 integer under YAML 1.1), `"2026-11-03"` (a date), `"off"`/`"on"`/`"no"`
+# (booleans), and digit-only ids.
+version: 2
 
 functions:
   get_weather:
-    description: Current weather for a city.
+    description: "Current weather for a city."
     parameters:
       type: object
       properties:
-        city: {type: string, description: City name}
-        unit: {type: string, enum: [celsius, fahrenheit], description: Temperature unit}
+        city: {type: string, description: "City name"}
+        unit: {type: string, enum: [celsius, fahrenheit], description: "Temperature unit"}
       required: [city]
   convert_currency:
-    description: Convert an amount of money between currencies.
+    description: "Convert an amount of money between currencies."
     parameters:
       type: object
       properties:
         amount: {type: number}
-        from_currency: {type: string, description: ISO 4217 code, e.g. USD}
-        to_currency: {type: string, description: ISO 4217 code, e.g. EUR}
+        from_currency: {type: string, description: "ISO 4217 code, e.g. USD"}
+        to_currency: {type: string, description: "ISO 4217 code, e.g. EUR"}
       required: [amount, from_currency, to_currency]
   set_timer:
-    description: Start a countdown timer.
+    description: "Start a countdown timer."
     parameters:
       type: object
       properties:
@@ -38,35 +55,35 @@ functions:
         label: {type: string}
       required: [minutes]
   search_books:
-    description: Search the library catalogue.
+    description: "Search the library catalogue."
     parameters:
       type: object
       properties:
         query: {type: string}
-        max_results: {type: integer, description: Defaults to 10}
-        available_only: {type: boolean, description: Only books that can be borrowed now}
+        max_results: {type: integer, description: "Defaults to 10"}
+        available_only: {type: boolean, description: "Only books that can be borrowed now"}
       required: [query]
   create_event:
-    description: Add an event to the calendar.
+    description: "Add an event to the calendar."
     parameters:
       type: object
       properties:
         title: {type: string}
-        date: {type: string, description: YYYY-MM-DD}
-        start_time: {type: string, description: 24-hour HH:MM}
+        date: {type: string, description: "YYYY-MM-DD"}
+        start_time: {type: string, description: "24-hour HH:MM"}
         duration_minutes: {type: integer}
       required: [title, date, start_time, duration_minutes]
   calculate_tip:
-    description: Work out a restaurant tip.
+    description: "Work out a restaurant tip."
     parameters:
       type: object
       properties:
         bill_amount: {type: number}
         tip_percent: {type: number}
-        split: {type: integer, description: Number of people sharing; defaults to 1}
+        split: {type: integer, description: "Number of people sharing; defaults to 1"}
       required: [bill_amount, tip_percent]
   get_stock_price:
-    description: Latest price of a listed stock.
+    description: "Latest price of a listed stock."
     parameters:
       type: object
       properties:
@@ -74,24 +91,24 @@ functions:
         exchange: {type: string, enum: [NASDAQ, NYSE, LSE]}
       required: [ticker]
   translate_text:
-    description: Translate text into another language.
+    description: "Translate text into another language."
     parameters:
       type: object
       properties:
         text: {type: string}
-        target_language: {type: string, description: Language name or ISO 639-1 code}
+        target_language: {type: string, description: "Language name or ISO 639-1 code"}
       required: [text, target_language]
   book_table:
-    description: Reserve a restaurant table.
+    description: "Reserve a restaurant table."
     parameters:
       type: object
       properties:
         restaurant: {type: string}
         party_size: {type: integer}
-        time: {type: string, description: 24-hour HH:MM}
+        time: {type: string, description: "24-hour HH:MM"}
       required: [restaurant, party_size, time]
   find_route:
-    description: Directions between two places.
+    description: "Directions between two places."
     parameters:
       type: object
       properties:
@@ -100,7 +117,7 @@ functions:
         mode: {type: string, enum: [driving, walking, cycling, transit]}
       required: [origin, destination, mode]
   set_thermostat:
-    description: Set the home thermostat.
+    description: "Set the home thermostat."
     parameters:
       type: object
       properties:
@@ -108,7 +125,7 @@ functions:
         unit: {type: string, enum: [celsius, fahrenheit]}
       required: [temperature, unit]
   add_to_cart:
-    description: Add a product to the shopping cart.
+    description: "Add a product to the shopping cart."
     parameters:
       type: object
       properties:
@@ -116,7 +133,7 @@ functions:
         quantity: {type: integer}
       required: [product_id, quantity]
   compute_area:
-    description: Area of a simple shape.
+    description: "Area of a simple shape."
     parameters:
       type: object
       properties:
@@ -127,22 +144,222 @@ functions:
           description: "circle: [radius]; rectangle: [width, height]; triangle: [base, height]"
       required: [shape, dimensions]
   define_word:
-    description: Dictionary definition of a word.
+    description: "Dictionary definition of a word."
     parameters:
       type: object
       properties:
         word: {type: string}
-        language: {type: string, description: Dictionary language; defaults to English}
+        language: {type: string, description: "Dictionary language; defaults to English"}
       required: [word]
   create_reminder:
-    description: Remind the user about something later.
+    description: "Remind the user about something later."
     parameters:
       type: object
       properties:
         text: {type: string}
         days_from_now: {type: integer}
-        notify: {type: boolean, description: Send a push notification}
+        notify: {type: boolean, description: "Send a push notification"}
       required: [text, days_from_now]
+
+  # ------------------------------------------------- added in data version 2
+  send_email:
+    description: "Send an email."
+    parameters:
+      type: object
+      properties:
+        to: {type: array, items: {type: string}, description: "Recipient email addresses"}
+        subject: {type: string}
+        body: {type: string}
+        cc: {type: array, items: {type: string}, description: "Addresses to copy in"}
+        high_priority: {type: boolean, description: "Flag the email as high priority; defaults to false"}
+      required: [to, subject, body]
+  create_account:
+    description: "Open a customer account."
+    parameters:
+      type: object
+      properties:
+        username: {type: string}
+        email: {type: string}
+        address:
+          type: object
+          description: "Postal address"
+          properties:
+            street: {type: string, description: "Street and house number"}
+            city: {type: string}
+            postal_code: {type: string}
+            country: {type: string, description: "ISO 3166-1 alpha-2 code, e.g. DE"}
+          required: [street, city, postal_code, country]
+        newsletter: {type: boolean, description: "Subscribe to the newsletter; defaults to false"}
+      required: [username, email, address]
+  search_flights:
+    description: "Search for flights."
+    parameters:
+      type: object
+      properties:
+        origin: {type: string, description: "IATA airport code, e.g. SFO"}
+        destination: {type: string, description: "IATA airport code, e.g. JFK"}
+        departure_date: {type: string, description: "YYYY-MM-DD"}
+        return_date: {type: string, description: "YYYY-MM-DD; omit for a one-way trip"}
+        passengers:
+          type: object
+          properties:
+            adults: {type: integer}
+            children: {type: integer}
+          required: [adults, children]
+        cabin: {type: string, enum: [economy, premium_economy, business, first], description: "Defaults to economy"}
+      required: [origin, destination, departure_date, passengers]
+  log_workout:
+    description: "Record a completed workout."
+    parameters:
+      type: object
+      properties:
+        activity: {type: string, enum: [running, cycling, swimming, rowing, walking]}
+        duration_minutes: {type: integer}
+        distance_km: {type: number}
+        avg_heart_rate: {type: integer, description: "Beats per minute"}
+      required: [activity, duration_minutes]
+  set_lights:
+    description: "Control the smart lights in a room."
+    parameters:
+      type: object
+      properties:
+        room: {type: string}
+        turn_on: {type: boolean, description: "true switches the lights on, false switches them off"}
+        brightness: {type: integer, description: "Percent, 0 to 100"}
+        color: {type: string, enum: [warm_white, cool_white, red, green, blue, purple]}
+      required: [room, turn_on]
+  filter_products:
+    description: "Browse the store's products in a category, with optional filters."
+    parameters:
+      type: object
+      properties:
+        category: {type: string, enum: [electronics, books, clothing, home, toys, sports]}
+        max_price: {type: number}
+        min_rating: {type: number, description: "Average star rating, 1 to 5"}
+        in_stock_only: {type: boolean}
+        sort_by: {type: string, enum: [price_low_to_high, price_high_to_low, rating, newest]}
+      required: [category]
+  create_invoice:
+    description: "Create an invoice for a customer."
+    parameters:
+      type: object
+      properties:
+        customer_id: {type: string}
+        line_items:
+          type: array
+          items:
+            type: object
+            properties:
+              product: {type: string}
+              quantity: {type: integer}
+              unit_price: {type: number}
+            required: [product, quantity, unit_price]
+        currency: {type: string, description: "ISO 4217 code, e.g. EUR"}
+        due_in_days: {type: integer, description: "Defaults to 30"}
+      required: [customer_id, line_items, currency]
+  convert_units:
+    description: "Convert a measurement from one unit to another."
+    parameters:
+      type: object
+      properties:
+        value: {type: number}
+        from_unit: {type: string, enum: [millimeters, centimeters, meters, kilometers, inches, feet, miles, grams, kilograms, ounces, pounds, liters, gallons]}
+        to_unit: {type: string, enum: [millimeters, centimeters, meters, kilometers, inches, feet, miles, grams, kilograms, ounces, pounds, liters, gallons]}
+      required: [value, from_unit, to_unit]
+  calculate_loan_payment:
+    description: "Monthly payment on a fixed-rate loan."
+    parameters:
+      type: object
+      properties:
+        principal: {type: number}
+        annual_rate_percent: {type: number}
+        term_months: {type: integer}
+      required: [principal, annual_rate_percent, term_months]
+  track_package:
+    description: "Delivery status of a parcel."
+    parameters:
+      type: object
+      properties:
+        carrier: {type: string, enum: [UPS, FedEx, DHL, USPS]}
+        tracking_number: {type: string}
+      required: [carrier, tracking_number]
+  create_task:
+    description: "Add a task to the to-do list."
+    parameters:
+      type: object
+      properties:
+        title: {type: string}
+        priority: {type: string, enum: [low, medium, high], description: "Defaults to medium"}
+        due_date: {type: string, description: "YYYY-MM-DD"}
+        tags: {type: array, items: {type: string}}
+      required: [title]
+  resize_image:
+    description: "Resize a stored image."
+    parameters:
+      type: object
+      properties:
+        image_id: {type: string}
+        width: {type: integer, description: "Pixels"}
+        height: {type: integer, description: "Pixels"}
+        keep_aspect_ratio: {type: boolean, description: "Defaults to true"}
+        output_format: {type: string, enum: [png, jpeg, webp], description: "Defaults to the input format"}
+      required: [image_id, width, height]
+  set_alarm:
+    description: "Set an alarm clock."
+    parameters:
+      type: object
+      properties:
+        time: {type: string, description: "24-hour HH:MM"}
+        repeat_days:
+          type: array
+          items: {type: string, enum: [mon, tue, wed, thu, fri, sat, sun]}
+          description: "Days the alarm repeats on; omit for a one-off alarm"
+        label: {type: string}
+      required: [time]
+  book_hotel:
+    description: "Book a hotel room."
+    parameters:
+      type: object
+      properties:
+        city: {type: string}
+        check_in: {type: string, description: "YYYY-MM-DD"}
+        nights: {type: integer}
+        guests: {type: integer}
+        room_type: {type: string, enum: [single, double, twin, suite]}
+        breakfast_included: {type: boolean}
+      required: [city, check_in, nights, guests]
+  find_nearby:
+    description: "Places of one type near a location."
+    parameters:
+      type: object
+      properties:
+        location:
+          type: object
+          properties:
+            latitude: {type: number}
+            longitude: {type: number}
+          required: [latitude, longitude]
+        place_type: {type: string, enum: [restaurant, cafe, pharmacy, atm, gas_station, hospital]}
+        radius_meters: {type: integer, description: "Defaults to 1000"}
+        open_now: {type: boolean}
+      required: [location, place_type]
+  calculate_bmi:
+    description: "Body mass index from weight and height."
+    parameters:
+      type: object
+      properties:
+        weight_kg: {type: number}
+        height_cm: {type: number}
+      required: [weight_kg, height_cm]
+  play_playlist:
+    description: "Play one of the user's saved playlists."
+    parameters:
+      type: object
+      properties:
+        name: {type: string}
+        shuffle: {type: boolean, description: "Defaults to false"}
+        repeat: {type: string, enum: ["off", one, all], description: "Defaults to off"}
+      required: [name]
 
 items:
   # ---------------------------------------------------------------- simple
@@ -180,12 +397,12 @@ items:
     category: simple
     functions: [set_timer]
     query: "Set a timer for 12 minutes for the pasta."
-    expected: {name: set_timer, arguments: {minutes: [12], label: [null, pasta, the pasta, Pasta]}}
+    expected: {name: set_timer, arguments: {minutes: [12], label: [null, "", pasta, the pasta, Pasta]}}
   - id: s-timer-2
     category: simple
     functions: [set_timer]
     query: "Start a 45 minute timer."
-    expected: {name: set_timer, arguments: {minutes: [45], label: [null]}}
+    expected: {name: set_timer, arguments: {minutes: [45], label: [null, ""]}}
   - id: s-timer-3
     category: simple
     functions: [set_timer]
@@ -345,7 +562,7 @@ items:
     category: simple
     functions: [create_reminder]
     query: "Remind me to renew my passport in 30 days, and send a push notification."
-    expected: {name: create_reminder, arguments: {text: [renew my passport, Renew my passport, renew passport], days_from_now: [30], notify: [true]}}
+    expected: {name: create_reminder, arguments: {text: [renew my passport, Renew my passport, renew passport, Renew your passport], days_from_now: [30], notify: [true]}}
   # ---------------------------------------------------------------- multiple
   - id: m-weather-1
     category: multiple
@@ -361,7 +578,7 @@ items:
     category: multiple
     functions: [create_reminder, set_timer, create_event]
     query: "Give me a 7 minute timer for the eggs."
-    expected: {name: set_timer, arguments: {minutes: [7], label: [null, eggs, the eggs, Eggs]}}
+    expected: {name: set_timer, arguments: {minutes: [7], label: [null, "", eggs, the eggs, Eggs]}}
   - id: m-reminder-1
     category: multiple
     functions: [create_reminder, set_timer, create_event]
@@ -447,3 +664,380 @@ items:
     functions: [create_reminder, book_table, add_to_cart, find_route]
     query: "Reserve Sakura Garden for a group of 10 at 20:45."
     expected: {name: book_table, arguments: {restaurant: [Sakura Garden], party_size: [10], time: ["20:45"]}}
+  # ------------------------------------------------- simple, added in data version 2
+  - id: s-email-1
+    category: simple
+    functions: [send_email]
+    query: "Email jordan@example.com with the subject 'Invoice 4471' and the body 'Please find the invoice attached.'"
+    expected: {name: send_email, arguments: {to: [["jordan@example.com"]], subject: [Invoice 4471], body: ["Please find the invoice attached.", "Please find the invoice attached"], cc: [null, []], high_priority: [null, false]}}
+  - id: s-email-2
+    category: simple
+    functions: [send_email]
+    query: "Send a high-priority email to ops@acme.io, cc lena@acme.io, with the subject 'Database failover' and the body 'The primary database is down and failover has started.'"
+    expected: {name: send_email, arguments: {to: [["ops@acme.io"]], subject: [Database failover], body: ["The primary database is down and failover has started.", "The primary database is down and failover has started"], cc: [["lena@acme.io"]], high_priority: [true]}}
+  - id: s-email-3
+    category: simple
+    functions: [send_email]
+    query: "Send an email to ana@example.org and raj@example.org. Subject: 'Lunch on Friday?' Body: 'Are you both free at noon?'"
+    expected: {name: send_email, arguments: {to: [["ana@example.org", "raj@example.org"], ["raj@example.org", "ana@example.org"]], subject: ["Lunch on Friday?"], body: ["Are you both free at noon?"], cc: [null, []], high_priority: [null, false]}}
+  - id: s-account-1
+    category: simple
+    functions: [create_account]
+    query: "Open an account for username 'mkoval' with email mkoval@example.com. Address: 48 Queen Street West, Toronto, M5H 2N2, Canada."
+    expected: {name: create_account, arguments: {username: [mkoval], email: ["mkoval@example.com"], address: [{street: 48 Queen Street West, city: Toronto, postal_code: M5H 2N2, country: CA}], newsletter: [null, false]}}
+  - id: s-account-2
+    category: simple
+    functions: [create_account]
+    query: "Create an account with username jsato and email j.sato@example.jp. Address: 1-9-1 Marunouchi, Tokyo, postal code 100-0005, Japan. Subscribe them to the newsletter."
+    expected: {name: create_account, arguments: {username: [jsato], email: ["j.sato@example.jp"], address: [{street: "1-9-1 Marunouchi", city: Tokyo, postal_code: "100-0005", country: JP}], newsletter: [true]}}
+  - id: s-account-3
+    category: simple
+    functions: [create_account]
+    query: "Sign up 'lwagner' (email lwagner@example.de), who lives at Hauptstrasse 5, 80331 Munich, Germany. No newsletter, please."
+    expected: {name: create_account, arguments: {username: [lwagner], email: ["lwagner@example.de"], address: [{street: Hauptstrasse 5, city: Munich, postal_code: "80331", country: DE}, {street: Hauptstrasse 5, city: München, postal_code: "80331", country: DE}], newsletter: [false, null]}}
+  - id: s-flight-1
+    category: simple
+    functions: [search_flights]
+    query: "Find one-way flights from SFO to JFK on 2026-12-20 for 2 adults."
+    expected: {name: search_flights, arguments: {origin: [SFO], destination: [JFK], departure_date: ["2026-12-20"], return_date: [null], passengers: [{adults: 2, children: 0}], cabin: [null, economy]}}
+  - id: s-flight-2
+    category: simple
+    functions: [search_flights]
+    query: "Round trip from LHR to SIN in business class for one adult, leaving 2027-02-03 and coming back 2027-02-17."
+    expected: {name: search_flights, arguments: {origin: [LHR], destination: [SIN], departure_date: ["2027-02-03"], return_date: ["2027-02-17"], passengers: [{adults: 1, children: 0}], cabin: [business]}}
+  - id: s-flight-3
+    category: simple
+    functions: [search_flights]
+    query: "Search premium economy flights from LIS to MAD on 2026-11-14, one way, for 2 adults and 3 children."
+    expected: {name: search_flights, arguments: {origin: [LIS], destination: [MAD], departure_date: ["2026-11-14"], return_date: [null], passengers: [{adults: 2, children: 3}], cabin: [premium_economy]}}
+  - id: s-workout-1
+    category: simple
+    functions: [log_workout]
+    query: "Log a 42 minute run: 8.4 km, average heart rate 151."
+    expected: {name: log_workout, arguments: {activity: [running], duration_minutes: [42], distance_km: [8.4], avg_heart_rate: [151]}}
+  - id: s-workout-2
+    category: simple
+    functions: [log_workout]
+    query: "I swam for an hour and a quarter today, please log it."
+    expected: {name: log_workout, arguments: {activity: [swimming], duration_minutes: [75], distance_km: [null], avg_heart_rate: [null]}}
+  - id: s-workout-3
+    category: simple
+    functions: [log_workout]
+    query: "Record a 25.5 km bike ride that took 1 hour 10 minutes."
+    expected: {name: log_workout, arguments: {activity: [cycling], duration_minutes: [70], distance_km: [25.5], avg_heart_rate: [null]}}
+  - id: s-lights-1
+    category: simple
+    functions: [set_lights]
+    query: "Turn off the kitchen lights."
+    expected: {name: set_lights, arguments: {room: [kitchen, the kitchen], turn_on: [false], brightness: [null, 0], color: [null]}}
+  - id: s-lights-2
+    category: simple
+    functions: [set_lights]
+    query: "Switch on the living room lights at 40% brightness."
+    expected: {name: set_lights, arguments: {room: [living room, the living room], turn_on: [true], brightness: [40], color: [null]}}
+  - id: s-lights-3
+    category: simple
+    functions: [set_lights]
+    query: "Make the bedroom lights purple at full brightness."
+    expected: {name: set_lights, arguments: {room: [bedroom, the bedroom], turn_on: [true], brightness: [100], color: [purple]}}
+  - id: s-products-1
+    category: simple
+    functions: [filter_products]
+    query: "Show me electronics under 150 dollars, cheapest first."
+    expected: {name: filter_products, arguments: {category: [electronics], max_price: [150], min_rating: [null], in_stock_only: [null, false], sort_by: [price_low_to_high]}}
+  - id: s-products-2
+    category: simple
+    functions: [filter_products]
+    query: "Which toys rated 4.5 stars or higher are in stock?"
+    expected: {name: filter_products, arguments: {category: [toys], max_price: [null], min_rating: [4.5], in_stock_only: [true], sort_by: [null]}}
+  - id: s-products-3
+    category: simple
+    functions: [filter_products]
+    query: "List the newest sports gear, nothing over 80 euros."
+    expected: {name: filter_products, arguments: {category: [sports], max_price: [80], min_rating: [null], in_stock_only: [null, false], sort_by: [newest]}}
+  - id: s-invoice-1
+    category: simple
+    functions: [create_invoice]
+    query: "Create a USD invoice for customer C-1029: 3 x 'Consulting hour' at 120 each, due in 14 days."
+    expected: {name: create_invoice, arguments: {customer_id: [C-1029], line_items: [[{product: Consulting hour, quantity: 3, unit_price: 120}]], currency: [USD], due_in_days: [14]}}
+  - id: s-invoice-2
+    category: simple
+    functions: [create_invoice]
+    query: "Bill customer ACME-77 in euros for 2 x 'Desk lamp' at 34.50 and 1 x 'Office chair' at 189."
+    expected: {name: create_invoice, arguments: {customer_id: [ACME-77], line_items: [[{product: Desk lamp, quantity: 2, unit_price: 34.5}, {product: Office chair, quantity: 1, unit_price: 189}]], currency: [EUR], due_in_days: [null, 30]}}
+  - id: s-invoice-3
+    category: simple
+    functions: [create_invoice]
+    query: "Invoice customer 5521 in British pounds: 10 x 'Sticker pack' at 2.25 each, payable within 7 days."
+    expected: {name: create_invoice, arguments: {customer_id: ["5521"], line_items: [[{product: Sticker pack, quantity: 10, unit_price: 2.25}]], currency: [GBP], due_in_days: [7]}}
+  - id: s-units-1
+    category: simple
+    functions: [convert_units]
+    query: "How many miles is 42.195 kilometers?"
+    expected: {name: convert_units, arguments: {value: [42.195], from_unit: [kilometers], to_unit: [miles]}}
+  - id: s-units-2
+    category: simple
+    functions: [convert_units]
+    query: "Convert 5.5 feet to centimeters."
+    expected: {name: convert_units, arguments: {value: [5.5], from_unit: [feet], to_unit: [centimeters]}}
+  - id: s-units-3
+    category: simple
+    functions: [convert_units]
+    query: "What is 2.5 gallons in liters?"
+    expected: {name: convert_units, arguments: {value: [2.5], from_unit: [gallons], to_unit: [liters]}}
+  - id: s-loan-1
+    category: simple
+    functions: [calculate_loan_payment]
+    query: "What's the monthly payment on a 25,000 car loan at 6.9% APR over 60 months?"
+    expected: {name: calculate_loan_payment, arguments: {principal: [25000], annual_rate_percent: [6.9], term_months: [60]}}
+  - id: s-loan-2
+    category: simple
+    functions: [calculate_loan_payment]
+    query: "How much would I pay each month on a 320000 mortgage at 5.25% for 30 years?"
+    expected: {name: calculate_loan_payment, arguments: {principal: [320000], annual_rate_percent: [5.25], term_months: [360]}}
+  - id: s-loan-3
+    category: simple
+    functions: [calculate_loan_payment]
+    query: "Monthly payment for borrowing 8,500 at 11 percent a year over 3 years?"
+    expected: {name: calculate_loan_payment, arguments: {principal: [8500], annual_rate_percent: [11], term_months: [36]}}
+  - id: s-track-1
+    category: simple
+    functions: [track_package]
+    query: "Where is my UPS package 1Z999AA10123456784?"
+    expected: {name: track_package, arguments: {carrier: [UPS], tracking_number: [1Z999AA10123456784]}}
+  - id: s-track-2
+    category: simple
+    functions: [track_package]
+    query: "Track DHL shipment JD014600006281230704."
+    expected: {name: track_package, arguments: {carrier: [DHL], tracking_number: [JD014600006281230704]}}
+  - id: s-track-3
+    category: simple
+    functions: [track_package]
+    query: "Track my USPS parcel, tracking number 9400111899223817504123."
+    expected: {name: track_package, arguments: {carrier: [USPS], tracking_number: ["9400111899223817504123"]}}
+  - id: s-task-1
+    category: simple
+    functions: [create_task]
+    query: "Add a high-priority task 'File quarterly taxes' due 2027-04-15."
+    expected: {name: create_task, arguments: {title: [File quarterly taxes], priority: [high], due_date: ["2027-04-15"], tags: [null, []]}}
+  - id: s-task-2
+    category: simple
+    functions: [create_task]
+    query: "New to-do: 'Buy printer ink', tagged 'errands' and 'office'."
+    expected: {name: create_task, arguments: {title: [Buy printer ink], priority: [null, medium], due_date: [null], tags: [[errands, office], [office, errands]]}}
+  - id: s-task-3
+    category: simple
+    functions: [create_task]
+    query: "Create a low priority task called 'Clean the garage'."
+    expected: {name: create_task, arguments: {title: [Clean the garage], priority: [low], due_date: [null], tags: [null, []]}}
+  - id: s-image-1
+    category: simple
+    functions: [resize_image]
+    query: "Resize image img_2041 to 1280 by 720."
+    expected: {name: resize_image, arguments: {image_id: [img_2041], width: [1280], height: [720], keep_aspect_ratio: [null, true], output_format: [null]}}
+  - id: s-image-2
+    category: simple
+    functions: [resize_image]
+    query: "Make img_88 exactly 512x512 even if it stretches, and save it as WebP."
+    expected: {name: resize_image, arguments: {image_id: [img_88], width: [512], height: [512], keep_aspect_ratio: [false], output_format: [webp]}}
+  - id: s-image-3
+    category: simple
+    functions: [resize_image]
+    query: "Resize photo P-3391 to 800 pixels wide and 600 tall, as a JPEG."
+    expected: {name: resize_image, arguments: {image_id: [P-3391], width: [800], height: [600], keep_aspect_ratio: [null, true], output_format: [jpeg]}}
+  - id: s-alarm-1
+    category: simple
+    functions: [set_alarm]
+    query: "Set a one-off alarm for 6:45 tomorrow morning, with no label."
+    expected: {name: set_alarm, arguments: {time: ["06:45"], repeat_days: [null, []], label: [null, ""]}}
+  - id: s-alarm-2
+    category: simple
+    functions: [set_alarm]
+    query: "Set an alarm for 7:30 am on weekdays, labelled 'Gym'."
+    expected: {name: set_alarm, arguments: {time: ["07:30"], repeat_days: [[mon, tue, wed, thu, fri]], label: [Gym]}}
+  - id: s-alarm-3
+    category: simple
+    functions: [set_alarm]
+    query: "Alarm at 9pm every Saturday and Sunday, labelled 'Take out the bins'."
+    expected: {name: set_alarm, arguments: {time: ["21:00"], repeat_days: [[sat, sun]], label: [Take out the bins]}}
+  - id: s-hotel-1
+    category: simple
+    functions: [book_hotel]
+    query: "Book a double room with breakfast in Vienna for 2 guests, checking in 2026-12-27 and checking out 2026-12-30."
+    expected: {name: book_hotel, arguments: {city: [Vienna], check_in: ["2026-12-27"], nights: [3], guests: [2], room_type: [double], breakfast_included: [true]}}
+  - id: s-hotel-2
+    category: simple
+    functions: [book_hotel]
+    query: "I need a suite in Kyoto for one guest, check-in 2027-03-28, 5 nights, breakfast not included."
+    expected: {name: book_hotel, arguments: {city: [Kyoto], check_in: ["2027-03-28"], nights: [5], guests: [1], room_type: [suite], breakfast_included: [false]}}
+  - id: s-hotel-3
+    category: simple
+    functions: [book_hotel]
+    query: "Book a hotel in Edinburgh for 4 people, checking in 2026-11-06 for 2 nights."
+    expected: {name: book_hotel, arguments: {city: [Edinburgh], check_in: ["2026-11-06"], nights: [2], guests: [4], room_type: [null], breakfast_included: [null, false]}}
+  - id: s-nearby-1
+    category: simple
+    functions: [find_nearby]
+    query: "Find pharmacies within 500 m of 40.7484, -73.9857."
+    expected: {name: find_nearby, arguments: {location: [{latitude: 40.7484, longitude: -73.9857}], place_type: [pharmacy], radius_meters: [500], open_now: [null, false]}}
+  - id: s-nearby-2
+    category: simple
+    functions: [find_nearby]
+    query: "Any cafes open right now near latitude 48.8584, longitude 2.2945?"
+    expected: {name: find_nearby, arguments: {location: [{latitude: 48.8584, longitude: 2.2945}], place_type: [cafe], radius_meters: [null, 1000], open_now: [true]}}
+  - id: s-nearby-3
+    category: simple
+    functions: [find_nearby]
+    query: "Find ATMs within 2 km of 35.6595, 139.7005."
+    expected: {name: find_nearby, arguments: {location: [{latitude: 35.6595, longitude: 139.7005}], place_type: [atm], radius_meters: [2000], open_now: [null, false]}}
+  - id: s-bmi-1
+    category: simple
+    functions: [calculate_bmi]
+    query: "What's the BMI for someone who weighs 72.5 kg and is 178 cm tall?"
+    expected: {name: calculate_bmi, arguments: {weight_kg: [72.5], height_cm: [178]}}
+  - id: s-bmi-2
+    category: simple
+    functions: [calculate_bmi]
+    query: "I weigh 90 kilos and I'm 1.85 m tall. What's my BMI?"
+    expected: {name: calculate_bmi, arguments: {weight_kg: [90], height_cm: [185]}}
+  - id: s-music-1
+    category: simple
+    functions: [play_playlist]
+    query: "Play my 'Road Trip' playlist on shuffle."
+    expected: {name: play_playlist, arguments: {name: [Road Trip], shuffle: [true], repeat: [null, "off"]}}
+  - id: s-music-2
+    category: simple
+    functions: [play_playlist]
+    query: "Play 'Deep Focus' and repeat the whole playlist."
+    expected: {name: play_playlist, arguments: {name: [Deep Focus], shuffle: [null, false], repeat: [all]}}
+  - id: s-music-3
+    category: simple
+    functions: [play_playlist]
+    query: "Play the playlist 'Sunday Morning' in order, with repeat off."
+    expected: {name: play_playlist, arguments: {name: [Sunday Morning], shuffle: [false, null], repeat: ["off", null]}}
+  # ----------------------------------------------- multiple, added in data version 2
+  - id: m-alarm-1
+    category: multiple
+    functions: [set_timer, set_alarm, create_reminder]
+    query: "Set an alarm for 5:50 am every Monday, Wednesday and Friday, labelled 'Early shift'."
+    expected: {name: set_alarm, arguments: {time: ["05:50"], repeat_days: [[mon, wed, fri]], label: [Early shift]}}
+  - id: m-timer-2
+    category: multiple
+    functions: [set_alarm, set_timer, create_reminder]
+    query: "Count down 20 minutes and label it 'Tea'."
+    expected: {name: set_timer, arguments: {minutes: [20], label: [Tea]}}
+  - id: m-units-1
+    category: multiple
+    functions: [convert_currency, convert_units, compute_area]
+    query: "How many ounces are in 340 grams?"
+    expected: {name: convert_units, arguments: {value: [340], from_unit: [grams], to_unit: [ounces]}}
+  - id: m-currency-3
+    category: multiple
+    functions: [convert_units, calculate_loan_payment, convert_currency]
+    query: "What is 1,000 Mexican pesos in US dollars?"
+    expected: {name: convert_currency, arguments: {amount: [1000], from_currency: [MXN], to_currency: [USD]}}
+  - id: m-loan-1
+    category: multiple
+    functions: [calculate_tip, convert_currency, calculate_loan_payment]
+    query: "What's the monthly payment on 15000 borrowed at 4.5% over 48 months?"
+    expected: {name: calculate_loan_payment, arguments: {principal: [15000], annual_rate_percent: [4.5], term_months: [48]}}
+  - id: m-hotel-1
+    category: multiple
+    functions: [book_table, search_flights, book_hotel]
+    query: "Get me a twin room in Porto for 2 people, 4 nights from 2027-05-02."
+    expected: {name: book_hotel, arguments: {city: [Porto], check_in: ["2027-05-02"], nights: [4], guests: [2], room_type: [twin], breakfast_included: [null, false]}}
+  - id: m-flight-1
+    category: multiple
+    functions: [book_hotel, find_route, search_flights]
+    query: "Flights from AMS to BCN on 2026-12-05, returning 2026-12-09, for 1 adult and 1 child."
+    expected: {name: search_flights, arguments: {origin: [AMS], destination: [BCN], departure_date: ["2026-12-05"], return_date: ["2026-12-09"], passengers: [{adults: 1, children: 1}], cabin: [null, economy]}}
+  - id: m-table-3
+    category: multiple
+    functions: [find_nearby, book_hotel, book_table]
+    query: "Reserve a table at Trattoria Sole for 5 people at 7pm."
+    expected: {name: book_table, arguments: {restaurant: [Trattoria Sole], party_size: [5], time: ["19:00"]}}
+  - id: m-nearby-1
+    category: multiple
+    functions: [get_weather, find_route, find_nearby]
+    query: "Is there a hospital within 3 km of 51.5072, -0.1276?"
+    expected: {name: find_nearby, arguments: {location: [{latitude: 51.5072, longitude: -0.1276}], place_type: [hospital], radius_meters: [3000], open_now: [null, false]}}
+  - id: m-route-2
+    category: multiple
+    functions: [search_flights, find_nearby, find_route]
+    query: "How do I get from Union Station to Navy Pier on public transport?"
+    expected: {name: find_route, arguments: {origin: [Union Station], destination: [Navy Pier], mode: [transit]}}
+  - id: m-email-1
+    category: multiple
+    functions: [create_task, create_reminder, send_email]
+    query: "Email finance@corp.example with the subject 'Q3 budget' and the body 'The numbers are attached.'"
+    expected: {name: send_email, arguments: {to: [["finance@corp.example"]], subject: [Q3 budget], body: ["The numbers are attached.", "The numbers are attached"], cc: [null, []], high_priority: [null, false]}}
+  - id: m-task-1
+    category: multiple
+    functions: [send_email, create_reminder, create_task]
+    query: "Put 'Renew car insurance' on my to-do list, high priority, due 2026-11-30."
+    expected: {name: create_task, arguments: {title: [Renew car insurance], priority: [high], due_date: ["2026-11-30"], tags: [null, []]}}
+  - id: m-reminder-3
+    category: multiple
+    functions: [create_task, set_alarm, create_reminder]
+    query: "Remind me in two weeks to 'book the dentist', and send me a notification."
+    expected: {name: create_reminder, arguments: {text: [book the dentist], days_from_now: [14], notify: [true]}}
+  - id: m-lights-1
+    category: multiple
+    functions: [set_thermostat, play_playlist, set_lights]
+    query: "Dim the office lights to 15%."
+    expected: {name: set_lights, arguments: {room: [office, the office], turn_on: [true], brightness: [15], color: [null]}}
+  - id: m-thermo-2
+    category: multiple
+    functions: [set_lights, play_playlist, set_thermostat]
+    query: "Heat the house to 72 degrees Fahrenheit."
+    expected: {name: set_thermostat, arguments: {temperature: [72], unit: [fahrenheit]}}
+  - id: m-music-1
+    category: multiple
+    functions: [set_lights, set_thermostat, play_playlist]
+    query: "Shuffle my 'Chill Mix' playlist."
+    expected: {name: play_playlist, arguments: {name: [Chill Mix], shuffle: [true], repeat: [null, "off"]}}
+  - id: m-products-1
+    category: multiple
+    functions: [add_to_cart, search_books, filter_products]
+    query: "Browse clothing that's in stock, best rated first."
+    expected: {name: filter_products, arguments: {category: [clothing], max_price: [null], min_rating: [null], in_stock_only: [true], sort_by: [rating]}}
+  - id: m-cart-2
+    category: multiple
+    functions: [filter_products, track_package, add_to_cart]
+    query: "Add 5 of item KB-220 to my cart."
+    expected: {name: add_to_cart, arguments: {product_id: [KB-220], quantity: [5]}}
+  - id: m-track-1
+    category: multiple
+    functions: [send_email, add_to_cart, track_package]
+    query: "What's the status of FedEx tracking number 771234567890?"
+    expected: {name: track_package, arguments: {carrier: [FedEx], tracking_number: ["771234567890"]}}
+  - id: m-invoice-1
+    category: multiple
+    functions: [calculate_tip, convert_currency, create_invoice]
+    query: "Invoice customer K-88 in Canadian dollars: 1 x 'Website audit' at 950, payable in 7 days."
+    expected: {name: create_invoice, arguments: {customer_id: [K-88], line_items: [[{product: Website audit, quantity: 1, unit_price: 950}]], currency: [CAD], due_in_days: [7]}}
+  - id: m-account-1
+    category: multiple
+    functions: [send_email, create_task, create_account]
+    query: "Register the username 'pnair' with email pnair@example.in, address 12 MG Road, Bengaluru 560001, India, and opt in to the newsletter."
+    expected: {name: create_account, arguments: {username: [pnair], email: ["pnair@example.in"], address: [{street: 12 MG Road, city: Bengaluru, postal_code: "560001", country: IN}, {street: 12 MG Road, city: Bangalore, postal_code: "560001", country: IN}], newsletter: [true]}}
+  - id: m-workout-1
+    category: multiple
+    functions: [create_event, set_timer, log_workout]
+    query: "Log a 30 minute rowing session."
+    expected: {name: log_workout, arguments: {activity: [rowing], duration_minutes: [30], distance_km: [null], avg_heart_rate: [null]}}
+  - id: m-image-1
+    category: multiple
+    functions: [convert_units, compute_area, resize_image]
+    query: "Resize img_701 to 300 by 250 pixels and output a PNG."
+    expected: {name: resize_image, arguments: {image_id: [img_701], width: [300], height: [250], keep_aspect_ratio: [null, true], output_format: [png]}}
+  - id: m-bmi-1
+    category: multiple
+    functions: [convert_units, log_workout, calculate_bmi]
+    query: "Calculate the BMI for 58 kg and 165 cm."
+    expected: {name: calculate_bmi, arguments: {weight_kg: [58], height_cm: [165]}}
+  - id: m-translate-2
+    category: multiple
+    functions: [send_email, define_word, translate_text]
+    query: "Translate 'See you tomorrow' into Portuguese."
+    expected: {name: translate_text, arguments: {text: [See you tomorrow], target_language: [Portuguese, pt]}}

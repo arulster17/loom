@@ -21,8 +21,8 @@ Code: `bench/src/loom_bench/quality/`. Suites: `bench/evals/<model>.yaml`.
 | `ruler_niah` | `lm_eval` | lm-eval RULER `niah_single_2` (synthetic) | 500 per length | string match, keyed by the doc's length |
 | `needle` | `needle` | synthetic, seeded | lengths x depths x samples | the six-digit code appears in the reply |
 | `code` | `code_exec` | openai/openai_humaneval (MIT) + google-research-datasets/mbpp test (CC-BY-4.0), pinned revisions | 164 + 500 | program + tests exit 0 in the sandbox |
-| `tool_calling` | `tool_calling` | self-authored, `quality/data/tool_calling.yaml` (Apache-2.0) | 60 | exactly one call, right name, AST-matched arguments |
-| `tool_calling_strict` | `tool_calling_strict` | the `tool_calling` items, tools sent with `strict: true` (below) | 60 | as `tool_calling` |
+| `tool_calling` | `tool_calling` | self-authored, `quality/data/tool_calling.yaml` (Apache-2.0), data version 2 | 135 | exactly one call, right name, AST-matched arguments |
+| `tool_calling_strict` | `tool_calling_strict` | the `tool_calling` items, tools sent with `strict: true` (below) | 135 | as `tool_calling` |
 | `json_schema` | `json_schema` | self-authored, `quality/data/json_schema.yaml` (Apache-2.0), data version 2 | 300 | reply parses and validates under strict `response_format` |
 | `toy_arithmetic` | `toy_arithmetic` | generated, seeded | configurable | "The answer is N" is right; used with the mock backend |
 
@@ -32,7 +32,8 @@ native tasks and to lm-eval's chat requests.
 
 ### Strict tool calling
 
-`tool_calling_strict` runs the 60 `tool_calling` items with the same matching rules. Only
+`tool_calling_strict` runs the `tool_calling` items (135 at data version 2) with the
+same matching rules. Only
 the request differs: every offered function carries `"strict": true`, and every object in
 its `parameters` gets `additionalProperties: false` (`strict_parameters` in
 `quality/tasks/tool_calling.py`). `tool_choice` stays `"auto"`, and `required` lists are
@@ -40,7 +41,8 @@ unchanged. OpenAI's strict style would also make every property required, with o
 ones nullable. Neither engine needs that, and it would change the task: the model would
 have to write `null` for an argument it means to leave out.
 
-Why it exists: Llama 3.3 70B scores 0.450 on `tool_calling` because it writes numbers as
+Why it exists: Llama 3.3 70B scores 0.450 on `tool_calling` (data version 1, 60 items,
+9f0853d7) because it writes numbers as
 strings (`"250"` for a number parameter), which the scorer rejects as a real client would.
 With strict tools the engine is meant to constrain the arguments to the schema, so that
 failure could not happen. On Llama 3.3 70B with vLLM 0.30 it does not: strict mode never
@@ -51,10 +53,11 @@ model and engine is the same thing. Reports list it right after `tool_calling` (
 sort together). The model page notes that it is the strict variant and that
 `tool_calling` is the headline, and the site's methodology says the same.
 
-Version `strict.1+data.1` (the plain task is `1+data.1`). Each item's content hash covers
-the strict tools, so the two tasks never pair in a gate, and a change to the strict
-request bumps `strict.1`. Both pinned suites list it with the same 6-point margin and
-`min_samples: 50` as `tool_calling`, since it has the same 60 items. It is gated like any
+Version `strict.1+data.2` (the plain task is `1+data.2`; both were `+data.1` with the
+60-item set). Each item's content hash covers the strict tools, so the two tasks never
+pair in a gate, and a change to the strict request bumps `strict.1`. Both pinned suites
+list it with the same 6-point margin and `min_samples: 100` as `tool_calling`, since it
+has the same items. It is gated like any
 other task whenever a run measures it: a full-suite run, or a subset that names it. It is
 not in the `phase0` subsets.
 
@@ -188,16 +191,101 @@ in b03b3c52 no `tool_calling` item changed across three passes on either engine 
 calls on all 33 plain failures. The s-books-1 flip is a BF16-vs-FP8 difference and
 would repeat, so replicates, or simply running the strict task again, buy nothing. More
 items do: at 120+ items the task tolerates the observed rate with room to spare, and so
-does `tool_calling`, whose zero-delta pass today sits on the same ±5-pt floor. Growing
-`tool_calling.yaml` (data version 2, which also fixes the `from_currency`/`to_currency`
-descriptions: the unquoted `ISO 4217 code, e.g. USD` in a YAML flow mapping parses as a
-truncated description plus a stray `"e.g. USD": null` key, which the prompt prints) and
-re-running both configs' quality suite on one 2x H100 pod is the lever. `bench plan` on a
-quality-only twin of the H100 spec (`workloads: []`, `phase0-strict`): cold start 30.6
-min, warm start 15.1, two evals of ~30 min each, 1.86 h, $14.88 at $8.0156/h; worst
-case $18.04 at a 135-minute TTL. The 9f0853d7 timings (BF16 healthy after 16.5 min,
-suites of 7.3 min BF16 and 4.7 min FP8, FP8 restart 7 min, plus eval setup) put the
-likely cost near 40 minutes, ~$5.30.
+does `tool_calling`, whose zero-delta pass today sits on the same ±5-pt floor. So the
+set grew to 135 items (data version 2, below), and
+`bench/experiments/llama-3.3-70b-h100-tp2-quality-runpod.yaml` (approved 2026-10-09,
+$22 cap) re-runs both configs' quality suite on one 2x H100 pod: `workloads: []`,
+`phase0-strict`, the same cells and config hashes as 9f0853d7, FP8 gated against the
+in-run BF16 cell. `bench plan`: cold start 30.6 min, eval setup 5, BF16 eval 31.4, warm
+start 15.1, FP8 eval 30.6, 1.89 h, $15.13 at $8.0156/h; worst case $20.04 at a
+150-minute TTL. The 9f0853d7 timings (BF16 healthy after 16.5 min, suites of 7.3 min
+BF16 and 4.7 min FP8, FP8 restart 7 min, plus eval setup) put the likely cost near 45
+minutes, ~$6.
+
+#### Tool-calling data version 2
+
+`quality/data/tool_calling.yaml` version 2 has 135 items: the 60 of version 1, same ids,
+order, queries and functions, then 75 new ones (50 simple, 25 multiple), so the mix stays
+two `simple` items (only the function to call is offered) per `multiple` one (three or four
+functions offered, the right one in varying positions, with near-miss decoys such as
+`set_alarm`/`set_timer`/`create_reminder`, `convert_units`/`convert_currency`,
+`book_hotel`/`book_table`). Version 1 had no no-call category, so version 2 has none
+either: every item expects exactly one call. The scorer is unchanged. The new items use
+17 new functions and add the argument shapes version 1 lacked: nested objects (a postal
+address, a passenger count, a latitude/longitude pair), arrays of strings (email
+recipients, tags), of enums (weekdays) and of objects (invoice line items), more
+enums, integers, numbers and booleans, optional arguments with stated defaults, and
+strings that look like numbers (postal codes `"80331"`, customer id `"5521"`, tracking
+numbers), which typed JSON must keep as strings. Values the query does not determine
+are accepted as omitted (and, for an optional boolean filter, `false`, which filters
+nothing; for an optional array, `[]`), so each item has one correct call up to what
+the user left open.
+
+The version also fixes what version 1 got wrong:
+
+- **A YAML bug in the prompt.** `from_currency: {type: string, description: ISO 4217
+  code, e.g. USD}`: inside a flow mapping a comma ends a plain scalar, so this parsed as
+  `{"type": "string", "description": "ISO 4217 code", "e.g. USD": null}`, and every
+  request offering `convert_currency` (9 of the 60 items) printed the truncated
+  description and a stray `"e.g. USD": null` key into the model's prompt. Every
+  description is now double-quoted, as is every string YAML would read as something
+  else (`"19:30"` is a base-60 integer under YAML 1.1, `"2026-11-03"` a date, `off` a
+  boolean). The rest of version 1's schemas parsed as written.
+- **Two golds that were too narrow.** s-reminder-1 accepts "Renew your passport" (both
+  Qwen3-8B and Llama 3.3 70B write it for "Remind me to renew my passport"), and an
+  optional timer label accepts `""` wherever omitting it is accepted (s-timer-1,
+  s-timer-2, m-timer-1), as BFCL does.
+
+The loader now refuses a malformed set (`schema_problems` and `value_problems` in
+`quality/tasks/tool_calling.py`): a null-valued key anywhere in a schema, a property
+without a type, an unknown keyword, an enum value of the wrong type, `required` names
+that are not properties, and any expected value whose type or enum membership could
+never match its parameter. `bench/tests/quality/test_native_tasks.py` checks every
+function, shows the checks catch version 1's bug, an unquoted `off` and an unquoted
+time, builds a call from each item's acceptable values and scores it 1, and pins the
+first 60 ids.
+
+Versions: `tool_calling` `1+data.2`, `tool_calling_strict` `strict.1+data.2`. Each run's
+provenance records the dataset name, source, revision `2`, license and the data file's
+sha256. Version-1 results never pair with version 2: the gate refuses any task whose
+baseline and candidate versions differ ("rerun the baseline"), a stored baseline with
+another item count is refused at plan time, and the changed `convert_currency` prompt
+changes those items' content hashes as well. Both suites keep the 6-point margin and
+raise `min_samples` to 100. At 135 items the floor is 3/135 = 2.2 pts and the paired CI
+about ±2.4 pts at 2% churn, so (through `evaluate_task`) FP8 can lose 4 net items and
+still pass; at 60 it could lose none:
+
+| 135 items, FP8 loses | Verdict |
+|---|---|
+| 1 (9f0853d7's strict loss) | PASS, -0.74 pts [-2.96, +1.48] |
+| 2 | PASS, -1.48 pts [-3.70, +0.74] |
+| 3 | PASS, -2.22 pts [-5.19, 0.00] |
+| 4 | PASS, -2.96 pts [-5.93, -0.74] (measurably lower) |
+| 5 | INCONCLUSIVE, -3.70 pts [-7.41, -0.74] |
+
+`min_samples` 100 keeps a set too small to decide its margin from reading PASS: below
+about 67 items one lost item cannot pass 6 points (-1/n - 3/n < -6 pts), which is where
+version 1 sat, and a `limit`-ed debug run reads INCONCLUSIVE.
+
+How the new items were checked offline (no GPU spend):
+
+- the mock backend runs all 135 items in both modes with no request error
+  (`test_eval_job.py`), and the pod simulator runs the quality-only rerun's two cells;
+- xgrammar 0.2.7, as vLLM v0.30 builds the `llama` structural tag for strict tools
+  under `tool_choice: "auto"`, compiles every item's strict tools with the Llama 3.3
+  tokenizer and accepts every item's gold call (135 of 135), and each strict parameter
+  schema compiles as a plain JSON-schema grammar;
+- two small local models (MLX 4-bit, greedy, plain tools, each rendered with its own
+  chat template; Llama 3.1 8B under Llama 3.3's template) answered all 135 items, scored
+  with the real scorer. Qwen3-8B passed 74 of the 75 new items (the miss: 65 minutes
+  for "an hour and a quarter") and 57 of the 60 old ones. Llama 3.1 8B passed 37 of 75
+  and 42 of 60; every failure is the model's (numbers, booleans and arrays sent as
+  strings or Python literals, a flattened nested object, invented optional arguments,
+  "Japan" for an alpha-2 code), none a gold that admits another right answer. The one
+  ambiguity found was invented labels: Qwen3-8B labelled every unlabelled alarm ("Weekday
+  Alarm") and wrote "Tea countdown" for "for my tea", so the new alarm and timer queries
+  now name their label (or say "with no label"), leaving v1's s-timer-2 as the one item
+  that tests not inventing an optional argument.
 
 Besides task scores, the gate looks at:
 
@@ -373,6 +461,7 @@ would need 1.96 * sqrt(2p(1-p) / n), several times wider, which is why the gate 
 |---|---|---|---|---|
 | 60 | 3.6 pts | 5.7 | 5.0 | 14.3 |
 | 100 | 2.8 | 4.4 | 3.0 | 11.1 |
+| 135 | 2.4 | 3.8 | 2.2 | 9.5 |
 | 300 | 1.6 | 2.5 | 1.0 | 6.4 |
 | 400 | 1.4 | 2.2 | 0.75 | 5.5 |
 | 541 | 1.2 | 1.9 | 0.55 | 4.8 |
@@ -385,12 +474,13 @@ would need 1.96 * sqrt(2p(1-p) / n), several times wider, which is why the gate 
 To decide a 1-point margin when ~2-5% of items flip takes roughly 1000-2000 items. The
 suites use that where the source data allows (MMLU-Pro 2100, GSM8K 1319, RULER 1000) and
 raise the task threshold where it does not: IFEval (541) and code (664) decide 2 points,
-the native needle (400) 2 points, the 300-item JSON-schema set 3 points, and the 60-item
+the native needle (400) 2 points, the 300-item JSON-schema set 3 points, and the 135-item
 tool-calling set 6 points, which catches broken parsers and templates rather
 than subtle drift. Each suite file repeats this table next to the tasks.
 
 A pinned set's data version is part of its task version (`json_schema` 300 items is
-`1+data.2`, the earlier 60 items `1+data.1`). The gate refuses to pair a baseline and a
+`1+data.2`, the earlier 60 items `1+data.1`; `tool_calling` 135 items is `1+data.2`, the
+earlier 60 `1+data.1`). The gate refuses to pair a baseline and a
 candidate whose versions differ ("rerun the baseline"), so results from different item
 sets never mix.
 

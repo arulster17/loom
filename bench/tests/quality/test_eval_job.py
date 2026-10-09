@@ -1,6 +1,7 @@
 """EvalJobs against the mock backend: in-process and through `bench quality job`."""
 
 import asyncio
+import re
 from collections.abc import Iterator
 
 import pytest
@@ -115,6 +116,43 @@ async def test_gate_refuses_results_from_different_task_versions(clean_url):
     base.tasks["json_schema"].version = "1+data.1"
     with pytest.raises(ValueError, match=r"json_schema: baseline ran version 1\+data\.1"):
         gate_against_baseline(base, cand, SUITE)
+
+
+TOOL_SUITE = Suite.model_validate(
+    {
+        "suite": "eval-job-tools",
+        "model": MODEL,
+        "seed": 1234,
+        "gate": {"threshold": 0.06, "min_samples": 100, "n_boot": 1000},
+        "tasks": [
+            {"name": "tool_calling", "kind": "tool_calling"},
+            {"name": "tool_calling_strict", "kind": "tool_calling_strict"},
+        ],
+    }
+)
+
+
+async def test_tool_tasks_run_every_v2_item_on_the_mock_and_never_pair_with_v1(clean_url):
+    """All 135 tool-calling items (nested objects, arrays of objects, enums) go through the
+    mock's request validation in both modes; the mock answers schema-valid calls, so the
+    run completes with no request errors. A data-version-1 baseline (60 items) of either
+    task is refused by the gate, whatever its item ids."""
+    res = await execute_eval_job(job(clean_url, suite=TOOL_SUITE))
+    for name, version in (("tool_calling", "1+data.2"), ("tool_calling_strict", "strict.1+data.2")):
+        run = res.tasks[name]
+        assert run.version == version and len(run.items) == 135
+        assert not [i.item_id for i in run.items if "error" in i.meta], name
+        assert run.provenance["dataset"]["revision"] == "2"
+    decision = gate_against_baseline(suite_result_of(res), suite_result_of(res), TOOL_SUITE)
+    assert {t.task: t.verdict for t in decision.tasks} == {
+        "tool_calling": Verdict.PASS,
+        "tool_calling_strict": Verdict.PASS,
+    }
+    for name, v1 in (("tool_calling", "1+data.1"), ("tool_calling_strict", "strict.1+data.1")):
+        base, cand = suite_result_of(res), suite_result_of(res)
+        base.tasks[name].version = v1
+        with pytest.raises(ValueError, match=re.escape(f"{name}: baseline ran version {v1}")):
+            gate_against_baseline(base, cand, TOOL_SUITE)
 
 
 def test_bench_quality_job_cli(clean_url, tmp_path):

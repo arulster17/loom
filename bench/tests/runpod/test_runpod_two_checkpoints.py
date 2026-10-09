@@ -10,7 +10,13 @@ runpod-smoke-h100 (4e50b5a5, $1.18) failed at its second cell: warm restarts dow
 weights, so the FP8 cell's offline engine found RedHatAI/Qwen3-8B-FP8-dynamic "not cached".
 The earlier e2e tests passed because neither the mock provider nor this file's pod
 simulator had a weight cache; PodSim now holds every pod to start_engine.sh's offline rules,
-and these runs would fail as the smoke did without the fix."""
+and these runs would fail as the smoke did without the fix.
+
+The quality-only rerun (llama-3.3-70b-h100-tp2-quality-runpod, `workloads: []`) runs the
+same two cells with no load job in between: a cold start, an eval job, a warm restart onto
+the FP8 checkpoint and its eval job. Real hardware ran quality-only pods (b1b904dc, one
+checkpoint per pod) and two checkpoints with load (9f0853d7), never both together, so
+`quality_run` below drives that combination through the pod simulator."""
 
 import asyncio
 from pathlib import Path
@@ -73,12 +79,16 @@ def suite_for(model: str, also: list[str]) -> dict[str, Any]:
 
 
 def at_test_scale(path: Path, tmp: Path) -> Experiment:
-    """The shipped spec's model, provider and variants; a tiny workload and suite."""
+    """The shipped spec's model, provider and variants; a tiny workload and suite (no
+    workload when the spec is quality-only)."""
     doc = yaml.safe_load(path.read_text())
     models = {v.get("model") for v in doc["variants"]} - {None, doc["model"]}
     suite = write_yaml(tmp / "suite.yaml", suite_for(doc["model"], sorted(models)))
+    quality_only = doc["workloads"] == []
     doc.update(
-        workloads=[
+        workloads=[]
+        if quality_only
+        else [
             {
                 "profile": "fixed-128-128",
                 "overrides": {"input_len": 32, "output_len": 8},
@@ -118,9 +128,8 @@ class RecordingPodSim(PodSim):
         return await super().job(target, script)
 
 
-@pytest.fixture(scope="module", params=SPECS, ids=lambda p: p.stem)
-def pod_run(request, tmp_path_factory):
-    tmp = tmp_path_factory.mktemp(request.param.stem)
+def run_on_pod_sim(path: Path, tmp: Path):
+    """The spec at test scale on the runpod provider against FakeRunpod and PodSim."""
     mp = pytest.MonkeyPatch()
     for k, v in {
         "AWS_ACCESS_KEY_ID": "testing",
@@ -145,7 +154,7 @@ def pod_run(request, tmp_path_factory):
             prices=load_prices(),
             budget=load_budget(),
         )
-        exp = at_test_scale(request.param, tmp)
+        exp = at_test_scale(path, tmp)
         cells = expand(exp, ctx.registry)
         wheel = tmp / "loom_bench-0.1.0-py3-none-any.whl"
         wheel.write_bytes(b"wheel")
@@ -167,7 +176,52 @@ def pod_run(request, tmp_path_factory):
         finally:
             sim.close()
             mp.undo()
-    return outcome, sim, ctx, cells, request.param
+    return outcome, sim, ctx, cells, path
+
+
+@pytest.fixture(scope="module", params=SPECS, ids=lambda p: p.stem)
+def pod_run(request, tmp_path_factory):
+    return run_on_pod_sim(request.param, tmp_path_factory.mktemp(request.param.stem))
+
+
+QUALITY_ONLY = EXPERIMENTS_DIR / "llama-3.3-70b-h100-tp2-quality-runpod.yaml"
+
+
+@pytest.fixture(scope="module")
+def quality_run(tmp_path_factory):
+    return run_on_pod_sim(QUALITY_ONLY, tmp_path_factory.mktemp(QUALITY_ONLY.stem))
+
+
+def test_quality_only_two_checkpoints_run_on_one_pod_without_load(quality_run):
+    outcome, sim, ctx, (base, cand), _ = quality_run
+    assert outcome.status.value == "completed", outcome.reason
+    assert base.host_key == cand.host_key and len(sim.downloads) == 1
+    # Only eval jobs: the BF16 cell's, then the FP8 cell's after the warm restart.
+    assert all(isinstance(j, EvalJob) for j in sim.jobs)
+    assert [j.served_model for j in sim.jobs] == [base.spec.id, cand.spec.id]
+    assert [j.divergence for j in sim.jobs] == ["capture_and_floor", "score"]
+    assert sim.jobs[1].reference is not None
+    assert sim.jobs[1].reference.config_hash == base.config_hash
+    # The warm restart still fetches the FP8 checkpoint: no load job ran in between.
+    (downloads,) = sim.downloads.values()
+    bf16 = (base.spec.hf.repo, base.spec.hf.revision)
+    fp8 = (cand.spec.hf.repo, cand.spec.hf.revision)
+    assert downloads == [bf16, fp8]
+    cold, warm = sim.scripts("start_engine")
+    assert script_pairs(cold, "FETCH_WEIGHTS") == [bf16]
+    assert script_var(warm, "WARM") == "1" and script_pairs(warm, "FETCH_WEIGHTS") == [fp8]
+    assert script_var(warm, "SERVED_MODEL") == cand.spec.id
+    assert sim.jobs[1].tokenizer is not None
+    assert (sim.jobs[1].tokenizer.repo, sim.jobs[1].tokenizer.revision) == fp8
+    (gate,) = outcome.gates
+    assert (gate.cell, gate.baseline) == (cand.key, base.key)
+    assert gate.decision in ("pass", "review")
+    with session_scope(ctx.db_url) as s:
+        kinds = sorted(c.kind for c in s.scalars(select(BenchColdStart)))
+        runs = list(s.scalars(select(BenchRun)))
+        evals = list(s.scalars(select(BenchEvalRun)))
+    assert kinds == ["cold", "warm"] and runs == []
+    assert {e.config_hash for e in evals} == {base.config_hash, cand.config_hash}
 
 
 @pytest.mark.parametrize("path", SPECS, ids=lambda p: p.stem)

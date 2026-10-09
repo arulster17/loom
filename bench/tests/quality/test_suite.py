@@ -118,6 +118,9 @@ def test_policy_from_suite():
     assert policy.threshold_for("ifeval") == 0.02
     assert policy.min_samples_for("json_schema") == 250
     assert policy.threshold_for("json_schema") == 0.03
+    # 135 tool-calling items (data version 2): below ~67 one lost item cannot pass 6 points.
+    for name in ("tool_calling", "tool_calling_strict"):
+        assert (policy.threshold_for(name), policy.min_samples_for(name)) == (0.06, 100)
     assert policy.max_kl == suite.divergence.max_kl
     assert (policy.noise_multiple, policy.ceiling_kl, policy.ceiling_top1) == (5.0, 0.5, 0.8)
     assert suite.divergence.floor_concurrency == 1 and not policy.review_blocks
@@ -182,7 +185,7 @@ def test_planned_items_per_kind():
         "c": 664,
         "c2": 20,
         "j": 7,
-        "t": 60,
+        "t": 135,
         "gsm8k": None,
         "g2": 1319,
         "g3": 2,

@@ -10,6 +10,7 @@
 #
 #     n      d=2%     d=5%    floor 3/n   | one run alone, p=0.8
 #     60     3.6 pts  5.7     5.0         | 10.1
+#     135    2.4      3.8     2.2         |  6.7
 #     400    1.4      2.2     0.75        |  3.9
 #     541    1.2      1.9     0.55        |  3.4
 #     664    1.1      1.7     0.45        |  3.0
@@ -110,19 +111,21 @@ tasks:
       datasets: [humaneval, mbpp]
       max_tokens: 1024
 
-  # Tool calling: 60 pinned BFCL-style items. Floor 3/60 = 5 pts; decided at 6 points,
-  # which catches a broken tool parser or chat template, not subtle drift.
+  # Tool calling: 135 pinned BFCL-style items (data version 2). Floor 3/135 = 2.2 pts;
+  # d=2% -> ±2.4 pts, d=5% -> ±3.8, so it decides a 6-point margin, which catches a broken
+  # tool parser or chat template, not subtle drift. min_samples 100: below ~67 items one
+  # lost item can never pass 6 points (the 60-item version 1 sat there).
   - name: tool_calling
     kind: tool_calling
     threshold: 0.06
-    min_samples: 50
-  # The same 60 items and scoring with every tool sent `strict: true`, so the engine
+    min_samples: 100
+  # The same 135 items and scoring with every tool sent `strict: true`, so the engine
   # constrains the arguments to the schema (docs/quality-gate.md). Reported next to
   # tool_calling, which stays the headline; same margin, as it has the same items.
   - name: tool_calling_strict
     kind: tool_calling_strict
     threshold: 0.06
-    min_samples: 50
+    min_samples: 100
 
   # JSON-schema validity under strict response_format: 300 pinned items (data version 2).
   # Floor 3/300 = 1 pt; d=2% -> ±1.6 pts, d=5% -> ±2.5 pts, so it decides a 3-point
@@ -184,7 +187,7 @@ sanity_limits:
 # run: mmlu_pro (~26 min per config), ruler_niah (~26 min), needle (~17 min) and code (~11
 # min; it also needs allow_code_exec).
 #
-# phase0-strict adds tool_calling_strict (60 items, ~1 min) to phase0. Its items pair with
+# phase0-strict adds tool_calling_strict (135 items, ~2 min) to phase0. Its items pair with
 # a phase0 run's on the four shared tasks, so a run of it gates against a phase0 baseline
 # on those, and reports the strict task as not gated until a baseline has run it too.
 subsets:

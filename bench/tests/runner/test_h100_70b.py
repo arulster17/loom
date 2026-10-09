@@ -27,6 +27,7 @@ from loom_bench.runner import run_experiment
 
 from .conftest import (
     LLAMA_FP8_RUNPOD,
+    LLAMA_H100_QUALITY_RUNPOD,
     LLAMA_H100_RUNPOD,
     RUNPOD_SMOKE_FP8,
     RUNPOD_SMOKE_H100,
@@ -129,6 +130,44 @@ def test_the_h100_quote_fits_its_cap_to_ttl():
     assert kinds.count("eval") == 2
     # The disk holds both checkpoints.
     assert exp.provider.container_disk_gb * 1e9 > BF16.hf.size_bytes + FP8.hf.size_bytes
+
+
+# --- the quality-only rerun (tool-calling data version 2) ---------------------------
+
+
+def test_the_quality_rerun_carries_its_approval_note():
+    text = LLAMA_H100_QUALITY_RUNPOD.read_text()
+    assert text.startswith("# APPROVED 2026-10-09 at a $22 cap")
+    assert "DRAFT" not in text and "not approved" not in text.lower()
+
+
+def test_the_quality_rerun_evaluates_the_h100_runs_configs():
+    # Same model, provider, variants and quality section as 9f0853d7's spec, no load:
+    # its evals and gate land on that run's BF16 and FP8 config hashes, on one pod.
+    rerun, real = load_experiment(LLAMA_H100_QUALITY_RUNPOD), load_experiment(LLAMA_H100_RUNPOD)
+    assert rerun.workloads == [] and real.workloads and not rerun.smoke
+    assert rerun.model == real.model and rerun.provider == real.provider
+    assert rerun.variants == real.variants and rerun.quality == real.quality
+    rerun_cells, real_cells = expand(rerun, REGISTRY), expand(real, REGISTRY)
+    assert [c.config_hash for c in rerun_cells] == [c.config_hash for c in real_cells]
+    assert [c.config_hash[:16] for c in rerun_cells] == ["2f7fb3f9372ba095", "0381825d763025fd"]
+    assert len({c.host_key for c in rerun_cells}) == 1
+    # The in-run baseline re-measures every task: nothing pairs with 9f0853d7's data v1.
+    q = rerun.quality
+    assert q is not None and q.baseline is None and q.baseline_variant == "vllm-tp2"
+
+
+def test_the_quality_rerun_fits_its_cap_to_ttl_and_runs_no_load():
+    plan = _plan(load_experiment(LLAMA_H100_QUALITY_RUNPOD))
+    assert plan.ok, plan.refusals
+    assert plan.caps.effective == parse_usd("$22")
+    assert plan.total_micros < plan.ttl_worst_micros <= plan.caps.effective
+    assert plan.n_runs_max == 0
+    (host,) = plan.hosts
+    kinds = [s.kind for s in host.steps]
+    assert kinds.count("cold_start") == 1 and kinds.count("warm_start") == 1
+    assert kinds.count("eval") == 2 and "workload" not in kinds
+    assert host.seconds < 0.8 * host.ttl_s
 
 
 def test_the_h100_smoke_runs_the_h100_paths():

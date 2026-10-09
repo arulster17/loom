@@ -52,6 +52,7 @@ the model is asked to do and how an omitted argument is scored.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -96,6 +97,7 @@ class ToolData:
     functions: dict[str, dict[str, Any]]  # name -> {description, parameters}
     items: tuple[ToolItem, ...]
     version: int
+    sha256: str = ""  # of the data file as shipped, recorded in each run's provenance
 
     def tools_for(self, item: ToolItem, *, strict: bool = False) -> list[dict[str, Any]]:
         """The item's functions as request `tools`; `strict` sends them in strict mode."""
@@ -125,10 +127,111 @@ def strict_parameters(schema: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+SCHEMA_TYPES = ("string", "integer", "number", "boolean", "array", "object")
+SCHEMA_KEYWORDS = frozenset({"type", "description", "enum", "properties", "required", "items"})
+
+
+def is_type(value: Any, kind: str) -> bool:
+    """Whether a parsed YAML/JSON `value` has JSON-schema type `kind` (bool is no number)."""
+    match kind:
+        case "string":
+            return isinstance(value, str)
+        case "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        case "number":
+            return isinstance(value, int | float) and not isinstance(value, bool)
+        case "boolean":
+            return isinstance(value, bool)
+        case "array":
+            return isinstance(value, list)
+        case "object":
+            return isinstance(value, dict)
+    return False
+
+
+def schema_problems(schema: Any, path: str = "parameters") -> list[str]:
+    """What is malformed in a parameter schema as YAML parsed it; empty when well-formed.
+
+    Catches what a hand-written flow mapping invites: a null-valued key (in version 1 an
+    unquoted `description: ISO 4217 code, e.g. USD` inside `{...}` parsed as a truncated
+    description plus a key `"e.g. USD": null`, which the prompt then printed), a property
+    without a type, an enum value YAML read as another type (`off` is false under YAML
+    1.1), and `required` names that are not properties. Only the keywords the pinned set
+    uses are allowed, so a stray key cannot pass as one.
+    """
+    if not isinstance(schema, dict):
+        return [f"{path}: not a mapping"]
+    problems = [f"{path}.{k}: null value" for k, v in schema.items() if v is None]
+    problems += [f"{path}: unknown keyword {k!r}" for k in schema if k not in SCHEMA_KEYWORDS]
+    kind = schema.get("type")
+    if kind not in SCHEMA_TYPES:
+        return [*problems, f"{path}: no valid type ({kind!r})"]
+    if "description" in schema and not isinstance(schema["description"], str):
+        problems.append(f"{path}.description: not a string")
+    if "enum" in schema:
+        enum = schema["enum"]
+        if not isinstance(enum, list) or not enum:
+            problems.append(f"{path}.enum: not a non-empty list")
+        else:
+            problems += [f"{path}.enum: {v!r} is not {kind}" for v in enum if not is_type(v, kind)]
+    if kind == "object":
+        props = schema.get("properties")
+        if not isinstance(props, dict) or not props:
+            return [*problems, f"{path}.properties: not a non-empty mapping"]
+        for name, sub in props.items():
+            problems += schema_problems(sub, f"{path}.{name}")
+        required = schema.get("required", [])
+        if not isinstance(required, list) or not all(isinstance(r, str) for r in required):
+            problems.append(f"{path}.required: not a list of names")
+        else:
+            problems += [
+                f"{path}.required: {r!r} is not a property" for r in required if r not in props
+            ]
+    elif "properties" in schema or "required" in schema:
+        problems.append(f"{path}: properties or required on a {kind}")
+    if kind == "array":
+        problems += schema_problems(schema.get("items"), f"{path}.items")
+    elif "items" in schema:
+        problems.append(f"{path}: items on a {kind}")
+    return problems
+
+
+def value_problems(value: Any, schema: dict[str, Any], path: str) -> list[str]:
+    """Why an expected `value` could never match a call valid for `schema`; empty if none.
+
+    A YAML-typed value of the wrong type (an unquoted `19:30` is an int, `2026-11-03` a
+    date) or outside the enum would make the item unwinnable."""
+    kind = schema["type"]
+    if not is_type(value, kind):
+        return [f"{path}: {value!r} is not {kind}"]
+    if "enum" in schema and value not in schema["enum"]:
+        return [f"{path}: {value!r} is not in the enum"]
+    if kind == "array":
+        return [
+            p
+            for i, v in enumerate(value)
+            for p in value_problems(v, schema["items"], f"{path}[{i}]")
+        ]
+    if kind == "object":
+        props, required = schema["properties"], set(schema.get("required", []))
+        problems = [f"{path}: unknown key {k!r}" for k in value if k not in props]
+        problems += [f"{path}: required key {k!r} missing" for k in sorted(required - set(value))]
+        for k, v in value.items():
+            if k in props:
+                problems += value_problems(v, props[k], f"{path}.{k}")
+        return problems
+    return []
+
+
 def _validate(data: ToolData) -> None:
     ids = [i.item_id for i in data.items]
     if len(set(ids)) != len(ids):
         raise ValueError(f"{DATA_FILE}: duplicate item ids")
+    for name, function in data.functions.items():
+        problems = [] if isinstance(function.get("description"), str) else ["no description"]
+        problems += schema_problems(function.get("parameters"))
+        if problems:
+            raise ValueError(f"{DATA_FILE}: function {name}: {'; '.join(problems)}")
     for item in data.items:
         where = f"{DATA_FILE}: {item.item_id}"
         unknown = [f for f in item.functions if f not in data.functions]
@@ -145,12 +248,18 @@ def _validate(data: ToolData) -> None:
                 raise ValueError(f"{where}: no acceptable values for {name}")
             if name in required and None in values:
                 raise ValueError(f"{where}: required argument {name} cannot be omitted")
+            problems = [
+                p for v in values if v is not None for p in value_problems(v, props[name], name)
+            ]
+            if problems:
+                raise ValueError(f"{where}: {'; '.join(problems)}")
 
 
 @cache
 def load_data() -> ToolData:
     path = resources.files("loom_bench.quality") / "data" / DATA_FILE
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    blob = path.read_bytes()
+    raw = yaml.safe_load(blob.decode("utf-8"))
     items = tuple(
         ToolItem(
             item_id=i["id"],
@@ -162,7 +271,12 @@ def load_data() -> ToolData:
         )
         for i in raw["items"]
     )
-    data = ToolData(functions=raw["functions"], items=items, version=int(raw["version"]))
+    data = ToolData(
+        functions=raw["functions"],
+        items=items,
+        version=int(raw["version"]),
+        sha256=hashlib.sha256(blob).hexdigest(),
+    )
     _validate(data)
     return data
 
@@ -360,6 +474,7 @@ class ToolCallingTask(ParamTask[ToolCallingParams]):
                 "name": "loom-tool-calling",
                 "source": f"loom_bench/quality/data/{DATA_FILE}",
                 "revision": str(data.version),
+                "sha256": data.sha256,
                 "license": "Apache-2.0",
             }
         }

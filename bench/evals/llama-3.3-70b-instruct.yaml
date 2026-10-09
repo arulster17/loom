@@ -7,6 +7,7 @@
 #
 #     n      d=2%     d=5%    floor 3/n
 #     60     3.6 pts  5.7     5.0
+#     135    2.4      3.8     2.2
 #     400    1.4      2.2     0.75
 #     541    1.2      1.9     0.55
 #     664    1.1      1.7     0.45
@@ -102,21 +103,25 @@ tasks:
       datasets: [humaneval, mbpp]
       max_tokens: 1024
 
-  # Tool calling: 60 pinned items, floor 3/60 = 5 pts, decided at 6 points (catches broken
-  # parsers and chat templates).
+  # Tool calling: 135 pinned items (data version 2). Floor 3/135 = 2.2 pts; d=2% -> ±2.4
+  # pts, d=5% -> ±3.8, decided at 6 points (catches broken parsers and chat templates). At
+  # 60 items (version 1) one net lost item could never pass the margin (9f0853d7's strict
+  # task: -1.67 [-6.67, +3.33]); at 135 up to 4 can. min_samples 100: below ~67 items a
+  # single lost item cannot pass, so a run that small (a `limit`-ed debug run) reads
+  # INCONCLUSIVE, never PASS.
   - name: tool_calling
     kind: tool_calling
     threshold: 0.06
-    min_samples: 50
-  # Strict-mode variant: the same 60 items, every tool sent `strict: true`. vLLM 0.30
+    min_samples: 100
+  # Strict-mode variant: the same 135 items, every tool sent `strict: true`. vLLM 0.30
   # constrains a call only when it starts with `{"name": `, which Llama 3.3 70B does not
   # write, so in 9f0853d7 nothing was constrained and numbers still came back as strings
   # (docs/quality-gate.md, "Strict tool calling"). Reported next to tool_calling, which
-  # stays the headline; same margin.
+  # stays the headline; same margin and min_samples.
   - name: tool_calling_strict
     kind: tool_calling_strict
     threshold: 0.06
-    min_samples: 50
+    min_samples: 100
   # JSON schema: 300 pinned items (data version 2), floor 1 pt, decided at 3 points; the
   # sizing is in qwen3-8b.yaml.
   - name: json_schema
@@ -166,7 +171,7 @@ sanity_limits:
 # run: mmlu_pro (~26 min per config), ruler_niah (~26 min), needle (~17 min) and code (~11
 # min; it also needs allow_code_exec).
 #
-# phase0-strict adds tool_calling_strict (60 items, ~1 min) to phase0: the FP8 runs use it.
+# phase0-strict adds tool_calling_strict (135 items, ~2 min) to phase0: the FP8 runs use it.
 # Gated against a phase0 baseline from an earlier experiment (BF16 run cf4d1614), the four
 # shared tasks pair item for item and the strict task is reported, not gated; a run that
 # carries its own BF16 baseline (the H100 run) gates it too.

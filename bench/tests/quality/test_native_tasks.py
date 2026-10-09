@@ -1,7 +1,11 @@
+import dataclasses
+import hashlib
 import json
+from importlib import resources
 
 import httpx
 import pytest
+import yaml
 
 from loom_bench.quality.client import EvalClient, ToolCall
 from loom_bench.quality.tasks import TASKS, build_task
@@ -13,10 +17,13 @@ from loom_bench.quality.tasks.tool_calling import (
     ToolCallingStrictTask,
     ToolCallingTask,
     ToolItem,
+    _validate,
     check_call,
     load_data,
     match_call,
+    schema_problems,
     strict_parameters,
+    value_problems,
     values_equal,
 )
 
@@ -236,6 +243,157 @@ def test_tool_pinned_set_is_consistent():
     assert all(len(i.functions) > 1 for i in data.items if i.category == "multiple")
 
 
+# The 60 items of data version 1, in order. Version 2 appended to them; changing or
+# reordering these would silently change what older results measured (and the smoke's
+# `limit`-ed runs, which take the first items).
+TOOL_V1_IDS = (
+    "s-weather-1 s-weather-2 s-weather-3 s-currency-1 s-currency-2 s-currency-3 s-timer-1 "
+    "s-timer-2 s-timer-3 s-books-1 s-books-2 s-books-3 s-event-1 s-event-2 s-event-3 "
+    "s-tip-1 s-tip-2 s-tip-3 s-stock-1 s-stock-2 s-stock-3 s-translate-1 s-translate-2 "
+    "s-translate-3 s-table-1 s-table-2 s-table-3 s-route-1 s-route-2 s-route-3 s-thermo-1 "
+    "s-thermo-2 s-cart-1 s-cart-2 s-area-1 s-area-2 s-area-3 s-define-1 s-define-2 "
+    "s-reminder-1 m-weather-1 m-thermo-1 m-timer-1 m-reminder-1 m-event-1 m-currency-1 "
+    "m-stock-1 m-tip-1 m-route-1 m-table-1 m-translate-1 m-define-1 m-books-1 m-cart-1 "
+    "m-area-1 m-area-2 m-weather-2 m-currency-2 m-reminder-2 m-table-2"
+).split()
+
+
+def test_tool_set_v2_keeps_v1_and_grows_to_135():
+    data = load_data()
+    assert data.version == 2 and len(data.items) == 135
+    assert [i.item_id for i in data.items[:60]] == TOOL_V1_IDS
+    # Version 1's mix, two simple items for each multiple-choice one, is kept.
+    cats = [i.category for i in data.items]
+    assert (cats.count("simple"), cats.count("multiple")) == (90, 45)
+    assert [i.category for i in data.items[60:]] == ["simple"] * 50 + ["multiple"] * 25
+    # The added items exercise the argument types version 1 lacked.
+    kinds = set()
+
+    def walk(schema):
+        kinds.add(schema["type"])
+        for sub in schema.get("properties", {}).values():
+            walk(sub)
+        if "items" in schema:
+            kinds.add(f"array of {schema['items']['type']}")
+            walk(schema["items"])
+
+    for f in data.functions.values():
+        for sub in f["parameters"]["properties"].values():
+            walk(sub)
+    assert {"object", "array of object", "array of string", "array of number"} <= kinds
+
+
+def _null_paths(node, path=""):
+    if node is None:
+        yield path
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            yield from _null_paths(v, f"{path}.{k}")
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            yield from _null_paths(v, f"{path}[{i}]")
+
+
+def test_tool_schemas_are_well_formed():
+    """Every function as YAML parsed it: no null-valued key anywhere (version 1's unquoted
+    `ISO 4217 code, e.g. USD` became a key `"e.g. USD": null`), a string description,
+    a type on every property, enums of the property's type, required within properties."""
+    data = load_data()
+
+    def check(schema, where):
+        assert isinstance(schema.get("type"), str), where
+        if "description" in schema:
+            assert isinstance(schema["description"], str), where
+        if schema["type"] == "object":
+            props = schema["properties"]
+            assert set(schema.get("required", [])) <= set(props), where
+            for k, sub in props.items():
+                check(sub, f"{where}.{k}")
+        if schema["type"] == "array":
+            check(schema["items"], f"{where}[]")
+
+    for name, function in data.functions.items():
+        assert set(function) == {"description", "parameters"}, name
+        assert isinstance(function["description"], str) and function["description"], name
+        assert list(_null_paths(function)) == [], name
+        assert schema_problems(function["parameters"]) == [], name
+        assert function["parameters"]["type"] == "object"
+        check(function["parameters"], name)
+
+
+def test_schema_problems_catch_the_yaml_pitfalls():
+    v1 = yaml.safe_load(
+        "{type: object, properties: {from_currency: {type: string, description: ISO 4217"
+        " code, e.g. USD}}, required: [from_currency]}"
+    )
+    assert v1["properties"]["from_currency"] == {
+        "type": "string",
+        "description": "ISO 4217 code",
+        "e.g. USD": None,
+    }
+    assert "parameters.from_currency.e.g. USD: null value" in schema_problems(v1)
+    off = yaml.safe_load("{type: object, properties: {repeat: {type: string, enum: [off, all]}}}")
+    assert schema_problems(off) == ["parameters.repeat.enum: False is not string"]
+    untyped = {"type": "object", "properties": {"a": {"description": "x"}}, "required": ["b"]}
+    assert schema_problems(untyped) == [
+        "parameters.a: no valid type (None)",
+        "parameters.required: 'b' is not a property",
+    ]
+    nested = {"type": "array", "items": {"type": "object", "properties": {"n": {}}}}
+    assert schema_problems(nested, "x") == ["x.items.n: no valid type (None)"]
+
+
+def test_expected_values_have_their_parameters_types():
+    """Unquoted, `19:30` is a base-60 int and `2026-11-03` a date under YAML 1.1: such a
+    gold value could never match, so the loader refuses it."""
+    time = {"type": "string"}
+    assert value_problems(yaml.safe_load("19:30"), time, "t") == ["t: 1170 is not string"]
+    assert value_problems(yaml.safe_load("2026-11-03"), time, "d") == [
+        "d: datetime.date(2026, 11, 3) is not string"
+    ]
+    assert value_problems("19:30", time, "t") == []
+    enum = {"type": "string", "enum": ["a"]}
+    assert value_problems("b", enum, "e") == ["e: 'b' is not in the enum"]
+    obj = {
+        "type": "object",
+        "properties": {"lat": {"type": "number"}, "lon": {"type": "number"}},
+        "required": ["lat", "lon"],
+    }
+    assert value_problems({"lat": 1.5}, obj, "o") == ["o: required key 'lon' missing"]
+    assert value_problems({"lat": True, "lon": 2}, obj, "o") == ["o.lat: True is not number"]
+    data = load_data()
+    item = next(i for i in data.items if i.item_id == "s-event-1")
+    bad = dataclasses.replace(
+        item, expected_args={**item.expected_args, "start_time": [yaml.safe_load("19:30")]}
+    )
+    broken = dataclasses.replace(data, items=(bad,))
+    with pytest.raises(ValueError, match="s-event-1: start_time: 1170 is not string"):
+        _validate(broken)
+
+
+@pytest.mark.parametrize("pick", ["first", "last"])
+def test_every_gold_answer_scores_under_the_scorer(pick):
+    """The call built from each item's acceptable values (the first alternative of each, or
+    the last with every omittable argument left out) scores 1."""
+    data = load_data()
+    for item in data.items:
+        args = {}
+        for name, values in item.expected_args.items():
+            given = [v for v in values if v is not None]
+            if not given or (pick == "last" and None in values):
+                continue
+            args[name] = given[0] if pick == "first" else given[-1]
+        call = (ToolCall(item.expected_name, json.dumps(args)),)
+        match = check_call(call, item, data.functions[item.expected_name])
+        assert match.ok, (item.item_id, match)
+
+
+def test_tool_provenance_pins_the_data_file():
+    data = load_data()
+    blob = (resources.files("loom_bench.quality") / "data" / "tool_calling.yaml").read_bytes()
+    assert data.sha256 == hashlib.sha256(blob).hexdigest()
+
+
 async def test_tool_task_sends_tools_and_scores(tmp_path):
     data = load_data()
     target = data.items[0]  # s-weather-1
@@ -338,10 +496,25 @@ def test_strict_tools_are_the_plain_tools_plus_strict_mode():
             assert t["type"] == "function" and t["function"]["strict"] is True
             params = t["function"]["parameters"]
             assert params["additionalProperties"] is False
-            assert params["properties"] == p["function"]["parameters"]["properties"]
+            assert _open(params)["properties"] == p["function"]["parameters"]["properties"]
             assert params.get("required") == p["function"]["parameters"].get("required")
             rest = {k: v for k, v in t["function"].items() if k not in ("strict", "parameters")}
             assert rest == {k: v for k, v in p["function"].items() if k != "parameters"}
+
+
+def _open(schema):
+    """`schema` without the `additionalProperties` strict mode adds, nested ones included."""
+    if isinstance(schema, dict):
+        return {k: _open(v) for k, v in schema.items() if k != "additionalProperties"}
+    return schema
+
+
+def test_strict_mode_closes_nested_objects_of_the_pinned_set():
+    data = load_data()
+    item = next(i for i in data.items if i.item_id == "s-invoice-2")
+    (tool,) = data.tools_for(item, strict=True)
+    line = tool["function"]["parameters"]["properties"]["line_items"]["items"]
+    assert line["additionalProperties"] is False and line["type"] == "object"
 
 
 def _raw(name, args):
@@ -438,7 +611,7 @@ async def test_strict_task_stores_the_unconstrained_reply_of_a_failed_item(tmp_p
     # whether the call began with the structural tag's trigger `{"name": `.
     assert meta["output"]["tool_calls"][0]["arguments"] == args
     assert meta["unconstrained_text"] == _raw("convert_currency", args)
-    assert out.version == "strict.1+data.1"  # a diagnostic, not a scoring change
+    assert out.version == "strict.1+data.2"  # a diagnostic, not a scoring change
 
 
 async def test_strict_task_keeps_scoring_when_the_diagnostic_request_fails(tmp_path):
@@ -477,6 +650,8 @@ async def test_strict_task_is_versioned_apart_from_tool_calling(tmp_path):
     )
     plain, strict = outs["tool_calling"], outs["tool_calling_strict"]
     assert strict.provenance["dataset"] == plain.provenance["dataset"]
+    assert plain.provenance["dataset"]["revision"] == "2"
+    assert plain.provenance["dataset"]["sha256"] == data.sha256
     assert build_task("tool_calling_strict", "x", {}).planned_items() == len(data.items)
 
 
