@@ -67,7 +67,8 @@
       "alternative_slo": false,
       "tokens_in": null,
       "tokens_out": null,
-      "quantization": null
+      "quantization": null,
+      "market_model_id": null
     },
     {
       "model_id": "llama-3.3-70b-instruct",
@@ -171,7 +172,8 @@
       "alternative_slo": false,
       "tokens_in": null,
       "tokens_out": null,
-      "quantization": null
+      "quantization": null,
+      "market_model_id": null
     },
     {
       "model_id": "llama-3.3-70b-instruct-fp8",
@@ -185,7 +187,78 @@
       "price": null,
       "margin_input": null,
       "margin_output": null,
-      "competitors": [],
+      "competitors": [
+        {
+          "provider": "Together AI",
+          "provider_model": null,
+          "aggregator": false,
+          "availability": "listed",
+          "input_per_mtok": 1040000,
+          "output_per_mtok": 1040000,
+          "quantization": null,
+          "source": "https://www.together.ai/pricing",
+          "last_checked": "2026-10-04",
+          "notes": null,
+          "in_comparison": true,
+          "blended_at_mix": null
+        },
+        {
+          "provider": "Fireworks AI",
+          "provider_model": null,
+          "aggregator": false,
+          "availability": "unverified",
+          "input_per_mtok": 900000,
+          "output_per_mtok": 900000,
+          "quantization": null,
+          "source": "https://docs.fireworks.ai/serverless/pricing",
+          "last_checked": "2026-10-04",
+          "notes": "Size-bucket price for models above 16B parameters.",
+          "in_comparison": false,
+          "blended_at_mix": null
+        },
+        {
+          "provider": "DeepInfra",
+          "provider_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+          "aggregator": false,
+          "availability": "listed",
+          "input_per_mtok": 100000,
+          "output_per_mtok": 320000,
+          "quantization": "fp8",
+          "source": "https://deepinfra.com/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+          "last_checked": "2026-10-04",
+          "notes": null,
+          "in_comparison": true,
+          "blended_at_mix": null
+        },
+        {
+          "provider": "Novita AI",
+          "provider_model": null,
+          "aggregator": false,
+          "availability": "listed",
+          "input_per_mtok": 135000,
+          "output_per_mtok": 400000,
+          "quantization": null,
+          "source": "https://novita.ai/pricing",
+          "last_checked": "2026-10-04",
+          "notes": "Listed with a 12K-token context window.",
+          "in_comparison": true,
+          "blended_at_mix": null
+        },
+        {
+          "provider": "OpenRouter",
+          "provider_model": "meta-llama/llama-3.3-70b-instruct",
+          "aggregator": true,
+          "availability": "listed",
+          "input_per_mtok": 100000,
+          "output_per_mtok": 320000,
+          "quantization": null,
+          "source": "https://openrouter.ai/meta-llama/llama-3.3-70b-instruct",
+          "last_checked": "2026-10-04",
+          "notes": "Headline price; requests are routed across underlying providers.",
+          "in_comparison": false,
+          "blended_at_mix": null
+        }
+      ],
       "flags": [
         {
           "kind": "no_price_set",
@@ -196,11 +269,6 @@
           "kind": "no_cost_measurement",
           "side": null,
           "message": "llama-3.3-70b-instruct-fp8: no measured cost at SLO"
-        },
-        {
-          "kind": "no_public_comparison",
-          "side": null,
-          "message": "llama-3.3-70b-instruct-fp8: no eligible public list price"
         }
       ],
       "cost_blended": null,
@@ -209,7 +277,8 @@
       "alternative_slo": false,
       "tokens_in": null,
       "tokens_out": null,
-      "quantization": null
+      "quantization": null,
+      "market_model_id": "llama-3.3-70b-instruct"
     },
     {
       "model_id": "qwen3-8b-fp8",
@@ -223,7 +292,36 @@
       "price": null,
       "margin_input": null,
       "margin_output": null,
-      "competitors": [],
+      "competitors": [
+        {
+          "provider": "Fireworks AI",
+          "provider_model": null,
+          "aggregator": false,
+          "availability": "unverified",
+          "input_per_mtok": 200000,
+          "output_per_mtok": 200000,
+          "quantization": null,
+          "source": "https://docs.fireworks.ai/serverless/pricing",
+          "last_checked": "2026-10-04",
+          "notes": "Size-bucket price for models of 4B-16B parameters.",
+          "in_comparison": false,
+          "blended_at_mix": null
+        },
+        {
+          "provider": "OpenRouter",
+          "provider_model": "qwen/qwen3-8b",
+          "aggregator": true,
+          "availability": "listed",
+          "input_per_mtok": 117000,
+          "output_per_mtok": 455000,
+          "quantization": null,
+          "source": "https://openrouter.ai/qwen/qwen3-8b",
+          "last_checked": "2026-10-04",
+          "notes": null,
+          "in_comparison": false,
+          "blended_at_mix": null
+        }
+      ],
       "flags": [
         {
           "kind": "no_price_set",
@@ -247,7 +345,8 @@
       "alternative_slo": false,
       "tokens_in": null,
       "tokens_out": null,
-      "quantization": null
+      "quantization": null,
+      "market_model_id": "qwen3-8b"
     }
   ],
   "not_offered": [
