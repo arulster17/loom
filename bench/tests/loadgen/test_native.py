@@ -1,12 +1,15 @@
 import asyncio
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from fake_server import BASE_URL, FakeServer
 
+from loom_bench.client import openai_stream
 from loom_bench.client.openai_stream import PreparedRequest
 from loom_bench.jobs import LoadJob, TokenizerSpec
+from loom_bench.loadgen import native
 from loom_bench.loadgen.arrivals import constant
 from loom_bench.loadgen.base import (
     LOAD_GENERATORS,
@@ -209,28 +212,73 @@ async def test_closed_loop_keeps_concurrency_and_flags_warmup():
     assert res.t_measure_end_s == max(r.finished_at_s for r in measured)
 
 
-async def test_closed_loop_duration_mode():
-    server = FakeServer(ttft_s=0.04, tokens=1)
+class StepClock:
+    """A `perf_counter` that moves only when the fake server starts answering a request.
+
+    Duration mode stops on the clock, so on the real clock how many requests fit in
+    the window depends on how long the machine stalls the process (a 0.2 s window of
+    40 ms requests held 2, not 10, on a loaded machine). On this clock every request
+    answered costs `step_s` and nothing else moves time, and with no timers the event
+    loop runs the same steps on any machine, so the count is the generator's alone.
+    """
+
+    def __init__(self, step_s: float) -> None:
+        self.now = 0.0
+        self.step_s = step_s
+
+    def perf_counter(self) -> float:
+        return self.now
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The driver and the client take every timestamp from time.perf_counter().
+        clock = SimpleNamespace(perf_counter=self.perf_counter)
+        monkeypatch.setattr(native, "time", clock)
+        monkeypatch.setattr(openai_stream, "time", clock)
+
+    def server(self) -> FakeServer:
+        both_in_flight = asyncio.Event()
+
+        async def gate(index: int) -> None:
+            if index == 0:  # hold the first until the second worker's is in flight
+                await both_in_flight.wait()
+            elif index == 1:
+                both_in_flight.set()
+            self.now += self.step_s
+
+        return FakeServer(tokens=1, gate=gate)
+
+
+async def test_closed_loop_duration_mode(monkeypatch):
+    clock = StepClock(step_s=0.125)  # a power of two: 8 requests reach 1.0 s exactly
+    clock.install(monkeypatch)
+    server = clock.server()
     res = await run_closed_loop(
         BASE_URL,
         make_requests(1000),
         concurrency=2,
-        duration_s=0.2,
+        duration_s=1.0,
         request_timeout_s=5.0,
         transport=server.transport(),
     )
     assert server.max_inflight == 2
-    assert 6 <= len(res.records) <= 12
-    assert all(r.sent_at_s < 0.2 for r in res.records)
-    assert res.t_measure_end_s == 0.2 and res.meta["exhausted"] is False
+    # Each worker sends its next request while the clock is short of the deadline, so
+    # the workers keep going until the 8th request's answer reaches it, and then stop:
+    # nothing is sent at or after the deadline.
+    assert len(res.records) == 8 and all(r.ok for r in res.records)
+    assert {r.request_id for r in res.records} == {f"r{i}" for i in range(8)}
+    assert all(r.sent_at_s < 1.0 for r in res.records)
+    assert max(r.finished_at_s for r in res.records) == 1.0
+    assert res.t_measure_end_s == 1.0 and res.meta["exhausted"] is False
 
+    clock = StepClock(step_s=0.125)
+    clock.install(monkeypatch)
     res = await run_closed_loop(
         BASE_URL,
         make_requests(3),
         concurrency=2,
-        duration_s=5.0,
+        duration_s=1.0,
         request_timeout_s=5.0,
-        transport=FakeServer(tokens=1).transport(),
+        transport=clock.server().transport(),
     )
     assert len(res.records) == 3 and res.meta["exhausted"] is True
 
