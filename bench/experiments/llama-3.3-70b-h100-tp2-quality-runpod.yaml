@@ -1,5 +1,5 @@
 # APPROVED 2026-10-09 at a $22 cap: quality-only rerun of the 2x H100 70B run (9f0853d7)
-# on tool-calling data version 2. Not run yet.
+# on tool-calling data version 2. Ran 2026-10-09 as 9e5f7866 ($3.29): FP8's gate passes.
 #
 # Why: 9f0853d7 measured everything, but its FP8 gate is blocked on tool_calling_strict,
 # -1.67 pts [-6.67, +3.33] against a 6-point margin: at 60 items the rule-of-three floor

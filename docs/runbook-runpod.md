@@ -352,6 +352,12 @@ Check: both cells' `quality` events name gsm8k, ifeval, tool_calling, tool_calli
 and json_schema with tool tasks at version `1+data.2` / `strict.1+data.2` and 135 items,
 no `quality_failed` or `divergence_failed` event, and a `gate` event for `vllm-tp2-fp8`.
 
+Ran 2026-10-09 as 9e5f7866: exit 0, every check above held, FP8's gate passed. $3.29 for
+24.6 min of pod time (the host had the image cached: BF16 healthy after 4.9 min). Teardown
+verified: the pod is gone from the API, no network volume, `bench reap --dry-run` clean.
+Launched from a worktree with `--out` set to the main checkout's `results/` and
+`LOOM_DATABASE_URL` set to its `results/loom.db`, so results land with the earlier runs.
+
 The proposed Qwen3-8B config sweep (`qwen3-8b-config-sweep-runpod.yaml`, $25 cap, not
 yet approved) has its own smoke, `runpod-smoke-8b-sweep.yaml` ($4.25 cap, about $3.20
 planned): the sweep's five cells on the same three pods (`host_group` a, b, c, run one
