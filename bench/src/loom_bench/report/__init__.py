@@ -16,6 +16,7 @@ from loom_bench.registry import Registry
 from loom_bench.report import compare as _compare
 from loom_bench.report import competitiveness as _competitiveness
 from loom_bench.report import leaderboard as _leaderboard
+from loom_bench.report import summary as _summary
 from loom_bench.report.analyze import (
     ColdStartStat,
     ConfigResult,
@@ -36,15 +37,45 @@ def render_leaderboard(
     cold_starts: Mapping[str, ColdStartStat] | None = None,
     price_book: PriceBook | None = None,
     title: str = "Loom leaderboard: cost at SLO",
+    registry: Registry | None = None,
+    competitors: Competitors | None = None,
+    alt_results: Sequence[ConfigResult] | None = None,
+    view_note: str | None = None,
 ) -> Rendered:
+    """The leaderboard with its summary on top. With `registry` and `competitors` it also
+    has a competitiveness section (and "competitiveness.csv"). `alt_results`, the same
+    runs judged against an alternative SLO, are quoted, labelled, only where no config
+    has a cost at the declared SLO. `view_note` opens the summary (an alternative view)."""
     report = _leaderboard.build_leaderboard(
         results, cold_starts=cold_starts, price_book=price_book, title=title
     )
+    alt = _leaderboard.build_leaderboard(alt_results) if alt_results else None
+    summary = _summary.build_summary(
+        report, alt=alt, competitors=competitors, registry=registry, view_note=view_note
+    )
+    top_md, top_html = [_summary.summary_markdown(summary)], [_summary.summary_html(summary)]
+    bottom_md: list[str] = []
+    bottom_html: list[str] = []
+    out: Rendered = {}
+    if registry is not None and competitors is not None:
+        comp = _competitiveness.build_competitiveness(
+            results,
+            registry,
+            competitors,
+            price_book=price_book,
+            alt_results=alt_results,
+            benchmarked_only=True,
+        )
+        heading = "Competitiveness: our cost at SLO vs public list prices"
+        bottom_md.append(f"## {heading}\n\n{_competitiveness.section_markdown(comp, level=3)}")
+        bottom_html.append(_competitiveness.section_html(comp, heading))
+        out["competitiveness.csv"] = _competitiveness.render_csv(comp)
     return {
-        "md": _leaderboard.render_markdown(report),
-        "html": _leaderboard.render_html(report),
+        "md": _leaderboard.render_markdown(report, top=top_md, bottom=bottom_md),
+        "html": _leaderboard.render_html(report, top=top_html, bottom=bottom_html),
         "csv": _leaderboard.render_csv(report),
         "equal_load.csv": _leaderboard.render_equal_load_csv(report),
+        **out,
     }
 
 

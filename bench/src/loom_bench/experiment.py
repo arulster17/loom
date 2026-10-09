@@ -323,7 +323,7 @@ class BudgetSpec(_Strict):
 
 
 class CostAllocationSpec(_Strict):
-    method: Literal["all_output", "all_input", "weighted"] = "all_output"
+    method: Literal["all_output", "all_input", "weighted", "prefill_time"] = "all_output"
     output_input_ratio: str | int | None = None
 
     def allocation(self) -> CostAllocation:

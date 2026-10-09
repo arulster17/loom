@@ -28,7 +28,7 @@ import math
 from collections.abc import Iterable
 
 import numpy as np
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 
 from loom_bench.metrics.gpu import GpuMetrics
 from loom_bench.metrics.prometheus import ServerMetrics
@@ -98,6 +98,17 @@ class RunSummary(BaseModel):
     goodput: RequestGoodput | None
     server: ServerMetrics | None = None
     gpu: GpuMetrics | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def prefill_in_flight(self) -> float | None:
+        """Mean number of requests in their prefill phase: successful request rate × mean
+        TTFT, by Little's law. Below 1 it is the share of the run's time the replica had a
+        prompt in prefill (the prefill_time cost split, `cost.py`); computed from the
+        stored fields, so runs recorded before it existed have it too."""
+        if self.ttft_ms.mean is None:
+            return None
+        return self.throughput.request_rate * self.ttft_ms.mean / 1000
 
 
 def _ms(values: Iterable[float | None]) -> list[float]:

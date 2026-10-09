@@ -4,17 +4,23 @@
 {% block content %}
 <header>
 <h1>{{ report.title }}</h1>
-<p class="lede">Ranked by $/1M output tokens at SLO (input tokens under the all_input cost allocation) at the on-demand list price, cheapest first; spot, committed-1y and as-run costs of the same tokens are shown where available. Every price includes the replica's block storage. Values are point estimates (geometric means for latency and throughput); the smaller line under each is its 95% confidence interval, computed as the methodology below describes. Goodput is the highest tested load that met the SLO; raw peak throughput ignores the SLO and is not goodput. Unranked rows (quality gate failed, untrusted, or no cost) are listed last.</p>
+</header>
+{% for section in top %}
+{{ section }}
+{% endfor %}
+<section>
+<h2>Leaderboards</h2>
+<p class="lede">{{ lede }} The smaller line under each value is its 95% confidence interval.</p>
 <p class="lede">{{ bracket_note }}</p>
 {% if unbracketed %}<p class="lede">{{ unbracketed_note }}</p>{% endif %}
-</header>
+</section>
 {% for b in report.boards %}
 <section>
-<h2>{{ board_title(b) }}</h2>
+<h3>{{ board_title(b) }}</h3>
 <div class="table-wrap">
 <table>
 <thead>
-<tr><th class="num">#</th><th>Config</th><th class="num">$/1M out at SLO,<br>on-demand</th><th class="num">$/1M in at SLO,<br>on-demand</th>{% for c in b.price_columns %}<th class="num">{{ price_header(c, b.side) }}</th>{% endfor %}<th class="num">Goodput out tok/s<br>per replica</th><th class="num">per GPU</th><th class="num">Goodput load<br>(search bracket)</th><th class="num">p95 TTFT<br>at goodput</th><th class="num">p95 TPOT<br>at goodput</th><th class="num">Raw peak out tok/s<br>(no SLO)</th><th>Quality Δ / gate</th><th class="num">Cold start</th><th>Status</th><th>Recommendation</th></tr>
+<tr><th class="num">#</th><th>Config</th><th class="num">$/1M in at SLO<br>(measured split)</th><th class="num">$/1M out at SLO<br>(measured split)</th><th class="num">$/1M blended<br>at this mix</th><th class="num">{{ rank_header(b) }}</th>{% for c in b.price_columns %}<th class="num">{{ price_header(c, b.side) }}</th>{% endfor %}<th class="num">Goodput out tok/s<br>per replica</th><th class="num">per GPU</th><th class="num">Goodput load<br>(search bracket)</th><th class="num">p95 TTFT<br>at goodput</th><th class="num">p95 TPOT<br>at goodput</th><th class="num">Raw peak out tok/s<br>(no SLO)</th><th>Quality Δ / gate</th><th class="num">Cold start</th><th>Status</th><th>Recommendation</th></tr>
 </thead>
 <tbody>
 {% for row in b.rows %}
@@ -22,8 +28,10 @@
 <tr class="{{ 'ranked' if row.rank is not none else 'unranked' }}">
 <td class="num">{{ row.rank if row.rank is not none else '–' }}</td>
 <td><strong>{{ r.name }}</strong><span class="sub">{{ r.label.text }}</span></td>
-<td class="num">{{ money(r.cost.output_per_mtok if r.cost else none) }}</td>
-<td class="num">{{ money(r.cost.input_per_mtok if r.cost else none) }}</td>
+{% for rng in split_ranges(r) %}
+<td class="num">{{ money(rng) }}</td>
+{% endfor %}
+<td class="num">{{ money(ranking_cost(r)) }}</td>
 {% for c in b.price_columns %}
 <td class="num">{{ money(ranking_cost(r, c)) }}</td>
 {% endfor %}
@@ -44,7 +52,7 @@
 </div>
 {% if b.equal_load %}
 {% set t = b.equal_load %}
-<h3>Latency at equal load</h3>
+<h4>Latency at equal load</h4>
 <p class="lede">{{ equal_load_note }}</p>
 <div class="table-wrap">
 <table>
@@ -64,7 +72,7 @@
 {% endif %}
 {% set warned = b.rows|map(attribute='result')|selectattr('warnings')|list %}
 {% if warned %}
-<h3>Warnings</h3>
+<h4>Warnings</h4>
 <ul class="warnings">
 {% for r in warned %}
 {% for w in r.warnings %}
@@ -74,6 +82,9 @@
 </ul>
 {% endif %}
 </section>
+{% endfor %}
+{% for section in bottom %}
+{{ section }}
 {% endfor %}
 {{ methodology_footer(report.methodology) }}
 {% endblock %}

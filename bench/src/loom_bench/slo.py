@@ -185,6 +185,9 @@ class GoodputResult(BaseModel):
     total_tok_s: Estimate | None
     max_sustainable_concurrency: float | None  # closed loop only
     points: list[GoodputPoint]
+    # Requests in prefill at the goodput point (`RunSummary.prefill_in_flight`): the
+    # prefill_time cost split.
+    prefill_in_flight: Estimate | None = None
 
 
 def find_goodput(
@@ -243,6 +246,7 @@ def find_goodput(
         total_tok_s=agg.get("throughput.total_tok_s"),
         max_sustainable_concurrency=load if load_mode is LoadMode.CLOSED_LOOP else None,
         points=graded,
+        prefill_in_flight=agg.get("prefill_in_flight"),
     )
 
 
