@@ -294,6 +294,13 @@ def draft_weights(engine: str, args: list[str]) -> list[tuple[str, str]]:
     return [(repo, revision)]
 
 
+def launch_weights(launch: EngineLaunch) -> list[tuple[str, str]]:
+    """Every pinned checkpoint the engine loads, as (repo, revision): the model, then any
+    speculative draft. The engine runs offline, so the host must hold all of them."""
+    model = (launch.model_repo, launch.model_revision)
+    return list(dict.fromkeys([model, *draft_weights(launch.engine, launch.args)]))
+
+
 def render_launch(spec: ModelSpec) -> EngineLaunch:
     """Render the engine invocation for `spec`; an engine without a renderer is an error."""
     renderer = ARG_RENDERERS.get(spec.engine.name)

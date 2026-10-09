@@ -1,11 +1,14 @@
-# requires: WARM MODEL_REPO MODEL_REVISION EXTRA_WEIGHTS WEIGHTS_DIR PORT SERVED_MODEL READY_TIMEOUT_S ENGINE_STALL_S LOG_DIR STAGE_FILE ENGINE_ENV ENGINE_CMD ENGINE_PIDFILE PROC1_ENVIRON JOB_UID JOB_HOME SCAN_DIRS
-# Download weights at the pinned revision (cold only), start the engine as a
-# process in this container (RunPod has no Docker in the pod) bound to loopback,
-# wait until it serves one token, and prove the job user is isolated from secrets.
-# Runs as root over SSH. The engine runs as root too (accepted for now), with
+# requires: WARM FETCH_WEIGHTS CACHED_WEIGHTS WEIGHTS_DIR PORT SERVED_MODEL READY_TIMEOUT_S ENGINE_STALL_S LOG_DIR STAGE_FILE ENGINE_ENV ENGINE_CMD ENGINE_PIDFILE PROC1_ENVIRON JOB_UID JOB_HOME SCAN_DIRS
+# Download the weights this pod does not hold yet at their pinned revisions, start the
+# engine as a process in this container (RunPod has no Docker in the pod) bound to
+# loopback, wait until it serves one token, and prove the job user is isolated from
+# secrets. Runs as root over SSH. The engine runs as root too (accepted for now), with
 # PID 1's environment minus every secret, and offline against the downloaded cache.
-# EXTRA_WEIGHTS: more pinned checkpoints the engine loads (a speculative draft), as
-# flat repo revision pairs; downloaded with the model, since the engine runs offline.
+# The engine loads every checkpoint in FETCH_WEIGHTS + CACHED_WEIGHTS (the model and any
+# speculative draft), each as flat repo revision pairs. FETCH_WEIGHTS: downloaded now, with
+# the HF token (every one on a cold start; on a warm restart those no earlier start on this
+# pod downloaded, e.g. the FP8 checkpoint after its BF16 baseline). CACHED_WEIGHTS: already
+# downloaded by an earlier start on this pod, checked offline (loom_bench.providers.weights).
 
 DOWNLOAD_PY='import sys
 from huggingface_hub import snapshot_download
@@ -13,7 +16,6 @@ a = sys.argv[1:]
 assert len(a) % 2 == 0, "repo/revision pairs"
 for repo, rev in zip(a[::2], a[1::2]):
     snapshot_download(repo, revision=rev, ignore_patterns=["original/*", "*.pth", "*.gguf"])'
-WEIGHTS=("$MODEL_REPO" "$MODEL_REVISION" ${EXTRA_WEIGHTS[@]+"${EXTRA_WEIGHTS[@]}"})
 
 # Environment variable names that never reach the engine.
 SECRET_NAME_RE='TOKEN|SECRET|PASSWORD|CREDENTIAL|(^|_)KEY($|_)'
@@ -65,6 +67,14 @@ dc="$(proc1_value RUNPOD_DC_ID)"
 if [ "$WARM" = 0 ]; then
   grep -q '^sshd_ready ' "$STAGE_FILE" || fail "pod start did not finish: TTL watchdog state unknown"
   sed 's/^/loom-stage /' "$STAGE_FILE"
+fi
+[ $((${#FETCH_WEIGHTS[@]} + ${#CACHED_WEIGHTS[@]})) -gt 0 ] || fail "the launch names no weights"
+if [ "${#CACHED_WEIGHTS[@]}" -gt 0 ]; then
+  HF_HOME="$WEIGHTS_DIR" HF_HUB_OFFLINE=1 HF_HUB_DISABLE_PROGRESS_BARS=1 \
+    "$image_python" -c "$DOWNLOAD_PY" "${CACHED_WEIGHTS[@]}" >>"$LOG_DIR/weights.log" 2>&1 \
+    || fail_log "weights for ${CACHED_WEIGHTS[*]} are not cached" "$LOG_DIR/weights.log"
+fi
+if [ "${#FETCH_WEIGHTS[@]}" -gt 0 ]; then
   # The token lives only in this shell variable and the download child's
   # environment; it is never exported, written to disk, logged, or given to the engine.
   tok="$(proc1_value HF_TOKEN)"
@@ -72,15 +82,11 @@ if [ "$WARM" = 0 ]; then
     *'{{'*) fail "the RunPod secret for HF_TOKEN was not substituted" ;;
   esac
   if ! HF_TOKEN="$tok" HF_HOME="$WEIGHTS_DIR" HF_HUB_DISABLE_PROGRESS_BARS=1 \
-    "$image_python" -c "$DOWNLOAD_PY" "${WEIGHTS[@]}" >>"$LOG_DIR/weights.log" 2>&1; then
+    "$image_python" -c "$DOWNLOAD_PY" "${FETCH_WEIGHTS[@]}" >>"$LOG_DIR/weights.log" 2>&1; then
     tok=""
     fail_log "weight download failed" "$LOG_DIR/weights.log"
   fi
   tok=""
-else
-  HF_HOME="$WEIGHTS_DIR" HF_HUB_OFFLINE=1 HF_HUB_DISABLE_PROGRESS_BARS=1 \
-    "$image_python" -c "$DOWNLOAD_PY" "${WEIGHTS[@]}" >>"$LOG_DIR/weights.log" 2>&1 \
-    || fail_log "weights for ${WEIGHTS[*]} are not cached" "$LOG_DIR/weights.log"
 fi
 stage weights_ready
 

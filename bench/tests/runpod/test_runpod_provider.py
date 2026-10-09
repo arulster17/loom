@@ -46,9 +46,19 @@ from loom_bench.runner import _host_request
 
 from . import fakes as fakes_mod
 from .conftest import BUCKET, REGION
-from .fakes import FakePodExec, FakeRunpod, engine_stdout, ok, script_var
+from .fakes import (
+    FakePodExec,
+    FakeRunpod,
+    engine_stdout,
+    ok,
+    script_array,
+    script_pairs,
+    script_var,
+)
 
 VLLM = "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90"
+QWEN = load_registry().get("qwen3-8b")
+FP8_REPO, FP8_REV = "RedHatAI/Qwen3-8B-FP8-dynamic", "05233ce1e0565b5fdc9cfa000ab840152ed30c70"
 SGLANG = "lmsysorg/sglang@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469"
 # 80 GB of container disk at $0.10/GB-month over 730 h = 10_958.9 micros/h.
 DISK_80 = Fraction(100_000 * 80, 730)
@@ -151,9 +161,14 @@ async def test_the_shipped_70b_spec_renders_a_4x_l40s_tp4_pod(fake, s3, tmp_path
     # since the engine runs offline.
     spec = json.loads(argv[argv.index("--speculative-config") + 1])
     assert spec["method"] == "eagle3" and spec["num_speculative_tokens"] == 3
-    draft = f"EXTRA_WEIGHTS=({spec['model']} {spec['revision']})"
-    script = provider(fake, s3, tmp_path, spec=exp.provider).engine_script(cell.launch, warm=False)
-    assert draft in script
+    p = provider(fake, s3, tmp_path, spec=exp.provider)
+    weights = p.weights.plan("pod", cell.launch, warm=False)
+    script = p.engine_script(cell.launch, warm=False, weights=weights)
+    assert script_pairs(script, "FETCH_WEIGHTS") == [
+        (cell.spec.hf.repo, cell.spec.hf.revision),
+        (spec["model"], spec["revision"]),
+    ]
+    assert script_array(script, "CACHED_WEIGHTS") == []
 
 
 async def test_pod_body_is_secure_on_demand_with_safety_rails(fake, s3, tmp_path) -> None:
@@ -615,8 +630,61 @@ async def test_warm_start_and_stop(fake, s3, tmp_path) -> None:
     ep = await p.start_engine(host, vllm_launch(), warm=True)
     assert ep.warm and ssh.probes == probes
     assert [name for _, name, _ in ssh.launched] == ["start_engine", "stop_engine", "start_engine"]
-    assert script_var(ssh.scripts("start_engine")[1], "WARM") == "1"
+    warm = ssh.scripts("start_engine")[1]
+    assert script_var(warm, "WARM") == "1"
     assert "pod_created" not in ep.start_stages
+    # Its checkpoint is on the pod already: checked offline, nothing downloaded.
+    assert script_array(warm, "FETCH_WEIGHTS") == []
+    assert script_pairs(warm, "CACHED_WEIGHTS") == [(QWEN.hf.repo, QWEN.hf.revision)]
+
+
+def fp8_launch():
+    """Qwen3-8B from another checkpoint: the FP8 smokes' variant."""
+    hf = QWEN.hf.model_copy(update={"repo": FP8_REPO, "revision": FP8_REV})
+    return render_launch(QWEN.model_copy(update={"hf": hf}))
+
+
+async def test_a_warm_start_onto_another_checkpoint_downloads_it(fake, s3, tmp_path) -> None:
+    # runpod-smoke-h100 (4e50b5a5, $1.18): after the BF16 cell, the warm restart onto
+    # the FP8 cell checked RedHatAI/Qwen3-8B-FP8-dynamic offline only, and the pod had
+    # never downloaded it: "weights ... are not cached".
+    ssh = FakePodExec()
+    p = provider(fake, s3, tmp_path, ssh=ssh)
+    host = await p.provision(request())
+    await p.start_engine(host, vllm_launch(), warm=False)
+    await p.stop_engine(host)
+    await p.start_engine(host, fp8_launch(), warm=True)
+    await p.stop_engine(host)
+    await p.start_engine(host, vllm_launch(), warm=True)
+    cold, fp8, back = ssh.scripts("start_engine")
+    bf16 = (QWEN.hf.repo, QWEN.hf.revision)
+    assert script_pairs(cold, "FETCH_WEIGHTS") == [bf16]
+    assert script_pairs(fp8, "FETCH_WEIGHTS") == [(FP8_REPO, FP8_REV)]
+    assert script_array(fp8, "CACHED_WEIGHTS") == []
+    assert script_array(back, "FETCH_WEIGHTS") == []
+    assert script_pairs(back, "CACHED_WEIGHTS") == [bf16]
+    assert p.weights.held(host.host_id) == {bf16, (FP8_REPO, FP8_REV)}
+    await p.teardown(host)
+    assert p.weights.held(host.host_id) == frozenset()
+
+
+async def test_a_failed_download_is_fetched_again(fake, s3, tmp_path) -> None:
+    calls = []
+
+    def start(target: SshTarget, script: str) -> Any:
+        calls.append(script)
+        if len(calls) == 2:  # the FP8 download fails before weights_ready
+            return (1, "loom-sys gpus NVIDIA L40S\n", "loom-error weight download failed")
+        return ok(engine_stdout())
+
+    ssh = FakePodExec({"start_engine": start})
+    p = provider(fake, s3, tmp_path, ssh=ssh)
+    host = await p.provision(request())
+    await p.start_engine(host, vllm_launch(), warm=False)
+    with pytest.raises(EngineStartFailed, match="weight download failed"):
+        await p.start_engine(host, fp8_launch(), warm=True)
+    await p.start_engine(host, fp8_launch(), warm=True)
+    assert script_pairs(calls[2], "FETCH_WEIGHTS") == [(FP8_REPO, FP8_REV)]
 
 
 async def test_lost_pod_during_a_command_raises_host_lost(fake, s3, tmp_path) -> None:

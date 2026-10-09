@@ -50,9 +50,8 @@ POD_START_VARS: dict[str, Any] = {
 }
 START_VARS: dict[str, Any] = {
     "WARM": 0,
-    "MODEL_REPO": "Qwen/Qwen3-8B",
-    "MODEL_REVISION": "b" * 40,
-    "EXTRA_WEIGHTS": [],
+    "FETCH_WEIGHTS": ["Qwen/Qwen3-8B", "b" * 40],
+    "CACHED_WEIGHTS": [],
     "WEIGHTS_DIR": "/opt/loom/hf",
     "PORT": 8000,
     "SERVED_MODEL": "qwen3-8b",
@@ -550,13 +549,16 @@ def test_start_engine_refuses_an_unsubstituted_secret(tmp_path: Path) -> None:
     assert not (w["logs"] / "engine_args").exists()
 
 
-def test_warm_start_downloads_nothing_and_needs_no_token(tmp_path: Path) -> None:
+def test_warm_start_on_held_weights_downloads_nothing_and_needs_no_token(tmp_path: Path) -> None:
     w = engine_env_world(tmp_path)
+    values = {
+        **w["values"],
+        "WARM": 1,
+        "FETCH_WEIGHTS": [],
+        "CACHED_WEIGHTS": ["Qwen/Qwen3-8B", "b" * 40],
+    }
     try:
-        proc = run_bash(
-            render_script("start_engine", template_dir=DIR, **{**w["values"], "WARM": 1}),
-            env=w["env"],
-        )
+        proc = run_bash(render_script("start_engine", template_dir=DIR, **values), env=w["env"])
     finally:
         kill_engine(w["pidfile"])
     assert proc.returncode == 0, proc.stderr
@@ -564,6 +566,78 @@ def test_warm_start_downloads_nothing_and_needs_no_token(tmp_path: Path) -> None
     assert "HF_TOKEN" not in download
     assert download["HF_HUB_OFFLINE"] == "1"
     assert "loom-stage sshd_ready" not in proc.stdout
+
+
+def hf_cache_python(bin_dir: Path, log: Path) -> None:
+    """A python3 that runs DOWNLOAD_PY against a fake HF cache under $HF_HOME, as
+    huggingface_hub would: online (a token in its environment) it creates each pinned
+    snapshot; with HF_HUB_OFFLINE=1 it fails on a snapshot that is not there. Each call
+    appends `<online|offline> <repo> <revision> ...` to `log`."""
+    stub(
+        bin_dir,
+        "python3",
+        "shift 2  # -c DOWNLOAD_PY\n"
+        'mode=online; [ "${HF_HUB_OFFLINE:-0}" = 1 ] && mode=offline\n'
+        f'echo "$mode $*" >>{shlex.quote(str(log))}\n'
+        "while [ $# -gt 0 ]; do\n"
+        '  snap="$HF_HOME/hub/models--${1/\\//--}/snapshots/$2"\n'
+        '  if [ "$mode" = offline ]; then\n'
+        '    [ -d "$snap" ] || { echo "OfflineModeIsEnabled: $1@$2" >&2; exit 1; }\n'
+        "  else\n"
+        '    [ -n "${HF_TOKEN:-}" ] || { echo "no token" >&2; exit 1; }\n'
+        '    mkdir -p "$snap"\n'
+        "  fi\n"
+        "  shift 2\n"
+        "done\n",
+    )
+
+
+BF16 = ["Qwen/Qwen3-8B", "b" * 40]
+FP8 = ["RedHatAI/Qwen3-8B-FP8-dynamic", "0" * 40]
+
+
+def test_a_cold_then_warm_start_onto_another_checkpoint_downloads_it(tmp_path: Path) -> None:
+    # runpod-smoke-h100 (4e50b5a5): the warm restart onto the FP8 cell checked its
+    # checkpoint offline only and failed "weights for RedHatAI/Qwen3-8B-FP8-dynamic ...
+    # are not cached". On one pod's cache: BF16 cold, FP8 warm (downloaded with the
+    # token), then BF16 again (held: offline only).
+    w = engine_env_world(tmp_path)
+    log = tmp_path / "hf_calls"
+    hf_cache_python(tmp_path / "bin", log)
+    starts = [
+        {"WARM": 0, "FETCH_WEIGHTS": BF16, "CACHED_WEIGHTS": []},
+        {"WARM": 1, "FETCH_WEIGHTS": FP8, "CACHED_WEIGHTS": []},
+        {"WARM": 1, "FETCH_WEIGHTS": [], "CACHED_WEIGHTS": BF16},
+    ]
+    for over in starts:
+        try:
+            proc = run_bash(
+                render_script("start_engine", template_dir=DIR, **{**w["values"], **over}),
+                env=w["env"],
+            )
+        finally:
+            kill_engine(w["pidfile"])
+        assert proc.returncode == 0, proc.stderr
+        assert re.search(r"^loom-stage weights_ready ", proc.stdout, re.MULTILINE)
+    assert log.read_text().splitlines() == [
+        "online " + " ".join(BF16),
+        "online " + " ".join(FP8),
+        "offline " + " ".join(BF16),
+    ]
+
+
+def test_a_warm_start_whose_weights_are_not_held_fails_before_the_engine(tmp_path: Path) -> None:
+    # What the smoke hit: the FP8 checkpoint offered as cached when no start downloaded it.
+    w = engine_env_world(tmp_path)
+    hf_cache_python(tmp_path / "bin", tmp_path / "hf_calls")
+    values = {**w["values"], "WARM": 1, "FETCH_WEIGHTS": [], "CACHED_WEIGHTS": FP8}
+    try:
+        proc = run_bash(render_script("start_engine", template_dir=DIR, **values), env=w["env"])
+    finally:
+        kill_engine(w["pidfile"])
+    assert proc.returncode == 1
+    assert f"weights for {' '.join(FP8)} are not cached" in proc.stderr
+    assert not (w["logs"] / "engine_args").exists()
 
 
 def with_proc1_path(w: dict[str, Any], path: str) -> None:
@@ -606,7 +680,7 @@ def test_start_engine_downloads_a_speculative_draft_with_the_model(tmp_path: Pat
     # pod failed with "Cannot reach .../model.safetensors: offline mode is enabled".
     w = engine_env_world(tmp_path)
     draft = ["RedHatAI/Llama-3.3-70B-Instruct-speculator.eagle3", "c" * 40]
-    values = {**w["values"], "EXTRA_WEIGHTS": draft}
+    values = {**w["values"], "FETCH_WEIGHTS": [*w["values"]["FETCH_WEIGHTS"], *draft]}
     try:
         proc = run_bash(render_script("start_engine", template_dir=DIR, **values), env=w["env"])
     finally:

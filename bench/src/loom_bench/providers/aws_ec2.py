@@ -34,7 +34,7 @@ import boto3  # type: ignore[import-untyped]
 from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from loom_bench.engines import docker_run_argv, draft_weights
+from loom_bench.engines import docker_run_argv
 from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult, TokenizerSpec
 from loom_bench.money import MICROS_PER_USD, Micros
 from loom_bench.prices import HOURS_PER_MONTH, PriceBook, load_prices
@@ -49,6 +49,7 @@ from loom_bench.providers.base import (
     HostRequest,
     SpotInterrupted,
 )
+from loom_bench.providers.weights import HostWeights, WeightsPlan, flat
 from loom_bench.records import Market
 from loom_bench.registry import PinnedImage, read_yaml
 from loom_bench.tokenize import hf_cache_folder
@@ -231,6 +232,7 @@ class AwsEc2Provider:
         self._requirements: dict[str, str] = {}  # extra -> exported requirements.txt
         self.clock = clock
         self.sleep = sleep
+        self.weights = HostWeights()  # what each instance's HF cache holds
 
     # -- provisioning -------------------------------------------------------
 
@@ -552,7 +554,7 @@ class AwsEc2Provider:
 
     # -- engine -----------------------------------------------------------------
 
-    def engine_script(self, launch: EngineLaunch, *, warm: bool) -> str:
+    def engine_script(self, launch: EngineLaunch, *, warm: bool, weights: WeightsPlan) -> str:
         cmd = docker_run_argv(
             launch, weights_dir=self.settings.weights_dir, container_name=ENGINE_CONTAINER
         )
@@ -562,9 +564,8 @@ class AwsEc2Provider:
             REGION=self.settings.region,
             HF_SECRET_ID=self.settings.hf_token_secret_name,
             IMAGE=launch.image,
-            MODEL_REPO=launch.model_repo,
-            MODEL_REVISION=launch.model_revision,
-            EXTRA_WEIGHTS=[x for pair in draft_weights(launch.engine, launch.args) for x in pair],
+            FETCH_WEIGHTS=flat(weights.fetch),
+            CACHED_WEIGHTS=flat(weights.cached),
             WEIGHTS_DIR=self.settings.weights_dir,
             CONTAINER=ENGINE_CONTAINER,
             PORT=launch.port,
@@ -586,14 +587,18 @@ class AwsEc2Provider:
                 host, lambda: self._ssm_online(host), "SSM online", SSM_ONLINE_TIMEOUT_S
             )
             controller_stages["ssm_online"] = (self.clock() - t0).total_seconds()
-        timeout = math.ceil(launch.ready_timeout_s) + (0 if warm else DOWNLOAD_ALLOWANCE_S)
+        # Every checkpoint the engine loads must be on the host before it starts offline:
+        # a warm restart onto a checkpoint no earlier start downloaded fetches it too.
+        weights = self.weights.plan(host.host_id, launch, warm=warm)
+        timeout = math.ceil(launch.ready_timeout_s) + (DOWNLOAD_ALLOWANCE_S if weights.fetch else 0)
         stdout = await self._run(
             host,
-            self.engine_script(launch, warm=warm),
+            self.engine_script(launch, warm=warm, weights=weights),
             timeout_s=timeout,
             comment=f"loom start {launch.engine} {launch.served_model}",
         )
         host_stages, system = parse_markers(stdout)
+        self.weights.downloaded(host.host_id, weights)
         stages = {k: round(v, 3) for k, v in controller_stages.items()}
         stages.update(stage_offsets(host_stages, t0.timestamp()))
         info: dict[str, Any] = {
@@ -795,6 +800,7 @@ class AwsEc2Provider:
 
     async def teardown(self, host: Host) -> None:
         await asyncio.to_thread(self._terminate, host.host_id)
+        self.weights.forget(host.host_id)
 
     async def reap(self, now: datetime) -> list[str]:
         return await asyncio.to_thread(aws_reaper.reap, self.ec2, now)

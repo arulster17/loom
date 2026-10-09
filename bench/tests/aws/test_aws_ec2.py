@@ -25,6 +25,7 @@ from loom_bench.provenance import GitInfo, PriceBasis, build_provenance
 from loom_bench.providers import export_requirements
 from loom_bench.providers.aws_ec2 import (
     CLIENT_IMAGE,
+    DOWNLOAD_ALLOWANCE_S,
     AwsEc2Provider,
     AwsSettings,
     HostLost,
@@ -428,16 +429,63 @@ async def test_cold_start_system_facts_reach_provenance(aws: dict[str, Any]) -> 
     assert prov.hardware.gpu_type == "L40S"
 
 
+def _fp8_qwen_launch():
+    """Qwen3-8B served from another checkpoint (the FP8 smokes' hf override)."""
+    spec = load_registry().get("qwen3-8b")
+    hf = spec.hf.model_copy(update={"repo": "RedHatAI/Qwen3-8B-FP8-dynamic", "revision": "0" * 40})
+    return render_launch(spec.model_copy(update={"hf": hf}))
+
+
+def _engine_ssm(holder: dict[str, Host]) -> FakeSsm:
+    return FakeSsm(
+        lambda script: [
+            {
+                "Status": "Success",
+                "StandardOutputContent": engine_stdout(holder["host"].launched_at.timestamp()),
+            }
+        ]
+    )
+
+
 async def test_warm_start_and_stop(aws: dict[str, Any]) -> None:
-    ssm = FakeSsm(lambda script: [{"Status": "Success", "StandardOutputContent": ""}])
+    holder: dict[str, Host] = {}
+    ssm = _engine_ssm(holder)
     p = provider(aws, ssm=ssm)
-    host = await p.provision(request())
+    host = holder["host"] = await p.provision(request())
+    launch = render_launch(load_registry().get("qwen3-8b"))
+    await p.start_engine(host, launch, warm=False)
+    assert "FETCH_WEIGHTS=(Qwen/Qwen3-8B " in ssm.scripts[0]
+    assert "CACHED_WEIGHTS=()" in ssm.scripts[0]
     await p.stop_engine(host)
-    ep = await p.start_engine(host, render_launch(load_registry().get("qwen3-8b")), warm=True)
+    ep = await p.start_engine(host, launch, warm=True)
     assert ep.warm
-    assert "loom-engine" in ssm.scripts[0]
-    assert "WARM=1" in ssm.scripts[1]
-    assert ssm.sent[1]["Parameters"]["executionTimeout"] == ["1800"]
+    assert "loom-engine" in ssm.scripts[1]
+    warm = ssm.scripts[2]
+    assert "WARM=1" in warm
+    # Its checkpoint is on the host already: checked offline, nothing downloaded.
+    assert "FETCH_WEIGHTS=()" in warm and "CACHED_WEIGHTS=(Qwen/Qwen3-8B " in warm
+    assert ssm.sent[2]["Parameters"]["executionTimeout"] == ["1800"]
+
+
+async def test_a_warm_start_onto_another_checkpoint_downloads_it(aws: dict[str, Any]) -> None:
+    # runpod-smoke-h100 (4e50b5a5): the FP8 cell's warm restart downloaded nothing and
+    # its offline engine found the FP8 checkpoint "not cached".
+    holder: dict[str, Host] = {}
+    ssm = _engine_ssm(holder)
+    p = provider(aws, ssm=ssm)
+    host = holder["host"] = await p.provision(request())
+    await p.start_engine(host, render_launch(load_registry().get("qwen3-8b")), warm=False)
+    await p.stop_engine(host)
+    await p.start_engine(host, _fp8_qwen_launch(), warm=True)
+    warm = ssm.scripts[2]
+    assert "FETCH_WEIGHTS=(RedHatAI/Qwen3-8B-FP8-dynamic " + "0" * 40 + ")" in warm
+    assert "CACHED_WEIGHTS=()" in warm
+    # The download gets the same allowance as a cold start's.
+    assert ssm.sent[2]["Parameters"]["executionTimeout"] == [str(1800 + DOWNLOAD_ALLOWANCE_S)]
+    await p.stop_engine(host)
+    # Back onto BF16: both checkpoints are on the host now.
+    await p.start_engine(host, render_launch(load_registry().get("qwen3-8b")), warm=True)
+    assert "FETCH_WEIGHTS=()" in ssm.scripts[4]
 
 
 async def test_spot_interruption_during_command_raises(aws: dict[str, Any]) -> None:

@@ -32,8 +32,17 @@ from loom_bench.runner import RunnerContext, reap, run_experiment
 from loom_bench.store import repo
 from loom_bench.store.db import session_scope, upgrade
 from loom_bench.store.models import BenchColdStart, BenchResource, BenchRun, BenchSpend
+from loom_bench.tokenize import hf_cache_folder
 
-from .fakes import FakePodExec, FakeRunpod, engine_stdout, ok, script_var
+from .fakes import (
+    FakePodExec,
+    FakeRunpod,
+    engine_stdout,
+    ok,
+    script_array,
+    script_pairs,
+    script_var,
+)
 
 pytestmark = [pytest.mark.timeout(240), pytest.mark.xdist_group("runpod-e2e")]
 
@@ -84,11 +93,25 @@ def _started_server(cfg: MockConfig) -> Any:
     return srv
 
 
+def engine_checkpoint(script: str) -> tuple[str, str]:
+    """(repo, revision) the rendered ENGINE_CMD loads (vLLM `serve <repo>`, SGLang
+    `--model-path <repo>`, both `--revision <rev>`)."""
+    cmd = script_array(script, "ENGINE_CMD")
+    repo = cmd[cmd.index("--model-path") + 1] if "--model-path" in cmd else cmd[2]
+    return repo, cmd[cmd.index("--revision") + 1]
+
+
 class PodSim(FakePodExec):
     """Each pod's engine is a mock server; staged jobs run against it, inputs read from
     and results written to the S3 keys the script's presigned URLs name. The pod's
     loopback address becomes the mock's, and the hf tokenizer (read from the pod's weight
-    cache) becomes the simple one."""
+    cache) becomes the simple one.
+
+    Each pod also has a Hugging Face cache, held to start_engine.sh's rules (its own
+    tests run the script itself): CACHED_WEIGHTS must be in it, FETCH_WEIGHTS are added
+    to it, and the engine, which runs offline, starts only if its checkpoint is in it.
+    A job's tokenizer snapshot (MODEL_CACHE_DIR, MODEL_REVISION) must be in it too, as
+    run_job.sh checks."""
 
     def __init__(self, s3: Any) -> None:
         super().__init__(
@@ -96,11 +119,23 @@ class PodSim(FakePodExec):
         )
         self.s3 = s3
         self.servers: dict[str, Any] = {}  # pod (by its known_hosts file) -> mock server
+        self.cache: dict[str, set[tuple[str, str]]] = {}  # pod -> its HF cache
+        self.downloads: dict[str, list[tuple[str, str]]] = {}  # pod -> downloads, in order
 
     def _pod(self, target: SshTarget) -> str:
         return target.known_hosts.name
 
     async def start(self, target: SshTarget, script: str) -> Any:
+        cache = self.cache.setdefault(self._pod(target), set())
+        absent = [c for c in script_pairs(script, "CACHED_WEIGHTS") if c not in cache]
+        if absent:
+            flat = " ".join(x for c in absent for x in c)
+            return 1, "", f"OfflineModeIsEnabled\nloom-error weights for {flat} are not cached"
+        fetch = script_pairs(script, "FETCH_WEIGHTS")
+        cache.update(fetch)
+        self.downloads.setdefault(self._pod(target), []).extend(fetch)
+        if engine_checkpoint(script) not in cache:
+            return 1, "", f"OfflineModeIsEnabled: the engine's {engine_checkpoint(script)}"
         served = script_var(script, "SERVED_MODEL")
         # Both pods split multi-byte characters across tokens, as Qwen3's byte-level BPE
         # does; SGLang reports every completions text_offset as -1 and renders each token
@@ -125,6 +160,12 @@ class PodSim(FakePodExec):
         return ok("loom-stopped\n")
 
     async def job(self, target: SshTarget, script: str) -> Any:
+        model_dir = script_var(script, "MODEL_CACHE_DIR")
+        if model_dir:
+            revision = script_var(script, "MODEL_REVISION")
+            held = {(hf_cache_folder(repo), rev) for repo, rev in self.cache[self._pod(target)]}
+            if (Path(model_dir).name, revision) not in held:
+                return 1, "", f"loom-error no tokenizer.json in snapshot {revision}"
         root = f"http://127.0.0.1:{self.servers[self._pod(target)].port}"
         raw = self.s3.get_object(Bucket=BUCKET, Key=s3_key(script_var(script, "JOB_URL")))
         body = raw["Body"].read()

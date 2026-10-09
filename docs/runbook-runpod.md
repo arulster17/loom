@@ -125,7 +125,11 @@ What happens, per engine image (each image gets its own pod):
    creates the job user (uid 10001).
 3. Over SSH, the engine start downloads weights at the pinned revision with the HF token,
    starts the engine on `127.0.0.1`, waits for one token and checks job isolation
-   (`job_isolation ok`).
+   (`job_isolation ok`). Later cells on the same pod restart the engine (warm); a restart
+   onto a checkpoint the pod does not hold yet (the FP8 cell after BF16) downloads it
+   first, and checks the ones it holds offline. The engine always runs offline
+   (`HF_HUB_OFFLINE=1`): before this rule, runpod-smoke-h100 (`4e50b5a5`) failed at its
+   FP8 cell with "weights for RedHatAI/Qwen3-8B-FP8-dynamic ... are not cached".
 4. Each load point × repetition runs as `bench job run` in the pod, as the job user;
    inputs and results move through presigned S3 URLs under `runs/<experiment id>/<run id>/`.
    Quality suites run there too, as `bench quality job`.

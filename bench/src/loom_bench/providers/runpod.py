@@ -46,7 +46,7 @@ from typing import Annotated, Any
 import boto3  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
-from loom_bench.engines import draft_weights, engine_process_argv
+from loom_bench.engines import engine_process_argv
 from loom_bench.experiment import RUNPOD_GPU_TYPE_IDS, RunpodProviderSpec
 from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult, TokenizerSpec
 from loom_bench.money import Micros
@@ -79,6 +79,7 @@ from loom_bench.providers.runpod_ssh import (
     generate_keypair,
     run_detached,
 )
+from loom_bench.providers.weights import HostWeights, WeightsPlan, flat
 from loom_bench.records import Market
 from loom_bench.registry import read_yaml
 from loom_bench.tokenize import hf_cache_folder
@@ -263,6 +264,7 @@ class RunpodProvider:
         self.sleep = sleep
         self._ssh_dir = ssh_dir
         self._key: tuple[Path, str] | None = None
+        self.weights = HostWeights()  # what each pod's HF cache holds
 
     # -- SSH identity -----------------------------------------------------------
 
@@ -588,14 +590,13 @@ class RunpodProvider:
 
     # -- engine -------------------------------------------------------------------
 
-    def engine_script(self, launch: EngineLaunch, *, warm: bool) -> str:
+    def engine_script(self, launch: EngineLaunch, *, warm: bool, weights: WeightsPlan) -> str:
         return render_script(
             "start_engine",
             template_dir=TEMPLATE_DIR,
             WARM=int(warm),
-            MODEL_REPO=launch.model_repo,
-            MODEL_REVISION=launch.model_revision,
-            EXTRA_WEIGHTS=[x for pair in draft_weights(launch.engine, launch.args) for x in pair],
+            FETCH_WEIGHTS=flat(weights.fetch),
+            CACHED_WEIGHTS=flat(weights.cached),
             WEIGHTS_DIR=runpod_layout.WEIGHTS_DIR,
             PORT=launch.port,
             SERVED_MODEL=launch.served_model,
@@ -627,24 +628,30 @@ class RunpodProvider:
             controller["pod_running"] = (self.clock() - t0).total_seconds()
             await self._wait_for_ssh(host, self._target(host, pod))
             controller["ssh_online"] = (self.clock() - t0).total_seconds()
-        timeout = math.ceil(launch.ready_timeout_s) + (0 if warm else DOWNLOAD_ALLOWANCE_S)
+        # Every checkpoint the engine loads must be on the pod before it starts offline:
+        # a warm restart onto a checkpoint no earlier start downloaded fetches it too.
+        weights = self.weights.plan(host.host_id, launch, warm=warm)
+        timeout = math.ceil(launch.ready_timeout_s) + (DOWNLOAD_ALLOWANCE_S if weights.fetch else 0)
         try:
             stdout = await self._run(
                 host,
-                self.engine_script(launch, warm=warm),
+                self.engine_script(launch, warm=warm, weights=weights),
                 timeout_s=timeout,
-                what=f"start {launch.engine} {launch.served_model}",
+                what=f"start {launch.engine} {launch.served_model} ({launch.model_repo})",
             )
         except RemoteCommandError as e:
             # The script prints the host's facts and stages as it goes: keep what it
             # reported before failing (the GPU topology, for a hang at NCCL init).
             failed_stages, failed_system = parse_markers(e.stdout)
+            if "weights_ready" in failed_stages:
+                self.weights.downloaded(host.host_id, weights)
             stages = {k: round(v, 3) for k, v in controller.items()}
             stages.update(stage_offsets(failed_stages, t0.timestamp()))
             raise EngineStartFailed(
                 str(e), stages=stages, system={**failed_system, "pod_id": host.host_id}
             ) from e
         pod_stages, system = parse_markers(stdout)
+        self.weights.downloaded(host.host_id, weights)
         if system.get("job_isolation") != "ok":
             raise RuntimeError(f"{host.host_id}: engine start did not prove job isolation")
         stages = {k: round(v, 3) for k, v in controller.items()}
@@ -855,6 +862,7 @@ class RunpodProvider:
     async def teardown(self, host: Host) -> None:
         """Terminate (never stop) the pod; a pod that is already gone is fine."""
         await asyncio.to_thread(self.api.terminate_pod, host.host_id)
+        self.weights.forget(host.host_id)
 
     async def reap(self, now: datetime) -> list[str]:
         return await asyncio.to_thread(

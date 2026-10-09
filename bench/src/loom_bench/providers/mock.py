@@ -3,6 +3,12 @@
 Hosts live in a module-level table so `reap` finds servers whose runner died
 without tearing down. Mock servers cannot outlive their process (daemon
 threads), so a host recorded by a dead process is already gone.
+
+Each host has a simulated Hugging Face cache, held to the real hosts' rule: the engine
+runs offline, so it starts only if every checkpoint it loads was downloaded by this or an
+earlier start on the host. Each start downloads and checks what the shared
+`HostWeights` plan says, as the aws_ec2 and runpod start scripts do, so a plan that skips
+a checkpoint fails here as it would on a pod ("weights ... are not cached").
 """
 
 from __future__ import annotations
@@ -12,18 +18,20 @@ import socket
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 import httpx
 
 from loom_bench import __version__
+from loom_bench.engines import launch_weights
 from loom_bench.experiment import mock_config_from_launch
 from loom_bench.jobexec import execute_load_job
 from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult
 from loom_bench.mock.config import MockConfig
 from loom_bench.provenance import PriceBasis
-from loom_bench.providers.base import Endpoint, EngineLaunch, Host, HostRequest
+from loom_bench.providers.base import Endpoint, EngineLaunch, EngineStartFailed, Host, HostRequest
+from loom_bench.providers.weights import Checkpoint, HostWeights
 from loom_bench.quality.runner import execute_eval_job
 from loom_bench.records import Market
 
@@ -42,6 +50,7 @@ class _Server:
 class _MockHost:
     host: Host
     server: _Server | None = None
+    cache: set[Checkpoint] = field(default_factory=set)  # simulated HF cache on the host
 
 
 _LIVE: dict[str, _MockHost] = {}
@@ -78,6 +87,8 @@ class MockProvider:
 
     def __init__(self, hourly_micros: int | None = None) -> None:
         self.hourly_micros = hourly_micros  # simulated; None: unpriced
+        self.weights = HostWeights()
+        self.downloads: dict[str, list[Checkpoint]] = {}  # host id -> downloads, in order
 
     async def provision(self, req: HostRequest) -> Host:
         now = datetime.now(UTC)
@@ -113,6 +124,8 @@ class MockProvider:
             0.0 if warm else (datetime.now(UTC) - host.launched_at).total_seconds()
         )
         stages: dict[str, float] = {} if warm else {"instance_running": 0.0}
+        self._load_weights(state, launch, warm=warm, stages=stages)
+        stages["weights_ready"] = time.monotonic() - t_ref
 
         srv = await asyncio.to_thread(_start_server, config)
         state.server = srv
@@ -153,6 +166,31 @@ class MockProvider:
             },
         )
 
+    def _load_weights(
+        self, state: _MockHost, launch: EngineLaunch, *, warm: bool, stages: dict[str, float]
+    ) -> None:
+        """The start scripts' weights step on the simulated cache, then the offline
+        engine's load: every checkpoint it loads must be in the cache."""
+        host_id = state.host.host_id
+        plan = self.weights.plan(host_id, launch, warm=warm)
+        system = {"engine": "mock"}
+        absent = [c for c in plan.cached if c not in state.cache]
+        if absent:
+            raise EngineStartFailed(
+                f"{host_id}: weights for {absent} are not cached", stages=stages, system=system
+            )
+        state.cache.update(plan.fetch)
+        self.downloads.setdefault(host_id, []).extend(plan.fetch)
+        self.weights.downloaded(host_id, plan)
+        offline = [c for c in launch_weights(launch) if c not in state.cache]
+        if offline:
+            raise EngineStartFailed(
+                f"{host_id}: the engine runs offline (HF_HUB_OFFLINE=1) and {offline} "
+                "is not in the host's cache",
+                stages=stages,
+                system=system,
+            )
+
     async def stop_engine(self, host: Host) -> None:
         state = self._state(host)
         if state.server is not None:
@@ -168,6 +206,7 @@ class MockProvider:
         return await execute_eval_job(job)
 
     async def teardown(self, host: Host) -> None:
+        self.weights.forget(host.host_id)
         state = _LIVE.pop(host.host_id, None)
         if state is not None and state.server is not None:
             await asyncio.to_thread(_stop_server, state.server)

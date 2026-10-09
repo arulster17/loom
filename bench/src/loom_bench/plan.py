@@ -10,6 +10,7 @@ host key, so each image gets its own pod). Every timing assumption is in `AWS_TI
 from __future__ import annotations
 
 import math
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
@@ -17,6 +18,7 @@ from fractions import Fraction
 from pydantic import ValidationError
 
 from loom_bench.budget import Caps
+from loom_bench.engines import launch_weights
 from loom_bench.experiment import (
     AwsEc2ProviderSpec,
     Cell,
@@ -184,19 +186,25 @@ class Estimator:
             + t.engine_init_s
         )
 
-    def warm_start_s(self, prev: Cell | None, cell: Cell) -> float:
+    def download_bytes(self, cell: Cell, held: Collection[tuple[str, str]] = ()) -> int:
+        """Bytes a start of `cell` downloads onto a host whose cache holds `held`: its
+        checkpoint, unless an earlier start on the host downloaded it. A speculative
+        draft has no size in the registry and is not counted."""
+        held = set(held)
+        return 0 if (cell.spec.hf.repo, cell.spec.hf.revision) in held else cell.spec.hf.size_bytes
+
+    def warm_start_s(self, started: Sequence[Cell], cell: Cell) -> float:
+        """A restart of the host that ran `started` (in order) onto `cell`. The engine runs
+        offline, so a checkpoint no earlier start on the host downloaded is downloaded
+        now (loom_bench.providers.weights): the FP8 row after its BF16 baseline."""
         if self.timing is None:
             return self._mock_start_s(cell)
         t, size = self.timing, cell.spec.hf.size_bytes
         seconds = size / t.load_bytes_per_s + t.engine_init_s
-        if prev is None or prev.launch.image != cell.launch.image:
+        if not started or started[-1].launch.image != cell.launch.image:
             seconds += t.image_pull_s
-        if prev is None or (prev.spec.hf.repo, prev.spec.hf.revision) != (
-            cell.spec.hf.repo,
-            cell.spec.hf.revision,
-        ):
-            seconds += size / t.download_bytes_per_s
-        return seconds
+        held = {w for c in started for w in launch_weights(c.launch)}
+        return seconds + self.download_bytes(cell, held) / t.download_bytes_per_s
 
     def _request_s(self, cell: Cell, profile: WorkloadProfile, concurrency: float) -> float:
         inp, out = profile_shape(profile)
@@ -474,14 +482,24 @@ def _runpod_hardware_problems(cell: Cell, prices: PriceBook) -> list[str]:
             f"{cell.key}: {hw['instance_type']} is priced for {it.gpu_count} GPUs, "
             f"the replica uses {cell.gpus}"
         )
-    need_gb = cell.spec.hf.size_bytes / 1e9 + RUNPOD_DISK_HEADROOM_GB
-    if hw["disk_gb"] < need_gb:
-        out.append(
-            f"{cell.key}: provider.container_disk_gb {hw['disk_gb']} is below the "
-            f"{math.ceil(need_gb)} GB the weights ({cell.spec.hf.size_bytes / 1e9:.0f} GB) "
-            f"and {RUNPOD_DISK_HEADROOM_GB} GB of engine headroom need"
-        )
     return out
+
+
+def _runpod_disk_problems(host_key: str, cells: Sequence[Cell]) -> list[str]:
+    """The pod's container disk holds every checkpoint its cells serve (each start
+    downloads the ones it lacks; nothing is deleted) plus the engine's headroom."""
+    sizes = {(c.spec.hf.repo, c.spec.hf.revision): c.spec.hf.size_bytes for c in cells}
+    disk_gb = cells[0].hardware["disk_gb"]
+    weights_gb = sum(sizes.values()) / 1e9
+    need_gb = weights_gb + RUNPOD_DISK_HEADROOM_GB
+    if disk_gb >= need_gb:
+        return []
+    what = f"{len(sizes)} checkpoints" if len(sizes) > 1 else "the weights"
+    return [
+        f"{host_key}: provider.container_disk_gb {disk_gb} is below the "
+        f"{math.ceil(need_gb)} GB {what} ({weights_gb:.0f} GB) and "
+        f"{RUNPOD_DISK_HEADROOM_GB} GB of engine headroom need"
+    ]
 
 
 def _hardware_problems(exp: Experiment, cell: Cell, prices: PriceBook) -> list[str]:
@@ -535,7 +553,7 @@ def build_plan(
         )
     notes: list[str] = []
     hosts: dict[str, HostPlan] = {}
-    prev: dict[str, Cell] = {}
+    started: dict[str, list[Cell]] = {}  # host key -> its cells, in start order
     n_runs = 0
 
     for cell in cells:
@@ -557,9 +575,9 @@ def build_plan(
                 host.steps.append(Step("eval_setup", host.key, est.eval_setup_s()))
         else:
             host.steps.append(
-                Step("warm_start", cell.key, est.warm_start_s(prev[cell.host_key], cell))
+                Step("warm_start", cell.key, est.warm_start_s(started[cell.host_key], cell))
             )
-        prev[cell.host_key] = cell
+        started.setdefault(cell.host_key, []).append(cell)
         host.cells.append(cell.key)
         for entry, profile in profiles:
             label = (
@@ -576,6 +594,9 @@ def build_plan(
                 seconds += (q.replicates - 1) * est.eval_s(cell, divergence=False)
             host.steps.append(Step("eval", label, seconds))
 
+    if isinstance(exp.provider, RunpodProviderSpec):
+        for key, members in started.items():
+            refusals += _runpod_disk_problems(key, members)
     for host in hosts.values():
         host.steps.append(Step("teardown", host.key, est.teardown_s()))
         notes += [f"{host.key}: {n}" for n in host.price_notes]

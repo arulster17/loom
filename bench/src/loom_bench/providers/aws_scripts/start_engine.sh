@@ -1,8 +1,12 @@
-# requires: WARM REGION HF_SECRET_ID IMAGE MODEL_REPO MODEL_REVISION EXTRA_WEIGHTS WEIGHTS_DIR CONTAINER PORT SERVED_MODEL READY_TIMEOUT_S LOG_DIR STAGE_FILE ENGINE_ENV ENGINE_CMD
-# Pull the engine image, download weights at the pinned revision (cold only),
-# start the engine container and wait until it serves one token.
-# EXTRA_WEIGHTS: more pinned checkpoints the engine loads (a speculative draft), as
-# flat repo revision pairs; downloaded with the model, since the engine runs offline.
+# requires: WARM REGION HF_SECRET_ID IMAGE FETCH_WEIGHTS CACHED_WEIGHTS WEIGHTS_DIR CONTAINER PORT SERVED_MODEL READY_TIMEOUT_S LOG_DIR STAGE_FILE ENGINE_ENV ENGINE_CMD
+# Pull the engine image, download the weights this host does not hold yet at their
+# pinned revisions, start the engine container and wait until it serves one token.
+# The engine loads every checkpoint in FETCH_WEIGHTS + CACHED_WEIGHTS (the model and any
+# speculative draft), each as flat repo revision pairs, offline. FETCH_WEIGHTS: downloaded
+# now, with the HF token (every one on a cold start; on a warm restart those no earlier
+# start on this host downloaded, e.g. the FP8 checkpoint after its BF16 baseline).
+# CACHED_WEIGHTS: downloaded by an earlier start on this host, checked offline
+# (loom_bench.providers.weights).
 
 DOWNLOAD_PY='import sys
 from huggingface_hub import snapshot_download
@@ -10,7 +14,6 @@ a = sys.argv[1:]
 assert len(a) % 2 == 0, "repo/revision pairs"
 for repo, rev in zip(a[::2], a[1::2]):
     snapshot_download(repo, revision=rev, ignore_patterns=["original/*", "*.pth", "*.gguf"])'
-WEIGHTS=("$MODEL_REPO" "$MODEL_REVISION" ${EXTRA_WEIGHTS[@]+"${EXTRA_WEIGHTS[@]}"})
 
 mkdir -p "$LOG_DIR" "$WEIGHTS_DIR"
 
@@ -24,7 +27,14 @@ docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 docker pull --quiet "$IMAGE" >>"$LOG_DIR/pull.log" 2>&1 || fail_log "image pull failed" "$LOG_DIR/pull.log"
 stage image_pulled
 
-if [ "$WARM" = 0 ]; then
+[ $((${#FETCH_WEIGHTS[@]} + ${#CACHED_WEIGHTS[@]})) -gt 0 ] || fail "the launch names no weights"
+if [ "${#CACHED_WEIGHTS[@]}" -gt 0 ]; then
+  docker run --rm --env HF_HUB_OFFLINE=1 --env HF_HUB_DISABLE_PROGRESS_BARS=1 \
+    --volume "$WEIGHTS_DIR:/root/.cache/huggingface" --entrypoint python3 "$IMAGE" \
+    -c "$DOWNLOAD_PY" "${CACHED_WEIGHTS[@]}" >>"$LOG_DIR/weights.log" 2>&1 \
+    || fail_log "weights for ${CACHED_WEIGHTS[*]} are not cached" "$LOG_DIR/weights.log"
+fi
+if [ "${#FETCH_WEIGHTS[@]}" -gt 0 ]; then
   # The token lives only in this shell's environment and the short-lived download
   # container; it is never written to disk, logged, or given to the engine.
   HF_TOKEN="$(aws secretsmanager get-secret-value --region "$REGION" --secret-id "$HF_SECRET_ID" \
@@ -32,7 +42,7 @@ if [ "$WARM" = 0 ]; then
   export HF_TOKEN
   if ! docker run --rm --env HF_TOKEN --env HF_HUB_DISABLE_PROGRESS_BARS=1 \
     --volume "$WEIGHTS_DIR:/root/.cache/huggingface" --entrypoint python3 "$IMAGE" \
-    -c "$DOWNLOAD_PY" "${WEIGHTS[@]}" >>"$LOG_DIR/weights.log" 2>&1; then
+    -c "$DOWNLOAD_PY" "${FETCH_WEIGHTS[@]}" >>"$LOG_DIR/weights.log" 2>&1; then
     unset HF_TOKEN
     fail_log "weight download failed" "$LOG_DIR/weights.log"
   fi

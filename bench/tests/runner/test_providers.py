@@ -78,6 +78,7 @@ async def test_mock_cold_then_warm_start(mock_host):
     )
     assert list(cold.start_stages) == [
         "instance_running",
+        "weights_ready",
         "server_listening",
         "engine_healthy",
         "first_token",
@@ -94,6 +95,39 @@ async def test_mock_cold_then_warm_start(mock_host):
     async with httpx.AsyncClient() as http:
         with pytest.raises(httpx.ConnectError):
             await http.get(cold.base_url + "/models")
+
+
+def _fp8_spec():
+    hf = SPEC.hf.model_copy(update={"repo": "RedHatAI/Qwen3-8B-FP8-dynamic", "revision": "0" * 40})
+    return SPEC.model_copy(update={"hf": hf})
+
+
+async def test_mock_hosts_download_each_checkpoint_once_and_serve_offline(mock_host):
+    # The mock holds its engine to the real hosts' offline rule: a warm start onto a
+    # checkpoint the host never downloaded must download it (runpod-smoke-h100, 4e50b5a5).
+    provider, host = mock_host
+    bf16 = (SPEC.hf.repo, SPEC.hf.revision)
+    fp8 = ("RedHatAI/Qwen3-8B-FP8-dynamic", "0" * 40)
+    await provider.start_engine(host, mock_launch(SPEC, MockConfig(**FAST)), warm=False)
+    await provider.start_engine(host, mock_launch(_fp8_spec(), MockConfig(**FAST)), warm=True)
+    await provider.start_engine(host, mock_launch(SPEC, MockConfig(**FAST)), warm=True)
+    assert provider.downloads[host.host_id] == [bf16, fp8]
+
+
+async def test_a_mock_start_offering_an_absent_checkpoint_as_cached_fails(mock_host, monkeypatch):
+    # The pre-fix rule (a warm start downloads nothing) fails on the mock as on the pod.
+    from loom_bench.providers.base import EngineStartFailed
+    from loom_bench.providers.weights import HostWeights, WeightsPlan
+
+    def warm_downloads_nothing(self, host_id, launch, *, warm):
+        need = ((launch.model_repo, launch.model_revision),)
+        return WeightsPlan(fetch=(), cached=need) if warm else WeightsPlan(fetch=need, cached=())
+
+    provider, host = mock_host
+    monkeypatch.setattr(HostWeights, "plan", warm_downloads_nothing)
+    await provider.start_engine(host, mock_launch(SPEC, MockConfig(**FAST)), warm=False)
+    with pytest.raises(EngineStartFailed, match=r"FP8-dynamic.*are not cached"):
+        await provider.start_engine(host, mock_launch(_fp8_spec(), MockConfig(**FAST)), warm=True)
 
 
 async def test_execute_load_job_closed_and_open_loop(mock_host):

@@ -266,3 +266,56 @@ def test_an_in_run_bf16_baseline_gates_the_fp8_row(ctx, tmp_path):
     assert gate.decision == "pass" and not gate.blocked
     kinds = [e["kind"] for e in outcome.events]
     assert "reference_captured" in kinds and "gate" in kinds
+
+
+# --- two checkpoints on one pod: downloads and disk ----------------------------------
+
+
+def test_the_fp8_warm_start_is_planned_with_its_download():
+    # Each pod downloads a checkpoint on the first start that serves it (the engine runs
+    # offline): the FP8 cell's warm restart downloads ~73 GB, and the plan prices it.
+    from loom_bench.plan import RUNPOD_TIMING as t
+
+    exp = load_experiment(LLAMA_H100_RUNPOD)
+    (host,) = _plan(exp).hosts
+    (warm,) = [s for s in host.steps if s.kind == "warm_start"]
+    assert warm.label == "vllm-tp2-fp8"
+    size = FP8.hf.size_bytes
+    assert warm.seconds == pytest.approx(
+        size / t.download_bytes_per_s + size / t.load_bytes_per_s + t.engine_init_s
+    )
+
+
+@pytest.mark.parametrize("path", [LLAMA_H100_RUNPOD, RUNPOD_SMOKE_H100, RUNPOD_SMOKE_FP8])
+def test_a_pod_disk_must_hold_every_checkpoint_its_cells_serve(path):
+    import yaml
+
+    from loom_bench.plan import RUNPOD_DISK_HEADROOM_GB
+
+    exp = load_experiment(path)
+    cells = expand(exp, REGISTRY)
+    need_gb = sum(dict((c.spec.hf.repo, c.spec.hf.size_bytes) for c in cells).values()) / 1e9
+    need_gb += RUNPOD_DISK_HEADROOM_GB
+    assert len({c.spec.hf.repo for c in cells}) == 2
+    assert exp.provider.container_disk_gb >= need_gb
+    assert not [r for r in _plan(exp).refusals if "container_disk_gb" in r]
+    # One checkpoint's worth of disk is not enough: both stay on the pod.
+    largest = max(c.spec.hf.size_bytes for c in cells) / 1e9 + RUNPOD_DISK_HEADROOM_GB
+    doc = yaml.safe_load(path.read_text())
+    doc["provider"]["container_disk_gb"] = int(largest) + 1
+    small = Experiment.model_validate(doc)
+    (refusal,) = [r for r in _plan(small).refusals if "container_disk_gb" in r]
+    assert "2 checkpoints" in refusal
+
+
+def test_a_checkpoint_already_on_the_pod_is_not_planned_again():
+    from loom_bench.plan import RUNPOD_TIMING as t
+    from loom_bench.plan import Estimator
+
+    exp = load_experiment(RUNPOD_SMOKE_H100)
+    base, cand = expand(exp, REGISTRY)
+    est = Estimator(exp)
+    load_only = base.spec.hf.size_bytes / t.load_bytes_per_s + t.engine_init_s
+    # Back onto BF16 after FP8: both are on the pod, nothing is downloaded.
+    assert est.warm_start_s([base, cand], base) == pytest.approx(load_only)
+    assert est.warm_start_s([base], cand) > est.warm_start_s([base, cand], cand)

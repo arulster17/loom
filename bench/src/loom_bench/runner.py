@@ -513,10 +513,10 @@ class _Executor:
         while pending:
             host = await self._provision(pending[0])
             try:
-                prev: Cell | None = None
+                started: list[Cell] = []  # this host's cells so far, in start order
                 while pending:
-                    await self._run_cell(host, pending[0], prev)
-                    prev = pending.pop(0)
+                    await self._run_cell(host, pending[0], started)
+                    started.append(pending.pop(0))
             except SpotInterrupted as e:
                 self.event(
                     "spot_interruption",
@@ -537,9 +537,9 @@ class _Executor:
                 if host.host_id in self.live:
                     await self.teardown(host)
 
-    async def _run_cell(self, host: Host, cell: Cell, prev: Cell | None) -> None:
-        warm = prev is not None
-        start_s = self.est.warm_start_s(prev, cell) if warm else self.est.cold_start_s(cell)
+    async def _run_cell(self, host: Host, cell: Cell, started: Sequence[Cell]) -> None:
+        warm = bool(started)
+        start_s = self.est.warm_start_s(started, cell) if warm else self.est.cold_start_s(cell)
         self.guard.check_next(start_s, what=f"starting {cell.key}")
         if warm:
             await self.guard.guarded(self.provider.stop_engine(host))

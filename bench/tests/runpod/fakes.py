@@ -162,6 +162,19 @@ def script_var(script: str, name: str) -> str:
     return value
 
 
+def script_array(script: str, name: str) -> list[str]:
+    """An array variable as rendered into a pod script (`NAME=('a' 'b')`)."""
+    m = re.search(rf"^{name}=\((.*)\)$", script, re.MULTILINE)
+    assert m, name
+    return shlex.split(m.group(1))
+
+
+def script_pairs(script: str, name: str) -> list[tuple[str, str]]:
+    """A flat `repo revision ...` array variable as (repo, revision) pairs."""
+    flat = script_array(script, name)
+    return list(zip(flat[::2], flat[1::2], strict=True))
+
+
 def engine_stdout(*, gpus: int = 1, isolation: bool = True) -> str:
     now = time.time()  # stages after the controller's own (ssh_online), in pod order
     lines = [

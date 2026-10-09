@@ -187,7 +187,10 @@ it there.
    30 s teardown, the rest as on AWS; a pod is priced at prices.yaml's on-demand rate plus
    its container disk, and the provider accrues the larger of that and the pod's API
    `costPerHr`. Warm restarts reload weights from the host's cache and pull an
-   image only when it changes.
+   image only when it changes. A warm restart onto a checkpoint no earlier start on the
+   host downloaded (a variant's `model` or `hf` override, e.g. the FP8 row after BF16)
+   downloads it first and is planned with that download; a RunPod pod's container disk
+   must hold every checkpoint its cells serve plus 35 GB of headroom.
 3. **Budget guard** (`budget.BudgetGuard`). Every `accrual_interval_s` it writes
    `Σ host.hourly_micros x elapsed` to `bench_spend` (computed from launch each time, so no
    rounding drift; the basis records price, market and the provider's accrual basis). Before
