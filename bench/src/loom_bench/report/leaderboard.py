@@ -25,6 +25,7 @@ from enum import StrEnum
 from fractions import Fraction
 from typing import Any
 
+from markupsafe import Markup
 from pydantic import BaseModel
 
 from loom_bench.cost import PRICE_COLUMN_LABELS, MicrosRange, PriceColumn
@@ -114,6 +115,11 @@ class Leaderboard(BaseModel):
     def side(self) -> str:
         """The token side every row is ranked by: "in" under all_input, else "out"."""
         return ranking_side(row.result for row in self.rows)
+
+    @property
+    def allocation(self) -> str:
+        """The declared cost allocation the rows are ranked under."""
+        return ", ".join(dict.fromkeys(row.result.allocation for row in self.rows))
 
 
 class LeaderboardReport(BaseModel):
@@ -291,6 +297,55 @@ def rank(
     return rows
 
 
+def quality_verified(r: ConfigResult) -> bool:
+    """The gate's reference, or a gate pass against it: quality shown equal to BF16."""
+    return r.quality is not None and r.quality.gate in ("baseline", "pass")
+
+
+def headline_row(rows: Sequence[LeaderboardRow]) -> LeaderboardRow | None:
+    """The config whose cost a summary or competitiveness view quotes for one board.
+
+    Among configs with a cost at SLO that did not fail the quality gate: trusted first,
+    then quality verified (`quality_verified`), then leaderboard order. Untrusted
+    configs are eligible only when no trusted one is, and are quoted with their reason.
+    This picks what to quote; it does not change the ranking.
+    """
+    candidates = [row for row in rows if row.status in (RowStatus.RANKED, RowStatus.UNTRUSTED)]
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda row: (
+            not row.result.trusted,
+            not quality_verified(row.result),
+            rows.index(row),
+        ),
+    )
+
+
+def no_headline_reason(rows: Sequence[LeaderboardRow]) -> str:
+    """Why `headline_row` found nothing to quote on a board."""
+    statuses = {row.status for row in rows}
+    if RowStatus.GATE_FAILED in statuses:
+        return "every config with a cost at SLO failed the quality gate"
+    if all(row.result.goodput.max_load is None for row in rows):
+        return "no tested load met the SLO"
+    missing = next((row.result.prices.missing for row in rows if row.result.prices.missing), None)
+    return f"no cost at SLO ({missing or 'no on-demand price or no token throughput'})"
+
+
+# Workloads listed first on a model's leaderboard, most representative first: a chat
+# shape, then the 1k/1k fixed shape; every other workload follows by name.
+REPRESENTATIVE_WORKLOADS = ("chat", "fixed-1k-1k")
+
+
+def workload_order(workload: str) -> tuple[int, str]:
+    for i, name in enumerate(REPRESENTATIVE_WORKLOADS):
+        if workload == name or workload.startswith(f"{name}-"):
+            return i, workload
+    return len(REPRESENTATIVE_WORKLOADS), workload
+
+
 def build_leaderboard(
     results: Sequence[ConfigResult],
     *,
@@ -303,7 +358,10 @@ def build_leaderboard(
     for r in results:
         groups[(r.model_repo or "unknown model", r.workload, r.load_mode)].append(r)
     boards = []
-    for (model, workload, mode), members in sorted(groups.items()):
+    ordered_groups = sorted(
+        groups.items(), key=lambda kv: (kv[0][0], workload_order(kv[0][1]), kv[0][2])
+    )
+    for (model, workload, mode), members in ordered_groups:
         contents = {r.content for r in members}
         rows = rank(members, cold_starts, names)
         boards.append(
@@ -347,7 +405,13 @@ def board_title(b: Leaderboard) -> str:
     return f"{b.model}: {b.workload} ({b.load_mode.value.replace('_', ' ')}{content})"
 
 
-MD_HEAD = ("#", "Config", "$/1M out at SLO, on-demand", "$/1M in at SLO, on-demand")
+MD_HEAD = (
+    "#",
+    "Config",
+    "$/1M in at SLO (measured split)",
+    "$/1M out at SLO (measured split)",
+    "$/1M blended at this mix",
+)
 MD_TAIL = (
     "Goodput out tok/s per replica",
     "per GPU",
@@ -362,18 +426,37 @@ MD_TAIL = (
 )
 
 
+def rank_header(b: Leaderboard) -> str:
+    """The ranking column: the declared allocation's cost, the one rows are ranked by."""
+    return f"Rank key: {price_header(PriceColumn.ON_DEMAND, b.side)} ({b.allocation})"
+
+
 def md_headers(b: Leaderboard) -> list[str]:
-    return [*MD_HEAD, *(price_header(c, b.side) for c in b.price_columns), *MD_TAIL]
+    return [
+        *MD_HEAD,
+        rank_header(b),
+        *(price_header(c, b.side) for c in b.price_columns),
+        *MD_TAIL,
+    ]
+
+
+def split_ranges(
+    r: ConfigResult,
+) -> tuple[MicrosRange | None, MicrosRange | None, MicrosRange | None]:
+    """(input, output, blended) at the on-demand price under the measured split."""
+    s = r.split_cost
+    if s is None:
+        return None, None, None
+    return s.input_per_mtok, s.output_per_mtok, s.total_per_mtok
 
 
 def _md_row(row: LeaderboardRow, columns: Sequence[PriceColumn]) -> list[Any]:
     r = row.result
-    cost = r.cost
     return [
         row.rank if row.rank is not None else "–",
         f"**{r.name}**<br>{r.label.text}",
-        usd_ci(cost.output_per_mtok if cost else None),
-        usd_ci(cost.input_per_mtok if cost else None),
+        *(usd_ci(x) for x in split_ranges(r)),
+        usd_ci(ranking_cost(r)),
         *(usd_ci(ranking_cost(r, c)) for c in columns),
         est(r.goodput.output_tok_s, 1),
         est(r.goodput_output_tok_s_per_gpu, 1),
@@ -388,28 +471,39 @@ def _md_row(row: LeaderboardRow, columns: Sequence[PriceColumn]) -> list[Any]:
     ]
 
 
-def render_markdown(report: LeaderboardReport) -> str:
+LEDE = (
+    "Each table lists one model on one workload. $/1M input and $/1M output split the "
+    "replica's cost by measured prefill time; $/1M blended is its cost over all tokens at "
+    "that workload's own input:output mix (methodology below). Rows are ranked by the rank "
+    "key, the cost under the experiments' declared allocation (all_output charges the whole "
+    "replica to output tokens), at the on-demand list price, cheapest first; spot, "
+    "committed-1y and as-run costs of the rank key are shown where available. Every price "
+    "includes the replica's block storage. Values are point estimates (geometric means for "
+    "latency and throughput) with 95% confidence intervals in brackets. Goodput is the "
+    "highest tested load that met the SLO; raw peak throughput ignores the SLO and is not "
+    "goodput. Unranked rows (quality gate failed, untrusted, or no cost) are listed last."
+)
+
+
+def render_markdown(
+    report: LeaderboardReport, *, top: Sequence[str] = (), bottom: Sequence[str] = ()
+) -> str:
+    """The leaderboard; `top` sections (a summary) go after the title and `bottom` ones
+    (competitiveness) before the methodology, as already rendered markdown."""
     parts = [f"# {report.title}", ""]
-    parts.append(
-        "Ranked by $/1M output tokens at SLO (input tokens under the all_input cost "
-        "allocation) at the on-demand list price, cheapest first; spot, committed-1y and "
-        "as-run costs of the same tokens are shown where available. Every price includes "
-        "the replica's block storage. Values are point estimates (geometric means for "
-        "latency and throughput) with 95% confidence intervals in brackets; the methodology "
-        "below says how each is computed. Goodput is the highest tested load that met the "
-        "SLO; raw peak throughput ignores the SLO and is not goodput. Unranked rows (quality "
-        "gate failed, untrusted, or no cost) are listed last."
-    )
+    for section in top:
+        parts += [section, ""]
+    parts += ["## Leaderboards", "", LEDE]
     parts += ["", BRACKET_NOTE]
     if any_unbracketed(row.result.goodput for b in report.boards for row in b.rows):
         parts += ["", UNBRACKETED_NOTE]
     for b in report.boards:
         rows = [_md_row(row, b.price_columns) for row in b.rows]
-        parts += ["", f"## {board_title(b)}", "", md_table(md_headers(b), rows)]
+        parts += ["", f"### {board_title(b)}", "", md_table(md_headers(b), rows)]
         if b.equal_load is not None:
             parts += [
                 "",
-                "### Latency at equal load",
+                "#### Latency at equal load",
                 "",
                 EQUAL_LOAD_NOTE,
                 "",
@@ -420,16 +514,27 @@ def render_markdown(report: LeaderboardReport) -> str:
             parts += ["", "**Warnings**", ""]
             for r in warned:
                 parts += [f"- {r.name}: {w.message}" for w in r.warnings]
+    for section in bottom:
+        parts += ["", section]
     parts += ["", methodology_markdown(report.methodology)]
     return "\n".join(parts)
 
 
-def render_html(report: LeaderboardReport) -> str:
+def render_html(
+    report: LeaderboardReport, *, top: Sequence[str] = (), bottom: Sequence[str] = ()
+) -> str:
+    """As `render_markdown`; `top` and `bottom` are HTML fragments rendered by this
+    package's autoescaping templates."""
     return (
         html_env()
         .get_template("leaderboard.html.j2")
         .render(
             report=report,
+            top=[Markup(s) for s in top],
+            bottom=[Markup(s) for s in bottom],
+            lede=LEDE,
+            rank_header=rank_header,
+            split_ranges=split_ranges,
             board_title=board_title,
             price_header=price_header,
             ranking_cost=ranking_cost,
@@ -457,6 +562,12 @@ CSV_COLUMNS = [
     "config",
     "config_hash",
     "label",
+    *micros_column_names("split_input_per_mtok"),
+    *micros_column_names("split_output_per_mtok"),
+    *micros_column_names("split_blended_per_mtok"),
+    *estimate_column_names("split_input_time_share"),
+    "tokens_in_per_request",
+    "tokens_out_per_request",
     *(
         name
         for column in PriceColumn
@@ -529,6 +640,8 @@ def _csv_row(b: Leaderboard, row: LeaderboardRow, m: Methodology) -> dict[str, A
     q = r.quality
     worst = q.worst() if q else None
     dataset = DatasetRef.model_validate(r.provenance.get("dataset") or {})
+    split_in, split_out, split_blended = split_ranges(r)
+    shape = r.tokens_per_request()
     return {
         "model": b.model,
         "workload": b.workload,
@@ -539,6 +652,14 @@ def _csv_row(b: Leaderboard, row: LeaderboardRow, m: Methodology) -> dict[str, A
         "config": r.name,
         "config_hash": r.config_hash,
         "label": r.label.text,
+        **micros_columns("split_input_per_mtok", split_in),
+        **micros_columns("split_output_per_mtok", split_out),
+        **micros_columns("split_blended_per_mtok", split_blended),
+        **estimate_columns(
+            "split_input_time_share", r.split_cost.input_time_share if r.split_cost else None
+        ),
+        "tokens_in_per_request": None if shape is None else round(shape[0], 1),
+        "tokens_out_per_request": None if shape is None else round(shape[1], 1),
         **{k: v for column in PriceColumn for k, v in _price_csv(r, column).items()},
         "storage_gb": r.prices.storage_gb,
         "allocation": r.allocation,

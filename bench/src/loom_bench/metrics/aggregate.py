@@ -70,6 +70,7 @@ _DIST_STATS = ("mean", "min", "p50", "p90", "p95", "p99", "max")
 LATENCY = CiRule("positive", "latency percentiles and means (ms)")
 THROUGHPUT = CiRule("positive", "throughput and goodput (tok/s, req/s)")
 OTHER_POSITIVE = CiRule("positive", "server queue time, measurement window")
+PREFILL = CiRule("positive", "requests in prefill (request rate × mean TTFT)")
 PROPORTION = CiRule("proportion", "error rate, SLO attainment, cache fractions and hit rates")
 PERCENT = CiRule("percent", "GPU utilization (%)")
 COUNT = CiRule("non_negative", "request counts and sample sizes")
@@ -84,6 +85,7 @@ CI_RULES: tuple[tuple[str, CiRule], ...] = (
     ("throughput.*", THROUGHPUT),
     ("goodput.request_rate", THROUGHPUT),
     ("goodput.output_tok_s", THROUGHPUT),
+    ("prefill_in_flight", PREFILL),
     ("server.queue_time_mean_ms", OTHER_POSITIVE),
     ("window_s", OTHER_POSITIVE),
     ("error_rate", PROPORTION),

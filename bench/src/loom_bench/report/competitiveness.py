@@ -1,12 +1,18 @@
 """Competitiveness view: our cost at SLO and planned price against public list prices.
 
-Per registry model and workload, "our cost" is the cost at SLO of the leaderboard's
-top-ranked config (trusted, not failing the quality gate) at the on-demand price the
-leaderboard ranks by (`cost.replica_prices`), so margins are reproducible from the
-price book. Competitor prices come
-from `bench/competitors.yaml`: public list prices only, never measured. Aggregators
-and entries whose availability is unverified are listed but, by default, left out
-of the market comparison behind the `assess()` flags.
+Per registry model and workload, "our cost" is the cost at SLO of the board's headline
+config (`leaderboard.headline_row`: trusted first, then quality verified, then rank;
+never one that failed the quality gate) at the on-demand price, split between input
+and output by measured prefill time (`cost.py`, prefill_time), plus the blended cost
+of the workload's own token mix. Margins and break-even prices are therefore
+reproducible from the price book. When no config has a cost at the declared SLO and
+an alternative-SLO analysis is given, its figure is added as a separate row, labelled
+as not the declared SLO.
+
+Competitor prices come from `bench/competitors.yaml`: public list prices only, never
+measured. Each is also shown at every workload's token mix, so blended compares like
+with like. Aggregators and entries whose availability is unverified are listed but, by
+default, left out of the market comparison behind the `assess()` flags.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from loom_bench.competitiveness import CostPerMtok, assess
+from loom_bench.competitiveness import CostPerMtok, assess, price_at_mix
 from loom_bench.cost import MicrosRange
 from loom_bench.money import Micros
 from loom_bench.prices import Competitors, PriceBook
@@ -27,6 +33,7 @@ from loom_bench.records import LoadMode
 from loom_bench.registry import ModelSpec, Pricing, Registry
 from loom_bench.report.analyze import ConfigResult
 from loom_bench.report.format import (
+    describe_slo,
     html_env,
     md_table,
     micros_column_names,
@@ -36,7 +43,13 @@ from loom_bench.report.format import (
     usd,
     usd_ci,
 )
-from loom_bench.report.leaderboard import RowStatus, rank
+from loom_bench.report.leaderboard import (
+    LeaderboardRow,
+    headline_row,
+    no_headline_reason,
+    rank,
+    workload_order,
+)
 from loom_bench.report.methodology import Methodology, methodology, methodology_markdown
 
 PUBLIC_PRICES_NOTE = (
@@ -44,6 +57,15 @@ PUBLIC_PRICES_NOTE = (
     "publishes on its pricing page, with the source and the date it was checked. No "
     "competitor endpoint was called or benchmarked, and list prices say nothing about a "
     "provider's latency, quality or quantization unless the page discloses it."
+)
+
+OUR_COST_NOTE = (
+    "Our cost is the headline config's cost at SLO (see the summary) at the on-demand list "
+    "price, storage included: $/1M input and $/1M output split the replica's cost by "
+    "measured prefill time, and $/1M blended is its cost over all tokens at the workload's "
+    "own input:output mix. Each public price is also shown at every workload's mix, so "
+    "blended compares like with like. With no price set, the break-even price is the lowest "
+    "price that covers our cost: at the point estimate, and at the cost CI high bound."
 )
 
 
@@ -58,7 +80,8 @@ class CompetitorPrice(BaseModel):
     source: str
     last_checked: dt.date
     notes: str | None
-    in_comparison: bool  # counted by the price_above_market flag
+    in_comparison: bool  # counted by the *_above_market flags
+    blended_at_mix: Micros | None = None  # this price list at the row's token mix
 
 
 class FlagView(BaseModel):
@@ -89,6 +112,21 @@ class CompetitivenessRow(BaseModel):
     margin_output: Margin | None
     competitors: list[CompetitorPrice]
     flags: list[FlagView]
+    cost_blended: MicrosRange | None = None
+    basis: str | None = None  # why this config, or why there is no cost
+    slo: str | None = None
+    alternative_slo: bool = False  # the figure is under an alternative SLO, not the declared one
+    tokens_in: float | None = None  # mean per request
+    tokens_out: float | None = None
+    quantization: str | None = None  # ours, from the config label
+
+    @property
+    def input_share(self) -> Fraction | None:
+        """Input tokens' share of the workload's tokens."""
+        if self.tokens_in is None or self.tokens_out is None:
+            return None
+        total = self.tokens_in + self.tokens_out
+        return None if total <= 0 else Fraction(self.tokens_in) / Fraction(total)
 
 
 class NotOfferedView(BaseModel):
@@ -120,7 +158,11 @@ def _margin(price: Micros, cost: MicrosRange | None) -> Margin | None:
 
 
 def _competitors(
-    spec: ModelSpec, competitors: Competitors, include_aggregators: bool, include_unverified: bool
+    spec: ModelSpec,
+    competitors: Competitors,
+    include_aggregators: bool,
+    include_unverified: bool,
+    input_share: Fraction | None,
 ) -> list[CompetitorPrice]:
     return [
         CompetitorPrice(
@@ -136,31 +178,69 @@ def _competitors(
             notes=e.notes,
             in_comparison=(include_aggregators or not p.aggregator)
             and (include_unverified or e.availability == "listed"),
+            blended_at_mix=None
+            if input_share is None
+            else price_at_mix(e.input_per_mtok, e.output_per_mtok, input_share),
         )
         for p, e in competitors.entries_for(spec.id)
     ]
+
+
+def quantization_text(q: str | None) -> str:
+    if q is None:
+        return "not recorded"
+    return "unquantized" if q == "none" else q
+
+
+def basis_text(row: LeaderboardRow) -> str:
+    """Why the quoted config: its leaderboard standing and, if untrusted, why."""
+    r = row.result
+    if row.rank is not None:
+        text = f"leaderboard rank {row.rank}"
+    else:
+        reasons = sorted({w.label for w in r.warnings if w.kind.value != "no_goodput"})
+        text = f"{row.status.value}, not ranked" + (f": {', '.join(reasons)}" if reasons else "")
+    if row.goodput_ties:
+        text += f"; tied with {', '.join(row.goodput_ties)}"
+    return text
 
 
 def _row(
     spec: ModelSpec,
     workload: str | None,
     mode: LoadMode | None,
-    best: ConfigResult | None,
+    rows: Sequence[LeaderboardRow],
     competitors: Competitors,
     include_aggregators: bool,
     include_unverified: bool,
+    *,
+    alternative_slo: bool = False,
 ) -> CompetitivenessRow:
-    cost = best.cost if best else None
-    cin, cout = (cost.input_per_mtok, cost.output_per_mtok) if cost else (None, None)
-    # A side the allocation does not price (na_reason) has no cost and no margin; a
-    # side that should be priced but is not (zero throughput) means no measurement.
+    head = headline_row(rows)
+    best = head.result if head else None
+    split = best.split_cost if best else None
+    cin, cout = (split.input_per_mtok, split.output_per_mtok) if split else (None, None)
+    blended = split.total_per_mtok if split else None
+    shape = best.tokens_per_request() if best else None
+    tokens_in, tokens_out = shape if shape else (None, None)
+    share = (
+        Fraction(tokens_in) / Fraction(tokens_in + tokens_out)
+        if tokens_in is not None and tokens_out is not None and tokens_in + tokens_out > 0
+        else None
+    )
+    # A side the split could not price (na_reason) has no cost of its own; the blended
+    # cost needs no split, so it is compared even then.
     priced = [r for r in (cin, cout) if r is not None and not r.na_reason]
+    has_sides = bool(priced) and all(r.value is not None for r in priced)
+    has_blended = blended is not None and blended.value is not None and share is not None
     measured = (
         CostPerMtok(
-            input=None if cin is None else cin.value,
-            output=None if cout is None else cout.value,
+            input=cin.value if has_sides and cin is not None else None,
+            output=cout.value if has_sides and cout is not None else None,
+            blended=blended.value if has_blended and blended is not None else None,
+            input_share=share if has_blended else None,
         )
-        if priced and all(r.value is not None for r in priced)
+        if has_sides or has_blended
         else None
     )
     flags = assess(
@@ -172,6 +252,15 @@ def _row(
         include_unverified=include_unverified,
     )
     price = spec.pricing
+    if head is not None:
+        basis = basis_text(head)
+        if alternative_slo:
+            basis = f"alternative SLO {describe_slo(head.result.goodput.slo)}: {basis}"
+    elif rows:
+        basis = no_headline_reason(rows)
+    else:
+        basis = "not benchmarked"
+    slos = {describe_slo(row.result.goodput.slo) for row in rows}
     return CompetitivenessRow(
         model_id=spec.id,
         display_name=spec.display_name,
@@ -181,12 +270,29 @@ def _row(
         best_config_hash=best.config_hash if best else None,
         cost_input=cin,
         cost_output=cout,
+        cost_blended=blended,
         price=price,
         margin_input=_margin(price.input_per_mtok, cin) if price else None,
         margin_output=_margin(price.output_per_mtok, cout) if price else None,
-        competitors=_competitors(spec, competitors, include_aggregators, include_unverified),
+        competitors=_competitors(spec, competitors, include_aggregators, include_unverified, share),
         flags=[FlagView(kind=f.kind.value, side=f.side, message=f.message) for f in flags],
+        basis=basis,
+        slo=slos.pop() if len(slos) == 1 else None,
+        alternative_slo=alternative_slo,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        quantization=best.label.quantization if best else None,
     )
+
+
+def _groups(
+    spec: ModelSpec, results: Sequence[ConfigResult]
+) -> dict[tuple[str, LoadMode], list[ConfigResult]]:
+    groups: dict[tuple[str, LoadMode], list[ConfigResult]] = defaultdict(list)
+    for r in results:
+        if r.model_repo == spec.hf.repo:
+            groups[(r.workload, r.load_mode)].append(r)
+    return groups
 
 
 def build_competitiveness(
@@ -198,28 +304,40 @@ def build_competitiveness(
     include_aggregators: bool = False,
     include_unverified: bool = False,
     title: str = "Loom competitiveness: cost at SLO vs public list prices",
+    alt_results: Sequence[ConfigResult] | None = None,
+    benchmarked_only: bool = False,
 ) -> CompetitivenessReport:
-    """One row per registry model and benchmarked workload (one row if never benchmarked).
+    """One row per registry model and benchmarked workload (one row if never benchmarked,
+    none with `benchmarked_only`), plus, where no config has a cost at the declared SLO,
+    the `alt_results` figure (an alternative-SLO analysis of the same runs) as a
+    separately labelled row.
 
     Results are matched to registry models by Hugging Face repo.
     """
-    names = {r.config_hash: r.name for r in results}
+    names = {r.config_hash: r.name for r in [*results, *(alt_results or [])]}
     rows: list[CompetitivenessRow] = []
     used: list[ConfigResult] = []
     args = (competitors, include_aggregators, include_unverified)
     for spec in registry.models:
-        groups: dict[tuple[str, LoadMode], list[ConfigResult]] = defaultdict(list)
-        for r in results:
-            if r.model_repo == spec.hf.repo:
-                groups[(r.workload, r.load_mode)].append(r)
-        if not groups:
-            rows.append(_row(spec, None, None, None, *args))
-        for (workload, mode), members in sorted(groups.items()):
-            ranked = [row for row in rank(members, names=names) if row.status is RowStatus.RANKED]
-            best = ranked[0].result if ranked else None
-            if best is not None:
-                used.append(best)
-            rows.append(_row(spec, workload, mode, best, *args))
+        groups = _groups(spec, results)
+        alt_groups = _groups(spec, alt_results or [])
+        if not groups and not benchmarked_only:
+            rows.append(_row(spec, None, None, [], *args))
+        ordered = sorted(groups.items(), key=lambda kv: (workload_order(kv[0][0]), kv[0][1]))
+        for (workload, mode), members in ordered:
+            ranked = rank(members, names=names)
+            row = _row(spec, workload, mode, ranked, *args)
+            rows.append(row)
+            if (head := headline_row(ranked)) is not None:
+                used.append(head.result)
+            alt_members = alt_groups.get((workload, mode))
+            if row.cost_blended is None and alt_members:
+                alt_ranked = rank(alt_members, names=names)
+                alt_row = _row(spec, workload, mode, alt_ranked, *args, alternative_slo=True)
+                if alt_row.cost_blended is not None:
+                    rows.append(alt_row)
+                    if (alt_head := headline_row(alt_ranked)) is not None:
+                        used.append(alt_head.result)
     return CompetitivenessReport(
         title=title,
         note=PUBLIC_PRICES_NOTE,
@@ -241,7 +359,7 @@ def build_competitiveness(
 
 
 def margin_text(m: Margin | None, cost: MicrosRange | None = None) -> str:
-    """Margin with its share of price; `cost` explains an n/a margin (allocation)."""
+    """Margin with its share of price; `cost` explains an n/a margin."""
     if m is None:
         return f"n/a ({cost.na_reason})" if cost is not None and cost.na_reason else "n/a"
     share = "" if m.fraction_of_price is None else f" ({pct(m.fraction_of_price)} of price)"
@@ -250,13 +368,62 @@ def margin_text(m: Margin | None, cost: MicrosRange | None = None) -> str:
 
 
 def price_text(p: Pricing | None, side: str) -> str:
-    return "not set" if p is None else usd(getattr(p, f"{side}_per_mtok"))
+    return "no price set" if p is None else usd(getattr(p, f"{side}_per_mtok"))
+
+
+def break_even_text(cost: MicrosRange | None) -> str:
+    """The lowest price covering our cost: at the point estimate and the CI high bound."""
+    if cost is None or cost.value is None:
+        return f"n/a ({cost.na_reason})" if cost is not None and cost.na_reason else "n/a"
+    high = "unbounded" if cost.hi is None else usd(cost.hi)
+    return f"{usd(cost.value)} (CI high {high})"
 
 
 def row_title(r: CompetitivenessRow) -> str:
     if r.workload is None:
         return "not benchmarked"
-    return f"{r.workload} ({r.load_mode.value.replace('_', ' ') if r.load_mode else ''})"
+    mode = r.load_mode.value.replace("_", " ") if r.load_mode else ""
+    title = f"{r.workload} ({mode})"
+    if r.alternative_slo:
+        title += " at the ALTERNATIVE SLO, not the declared one"
+    return title
+
+
+def config_text(r: CompetitivenessRow) -> str:
+    if r.best_config is None:
+        return r.basis or "none"
+    return f"{r.best_config} ({r.basis})" if r.basis else r.best_config
+
+
+def shape_text(r: CompetitivenessRow) -> str:
+    if r.tokens_in is None or r.tokens_out is None:
+        return "n/a"
+    return f"{r.tokens_in:,.0f} / {r.tokens_out:,.0f}"
+
+
+def mix_header(r: CompetitivenessRow) -> str:
+    alt = ", alt SLO" if r.alternative_slo else ""
+    return f"At {r.workload} mix ({shape_text(r)}{alt})"
+
+
+def mix_cell(c: CompetitorPrice, r: CompetitivenessRow) -> str:
+    """A public price at this row's mix and our blended cost as a multiple of it."""
+    if c.blended_at_mix is None:
+        return "n/a"
+    text = usd(c.blended_at_mix)
+    ours = r.cost_blended.value if r.cost_blended else None
+    if ours is not None and c.blended_at_mix > 0:
+        text += f" (our cost {ours / c.blended_at_mix:.2f}×)"
+    return text
+
+
+def precision_text(c: CompetitorPrice, ours: str | None) -> str:
+    if c.quantization is None:
+        return "not disclosed"
+    mine = quantization_text(ours)
+    if ours is not None and c.quantization != ours:
+        return f"{c.quantization} (ours {mine}: not like for like)"
+    return c.quantization
 
 
 def comparison_scope(report: CompetitivenessReport) -> str:
@@ -272,47 +439,67 @@ def comparison_scope(report: CompetitivenessReport) -> str:
 
 OURS_HEADERS = (
     "Workload",
-    "Best config at SLO",
-    "Our cost $/1M in (on-demand)",
-    "Our cost $/1M out (on-demand)",
+    "Our config at SLO (basis)",
+    "Tokens per request in / out",
+    "Our cost $/1M in",
+    "Our cost $/1M out",
+    "Our cost $/1M blended",
     "Our price $/1M in",
     "Our price $/1M out",
+    "Break-even $/1M in",
+    "Break-even $/1M out",
     "Margin in",
     "Margin out",
 )
-COMPETITOR_HEADERS = (
-    "Provider",
-    "Provider model",
-    "$/1M in",
-    "$/1M out",
-    "Quantization",
-    "Availability",
-    "In flag comparison",
-    "Source",
-    "Last checked",
-)
+
+
+def competitor_headers(rows: Sequence[CompetitivenessRow]) -> list[str]:
+    return [
+        "Provider",
+        "Provider model",
+        "$/1M in",
+        "$/1M out",
+        "Precision",
+        *(mix_header(r) for r in _priced(rows)),
+        "Availability",
+        "In flag comparison",
+        "Source",
+        "Last checked",
+    ]
+
+
+def _priced(rows: Sequence[CompetitivenessRow]) -> list[CompetitivenessRow]:
+    """Rows with a blended cost: one mix column each in the public-price table."""
+    return [r for r in rows if r.cost_blended is not None and r.cost_blended.value is not None]
 
 
 def _ours_md(r: CompetitivenessRow) -> list[Any]:
     return [
         row_title(r),
-        r.best_config or "none ranked",
+        config_text(r),
+        shape_text(r),
         usd_ci(r.cost_input),
         usd_ci(r.cost_output),
+        usd_ci(r.cost_blended),
         price_text(r.price, "input"),
         price_text(r.price, "output"),
+        break_even_text(r.cost_input),
+        break_even_text(r.cost_output),
         margin_text(r.margin_input, r.cost_input),
         margin_text(r.margin_output, r.cost_output),
     ]
 
 
-def _competitor_md(c: CompetitorPrice) -> list[Any]:
+def _competitor_md(
+    i: int, c: CompetitorPrice, rows: Sequence[CompetitivenessRow], ours: str | None
+) -> list[Any]:
     return [
         c.provider + (" (aggregator)" if c.aggregator else ""),
         c.provider_model or "",
         usd(c.input_per_mtok),
         usd(c.output_per_mtok),
-        c.quantization or "not disclosed",
+        precision_text(c, ours),
+        *(mix_cell(r.competitors[i], r) for r in _priced(rows)),
         c.availability,
         "yes" if c.in_comparison else "no",
         c.source,
@@ -320,56 +507,110 @@ def _competitor_md(c: CompetitorPrice) -> list[Any]:
     ]
 
 
-def render_markdown(report: CompetitivenessReport) -> str:
-    parts = [f"# {report.title}", "", f"> {report.note}", ""]
-    parts.append(
-        f"Competitor prices last checked {report.competitors_last_checked.isoformat()}. "
-        f"{comparison_scope(report)} Margin is our price minus our on-demand cost at SLO under the "
-        "stated cost allocation."
-    )
-    by_model: dict[str, list[CompetitivenessRow]] = defaultdict(list)
+def flag_groups(rows: Sequence[CompetitivenessRow]) -> list[tuple[list[str], FlagView]]:
+    """Each distinct flag once, with the rows (workloads) it was raised on."""
+    groups: dict[tuple[str, str | None, str], tuple[list[str], FlagView]] = {}
+    for r in rows:
+        for f in r.flags:
+            titles, _ = groups.setdefault((f.kind, f.side, f.message), ([], f))
+            titles.append(row_title(r))
+    return list(groups.values())
+
+
+def by_model(report: CompetitivenessReport) -> dict[str, list[CompetitivenessRow]]:
+    out: dict[str, list[CompetitivenessRow]] = defaultdict(list)
     for r in report.rows:
-        by_model[r.model_id].append(r)
-    for model_id, rows in by_model.items():
+        out[r.model_id].append(r)
+    return out
+
+
+def our_quantization(rows: Sequence[CompetitivenessRow]) -> str | None:
+    return next((r.quantization for r in rows if r.quantization is not None), None)
+
+
+def lede(report: CompetitivenessReport) -> str:
+    return (
+        f"Competitor prices last checked {report.competitors_last_checked.isoformat()}. "
+        f"{comparison_scope(report)} {OUR_COST_NOTE}"
+    )
+
+
+def section_markdown(report: CompetitivenessReport, level: int = 2) -> str:
+    """The per-model tables and flags, headings starting at `level` (embedded in the
+    leaderboard at 2, as the body of the standalone report at 2 as well)."""
+    h = "#" * level
+    parts = [f"> {report.note}", "", lede(report)]
+    for model_id, rows in by_model(report).items():
         first = rows[0]
-        parts += ["", f"## {first.display_name} (`{model_id}`)", ""]
+        ours = our_quantization(rows)
+        parts += [
+            "",
+            f"{h} {first.display_name} (`{model_id}`), ours {quantization_text(ours)}",
+            "",
+        ]
         parts.append(md_table(OURS_HEADERS, map(_ours_md, rows)))
-        parts += ["", "**Public list prices**", ""]
+        parts += ["", "**Public list prices** (per 1M tokens)", ""]
         if first.competitors:
-            parts.append(md_table(COMPETITOR_HEADERS, map(_competitor_md, first.competitors)))
+            table = [_competitor_md(i, c, rows, ours) for i, c in enumerate(first.competitors)]
+            parts.append(md_table(competitor_headers(rows), table))
         else:
             parts.append("No public list price recorded for this model.")
-        flags = [(r, f) for r in rows for f in r.flags]
         parts += ["", "**Flags**", ""]
-        if flags:
-            parts += [f"- [{row_title(r)}] `{f.kind}`: {f.message}" for r, f in flags]
+        groups = flag_groups(rows)
+        if groups:
+            parts += [f"- [{'; '.join(titles)}] `{f.kind}`: {f.message}" for titles, f in groups]
         else:
             parts.append("- none")
     if report.not_offered:
-        parts += ["", "## Providers with no public per-token price", ""]
+        parts += ["", f"{h} Providers with no public per-token price", ""]
         parts += [
             f"- {n.name}: {n.reason} (checked {n.last_checked.isoformat()})"
             for n in report.not_offered
         ]
+    return "\n".join(parts)
+
+
+def render_markdown(report: CompetitivenessReport) -> str:
+    parts = [f"# {report.title}", "", section_markdown(report)]
     parts += ["", methodology_markdown(report.methodology)]
     return "\n".join(parts)
 
 
+def _html_context(report: CompetitivenessReport) -> dict[str, Any]:
+    return {
+        "comp": report,
+        "comp_by_model": by_model(report),
+        "comp_lede": lede(report),
+        "row_title": row_title,
+        "config_text": config_text,
+        "shape_text": shape_text,
+        "margin_text": margin_text,
+        "price_text": price_text,
+        "break_even_text": break_even_text,
+        "mix_header": mix_header,
+        "mix_cell": mix_cell,
+        "precision_text": precision_text,
+        "quantization_text": quantization_text,
+        "our_quantization": our_quantization,
+        "priced_rows": _priced,
+        "flag_groups": flag_groups,
+    }
+
+
+def section_html(report: CompetitivenessReport, heading: str) -> str:
+    """The section as an HTML fragment, under an <h2> `heading` (for the leaderboard)."""
+    return (
+        html_env()
+        .get_template("_competitiveness_section.html.j2")
+        .render(heading=heading, **_html_context(report))
+    )
+
+
 def render_html(report: CompetitivenessReport) -> str:
-    by_model: dict[str, list[CompetitivenessRow]] = defaultdict(list)
-    for r in report.rows:
-        by_model[r.model_id].append(r)
     return (
         html_env()
         .get_template("competitiveness.html.j2")
-        .render(
-            report=report,
-            by_model=by_model,
-            scope=comparison_scope(report),
-            row_title=row_title,
-            margin_text=margin_text,
-            price_text=price_text,
-        )
+        .render(report=report, **_html_context(report))
     )
 
 
@@ -377,10 +618,16 @@ CSV_COLUMNS = [
     "model_id",
     "workload",
     "load_mode",
+    "slo",
+    "alternative_slo",
     "best_config",
     "best_config_hash",
+    "basis",
+    "tokens_in_per_request",
+    "tokens_out_per_request",
     *micros_column_names("cost_input_per_mtok"),
     *micros_column_names("cost_output_per_mtok"),
+    *micros_column_names("cost_blended_per_mtok"),
     "price_input_per_mtok_micros",
     "price_input_per_mtok_usd",
     "price_output_per_mtok_micros",
@@ -399,7 +646,11 @@ CSV_COLUMNS = [
     "competitor_input_per_mtok_usd",
     "competitor_output_per_mtok_micros",
     "competitor_output_per_mtok_usd",
+    "competitor_blended_at_mix_micros",
+    "competitor_blended_at_mix_usd",
+    "our_blended_cost_vs_competitor",
     "competitor_quantization",
+    "our_quantization",
     "competitor_source",
     "competitor_last_checked",
     "price_basis",
@@ -415,10 +666,16 @@ def render_csv(report: CompetitivenessReport) -> str:
             "model_id": r.model_id,
             "workload": r.workload,
             "load_mode": r.load_mode.value if r.load_mode else None,
+            "slo": r.slo,
+            "alternative_slo": r.alternative_slo,
             "best_config": r.best_config,
             "best_config_hash": r.best_config_hash,
+            "basis": r.basis,
+            "tokens_in_per_request": None if r.tokens_in is None else round(r.tokens_in, 1),
+            "tokens_out_per_request": None if r.tokens_out is None else round(r.tokens_out, 1),
             **micros_columns("cost_input_per_mtok", r.cost_input),
             **micros_columns("cost_output_per_mtok", r.cost_output),
+            **micros_columns("cost_blended_per_mtok", r.cost_blended),
             "price_input_per_mtok_micros": r.price.input_per_mtok if r.price else None,
             "price_input_per_mtok_usd": usd(r.price.input_per_mtok, 6) if r.price else None,
             "price_output_per_mtok_micros": r.price.output_per_mtok if r.price else None,
@@ -428,13 +685,16 @@ def render_csv(report: CompetitivenessReport) -> str:
             "margin_output_micros": r.margin_output.value if r.margin_output else None,
             "margin_output_worst_micros": r.margin_output.worst if r.margin_output else None,
             "flags": "; ".join(f.kind + (f"({f.side})" if f.side else "") for f in r.flags),
+            "our_quantization": r.quantization,
             "price_basis": bases.get(r.best_config_hash or ""),
             "public_list_prices_only": True,
         }
+        ours = r.cost_blended.value if r.cost_blended else None
         entries: list[CompetitorPrice | None] = [*r.competitors] or [None]
         for c in entries:
             row = dict(base)
             if c is not None:
+                mix = c.blended_at_mix
                 row |= {
                     "competitor": c.provider,
                     "competitor_model": c.provider_model,
@@ -445,6 +705,11 @@ def render_csv(report: CompetitivenessReport) -> str:
                     "competitor_input_per_mtok_usd": usd(c.input_per_mtok, 6),
                     "competitor_output_per_mtok_micros": c.output_per_mtok,
                     "competitor_output_per_mtok_usd": usd(c.output_per_mtok, 6),
+                    "competitor_blended_at_mix_micros": mix,
+                    "competitor_blended_at_mix_usd": None if mix is None else usd(mix, 6),
+                    "our_blended_cost_vs_competitor": (
+                        round(ours / mix, 4) if ours is not None and mix else None
+                    ),
                     "competitor_quantization": c.quantization,
                     "competitor_source": c.source,
                     "competitor_last_checked": c.last_checked,

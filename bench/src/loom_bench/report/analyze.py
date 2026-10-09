@@ -222,11 +222,33 @@ class GateDivergence(BaseModel):
         return f"KL {self.kl:.4f} nats{kl_lim}, top-1 {self.top1:.1%}{top1_lim}; {floor}"
 
 
+class GateCheck(BaseModel):
+    """One check of a gate decision: a task, divergence or sanity, with its verdict."""
+
+    name: str
+    verdict: str
+    reason: str | None
+
+    @classmethod
+    def from_details(cls, details: Mapping[str, Any]) -> list[GateCheck]:
+        checks = [
+            cls(name=t["task"], verdict=t["verdict"], reason=t.get("reason"))
+            for t in details.get("tasks") or []
+            if isinstance(t, Mapping) and "task" in t and "verdict" in t
+        ]
+        for name in ("divergence", "sanity"):
+            part = details.get(name)
+            if isinstance(part, Mapping) and part.get("verdict"):
+                checks.append(cls(name=name, verdict=part["verdict"], reason=part.get("reason")))
+        return checks
+
+
 class Quality(BaseModel):
     gate: GateStatus | None  # None: no gate decision involves this config
     baseline_config_hash: str | None
     tasks: list[TaskQuality]
     divergence: GateDivergence | None = None  # of the latest gate decision on this config
+    checks: list[GateCheck] = []  # per-check verdicts of that decision
 
     def worst(self) -> TaskQuality | None:
         """The task with the most negative delta vs baseline."""
@@ -268,6 +290,9 @@ class ConfigResult(BaseModel):
     git_shas: list[str]
     provenance: dict[str, Any]  # representative record (first run at the lowest load)
     quality: Quality | None = None
+    # The headline split at the on-demand price: prefill_time (docs/cost-model.md,
+    # section 2), whatever allocation `cost` (the ranking) uses.
+    split_cost: CostAtSlo | None = None
 
     @property
     def name(self) -> str:
@@ -311,6 +336,19 @@ class ConfigResult(BaseModel):
         if est is None:
             return None
         return est.scaled(1 / self.gpus)
+
+    def tokens_per_request(self) -> tuple[float, float] | None:
+        """Mean (input, output) tokens per successful request: at the goodput point, else
+        at the lowest tested load. None when no throughput was measured."""
+        point = self.goodput_point or (self.points[0] if self.points else None)
+        if point is None:
+            return None
+        rate = point.aggregate.get("throughput.request_rate")
+        tin = point.aggregate.get("throughput.input_tok_s")
+        tout = point.aggregate.get("throughput.output_tok_s")
+        if rate is None or tin is None or tout is None or rate.mean <= 0:
+            return None
+        return tin.mean / rate.mean, tout.mean / rate.mean
 
     def reproduce_run_id(self) -> str:
         """A run whose provenance reproduces this sweep: first run at goodput, else first."""
@@ -526,6 +564,11 @@ def _analyze_sweep(
     prov = ordered[0].provenance
     prices = price_resolver(prov)
     costs = {col: costs_at(prices.get(col), goodput, allocation) for col in PriceColumn}
+    split = (
+        costs[PriceColumn.ON_DEMAND]
+        if allocation.method == "prefill_time"
+        else costs_at(prices.on_demand, goodput, CostAllocation.prefill_time())
+    )
     at = next((p for p in points if p.load == goodput.max_load), None)
 
     peak: LoadPoint | None = None
@@ -566,6 +609,7 @@ def _analyze_sweep(
         provenance_digests=sorted({provenance_digest(r.provenance) for r in ordered}),
         git_shas=sorted({g for r in ordered if (g := _git_label(r.provenance))}),
         provenance=dict(prov),
+        split_cost=split,
     )
 
 
@@ -648,10 +692,18 @@ def quality_for(
         )
     status: GateStatus | None = "baseline" if is_baseline else None
     divergence = None
+    checks: list[GateCheck] = []
     if gate is not None:
         status = cast(GateStatus, gate.decision)
         divergence = GateDivergence.from_details(gate.details)
-    return Quality(gate=status, baseline_config_hash=baseline, tasks=tasks, divergence=divergence)
+        checks = GateCheck.from_details(gate.details)
+    return Quality(
+        gate=status,
+        baseline_config_hash=baseline,
+        tasks=tasks,
+        divergence=divergence,
+        checks=checks,
+    )
 
 
 def with_quality(

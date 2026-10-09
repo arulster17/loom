@@ -23,7 +23,27 @@ ALLOCATION_TEXT = {
     "headline number",
     "all_input": "all of the replica's hourly cost is charged to input tokens, so output "
     "tokens have no separate price ($/1M output is n/a, not $0)",
+    "prefill_time": "input tokens are charged the share of the replica's time spent "
+    "prefilling prompts, output tokens the rest (see the input/output split)",
 }
+
+# How the headline $/1M input and $/1M output are split; every leaderboard states it.
+SPLIT_TEXT = (
+    "Headline $/1M input and $/1M output use the prefill_time split, measured at the "
+    "goodput point: input tokens pay for the share φ of the replica's time spent "
+    "prefilling prompts, output tokens for the rest (decode steps, and any idle headroom "
+    "the SLO needs). φ is the mean number of requests in their prefill phase, request "
+    "rate × mean TTFT (Little's law), per repetition, combined like a throughput "
+    "(geometric mean, log-t CI) and capped at 1. Input = φ × hourly price / input tok/s; "
+    "output = (1 − φ) × hourly price / output tok/s; at the measured mix they bill "
+    "exactly the replica's hourly price. TTFT includes queueing and the first decode step "
+    "and concurrent prefills are each counted, so φ tends to overstate prefill time (input "
+    "high, output low); idle headroom is charged to output (output high). The price CIs "
+    "combine the φ and throughput CIs at the ends that push each price the same way, an "
+    "outer bound. Blended $/1M is the hourly price over all tokens at the workload's own "
+    "input:output mix and needs no split. The ranking still uses the declared cost "
+    "allocation, shown in its own column."
+)
 
 
 class PriceSource(BaseModel):
@@ -101,6 +121,7 @@ class Methodology(BaseModel):
     ci_methods: list[CiMethodRow]
     price_book_last_checked: dt.date | None
     configs: list[ConfigProvenance]
+    split: str = SPLIT_TEXT
 
 
 def reproduce_command(run_id: str) -> str:
@@ -339,7 +360,8 @@ def methodology_markdown(m: Methodology) -> str:
     lines.append(f"- **Repetitions:** {m.repetitions}")
     lines.append(f"- **Confidence intervals:** {m.ci_method}")
     lines += [f"  - {row.metrics}: {row.method}" for row in m.ci_methods]
-    lines += [f"- **Cost allocation:** {a}" for a in m.allocations]
+    lines += [f"- **Cost allocation (ranking):** {a}" for a in m.allocations]
+    lines.append(f"- **Input/output split (headline):** {m.split}")
     checked = m.price_book_last_checked.isoformat() if m.price_book_last_checked else "n/a"
     lines.append(f"- **Price book last checked:** {checked}")
     for c in m.configs:

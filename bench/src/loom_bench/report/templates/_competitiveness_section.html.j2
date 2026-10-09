@@ -1,0 +1,84 @@
+{% from "_macros.html.j2" import money, link_list %}
+<section class="competitiveness">
+{% if heading %}<h2>{{ heading }}</h2>{% endif %}
+<p class="note"><strong>{{ comp.note }}</strong></p>
+<p class="lede">{{ comp_lede }}</p>
+{% for model_id, rows in comp_by_model.items() %}
+{% set first = rows[0] %}
+{% set ours = our_quantization(rows) %}
+{% set priced = priced_rows(rows) %}
+<h3>{{ first.display_name }} <code>{{ model_id }}</code>, ours {{ quantization_text(ours) }}</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>Workload</th><th>Our config at SLO (basis)</th><th class="num">Tokens per request<br>in / out</th><th class="num">Our cost<br>$/1M in</th><th class="num">Our cost<br>$/1M out</th><th class="num">Our cost<br>$/1M blended</th><th class="num">Our price<br>$/1M in</th><th class="num">Our price<br>$/1M out</th><th class="num">Break-even<br>$/1M in</th><th class="num">Break-even<br>$/1M out</th><th class="num">Margin in</th><th class="num">Margin out</th></tr>
+</thead>
+<tbody>
+{% for r in rows %}
+<tr class="{{ 'unranked' if r.alternative_slo else '' }}">
+<td>{{ row_title(r) }}</td>
+<td>{{ config_text(r) }}</td>
+<td class="num">{{ shape_text(r) }}</td>
+<td class="num">{{ money(r.cost_input) }}</td>
+<td class="num">{{ money(r.cost_output) }}</td>
+<td class="num">{{ money(r.cost_blended) }}</td>
+<td class="num">{{ price_text(r.price, 'input') }}</td>
+<td class="num">{{ price_text(r.price, 'output') }}</td>
+<td class="num">{{ break_even_text(r.cost_input) }}</td>
+<td class="num">{{ break_even_text(r.cost_output) }}</td>
+<td class="num">{{ margin_text(r.margin_input, r.cost_input) }}</td>
+<td class="num">{{ margin_text(r.margin_output, r.cost_output) }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+<h4>Public list prices (per 1M tokens)</h4>
+{% if first.competitors %}
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>Provider</th><th>Provider model</th><th class="num">$/1M in</th><th class="num">$/1M out</th><th>Precision</th>{% for r in priced %}<th class="num">{{ mix_header(r) }}</th>{% endfor %}<th>Availability</th><th>In flag comparison</th><th>Source</th><th>Last checked</th></tr>
+</thead>
+<tbody>
+{% for c in first.competitors %}
+{% set i = loop.index0 %}
+<tr class="{{ '' if c.in_comparison else 'unranked' }}">
+<td>{{ c.provider }}{% if c.aggregator %}<span class="sub">aggregator</span>{% endif %}</td>
+<td>{{ c.provider_model or '' }}</td>
+<td class="num">{{ c.input_per_mtok|usd }}</td>
+<td class="num">{{ c.output_per_mtok|usd }}</td>
+<td>{{ precision_text(c, ours) }}</td>
+{% for r in priced %}
+<td class="num">{{ mix_cell(r.competitors[i], r) }}</td>
+{% endfor %}
+<td>{{ c.availability }}</td>
+<td>{{ 'yes' if c.in_comparison else 'no' }}</td>
+<td>{{ link_list([c.source]) }}{% if c.notes %}<span class="sub">{{ c.notes }}</span>{% endif %}</td>
+<td>{{ c.last_checked }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% else %}
+<p>No public list price recorded for this model.</p>
+{% endif %}
+<h4>Flags</h4>
+<ul class="flags">
+{% for titles, f in flag_groups(rows) %}
+<li class="{{ f.kind }}">[{{ titles|join('; ') }}] <code>{{ f.kind }}</code>: {{ f.message }}</li>
+{% else %}
+<li>none</li>
+{% endfor %}
+</ul>
+{% endfor %}
+{% if comp.not_offered %}
+<h3>Providers with no public per-token price</h3>
+<ul>
+{% for n in comp.not_offered %}
+<li>{{ n.name }}: {{ n.reason }} (checked {{ n.last_checked }}){% if n.url %}; {{ link_list([n.url]) }}{% endif %}</li>
+{% endfor %}
+</ul>
+{% endif %}
+</section>
