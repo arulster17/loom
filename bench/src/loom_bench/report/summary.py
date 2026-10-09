@@ -19,7 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from loom_bench.competitiveness import price_at_mix
+from loom_bench.competitiveness import like_for_like, price_at_mix
 from loom_bench.cost import MicrosRange
 from loom_bench.prices import Competitors
 from loom_bench.registry import Registry
@@ -238,10 +238,27 @@ def _model_id(registry: Registry | None, repo: str) -> str | None:
     return next((m.id for m in registry.models if m.hf.repo == repo), None)
 
 
+def _market_model_id(registry: Registry | None, model_id: str | None) -> str | None:
+    """The registry id whose list prices apply: a quantized entry's base model."""
+    if registry is None or model_id is None:
+        return model_id
+    return registry.market_model_id(model_id)
+
+
 def market_sentence(
-    r: ConfigResult, model_id: str | None, competitors: Competitors | None, label: str = ""
+    r: ConfigResult,
+    model_id: str | None,
+    competitors: Competitors | None,
+    label: str = "",
+    *,
+    base_model: bool = False,
 ) -> str | None:
-    """Our blended cost against each public list price taken at this workload's mix."""
+    """Our blended cost against each public list price taken at this workload's mix.
+
+    `model_id` is the registry entry whose listings apply; `base_model` says it is the
+    base model of the quantized entry `r` serves (`Registry.market_model_id`). A disclosed
+    competitor precision is marked like for like, or not, against ours.
+    """
     if competitors is None or model_id is None:
         return None
     shape = r.tokens_per_request()
@@ -252,10 +269,14 @@ def market_sentence(
     entries = competitors.entries_for(model_id)
     if not entries:
         return f"Market{label}: no public list price recorded for this model."
+    ours = r.label.quantization
     parts, eligible = [], []
     for p, e in entries:
         mix = price_at_mix(e.input_per_mtok, e.output_per_mtok, share)
-        tags = [t for t in (e.quantization, "aggregator" if p.aggregator else None) if t]
+        precision: str | None = e.quantization
+        if e.quantization is not None and ours is not None:
+            precision = f"{e.quantization}, {like_for_like(e.quantization, ours)}"
+        tags = [t for t in (precision, "aggregator" if p.aggregator else None) if t]
         if e.availability != "listed":
             tags.append(f"availability {e.availability}")
         if mix > 0:
@@ -263,9 +284,15 @@ def market_sentence(
         parts.append(f"{p.name} {usd(mix)} ({', '.join(tags)})")
         if not p.aggregator and e.availability == "listed":
             eligible.append((mix, p.name))
+    whose = (
+        f" of {model_id} (the model this config serves at another precision; providers "
+        "price the model)"
+        if base_model
+        else ""
+    )
     text = (
-        f"Market{label}: public list prices at this mix, per 1M tokens: {'; '.join(parts)}. "
-        f"Our blended cost is {usd(blended.value)}"
+        f"Market{label}: public list prices{whose} at this mix, per 1M tokens: "
+        f"{'; '.join(parts)}. Our blended cost is {usd(blended.value)}"
     )
     if eligible:
         low, who = min(eligible)
@@ -285,7 +312,10 @@ def _workload(
     model_id: str | None,
     competitors: Competitors | None,
     alternative_view: bool = False,
+    base_model: bool = False,
 ) -> WorkloadSummary:
+    """`model_id` is the registry entry whose public list prices apply; `base_model`
+    says it is the base model of this board's quantized entry."""
     head = headline_row(b.rows)
     lines = [
         SummaryLine(
@@ -354,10 +384,14 @@ def _workload(
                 f"{no_headline_reason(alt.rows)}."
             )
     if head is not None:
-        market = market_sentence(head.result, model_id, competitors)
+        market = market_sentence(head.result, model_id, competitors, base_model=base_model)
     elif alt_head is not None:
         market = market_sentence(
-            alt_head.result, model_id, competitors, " (at the alternative-SLO cost)"
+            alt_head.result,
+            model_id,
+            competitors,
+            " (at the alternative-SLO cost)",
+            base_model=base_model,
         )
     else:
         market = None
@@ -422,6 +456,7 @@ def build_summary(
     for model, boards in models.items():
         results = [row.result for b in boards for row in b.rows]
         model_id = _model_id(registry, model)
+        market_id = _market_model_id(registry, model_id)
         names = {r.config_hash: r.name for r in results}
         seen: dict[str, ConfigResult] = {}
         for r in results:
@@ -435,9 +470,10 @@ def build_summary(
                         b,
                         alt_boards.get((b.model, b.workload, b.load_mode)),
                         alt_slo,
-                        model_id,
+                        market_id,
                         competitors,
                         alternative_view=view_note is not None,
+                        base_model=market_id != model_id,
                     )
                     for b in boards
                 ],

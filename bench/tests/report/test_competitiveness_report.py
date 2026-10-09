@@ -6,6 +6,7 @@ import pytest
 
 from loom_bench.competitiveness import price_at_mix
 from loom_bench.cost import NA_PREFILL_SATURATED, CostAllocation
+from loom_bench.prices import Competitors
 from loom_bench.registry import Pricing, Registry, load_registry
 from loom_bench.report.analyze import analyze_runs, default_price_resolver
 from loom_bench.report.competitiveness import (
@@ -215,6 +216,68 @@ def test_no_cost_at_slo_adds_a_labelled_alternative_slo_row(price_book, registry
     assert "chat (open loop) at the ALTERNATIVE SLO, not the declared one" in md
     # without an alternative analysis there is only the declared row
     assert len(build_competitiveness(main, registry, competitors).rows) == 2  # + llama
+
+
+FP8_REPO = "RedHatAI/Qwen3-8B-FP8-dynamic"
+
+
+def _listing(name: str, quantization: str | None) -> dict:
+    url = f"https://{name.lower()}.example/pricing"
+    entry = {"model_id": "qwen3-8b", "input_per_mtok": 50_000, "output_per_mtok": 150_000}
+    if quantization is not None:
+        entry["quantization"] = quantization
+    return {
+        "name": name,
+        "pricing_url": url,
+        "last_checked": "2026-10-04",
+        "entries": [entry | {"source": url}],
+    }
+
+
+QWEN_MARKET = Competitors.model_validate(
+    {
+        "last_checked": "2026-10-04",
+        "providers": [_listing("Eight", "fp8"), _listing("Full", "none"), _listing("Quiet", None)],
+    }
+)
+
+
+def test_quantized_entry_is_compared_with_its_base_models_list_prices(price_book):
+    base = load_registry()
+    registry = Registry(models=[base.get("qwen3-8b"), base.get("qwen3-8b-fp8")])
+    fp8 = make_runs("vllm-fp8", quantization="fp8", ttft=TTFT_FAST_VLLM, repo=FP8_REPO)
+    report = build_competitiveness(
+        _analyze(fp8, price_book), registry, QWEN_MARKET, benchmarked_only=True
+    )
+    (row,) = report.rows
+    assert row.model_id == "qwen3-8b-fp8" and row.market_model_id == "qwen3-8b"
+    assert [c.provider for c in row.competitors] == ["Eight", "Full", "Quiet"]
+    assert "no_public_comparison" not in [f.kind for f in row.flags]
+    md = render_markdown(report)
+    assert "No public list price recorded" not in md
+    assert "Public list prices are those of qwen3-8b, the model this entry serves" in md
+    assert "fp8 (same precision as ours: like for like)" in md
+    assert "none (ours fp8: not like for like)" in md
+    assert "| not disclosed |" in md
+    assert "Public list prices are those of qwen3-8b" in render_html(report)
+    (line,) = [r for r in csv.DictReader(io.StringIO(render_csv(report)))][:1]
+    assert line["model_id"] == "qwen3-8b-fp8"
+    assert line["competitor_listing_model_id"] == "qwen3-8b"
+
+
+def test_unquantized_entry_marks_a_quantized_listing_not_like_for_like(price_book):
+    base = load_registry()
+    registry = Registry(models=[base.get("qwen3-8b"), base.get("qwen3-8b-fp8")])
+    bf16 = make_runs("vllm-bf16", ttft=TTFT_FAST_VLLM)
+    report = build_competitiveness(
+        _analyze(bf16, price_book), registry, QWEN_MARKET, benchmarked_only=True
+    )
+    (row,) = report.rows
+    assert row.model_id == "qwen3-8b" and row.market_model_id is None
+    md = render_markdown(report)
+    assert "fp8 (ours unquantized: not like for like)" in md
+    assert "none (same precision as ours: like for like)" in md
+    assert "Public list prices are those of" not in md
 
 
 def test_overlapping_prefills_leave_no_split_but_blended_is_compared(

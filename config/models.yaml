@@ -135,6 +135,9 @@ models:
     tool_call_parsers: {vllm: llama3_json, sglang: llama3}
     routing_tier: 1
     status: preview
+    # Quantization of the entry above: compared with its public list prices
+    # (competitors price Llama 3.3 70B per model; DeepInfra's listing is itself fp8).
+    base_model: llama-3.3-70b-instruct
 
   # Qwen3-8B served in FP8: its own labeled row, gated against the BF16 entry
   # (qwen3-8b), which stays the reference and headline row. The smokes serve it as the
@@ -187,3 +190,4 @@ models:
     tool_call_parsers: {vllm: hermes, sglang: qwen25}
     routing_tier: 1
     status: preview
+    base_model: qwen3-8b  # quantization of qwen3-8b: compared with its list prices

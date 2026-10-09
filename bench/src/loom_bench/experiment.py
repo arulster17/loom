@@ -798,6 +798,9 @@ def expand(exp: Experiment, registry: Registry) -> list[Cell]:
             key = cell_key(variant.name, knobs)
             try:
                 spec = ModelSpec.model_validate(model_doc)
+                # The dump leaves base_model out (it is not part of the config hash);
+                # the cell still serves this registry entry, so it keeps the relation.
+                spec = spec.model_copy(update={"base_model": base.base_model})
                 mock = (
                     exp.provider.mock_config({"models": [spec.id], **mock_over})
                     if isinstance(exp.provider, MockProviderSpec)

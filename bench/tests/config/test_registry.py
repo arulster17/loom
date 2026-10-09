@@ -149,3 +149,48 @@ def test_yaml_duplicate_keys_rejected(tmp_path: Path):
     path.write_text("models: []\nmodels: []\n")
     with pytest.raises(yaml.constructor.ConstructorError, match="duplicate key 'models'"):
         read_yaml(path)
+
+
+def quantized(**overrides: Any) -> dict[str, Any]:
+    fields: dict[str, Any] = {"id": "m-1-fp8", "quantization": "fp8", "base_model": "m-1"}
+    return model(**(fields | overrides))
+
+
+def test_base_model_names_the_entry_whose_list_prices_apply():
+    reg = validate(model(), quantized())
+    assert reg.market_model_id("m-1-fp8") == "m-1"
+    assert reg.market_model_id("m-1") == "m-1"
+
+
+def test_shipped_quantized_entries_compare_with_their_base_models():
+    reg = load_registry()
+    assert reg.market_model_id("llama-3.3-70b-instruct-fp8") == "llama-3.3-70b-instruct"
+    assert reg.market_model_id("qwen3-8b-fp8") == "qwen3-8b"
+
+
+def test_base_model_is_left_out_of_dumps_so_config_hashes_do_not_move():
+    from loom_bench.provenance import config_hash
+
+    with_base = validate(model(), quantized()).get("m-1-fp8")
+    without = validate(model(id="m-1-fp8", quantization="fp8")).get("m-1-fp8")
+    assert "base_model" not in with_base.model_dump(mode="json")
+    assert config_hash(with_base.model_dump(mode="json")) == config_hash(
+        without.model_dump(mode="json")
+    )
+
+
+@pytest.mark.parametrize(
+    ("models", "message"),
+    [
+        ([quantized()], "base_model 'm-1' is not another entry"),
+        ([model(base_model="m-1")], "is not another entry"),
+        ([model(), quantized(quantization="none")], "same precision"),
+        (
+            [model(), quantized(), model(id="m-1-fp8-b", quantization="fp8", base_model="m-1-fp8")],
+            "has a base_model of its own",
+        ),
+    ],
+)
+def test_rejects_bad_base_model(models: list[dict[str, Any]], message: str):
+    with pytest.raises(ValidationError, match=message):
+        validate(*models)

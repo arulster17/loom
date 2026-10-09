@@ -25,7 +25,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from loom_bench.competitiveness import CostPerMtok, assess, price_at_mix
+from loom_bench.competitiveness import CostPerMtok, assess, like_for_like, price_at_mix
 from loom_bench.cost import MicrosRange
 from loom_bench.money import Micros
 from loom_bench.prices import Competitors, PriceBook
@@ -119,6 +119,9 @@ class CompetitivenessRow(BaseModel):
     tokens_in: float | None = None  # mean per request
     tokens_out: float | None = None
     quantization: str | None = None  # ours, from the config label
+    # Set when the list prices are another registry entry's: the base model this
+    # quantized entry is compared with (`ModelSpec.base_model`).
+    market_model_id: str | None = None
 
     @property
     def input_share(self) -> Fraction | None:
@@ -158,7 +161,7 @@ def _margin(price: Micros, cost: MicrosRange | None) -> Margin | None:
 
 
 def _competitors(
-    spec: ModelSpec,
+    market_model_id: str,
     competitors: Competitors,
     include_aggregators: bool,
     include_unverified: bool,
@@ -182,7 +185,7 @@ def _competitors(
             if input_share is None
             else price_at_mix(e.input_per_mtok, e.output_per_mtok, input_share),
         )
-        for p, e in competitors.entries_for(spec.id)
+        for p, e in competitors.entries_for(market_model_id)
     ]
 
 
@@ -215,7 +218,11 @@ def _row(
     include_unverified: bool,
     *,
     alternative_slo: bool = False,
+    market_model_id: str | None = None,
 ) -> CompetitivenessRow:
+    """`market_model_id`: the registry entry whose list prices apply (`spec.base_model`
+    for a quantized entry, `Registry.market_model_id`); by default `spec.id`."""
+    market_id = market_model_id or spec.id
     head = headline_row(rows)
     best = head.result if head else None
     split = best.split_cost if best else None
@@ -250,6 +257,7 @@ def _row(
         competitors,
         include_aggregators=include_aggregators,
         include_unverified=include_unverified,
+        market_model_id=market_id,
     )
     price = spec.pricing
     if head is not None:
@@ -274,7 +282,10 @@ def _row(
         price=price,
         margin_input=_margin(price.input_per_mtok, cin) if price else None,
         margin_output=_margin(price.output_per_mtok, cout) if price else None,
-        competitors=_competitors(spec, competitors, include_aggregators, include_unverified, share),
+        competitors=_competitors(
+            market_id, competitors, include_aggregators, include_unverified, share
+        ),
+        market_model_id=None if market_id == spec.id else market_id,
         flags=[FlagView(kind=f.kind.value, side=f.side, message=f.message) for f in flags],
         basis=basis,
         slo=slos.pop() if len(slos) == 1 else None,
@@ -321,19 +332,28 @@ def build_competitiveness(
     for spec in registry.models:
         groups = _groups(spec, results)
         alt_groups = _groups(spec, alt_results or [])
+        market = registry.market_model_id(spec.id)
         if not groups and not benchmarked_only:
-            rows.append(_row(spec, None, None, [], *args))
+            rows.append(_row(spec, None, None, [], *args, market_model_id=market))
         ordered = sorted(groups.items(), key=lambda kv: (workload_order(kv[0][0]), kv[0][1]))
         for (workload, mode), members in ordered:
             ranked = rank(members, names=names)
-            row = _row(spec, workload, mode, ranked, *args)
+            row = _row(spec, workload, mode, ranked, *args, market_model_id=market)
             rows.append(row)
             if (head := headline_row(ranked)) is not None:
                 used.append(head.result)
             alt_members = alt_groups.get((workload, mode))
             if row.cost_blended is None and alt_members:
                 alt_ranked = rank(alt_members, names=names)
-                alt_row = _row(spec, workload, mode, alt_ranked, *args, alternative_slo=True)
+                alt_row = _row(
+                    spec,
+                    workload,
+                    mode,
+                    alt_ranked,
+                    *args,
+                    alternative_slo=True,
+                    market_model_id=market,
+                )
                 if alt_row.cost_blended is not None:
                     rows.append(alt_row)
                     if (alt_head := headline_row(alt_ranked)) is not None:
@@ -418,12 +438,23 @@ def mix_cell(c: CompetitorPrice, r: CompetitivenessRow) -> str:
 
 
 def precision_text(c: CompetitorPrice, ours: str | None) -> str:
+    """The competitor's disclosed precision, marked against ours when ours is known."""
     if c.quantization is None:
         return "not disclosed"
-    mine = quantization_text(ours)
-    if ours is not None and c.quantization != ours:
-        return f"{c.quantization} (ours {mine}: not like for like)"
-    return c.quantization
+    if ours is None:
+        return c.quantization
+    return f"{c.quantization} ({like_for_like(c.quantization, ours)})"
+
+
+def market_note(r: CompetitivenessRow) -> str | None:
+    """Why a row's list prices are another registry entry's."""
+    if r.market_model_id is None:
+        return None
+    return (
+        f"Public list prices are those of {r.market_model_id}, the model this entry "
+        "serves at another precision: providers price the model, and the precision column "
+        "says which listings match ours."
+    )
 
 
 def comparison_scope(report: CompetitivenessReport) -> str:
@@ -550,6 +581,8 @@ def section_markdown(report: CompetitivenessReport, level: int = 2) -> str:
         ]
         parts.append(md_table(OURS_HEADERS, map(_ours_md, rows)))
         parts += ["", "**Public list prices** (per 1M tokens)", ""]
+        if note := market_note(first):
+            parts += [note, ""]
         if first.competitors:
             table = [_competitor_md(i, c, rows, ours) for i, c in enumerate(first.competitors)]
             parts.append(md_table(competitor_headers(rows), table))
@@ -590,6 +623,7 @@ def _html_context(report: CompetitivenessReport) -> dict[str, Any]:
         "mix_header": mix_header,
         "mix_cell": mix_cell,
         "precision_text": precision_text,
+        "market_note": market_note,
         "quantization_text": quantization_text,
         "our_quantization": our_quantization,
         "priced_rows": _priced,
@@ -639,6 +673,7 @@ CSV_COLUMNS = [
     "flags",
     "competitor",
     "competitor_model",
+    "competitor_listing_model_id",
     "competitor_aggregator",
     "competitor_availability",
     "competitor_in_comparison",
@@ -698,6 +733,9 @@ def render_csv(report: CompetitivenessReport) -> str:
                 row |= {
                     "competitor": c.provider,
                     "competitor_model": c.provider_model,
+                    # The registry entry the listing is recorded under: the base model
+                    # for a quantized entry (`ModelSpec.base_model`).
+                    "competitor_listing_model_id": r.market_model_id or r.model_id,
                     "competitor_aggregator": c.aggregator,
                     "competitor_availability": c.availability,
                     "competitor_in_comparison": c.in_comparison,

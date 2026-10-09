@@ -7,6 +7,7 @@ import io
 import pytest
 
 from loom_bench.cost import CostAllocation
+from loom_bench.prices import Competitors
 from loom_bench.registry import load_registry
 from loom_bench.report import render_leaderboard
 from loom_bench.report.analyze import analyze_runs, default_price_resolver, with_quality
@@ -213,6 +214,54 @@ def test_markdown_and_html(summary):
     assert "**Quality**" in md
     html = summary_html(summary)
     assert '<section class="summary">' in html and "<strong>vllm-bf16</strong>" in html
+
+
+def test_quantized_row_market_line_uses_its_base_models_list_prices(price_book):
+    url = "https://deep.example/pricing"
+    market = Competitors.model_validate(
+        {
+            "last_checked": "2026-10-04",
+            "providers": [
+                {
+                    "name": "Deep",
+                    "pricing_url": url,
+                    "last_checked": "2026-10-04",
+                    "entries": [
+                        {
+                            "model_id": "qwen3-8b",
+                            "input_per_mtok": 50_000,
+                            "output_per_mtok": 150_000,
+                            "quantization": "fp8",
+                            "source": url,
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    fp8 = _analyze(
+        make_runs(
+            "vllm-fp8",
+            quantization="fp8",
+            ttft=TTFT_FAST_VLLM,
+            repo="RedHatAI/Qwen3-8B-FP8-dynamic",
+        ),
+        price_book,
+    )
+    summary = build_summary(build_leaderboard(fp8), competitors=market, registry=load_registry())
+    md = summary_markdown(summary)
+    assert "no public list price recorded" not in md
+    assert (
+        "Market: public list prices of qwen3-8b (the model this config serves at another "
+        "precision; providers price the model) at this mix, per 1M tokens: Deep $0.0833 "
+        "(fp8, same precision as ours: like for like, our cost" in md
+    )
+    bf16 = _analyze(make_runs("vllm-bf16", ttft=TTFT_FAST_VLLM), price_book)
+    md = summary_markdown(
+        build_summary(build_leaderboard(bf16), competitors=market, registry=load_registry())
+    )
+    assert "Market: public list prices at this mix, per 1M tokens: Deep $0.0833 (fp8, ours " in md
+    assert "unquantized: not like for like" in md
 
 
 def test_full_leaderboard_has_summary_then_boards_then_competitiveness(

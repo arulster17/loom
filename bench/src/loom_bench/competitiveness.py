@@ -46,6 +46,15 @@ class CostPerMtok:
     input_share: Fraction | None = None
 
 
+def like_for_like(theirs: str, ours: str) -> str:
+    """Whether a competitor's disclosed precision matches ours (registry quantization
+    values; "none" is unquantized)."""
+    if theirs == ours:
+        return "same precision as ours: like for like"
+    mine = "unquantized" if ours == "none" else ours
+    return f"ours {mine}: not like for like"
+
+
 def price_at_mix(input_per_mtok: Micros, output_per_mtok: Micros, input_share: Fraction) -> Micros:
     """A per-side price list as one price per 1M tokens of a mix with this input share."""
     return round_half_up(input_per_mtok * input_share + output_per_mtok * (1 - input_share))
@@ -83,16 +92,19 @@ def assess(
     *,
     include_aggregators: bool = False,
     include_unverified: bool = False,
+    market_model_id: str | None = None,
 ) -> list[Flag]:
     """Flag pricing problems for one model.
 
     Aggregators and entries whose availability is unverified are left out of the
     market comparison by default: they are not a firm price for this model.
+    `market_model_id` names the registry entry whose list prices apply (a quantized
+    entry's base model, `Registry.market_model_id`); by default `model_id` itself.
     """
     flags: list[Flag] = []
     market = [
         (provider.name, entry)
-        for provider, entry in competitors.entries_for(model_id)
+        for provider, entry in competitors.entries_for(market_model_id or model_id)
         if (include_aggregators or not provider.aggregator)
         and (include_unverified or entry.availability == "listed")
     ]

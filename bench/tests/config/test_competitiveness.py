@@ -1,7 +1,14 @@
 from fractions import Fraction
 from typing import Any
 
-from loom_bench.competitiveness import CostPerMtok, Flag, FlagKind, assess, price_at_mix
+from loom_bench.competitiveness import (
+    CostPerMtok,
+    Flag,
+    FlagKind,
+    assess,
+    like_for_like,
+    price_at_mix,
+)
 from loom_bench.prices import Competitors, load_competitors
 from loom_bench.registry import Pricing
 
@@ -196,3 +203,21 @@ def test_price_at_mix_rounds_once_half_up():
     assert price_at_mix(100_000, 300_000, Fraction(3, 4)) == 150_000
     assert price_at_mix(1, 2, Fraction(1, 2)) == 2  # 1.5 rounds up
     assert price_at_mix(100_000, 300_000, Fraction(1)) == 100_000
+
+
+def test_a_quantized_entry_is_compared_with_its_base_models_listings():
+    cost = CostPerMtok(input=110_000, output=200_000)
+    alone = assess("m-fp8", None, cost, MARKET)
+    assert FlagKind.NO_PUBLIC_COMPARISON in {f.kind for f in alone}
+    via_base = assess("m-fp8", None, cost, MARKET, market_model_id="m")
+    assert FlagKind.NO_PUBLIC_COMPARISON not in {f.kind for f in via_base}
+    above = [f for f in via_base if f.kind is FlagKind.COST_ABOVE_MARKET]
+    assert [f.side for f in above] == ["input"]
+    assert above[0].reference == 100_000
+    assert above[0].message.startswith("m-fp8 input")
+
+
+def test_like_for_like_marks_matching_and_differing_precisions():
+    assert like_for_like("fp8", "fp8") == "same precision as ours: like for like"
+    assert like_for_like("fp8", "none") == "ours unquantized: not like for like"
+    assert like_for_like("fp8", "awq") == "ours awq: not like for like"

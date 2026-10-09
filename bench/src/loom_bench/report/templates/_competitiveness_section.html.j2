@@ -34,6 +34,7 @@
 </table>
 </div>
 <h4>Public list prices (per 1M tokens)</h4>
+{% if market_note(first) %}<p class="note">{{ market_note(first) }}</p>{% endif %}
 {% if first.competitors %}
 <div class="table-wrap">
 <table>

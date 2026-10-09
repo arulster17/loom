@@ -329,9 +329,15 @@ is ever called, see [legal/competitor-benchmarking.md](legal/competitor-benchmar
 - **Like with like**: every public price is also shown at each workload's token mix,
   in_price × input share + out_price × output share (`competitiveness.price_at_mix`), next
   to our blended cost, with our cost as a multiple of it. Input is compared with input and
-  output with output. A competitor's disclosed quantization is shown, and marked "not
-  like for like" when it differs from ours (DeepInfra's Llama 3.3 70B Turbo is fp8; ours
-  is unquantized).
+  output with output. A competitor's disclosed quantization is shown and marked against
+  ours: "like for like" when it matches, "not like for like" when it differs (DeepInfra's
+  Llama 3.3 70B Turbo is fp8: like for like for the `llama-3.3-70b-instruct-fp8` row, not
+  for the unquantized one).
+- **Quantized entries**: providers list prices per model, not per checkpoint, so a
+  registry entry with `base_model` (a quantization of another entry, e.g.
+  `llama-3.3-70b-instruct-fp8` of `llama-3.3-70b-instruct`) is compared with its base
+  model's listings (`Registry.market_model_id`), and the report says so. `base_model` is
+  left out of the spec dump, so it does not change any config hash.
 - **No cost at the declared SLO**: when an alternative-SLO analysis is run
   (`--alt-slo`), its figure is added as a separate row titled "at the ALTERNATIVE SLO, not
   the declared one".

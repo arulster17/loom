@@ -184,6 +184,13 @@ class ModelSpec(StrictModel):
     tool_call_parsers: dict[Literal["vllm", "sglang"], NonEmptyStr] = Field(default_factory=dict)
     routing_tier: Annotated[int, Field(ge=0)]
     status: Status
+    # The registry entry this one is a quantization of: the same model served at another
+    # precision (its own labeled row; the base stays the quality reference). Providers
+    # list prices per model, not per checkpoint, so the competitiveness view compares
+    # this row with the base entry's competitor listings (`Registry.market_model_id`).
+    # Excluded from dumps: it says nothing about how the model is served, and the spec
+    # dump is part of every config hash, which must not move for it.
+    base_model: str | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
@@ -230,6 +237,23 @@ class Registry(StrictModel):
                     f"{m.id}: capabilities.tools needs tool_call_parsers.{m.engine.name} "
                     "(the engine rejects tool_choice: auto without a parser)"
                 )
+        by_id = {m.id: m for m in self.models}
+        for m in self.models:
+            if m.base_model is None:
+                continue
+            base = by_id.get(m.base_model)
+            if base is None or base.id == m.id:
+                raise ValueError(f"{m.id}: base_model {m.base_model!r} is not another entry")
+            if base.base_model is not None:
+                raise ValueError(
+                    f"{m.id}: base_model {base.id!r} has a base_model of its own; name the "
+                    f"root entry ({base.base_model!r})"
+                )
+            if base.quantization == m.quantization:
+                raise ValueError(
+                    f"{m.id}: base_model {base.id!r} is served at the same precision "
+                    f"({m.quantization}); base_model names the entry this one quantizes"
+                )
         return self
 
     def get(self, model_id: str) -> ModelSpec:
@@ -237,6 +261,12 @@ class Registry(StrictModel):
             if m.id == model_id:
                 return m
         raise KeyError(f"unknown model id {model_id!r}")
+
+    def market_model_id(self, model_id: str) -> str:
+        """The registry id whose public list prices apply to `model_id`: its base model
+        for a quantized entry (providers price the model, whatever precision they serve
+        it at), else the id itself."""
+        return self.get(model_id).base_model or model_id
 
 
 def load_registry(path: Path | str | None = None) -> Registry:

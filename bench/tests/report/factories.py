@@ -139,6 +139,7 @@ def make_runs(
     missing_usage: int = 0,
     engine_args: dict[str, Any] | None = None,
     workload: str = "chat",
+    repo: str = "Qwen/Qwen3-8B",
 ) -> list[BenchRun]:
     args = engine_args if engine_args is not None else {"max_num_seqs": 256}
     recorded, basis = as_run(market, region)
@@ -185,7 +186,7 @@ def make_runs(
                 ),
                 cuda_version="13.0",
                 driver_version="580.65",
-                model=ModelInfo(repo="Qwen/Qwen3-8B", revision=QWEN_REV, quantization=quantization),
+                model=ModelInfo(repo=repo, revision=QWEN_REV, quantization=quantization),
                 hardware=HardwareInfo(gpu_type="L40S", gpu_count=1, instance_type=instance_type),
                 cloud=cloud,
                 region=region,
