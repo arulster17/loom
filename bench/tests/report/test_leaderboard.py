@@ -3,7 +3,7 @@ import io
 
 import pytest
 
-from loom_bench.cost import CostAllocation, PriceColumn
+from loom_bench.cost import NA_PREFILL_SATURATED, CostAllocation, PriceColumn
 from loom_bench.report.analyze import (
     ColdStartStat,
     Quality,
@@ -181,20 +181,26 @@ def test_scores_without_a_gate_show_strict_tool_calling_beside_the_headline(pric
 def test_markdown_table_and_footer(report, price_book):
     md = render_markdown(report)
     assert "| " + " | ".join(md_headers(report.boards[0])) + " |" in md
-    assert "$/1M out at SLO, on-demand | $/1M in at SLO, on-demand | $/1M out at SLO, spot | " in md
-    assert "$/1M out at SLO, as run | Goodput out tok/s per replica" in md
+    assert (
+        "| $/1M in at SLO (measured split) | $/1M out at SLO (measured split) | "
+        "$/1M blended at this mix | Rank key: $/1M out at SLO, on-demand (all_output) | "
+        "$/1M out at SLO, spot | $/1M out at SLO, as run | Goodput out tok/s per replica"
+    ) in md
     row = next(line for line in md.splitlines() if line.startswith("| 1 |"))
     cells = [c.strip() for c in row.strip("|").split(" | ")]
     assert cells[1].startswith("**sglang-bf16**<br>sglang 0.5.21 · unquantized · 1×L40S")
-    assert cells[2] == "$0.8717 [0.8503, 0.8936]"  # on-demand, 200 GB volume included
-    assert cells[4] == "$0.8613 [0.8402, 0.8830]"  # spot from the price book
-    assert cells[5] == "$0.8717 [0.8503, 0.8936]"  # as run: an on-demand host
-    assert cells[6] == "600.0 [585.3, 615.1]"  # geometric mean, log-t CI
-    assert cells[8] == "6 req/s (fails at 8)"
-    assert cells[9] == "413 [393, 434] ms"
-    assert cells[11] == "800.0 [780.4, 820.2] at 8 req/s"
-    assert cells[12] == "-0.010 (gsm8k) · pass"
-    assert cells[13] == "95 s (median of 3)"
+    # this fixture's ~0.35 s TTFT at 6 req/s puts two requests in prefill: no split
+    assert cells[2] == cells[3] == f"n/a ({NA_PREFILL_SATURATED})"
+    assert cells[4] == "$0.2906 [0.2834, 0.2979]"  # blended: 1 / (600 + 1200 tok/s)
+    assert cells[5] == "$0.8717 [0.8503, 0.8936]"  # rank key: on-demand, 200 GB included
+    assert cells[6] == "$0.8613 [0.8402, 0.8830]"  # spot from the price book
+    assert cells[7] == "$0.8717 [0.8503, 0.8936]"  # as run: an on-demand host
+    assert cells[8] == "600.0 [585.3, 615.1]"  # geometric mean, log-t CI
+    assert cells[10] == "6 req/s (fails at 8)"
+    assert cells[11] == "413 [393, 434] ms"
+    assert cells[13] == "800.0 [780.4, 820.2] at 8 req/s"
+    assert cells[14] == "-0.010 (gsm8k) · pass"
+    assert cells[15] == "95 s (median of 3)"
     assert "- sglang-1rep: load 2 req/s: 1 completed repetition; no confidence interval" in md
     for needle in (
         "## Methodology and provenance",
@@ -209,7 +215,9 @@ def test_markdown_table_and_footer(report, price_book):
         "log scale (log_t)",
         "  - error rate, SLO attainment, cache fractions and hit rates: arithmetic mean of "
         "per-run proportions, Student-t interval clipped to [0, 1] (t_clipped)",
-        "- **Cost allocation:** all_output",
+        "- **Cost allocation (ranking):** all_output",
+        "- **Input/output split (headline):** Headline $/1M input and $/1M output use the "
+        "prefill_time split",
         f"- **Price book last checked:** {price_book.last_checked.isoformat()}",
         "aws/us-east-1 g6e.xlarge + 200 GB block storage, from the price book: on-demand "
         "$1.8829/h; spot $1.8605/h; committed 1y n/a",
@@ -327,10 +335,14 @@ def test_unallocated_price_is_na_not_zero(report):
     md = render_markdown(report)
     row = next(line for line in md.splitlines() if line.startswith("| 1 |"))
     cells = [c.strip() for c in row.strip("|").split(" | ")]
-    assert cells[3] == "n/a (all cost allocated to output)"
+    # a split that does not apply reads n/a with its reason, never $0
+    assert cells[2] == f"n/a ({NA_PREFILL_SATURATED})"
     assert "$0.0000" not in md
     html = render_html(report)
-    assert 'n/a<span class="ci">all cost allocated to output</span>' in html
+    assert f'n/a<span class="ci">{NA_PREFILL_SATURATED}</span>' in html
+    # the CSV keeps the declared allocation's columns, n/a input included
+    first = next(csv.DictReader(io.StringIO(render_csv(report))))
+    assert first["on_demand_input_per_mtok_na_reason"] == "all cost allocated to output"
     assert "$0.0000" not in html
 
 
@@ -357,9 +369,9 @@ def test_unbracketed_goodput_is_marked_and_explained_once(report):
         if line.startswith("| ") and "**" in line
         for cells in [[c.strip() for c in line.strip("|").split(" | ")]]
     }
-    assert rows["sglang-bf16"][8] == "6 req/s (fails at 8)"  # bracketed: 8 failed
+    assert rows["sglang-bf16"][10] == "6 req/s (fails at 8)"  # bracketed: 8 failed
     # every tested load met the SLO; its [8, ∞) bracket overlaps vllm-awq's [8, 10)
-    assert rows["sglang-1rep"][8] == "≥8 req/s (none failed); tied with vllm-awq"
+    assert rows["sglang-1rep"][10] == "≥8 req/s (none failed); tied with vllm-awq"
     assert md.count(UNBRACKETED_NOTE) == 1
     assert render_html(report).count(UNBRACKETED_NOTE) == 1
 

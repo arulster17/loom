@@ -599,17 +599,27 @@ def report(
         ),
     ] = None,
 ) -> None:
-    """Leaderboard ranked by $/1M output tokens at SLO (md, html, csv; latency at equal
-    load in leaderboard.equal_load.csv)."""
+    """Leaderboard with a summary on top and a competitiveness section (md, html, csv;
+    latency at equal load in leaderboard.equal_load.csv, competitiveness in
+    leaderboard.competitiveness.csv), ranked by $/1M output tokens at SLO."""
+    from loom_bench.prices import load_competitors
     from loom_bench.report import render_leaderboard, write_reports
     from loom_bench.report.format import describe_slo
 
     results, cold = _analyze(db, experiment)
-    rendered = render_leaderboard(results, cold_starts=cold, price_book=load_prices())
+    registry, competitors = load_registry(), load_competitors()
+    alt, alt_cold = _analyze(db, experiment, slo_overrides=alt_slo) if alt_slo else ([], {})
+    rendered = render_leaderboard(
+        results,
+        cold_starts=cold,
+        price_book=load_prices(),
+        registry=registry,
+        competitors=competitors,
+        alt_results=alt or None,
+    )
     console.print(Markdown(rendered["md"]))
     _written(write_reports(out, leaderboard=rendered))
     if alt_slo:
-        alt, alt_cold = _analyze(db, experiment, slo_overrides=alt_slo)
         declared = describe_slo(results[0].goodput.slo) if results else "?"
         used = describe_slo(alt[0].goodput.slo) if alt else "?"
         title = (
@@ -617,7 +627,13 @@ def report(
             f"(the experiments declare {declared}; the main leaderboard uses that)"
         )
         rendered_alt = render_leaderboard(
-            alt, cold_starts=alt_cold, price_book=load_prices(), title=title
+            alt,
+            cold_starts=alt_cold,
+            price_book=load_prices(),
+            title=title,
+            registry=registry,
+            competitors=competitors,
+            view_note=f"Alternative SLO view ({used}), not the declared SLO ({declared}).",
         )
         console.print(Markdown(rendered_alt["md"]))
         _written(write_reports(out, **{"leaderboard.alt-slo": rendered_alt}))

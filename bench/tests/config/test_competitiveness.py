@@ -1,6 +1,7 @@
+from fractions import Fraction
 from typing import Any
 
-from loom_bench.competitiveness import CostPerMtok, Flag, FlagKind, assess
+from loom_bench.competitiveness import CostPerMtok, Flag, FlagKind, assess, price_at_mix
 from loom_bench.prices import Competitors, load_competitors
 from loom_bench.registry import Pricing
 
@@ -91,21 +92,29 @@ def test_provider_with_several_entries_counts_once_at_its_cheapest():
     two = provider("X", 300_000, 1)
     two["entries"].append({**two["entries"][0], "input_per_mtok": 200_000})
     comp = market(two, provider("Y", 400_000, 1))
-    flag = assess("m", price(500_000, 1), COST, comp)[0]
+    flag = above_market(assess("m", price(500_000, 1), COST, comp))
     assert (flag.reference, flag.providers, flag.median) == (200_000, ("X",), 300_000)
     assert "of 2 providers" in flag.message
 
 
 def test_even_median_rounds_half_up_to_the_micro():
     comp = market(provider("X", 100_000, 1), provider("Y", 100_001, 1))
-    flag = assess("m", price(200_000, 1), COST, comp)[0]
+    flag = above_market(assess("m", price(200_000, 1), COST, comp))
     assert flag.median == 100_001  # 100_000.5 rounds half up
+
+
+def above_market(flags: list[Flag]) -> Flag:
+    return next(f for f in flags if f.kind is FlagKind.PRICE_ABOVE_MARKET)
 
 
 def test_negative_margin():
     flags = assess("m", price(100_000, 300_000), CostPerMtok(110_000, 200_000), MARKET)
-    assert kinds(flags) == [(FlagKind.NEGATIVE_MARGIN, "input")]
-    (flag,) = flags
+    # the input cost is also above the cheapest list price (A, $0.10)
+    assert kinds(flags) == [
+        (FlagKind.COST_ABOVE_MARKET, "input"),
+        (FlagKind.NEGATIVE_MARGIN, "input"),
+    ]
+    flag = flags[1]
     assert (flag.ours, flag.reference, flag.delta) == (100_000, 110_000, -10_000)
     assert "$0.0100 below measured cost $0.1100/1M" in flag.message
 
@@ -151,4 +160,39 @@ def test_real_competitors_file():
 def test_side_without_allocated_cost_gets_no_margin_check():
     # all_output: input has no cost of its own; a low input price is not a negative margin
     flags = assess("m", price(1, 300_000), CostPerMtok(input=None, output=310_000), MARKET)
-    assert kinds(flags) == [(FlagKind.NEGATIVE_MARGIN, "output")]
+    assert kinds(flags) == [
+        (FlagKind.COST_ABOVE_MARKET, "output"),
+        (FlagKind.NEGATIVE_MARGIN, "output"),
+    ]
+
+
+def test_cost_above_market_per_side_and_at_the_mix():
+    # A lists 0.10 / 0.30. Our input cost 0.05 is below it, output 0.40 above; at a mix
+    # of 3 input : 1 output A costs 0.75 x 0.10 + 0.25 x 0.30 = 0.15 per 1M tokens.
+    cost = CostPerMtok(input=50_000, output=400_000, blended=160_000, input_share=Fraction(3, 4))
+    flags = assess("m", None, cost, MARKET)
+    assert kinds(flags) == [
+        (FlagKind.NO_PRICE_SET, None),
+        (FlagKind.COST_ABOVE_MARKET, "output"),
+        (FlagKind.COST_ABOVE_MARKET, "blended"),
+    ]
+    out, mix = flags[1], flags[2]
+    assert (out.reference, out.providers, out.delta) == (300_000, ("A",), 100_000)
+    assert out.median == 320_000  # A 0.30, B 0.32, C 0.40; Agg and Unv left out
+    assert (mix.reference, mix.providers, mix.ours) == (150_000, ("A",), 160_000)
+    assert "above the lowest public list price at the workload's token mix" in mix.message
+    # at or below the market on every side: no cost flag
+    cheap = CostPerMtok(input=1, output=1, blended=1, input_share=Fraction(1, 2))
+    assert kinds(assess("m", None, cheap, MARKET)) == [(FlagKind.NO_PRICE_SET, None)]
+    # aggregators widen the market when asked
+    with_agg = assess("m", None, cost, MARKET, include_aggregators=True)
+    assert [(f.side, f.providers) for f in with_agg[1:]] == [
+        ("output", ("Agg",)),
+        ("blended", ("Agg",)),
+    ]
+
+
+def test_price_at_mix_rounds_once_half_up():
+    assert price_at_mix(100_000, 300_000, Fraction(3, 4)) == 150_000
+    assert price_at_mix(1, 2, Fraction(1, 2)) == 2  # 1.5 rounds up
+    assert price_at_mix(100_000, 300_000, Fraction(1)) == 100_000

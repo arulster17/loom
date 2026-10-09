@@ -1,86 +1,11 @@
 {% extends "base.html.j2" %}
-{% from "_macros.html.j2" import money, link_list, methodology_footer %}
+{% from "_macros.html.j2" import methodology_footer %}
 {% set title = report.title %}
 {% block content %}
 <header>
 <h1>{{ report.title }}</h1>
-<p class="note"><strong>{{ report.note }}</strong></p>
-<p class="lede">Competitor prices last checked {{ report.competitors_last_checked }}. {{ scope }} Margin is our price minus our cost at SLO at the on-demand list price (storage included), under the stated cost allocation.</p>
 </header>
-{% for model_id, rows in by_model.items() %}
-{% set first = rows[0] %}
-<section>
-<h2>{{ first.display_name }} <code>{{ model_id }}</code></h2>
-<div class="table-wrap">
-<table>
-<thead>
-<tr><th>Workload</th><th>Best config at SLO</th><th class="num">Our cost $/1M in<br>(on-demand)</th><th class="num">Our cost $/1M out<br>(on-demand)</th><th class="num">Our price $/1M in</th><th class="num">Our price $/1M out</th><th class="num">Margin in</th><th class="num">Margin out</th></tr>
-</thead>
-<tbody>
-{% for r in rows %}
-<tr>
-<td>{{ row_title(r) }}</td>
-<td>{{ r.best_config or 'none ranked' }}</td>
-<td class="num">{{ money(r.cost_input) }}</td>
-<td class="num">{{ money(r.cost_output) }}</td>
-<td class="num">{{ price_text(r.price, 'input') }}</td>
-<td class="num">{{ price_text(r.price, 'output') }}</td>
-<td class="num">{{ margin_text(r.margin_input, r.cost_input) }}</td>
-<td class="num">{{ margin_text(r.margin_output, r.cost_output) }}</td>
-</tr>
-{% endfor %}
-</tbody>
-</table>
-</div>
-<h3>Public list prices</h3>
-{% if first.competitors %}
-<div class="table-wrap">
-<table>
-<thead>
-<tr><th>Provider</th><th>Provider model</th><th class="num">$/1M in</th><th class="num">$/1M out</th><th>Quantization</th><th>Availability</th><th>In flag comparison</th><th>Source</th><th>Last checked</th></tr>
-</thead>
-<tbody>
-{% for c in first.competitors %}
-<tr class="{{ '' if c.in_comparison else 'unranked' }}">
-<td>{{ c.provider }}{% if c.aggregator %}<span class="sub">aggregator</span>{% endif %}</td>
-<td>{{ c.provider_model or '' }}</td>
-<td class="num">{{ c.input_per_mtok|usd }}</td>
-<td class="num">{{ c.output_per_mtok|usd }}</td>
-<td>{{ c.quantization or 'not disclosed' }}</td>
-<td>{{ c.availability }}</td>
-<td>{{ 'yes' if c.in_comparison else 'no' }}</td>
-<td>{{ link_list([c.source]) }}{% if c.notes %}<span class="sub">{{ c.notes }}</span>{% endif %}</td>
-<td>{{ c.last_checked }}</td>
-</tr>
-{% endfor %}
-</tbody>
-</table>
-</div>
-{% else %}
-<p>No public list price recorded for this model.</p>
-{% endif %}
-<h3>Flags</h3>
-<ul class="flags">
-{% for r in rows %}
-{% for f in r.flags %}
-<li class="{{ f.kind }}">[{{ row_title(r) }}] <code>{{ f.kind }}</code>: {{ f.message }}</li>
-{% endfor %}
-{% endfor %}
-{% if not rows|map(attribute='flags')|select|list %}
-<li>none</li>
-{% endif %}
-</ul>
-</section>
-{% endfor %}
-{% if report.not_offered %}
-<section>
-<h2>Providers with no public per-token price</h2>
-<ul>
-{% for n in report.not_offered %}
-<li>{{ n.name }}: {{ n.reason }} (checked {{ n.last_checked }}){% if n.url %}; {{ link_list([n.url]) }}{% endif %}</li>
-{% endfor %}
-</ul>
-</section>
-{% endif %}
+{% set heading = none %}
+{% include "_competitiveness_section.html.j2" %}
 {{ methodology_footer(report.methodology) }}
 {% endblock %}
