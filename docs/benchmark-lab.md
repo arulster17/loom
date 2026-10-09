@@ -410,8 +410,8 @@ The real runs are on RunPod Secure Cloud on-demand, since the AWS GPU spot quota
 | `runpod-smoke` | 2x RunPod 1x L40S (the Qwen sweep at smoke scale), 37 min each of a 60 min TTL | $1.35 | $2.20 | $2.25 |
 | `llama-3.3-70b-fp8-tp4-runpod` (**on hold**, superseded by the H100 run) | 1x RunPod 4x L40S, Llama 3.3 70B FP8 at defaults, gated against BF16 run cf4d1614 (phase0-strict: tool_calling_strict reported, not gated); 2.5 h of a 3.25 h TTL (planner; cf4d1614 took 81 min) | $11.05 | $14.24 | $15 |
 | `runpod-smoke-fp8` | 1x RunPod 1x L40S, the FP8 run's FP8 path at smoke scale (Qwen3-8B BF16 vs RedHatAI FP8-dynamic), 51 min of a 65 min TTL | $0.93 | $1.19 | $1.25 |
-| `llama-3.3-70b-h100-tp2-runpod` (approved 2026-10-08, after its smoke) | 1x RunPod 2x H100 SXM ($7.98/h), BF16 baseline + FP8 at TP=2 on one pod, FP8 gated in-run; 5.1 h of a 5.5 h TTL (planner) | $40.53 | $44.09 | $45 |
-| `runpod-smoke-h100` (approved 2026-10-08, runs first) | 1x RunPod 2x H100 SXM, the H100 run's paths at smoke scale (Qwen3-8B BF16 vs FP8, TP=2, NVLink P2P), 51 min of a 65 min TTL | $6.78 | $8.66 | $9 |
+| `llama-3.3-70b-h100-tp2-runpod` (ran 2026-10-09 as 9f0853d7: $25.18, results below) | 1x RunPod 2x H100 SXM ($7.98/h), BF16 baseline + FP8 at TP=2 on one pod, FP8 gated in-run; 5.1 h of a 5.5 h TTL (planner) | $40.53 | $44.09 | $45 |
+| `runpod-smoke-h100` (ran three times: 4e50b5a5, e929eb0c, 4680fa3e, $6.15) | 1x RunPod 2x H100 SXM, the H100 run's paths at smoke scale (Qwen3-8B BF16 vs FP8, TP=2, NVLink P2P), 51 min of a 65 min TTL | $6.78 | $8.66 | $9 |
 | `qwen3-8b-quality-runpod` | 2x RunPod 1x L40S, evals and gate only, 3 eval passes per engine (finishes 565b8d3f's gate), 105 min each of a 135 min TTL (planned; ~35 min at b1b904dc's measured pass time) | $3.85 | $4.95 | $5.00 |
 
 The AWS specs stay as the secondary path:
@@ -528,7 +528,8 @@ lands above 50 ms at any load. A smaller load doesn't help, because the floor is
   tool-calling format, and vLLM's `llama3_json` keeps the model's JSON as it is. vLLM lists
   "parameters in an incorrect format" as a known Llama 3 issue. vLLM can constrain
   arguments to the schema when a tool sets `strict: true`, but the eval sends plain tools,
-  as most clients do, so it measures the model's own typing.
+  as most clients do, so it measures the model's own typing. (The strict variant, run on
+  H100 below, showed vLLM 0.30 does not constrain Llama 3.3 70B's calls either.)
 
 A config that meets 50 ms TPOT p95 on this content needs P2P that works (or NVLink), or
 fewer bytes per token (FP8 weights, a different config), or a target taken per model.
@@ -539,4 +540,39 @@ rendered `--speculative-config` (vLLM) or `--speculative-draft-model-path` and
 `--speculative-draft-model-revision` (SGLang). Both providers download it next to the
 model, since the engine runs offline. A draft must be a Hugging Face repo pinned to a
 40-hex commit.
+
+### 70B on 2x H100 SXM (9f0853d7, 2026-10-09)
+
+`llama-3.3-70b-h100-tp2-runpod`: one RunPod Secure 2x H100 SXM pod ($8.0156/h with 260 GB
+of storage), TP=2 over NVLink, vLLM v0.30.0, BF16 then a warm restart onto the FP8
+checkpoint, FP8 gated against the in-run BF16 cell. Spend $25.18 (DB), plus $6.15 for
+three smoke attempts (`runpod-smoke-h100`: 4e50b5a5 $1.18, failed on the second
+checkpoint's weights not being downloaded before its offline engine started, fixed since;
+e929eb0c $2.26; 4680fa3e $2.71): $31.33 in all, under the $45 + $9 caps. Report:
+`reports/70b-h100-v1/`.
+
+| Row | Workload | Goodput at SLO | Status | p95 TTFT / TPOT at goodput | $/1M blended | vs lowest eligible list price |
+|---|---|---|---|---|---|---|
+| Llama 3.3 70B (BF16) | fixed-1k-1k | 0.5 req/s (fails at 0.59) | untrusted: TTFT p95 CV 21.8% | 271 ms / 31.1 ms | $2.37 [1.97, 2.84] | 11.27× DeepInfra $0.210 (fp8, not like for like) |
+| Llama 3.3 70B (BF16) | shared-prefix | 2 req/s (fails at 2.83) | untrusted: TTFT p95 CV 10.8% | 411 ms / 42.0 ms | $0.502 [0.419, 0.601] | 4.45× DeepInfra $0.113 |
+| Llama 3.3 70B FP8 | fixed-1k-1k | 2 req/s (fails at 4) | trusted, rank 1 | 304 ms / 29.4 ms | $0.546 [0.532, 0.561] | 2.60× DeepInfra $0.210 (fp8, like for like) |
+| Llama 3.3 70B FP8 | shared-prefix | 4 req/s (fails at 8) | trusted, rank 1 | 417 ms / 38.1 ms | $0.263 [0.239, 0.289] | 2.33× DeepInfra $0.113 (like for like) |
+
+- **BF16 meets the 50 ms TPOT SLO on H100.** On 4x L40S (cf4d1614, 55102ddb) no load met
+  it; here a decode step reads its 70 GB shard pair over ~3.35 TB/s and the all-reduce
+  runs over NVLink, and BF16 holds 0.5 req/s on fixed-1k-1k with TPOT p95 31 ms. The
+  figure is untrusted (TTFT p95 varies 21.8% across the three repetitions at goodput) and
+  so indicative only: rerun before relying on it.
+- **FP8 is 4x the goodput for the same pod**: 2 req/s on fixed-1k-1k (2,037 output tok/s
+  per replica vs 470) and 4 req/s on shared-prefix, both trusted. Blended cost $0.546 per
+  1M tokens at 1k/1k and $0.263 on shared-prefix. Against public list prices for Llama
+  3.3 70B (the FP8 row is compared with its base model's listings), that is 2.60× and
+  2.33× DeepInfra's fp8 Turbo listing, and 0.53× and 0.25× Together AI's $1.04.
+- **Quality gate: inconclusive, so FP8 is blocked.** gsm8k (0.957 vs 0.955), ifeval
+  (0.898 vs 0.889), tool_calling (0.450 vs 0.450), json_schema (0.973 vs 0.970),
+  divergence (KL 0.0038 nats, top-1 97.99%) and sanity all pass; tool_calling_strict is
+  inconclusive at -1.67 pts [-6.67, +3.33] against its 6-point margin (one item of 60, the
+  ±3/n floor). Strict mode never engaged on Llama 3.3 70B (both configs still sent
+  numbers as strings), and the lever that can decide the task is more items, not
+  replicates: [quality-gate.md](quality-gate.md), "Strict tool calling".
 
