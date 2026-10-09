@@ -108,9 +108,11 @@ tasks:
     kind: tool_calling
     threshold: 0.06
     min_samples: 50
-  # Strict-mode variant: the same 60 items, every tool sent `strict: true` (vLLM then
-  # constrains the arguments, so numbers cannot come back as strings). Reported next to
-  # tool_calling, which stays the headline; same margin.
+  # Strict-mode variant: the same 60 items, every tool sent `strict: true`. vLLM 0.30
+  # constrains a call only when it starts with `{"name": `, which Llama 3.3 70B does not
+  # write, so in 9f0853d7 nothing was constrained and numbers still came back as strings
+  # (docs/quality-gate.md, "Strict tool calling"). Reported next to tool_calling, which
+  # stays the headline; same margin.
   - name: tool_calling_strict
     kind: tool_calling_strict
     threshold: 0.06

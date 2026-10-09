@@ -39,8 +39,11 @@ the samples without re-running the model.
 strict mode: `"strict": true` on the function and `additionalProperties: false`
 on every object schema (`strict_parameters`). With tool_choice "auto", vLLM
 v0.30 and SGLang v0.5.21 then constrain the call to the schema with an xgrammar
-structural tag once the model starts one, so a quoted number can no longer be
-emitted. `tool_calling` stays the headline: most clients send plain tools, and
+structural tag, but only once the model starts the call with the tag's trigger.
+For vLLM `llama3_json` that is exactly `{"name": `, which Llama 3.3 70B does not
+write, so its strict calls are unconstrained (docs/quality-gate.md, "Strict tool
+calling"); a failed strict item therefore also stores the model's raw reply
+(`unconstrained_text`). `tool_calling` stays the headline: most clients send plain tools, and
 the strict variant measures what a client that opts in gets. Required lists are
 left as they are (OpenAI's strict style would require every property and make
 optional ones nullable): neither engine asks for that, and it would change what
@@ -270,6 +273,34 @@ def failure_meta(
     return meta
 
 
+async def unconstrained_text(
+    ctx: EvalContext, item: ToolItem, tools: list[dict[str, Any]], max_tokens: int
+) -> dict[str, Any]:
+    """The model's raw, unparsed reply to a failed strict item, for diagnosis only.
+
+    The tool parser re-serialises a call, so the scored reply cannot show how the model
+    began it, and that decides whether strict mode engaged: vLLM's structural tag for
+    `llama3_json` only constrains a call that starts with exactly `{"name": ` (see
+    docs/quality-gate.md, "Strict tool calling"). This re-asks with tool_choice "none"
+    and special tokens kept: no tool parser and no structural tag run, and on vLLM the
+    tools stay in the prompt (`--exclude-tools-when-tool-choice-none` is off by default),
+    so with greedy decoding this is the reply the model writes when nothing constrains
+    it. (SGLang drops the tools from the prompt under "none", so there the text answers
+    a different prompt.) Never scored.
+    """
+    try:
+        res = await ctx.client.chat(
+            [{"role": "user", "content": item.query}],
+            max_tokens=max_tokens,
+            tools=tools,
+            tool_choice="none",
+            skip_special_tokens=False,
+        )
+    except EvalRequestError as e:
+        return {"unconstrained_error": clip(str(e))}
+    return {"unconstrained_text": clip(res.text)}
+
+
 class ToolCallingParams(TaskParams):
     categories: tuple[Category, ...] = ("simple", "multiple")
     limit: Annotated[int, Field(ge=1)] | None = None  # first N items of those categories
@@ -310,6 +341,8 @@ class ToolCallingTask(ParamTask[ToolCallingParams]):
             meta: dict[str, Any] = {"result": match.reason, "category": item.category}
             if not match.ok:
                 meta |= failure_meta(match, res.tool_calls, res.text, item)
+                if self.strict:
+                    meta |= await unconstrained_text(ctx, item, tools, self.params.max_tokens)
             return (
                 ItemResult(
                     item_id=item.item_id,

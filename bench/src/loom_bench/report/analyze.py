@@ -164,8 +164,9 @@ class TaskQuality(BaseModel):
 # Variant tasks: listed after the task they vary (names sort together) with this note.
 TASK_NOTES: dict[str, str] = {
     "tool_calling_strict": (
-        "strict variant: tools sent with strict: true, arguments constrained to the "
-        "schema; tool_calling is the headline"
+        "strict variant: tools sent with strict: true, which constrains the arguments to "
+        "the schema only if the engine's grammar recognises how the model starts a call "
+        "(on vLLM 0.30, Llama 3.3 70B's calls are not); tool_calling is the headline"
     ),
 }
 

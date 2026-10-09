@@ -42,10 +42,12 @@ have to write `null` for an argument it means to leave out.
 
 Why it exists: Llama 3.3 70B scores 0.450 on `tool_calling` because it writes numbers as
 strings (`"250"` for a number parameter), which the scorer rejects as a real client would.
-With strict tools the engine constrains the arguments to the schema, so that failure
-cannot happen. Both numbers are worth knowing. **`tool_calling` stays the headline**:
-most clients send plain tools, so it measures what they get. `tool_calling_strict` measures
-what a client that opts in gets. Reports list it right after `tool_calling` (task names
+With strict tools the engine is meant to constrain the arguments to the schema, so that
+failure could not happen. On Llama 3.3 70B with vLLM 0.30 it does not: strict mode never
+engaged (below, "What the 70B H100 run showed"). Both numbers are worth knowing.
+**`tool_calling` stays the headline**: most clients send plain tools, so it measures what
+they get. `tool_calling_strict` measures what a client that opts in gets, which for this
+model and engine is the same thing. Reports list it right after `tool_calling` (task names
 sort together). The model page notes that it is the strict variant and that
 `tool_calling` is the headline, and the site's methodology says the same.
 
@@ -65,7 +67,11 @@ Engine behaviour (checked against vLLM v0.30.0 and SGLang v0.5.21 source):
   text through until the model starts a call. From then on, the name must be one of the
   offered tools and the arguments must match that tool's `parameters` schema. For
   `llama3_json` (Llama 3.3) that is xgrammar's builtin `llama` format, triggered by
-  `{"name": ` and forcing `{"name": "<tool>", "parameters": <schema JSON>}`. For `hermes`
+  `{"name": ` and forcing `{"name": "<tool>", "parameters": <schema JSON>}`. That trigger
+  is the only way in: a call written any other way (`{"type": "function", "name": ...}`,
+  `{"name":"...` without the space, a newline after `{`) never fires it, stays free text,
+  and the `llama3_json` parser, which accepts any JSON object with `name` and
+  `parameters` or `arguments`, still returns it as a tool call. For `hermes`
   (Qwen3) it is vLLM's own format, triggered by `<tool_call>` and forcing
   `<tool_call>\n{"name": "<tool>", "arguments": <schema JSON>}\n</tool_call>`. vLLM's docs
   recommend the OpenAI strict-schema style "for best compatibility" but do not require
@@ -83,6 +89,115 @@ Engine behaviour (checked against vLLM v0.30.0 and SGLang v0.5.21 source):
 Both engines enforce the schema through their grammar backend (xgrammar by default, as for
 `json_schema`). No extra engine flag is needed beyond the tool parser flags that
 `tool_calling` already uses.
+
+#### What the 70B H100 run showed (9f0853d7): strict mode never engaged
+
+BF16 scored 0.450 on both tasks, FP8 0.450 and 0.433. The stored failures (each failed
+item keeps its raw call) show the grammar constrained none of them:
+
+- Every one of BF16's 33 strict failures carries a value the schema forbids, which the
+  structural tag cannot emit once it is triggered: `"days_from_now": "30"` and
+  `"party_size": "10"` for integers, `"amount": "40"` for a number, `"notify": "true"`
+  for a boolean, `"dimensions": "[6, 9]"` for an array (FP8: 34 of 34).
+- Keys come out of schema order, which xgrammar's JSON schema grammar (`any_order:
+  false`) also forbids: BF16 strict m-currency-2 is
+  `{"to_currency": "NZD", "amount": "40", "from_currency": "AUD"}` (schema order:
+  amount, from_currency, to_currency), m-table-2 is
+  `{"party_size": "10", "time": "20:45", "restaurant": "Sakura Garden"}`.
+- 31 of the 33 calls both tasks failed are byte-identical between `tool_calling` and
+  `tool_calling_strict`. The two that differ (s-reminder-1 `"Renew your passport"` vs
+  `"renew my passport"`, m-currency-2's key order) differ because the prompt does: the
+  chat template prints each tool's JSON, now with `"strict": true` and
+  `"additionalProperties": false`. That also shows the strict flag reached vLLM.
+
+Why, checked against vLLM v0.30.0 and xgrammar 0.2.7 (the image was built 2026-09-22;
+0.2.3, vLLM's test pin, has the same trigger):
+
+1. The request is right. `strict: true` survives vLLM's `FunctionDefinition`, the
+   renderer's `preprocess_chat` calls the parser's `adjust_request` whenever
+   `tool_choice` is not `"none"`, and `_apply_structural_tag` builds the tag for
+   `"auto"` with a strict tool (`structural_tag_registry.get_model_structural_tag`) and
+   sets it as the request's `structured_outputs`. Nothing in the path drops it.
+2. The grammar works once triggered. Built exactly as vLLM builds it (`llama`, auto, the
+   m-currency-2 tools) and compiled with the Llama 3.3 tokenizer, xgrammar rejects
+   `{"name": "convert_currency", "parameters": {"to...` and `... {"amount": "` (the
+   observed calls), with or without a leading `<|python_tag|>` (an ordinary token to
+   xgrammar here), and accepts `... {"amount": 40, ...}`.
+3. It also accepts the observed call written as `{"type": "function", "name":
+   "convert_currency", "parameters": {...}}` or `{"name":"convert_currency",...}`: no
+   trigger, so free text to the end.
+
+So Llama 3.3 70B did not begin its calls with `{"name": `. Which prefix it used cannot be
+read from these samples: `llama3_json` re-serialises the call (`json.dumps` of the
+arguments), so only argument order and values survive. A sibling under the same chat
+template behaves differently: Llama 3.1 8B (MLX 4-bit, greedy, all 60 strict prompts)
+began 58 calls with `<|python_tag|>{"name": ` and 2 with `{"name": `, all on the
+trigger. llama.cpp's Llama 3.x grammar (ggml-org/llama.cpp a83f528, "fix llama 3.x")
+allows an optional `"type": "function",` before `name` and triggers on
+`{"type": "function"`, `{"name":` and `{\n  "name":` as well, because Llama 3.x models
+write all of these. The likeliest prefix for the 70B is `{"type": "function", ...`,
+which mirrors how the template prints each tool (`{"type": "function", "function":
+{...}}`).
+
+Classification: engine behaviour, a mismatch between xgrammar's single Llama trigger and
+what Llama 3.3 70B writes. It is not a harness bug: no request shape under
+`tool_choice: "auto"` changes where the model starts its call. `tool_choice: "required"`
+would engage the grammar (its `llama` format then forces the output to start with the tag,
+so `{"type": ...` and `{"name":"` are rejected at the first token), but that is a
+different request (the model may not answer without a call), not what a client opting
+into strict tools sends, so the task keeps `"auto"`. The task's numbers are therefore
+correct for what they claim: a client sending strict tools to Llama 3.3 70B on vLLM 0.30
+gets no constraint and the same quoted numbers.
+
+To settle the prefix, a failed `tool_calling_strict` item now also stores
+`meta["unconstrained_text"]`: the same messages and tools re-sent once with
+`tool_choice: "none"` and `skip_special_tokens: false`, so no parser and no structural
+tag run and the reply is the model's own text, special tokens included. On vLLM the tools
+stay in the prompt under `"none"` (`--exclude-tools-when-tool-choice-none` is off by
+default), so with greedy decoding this is the reply the scored request got whenever the
+grammar did not engage. (SGLang drops the tools under `"none"`, so there it answers a
+different prompt.) It is never scored, and the task version is unchanged (`strict.1`):
+items, prompts and scoring are the same.
+
+The one item FP8 lost on the strict task (s-books-1: BF16 `{"max_results": 5}`, FP8
+`{"max_results": "5"}`) is that same quoted-number habit tipping on a borderline item
+under the strict prompt; the plain prompt gives a typed 5 on both. FP8 and BF16 differ
+on 2 of 60 strict items (s-books-1, and m-table-2's key order); on the plain task they
+agree on every verdict and on every one of the 33 failed calls, byte for byte, in line
+with the 97.99% top-1 agreement.
+
+#### What can decide a 60-item task
+
+The strict verdict, -1.67 pts [-6.67, +3.33] against a 6-point margin, is the ±3/n
+floor at work: with 60 items the CI is at least ±5 pts around the delta, so a pass needs
+delta ≥ -1 pt, and one net lost item is -1.67. Run through `evaluate_task`:
+
+| Lever | Strict verdict |
+|---|---|
+| as run: 60 items, FP8 loses 1 | INCONCLUSIVE, [-6.67, +3.33] |
+| `replicates: 3`, the flip repeats every pass | INCONCLUSIVE, unchanged |
+| `replicates: 3`, FP8 fails it in 2 of 3 passes | INCONCLUSIVE, [-6.11, +3.89] |
+| `replicates: 3`, FP8 fails it in 1 of 3 passes | PASS, [-5.56, +4.44] |
+| 67 items, 1 lost | PASS, [-5.97, +2.99] |
+| 120 items, 2 lost (the observed rate) / 3 lost | PASS, [-4.17, +0.83] / [-5.83, 0.00] |
+| 150 items, 3 lost | PASS, [-4.67, 0.00] |
+
+Replicates only help if the flip is run noise, and tool calls here are deterministic:
+in b03b3c52 no `tool_calling` item changed across three passes on either engine (IFEval:
+19 and 32 did), and in 9f0853d7 BF16 and FP8, different weights, wrote byte-identical
+calls on all 33 plain failures. The s-books-1 flip is a BF16-vs-FP8 difference and
+would repeat, so replicates, or simply running the strict task again, buy nothing. More
+items do: at 120+ items the task tolerates the observed rate with room to spare, and so
+does `tool_calling`, whose zero-delta pass today sits on the same ±5-pt floor. Growing
+`tool_calling.yaml` (data version 2, which also fixes the `from_currency`/`to_currency`
+descriptions: the unquoted `ISO 4217 code, e.g. USD` in a YAML flow mapping parses as a
+truncated description plus a stray `"e.g. USD": null` key, which the prompt prints) and
+re-running both configs' quality suite on one 2x H100 pod is the lever. `bench plan` on a
+quality-only twin of the H100 spec (`workloads: []`, `phase0-strict`): cold start 30.6
+min, warm start 15.1, two evals of ~30 min each, 1.86 h, $14.88 at $8.0156/h; worst
+case $18.04 at a 135-minute TTL. The 9f0853d7 timings (BF16 healthy after 16.5 min,
+suites of 7.3 min BF16 and 4.7 min FP8, FP8 restart 7 min, plus eval setup) put the
+likely cost near 40 minutes, ~$5.30.
 
 Besides task scores, the gate looks at:
 

@@ -344,14 +344,25 @@ def test_strict_tools_are_the_plain_tools_plus_strict_mode():
             assert rest == {k: v for k, v in p["function"].items() if k != "parameters"}
 
 
-def _tool_handler(seen, answers):
-    """Answers each query with its scripted call (else empty arguments); records bodies."""
+def _raw(name, args):
+    """What a Llama 3.3 reply might look like before the parser re-serialises it."""
+    return f'{{"type": "function", "name": "{name}", "parameters": {args}}}'
+
+
+def _tool_handler(seen, answers, diagnostics=None):
+    """Answers each query with its scripted call (else empty arguments); records bodies.
+
+    A tool_choice "none" request (the strict task's diagnostic) gets the call as raw
+    text, as an engine without a tool parser would send it."""
 
     def handler(request):
         body = json.loads(request.content)
-        seen.append(body)
         query = body["messages"][0]["content"]
         name, args = answers.get(query, (body["tools"][0]["function"]["name"], "{}"))
+        if body["tool_choice"] == "none":
+            (diagnostics if diagnostics is not None else seen).append(body)
+            return reply(_raw(name, args))
+        seen.append(body)
         call = {"id": "c", "type": "function", "function": {"name": name, "arguments": args}}
         return reply(None, [call], "tool_calls")
 
@@ -370,14 +381,15 @@ async def test_strict_task_sends_strict_tools_and_scores_like_tool_calling(tmp_p
             '{"amount": "250", "from_currency": "USD", "to_currency": "EUR"}',
         ),
     }
-    outs, bodies = {}, {}
+    outs, bodies, diagnostics = {}, {}, {}
     for kind in ("tool_calling", "tool_calling_strict"):
         seen: list[dict] = []
-        async with fake_client(_tool_handler(seen, answers)) as c:
+        diag: list[dict] = []
+        async with fake_client(_tool_handler(seen, answers, diag)) as c:
             outs[kind] = await build_task(kind, kind, {"categories": ["simple"]}).run(
                 EvalContext(client=c, workdir=tmp_path)
             )
-        bodies[kind] = seen
+        bodies[kind], diagnostics[kind] = seen, diag
 
     for body in bodies["tool_calling_strict"]:
         assert body["tool_choice"] == "auto"
@@ -390,13 +402,62 @@ async def test_strict_task_sends_strict_tools_and_scores_like_tool_calling(tmp_p
     plain, strict = outs["tool_calling"], outs["tool_calling_strict"]
     assert [r.item_id for r in plain.items] == [r.item_id for r in strict.items]
     for p, t in zip(plain.items, strict.items, strict=True):
+        diagnosis = {k: t.meta.pop(k) for k in ("unconstrained_text",) if k in t.meta}
         assert (p.score, p.meta) == (t.score, t.meta)
         assert p.content_hash != t.content_hash  # the strict request is other content
+        # A failed strict item also stores the raw, unconstrained reply; a pass does not.
+        assert bool(diagnosis) == (t.score == 0.0)
+        assert "unconstrained_text" not in p.meta
     got = {r.item_id: r for r in strict.items}
     assert got["s-weather-1"].score == 1.0
     assert got["s-currency-1"].meta["result"] == "wrong_value"
     assert got["s-timer-2"].meta["result"] == "missing_required_argument"
     assert sum(r.score for r in strict.items) == 1.0
+    # The diagnostic re-asks each failed strict item once, unconstrained: tool_choice
+    # "none" (no parser, no structural tag) with special tokens kept, the same tools.
+    assert diagnostics["tool_calling"] == []
+    failed = [r for r in strict.items if r.score == 0.0]
+    assert len(diagnostics["tool_calling_strict"]) == len(failed)
+    for body in diagnostics["tool_calling_strict"]:
+        assert body["skip_special_tokens"] is False
+        assert all(t["function"]["strict"] is True for t in body["tools"])
+
+
+async def test_strict_task_stores_the_unconstrained_reply_of_a_failed_item(tmp_path):
+    data = load_data()
+    item = next(i for i in data.items if i.item_id == "s-currency-1")
+    args = '{"amount": "250", "from_currency": "USD", "to_currency": "EUR"}'
+    answers = {item.query: ("convert_currency", args)}
+    async with fake_client(_tool_handler([], answers)) as c:
+        out = await build_task("tool_calling_strict", "tcs", {"limit": 4}).run(
+            EvalContext(client=c, workdir=tmp_path)
+        )
+    meta = next(r for r in out.items if r.item_id == item.item_id).meta
+    assert meta["result"] == "wrong_value"
+    # The parser's view (a re-serialised call) and the model's own text, which shows
+    # whether the call began with the structural tag's trigger `{"name": `.
+    assert meta["output"]["tool_calls"][0]["arguments"] == args
+    assert meta["unconstrained_text"] == _raw("convert_currency", args)
+    assert out.version == "strict.1+data.1"  # a diagnostic, not a scoring change
+
+
+async def test_strict_task_keeps_scoring_when_the_diagnostic_request_fails(tmp_path):
+    def handler(request):
+        body = json.loads(request.content)
+        if body["tool_choice"] == "none":
+            return httpx.Response(400, json={"error": {"message": "no"}})
+        name = body["tools"][0]["function"]["name"]
+        call = {"id": "c", "type": "function", "function": {"name": name, "arguments": "{}"}}
+        return reply(None, [call], "tool_calls")
+
+    async with fake_client(handler) as c:
+        out = await build_task("tool_calling_strict", "tcs", {"limit": 2}).run(
+            EvalContext(client=c, workdir=tmp_path)
+        )
+    assert all(r.score == 0.0 for r in out.items)
+    for r in out.items:
+        assert "HTTP 400" in r.meta["unconstrained_error"]
+        assert "error" not in r.meta  # the scored request itself succeeded
 
 
 async def test_strict_task_is_versioned_apart_from_tool_calling(tmp_path):
