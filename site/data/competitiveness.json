@@ -26,7 +26,8 @@
           "source": "https://docs.fireworks.ai/serverless/pricing",
           "last_checked": "2026-10-04",
           "notes": "Size-bucket price for models of 4B-16B parameters.",
-          "in_comparison": false
+          "in_comparison": false,
+          "blended_at_mix": null
         },
         {
           "provider": "OpenRouter",
@@ -39,7 +40,8 @@
           "source": "https://openrouter.ai/qwen/qwen3-8b",
           "last_checked": "2026-10-04",
           "notes": null,
-          "in_comparison": false
+          "in_comparison": false,
+          "blended_at_mix": null
         }
       ],
       "flags": [
@@ -58,7 +60,14 @@
           "side": null,
           "message": "qwen3-8b: no eligible public list price"
         }
-      ]
+      ],
+      "cost_blended": null,
+      "basis": "not benchmarked",
+      "slo": null,
+      "alternative_slo": false,
+      "tokens_in": null,
+      "tokens_out": null,
+      "quantization": null
     },
     {
       "model_id": "llama-3.3-70b-instruct",
@@ -84,7 +93,8 @@
           "source": "https://www.together.ai/pricing",
           "last_checked": "2026-10-04",
           "notes": null,
-          "in_comparison": true
+          "in_comparison": true,
+          "blended_at_mix": null
         },
         {
           "provider": "Fireworks AI",
@@ -97,7 +107,8 @@
           "source": "https://docs.fireworks.ai/serverless/pricing",
           "last_checked": "2026-10-04",
           "notes": "Size-bucket price for models above 16B parameters.",
-          "in_comparison": false
+          "in_comparison": false,
+          "blended_at_mix": null
         },
         {
           "provider": "DeepInfra",
@@ -110,7 +121,8 @@
           "source": "https://deepinfra.com/meta-llama/Llama-3.3-70B-Instruct-Turbo",
           "last_checked": "2026-10-04",
           "notes": null,
-          "in_comparison": true
+          "in_comparison": true,
+          "blended_at_mix": null
         },
         {
           "provider": "Novita AI",
@@ -123,7 +135,8 @@
           "source": "https://novita.ai/pricing",
           "last_checked": "2026-10-04",
           "notes": "Listed with a 12K-token context window.",
-          "in_comparison": true
+          "in_comparison": true,
+          "blended_at_mix": null
         },
         {
           "provider": "OpenRouter",
@@ -136,7 +149,8 @@
           "source": "https://openrouter.ai/meta-llama/llama-3.3-70b-instruct",
           "last_checked": "2026-10-04",
           "notes": "Headline price; requests are routed across underlying providers.",
-          "in_comparison": false
+          "in_comparison": false,
+          "blended_at_mix": null
         }
       ],
       "flags": [
@@ -150,7 +164,14 @@
           "side": null,
           "message": "llama-3.3-70b-instruct: no measured cost at SLO"
         }
-      ]
+      ],
+      "cost_blended": null,
+      "basis": "not benchmarked",
+      "slo": null,
+      "alternative_slo": false,
+      "tokens_in": null,
+      "tokens_out": null,
+      "quantization": null
     },
     {
       "model_id": "llama-3.3-70b-instruct-fp8",
@@ -181,7 +202,52 @@
           "side": null,
           "message": "llama-3.3-70b-instruct-fp8: no eligible public list price"
         }
-      ]
+      ],
+      "cost_blended": null,
+      "basis": "not benchmarked",
+      "slo": null,
+      "alternative_slo": false,
+      "tokens_in": null,
+      "tokens_out": null,
+      "quantization": null
+    },
+    {
+      "model_id": "qwen3-8b-fp8",
+      "display_name": "Qwen3 8B FP8",
+      "workload": null,
+      "load_mode": null,
+      "best_config": null,
+      "best_config_hash": null,
+      "cost_input": null,
+      "cost_output": null,
+      "price": null,
+      "margin_input": null,
+      "margin_output": null,
+      "competitors": [],
+      "flags": [
+        {
+          "kind": "no_price_set",
+          "side": null,
+          "message": "qwen3-8b-fp8: no price set"
+        },
+        {
+          "kind": "no_cost_measurement",
+          "side": null,
+          "message": "qwen3-8b-fp8: no measured cost at SLO"
+        },
+        {
+          "kind": "no_public_comparison",
+          "side": null,
+          "message": "qwen3-8b-fp8: no eligible public list price"
+        }
+      ],
+      "cost_blended": null,
+      "basis": "not benchmarked",
+      "slo": null,
+      "alternative_slo": false,
+      "tokens_in": null,
+      "tokens_out": null,
+      "quantization": null
     }
   ],
   "not_offered": [
@@ -241,6 +307,10 @@
         "method": "geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0"
       },
       {
+        "metrics": "requests in prefill (request rate × mean TTFT)",
+        "method": "geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0"
+      },
+      {
         "metrics": "server queue time, measurement window",
         "method": "geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0"
       },
@@ -262,6 +332,7 @@
       }
     ],
     "price_book_last_checked": "2026-10-08",
-    "configs": []
+    "configs": [],
+    "split": "Headline $/1M input and $/1M output use the prefill_time split, measured at the goodput point: input tokens pay for the share φ of the replica's time spent prefilling prompts, output tokens for the rest (decode steps, and any idle headroom the SLO needs). φ is the mean number of requests in their prefill phase, request rate × mean TTFT (Little's law), per repetition, combined like a throughput (geometric mean, log-t CI) and capped at 1. Input = φ × hourly price / input tok/s; output = (1 − φ) × hourly price / output tok/s; at the measured mix they bill exactly the replica's hourly price. TTFT includes queueing and the first decode step and concurrent prefills are each counted, so φ tends to overstate prefill time (input high, output low); idle headroom is charged to output (output high). The price CIs combine the φ and throughput CIs at the ends that push each price the same way, an outer bound. Blended $/1M is the hourly price over all tokens at the workload's own input:output mix and needs no split. The ranking still uses the declared cost allocation, shown in its own column."
   }
 }

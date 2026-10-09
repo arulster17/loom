@@ -1,0 +1,69 @@
+{
+  "model_id": "qwen3-8b-fp8",
+  "display_name": "Qwen3 8B FP8",
+  "repo": "RedHatAI/Qwen3-8B-FP8-dynamic",
+  "registry": {
+    "id": "qwen3-8b-fp8",
+    "display_name": "Qwen3 8B FP8",
+    "hf": {
+      "repo": "RedHatAI/Qwen3-8B-FP8-dynamic",
+      "revision": "05233ce1e0565b5fdc9cfa000ab840152ed30c70",
+      "license": "apache-2.0",
+      "gated": false,
+      "size_bytes": 9438581960,
+      "quant_method": "compressed-tensors",
+      "trust_remote_code": false,
+      "trust_remote_code_review": null
+    },
+    "engine": {
+      "name": "vllm",
+      "version": "0.30.0",
+      "image": "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90",
+      "args": {},
+      "chat_template_kwargs": {
+        "enable_thinking": false
+      }
+    },
+    "hardware": {
+      "gpu": "L40S",
+      "gpus_per_replica": 1,
+      "nodes_per_replica": 1,
+      "instance_types": {
+        "aws": "g6e.xlarge",
+        "gcp": null,
+        "runpod": "l40s-x1"
+      }
+    },
+    "parallelism": {
+      "tp": 1,
+      "pp": 1,
+      "ep": 1
+    },
+    "max_context": 32768,
+    "quantization": "fp8",
+    "kv_cache_dtype": "auto",
+    "pricing": null,
+    "scaling": {
+      "min_replicas": 0,
+      "max_replicas": 1
+    },
+    "clouds": [
+      "aws",
+      "runpod"
+    ],
+    "capabilities": {
+      "tools": true,
+      "json_schema": true,
+      "vision": false,
+      "reasoning": true
+    },
+    "tool_call_parsers": {
+      "vllm": "hermes",
+      "sglang": "qwen25"
+    },
+    "routing_tier": 1,
+    "status": "preview"
+  },
+  "results": [],
+  "cold_starts": {}
+}
