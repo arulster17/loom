@@ -1,0 +1,652 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loom leaderboard: cost at SLO</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1b1f24;
+  --muted: #59636e;
+  --border: #d1d9e0;
+  --stripe: #f6f8fa;
+  --accent: #0969da;
+  --good: #1a7f37;
+  --warn: #9a6700;
+  --bad: #cf222e;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #9198a1;
+    --border: #3d444d;
+    --stripe: #151b23;
+    --accent: #4493f8;
+    --good: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 2rem 1rem 3rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+main { max-width: 84rem; margin: 0 auto; }
+h1 { font-size: 1.6rem; margin: 0 0 .5rem; }
+h2 { font-size: 1.2rem; margin: 2.5rem 0 .75rem; }
+h3 { font-size: 1rem; margin: 1.5rem 0 .5rem; }
+p.lede { color: var(--muted); max-width: 60rem; margin: 0 0 .5rem; }
+a { color: var(--accent); }
+code { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { padding: .5rem .65rem; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); }
+th { font-size: 12px; font-weight: 600; color: var(--muted); background: var(--stripe); white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; white-space: nowrap; }
+tr.unranked td { color: var(--muted); }
+.sub, .ci { display: block; color: var(--muted); font-size: 12px; }
+.badge { display: inline-block; padding: 0 .45rem; border-radius: 999px; border: 1px solid currentColor; font-size: 12px; white-space: nowrap; }
+.badge.ranked, .badge.pass, .badge.within { color: var(--good); }
+.badge.untrusted, .badge.inconclusive, .badge.review, .badge.no_cost, .badge.baseline { color: var(--warn); }
+.badge.gate_failed, .badge.fail, .badge.outside { color: var(--bad); }
+ul.warnings, ul.flags { padding-left: 1.2rem; }
+ul.warnings li { color: var(--warn); }
+ul.flags li { color: var(--warn); }
+ul.flags li.price_above_market, ul.flags li.negative_margin, ul.flags li.cost_above_market { color: var(--bad); }
+section.summary ul li { margin: .25rem 0; }
+section.summary .caveat { color: var(--warn); }
+.note { border-left: 3px solid var(--accent); padding: .25rem .75rem; margin: 1rem 0; }
+footer.method { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); font-size: 14px; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1rem; margin: 0; }
+dt { font-weight: 600; }
+dd { margin: 0; overflow-wrap: anywhere; }
+details { border: 1px solid var(--border); border-radius: 6px; padding: .5rem .75rem; margin: .5rem 0; }
+summary { cursor: pointer; font-weight: 600; }
+details dl { margin-top: .5rem; }
+@media (max-width: 40rem) { dl { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+<header>
+<h1>Loom leaderboard: cost at SLO</h1>
+</header>
+<section class="summary">
+<h2>Summary</h2>
+<p class="lede">What one replica costs us to serve at the SLO (TTFT p95 ≤ 1000 ms, TPOT p95 ≤ 50 ms, error rate ≤ 1.00%), at the on-demand list price including its storage, at the highest tested load that met the SLO; 95% confidence intervals in brackets. $/1M input and $/1M output split the replica&#39;s cost by measured prefill time (methodology at the end); $/1M blended is the replica&#39;s cost over all tokens at that workload&#39;s own input:output mix and needs no split. Each workload quotes one config: trusted first, then quality verified (the gate&#39;s reference or a gate pass), then leaderboard rank; a config that failed the quality gate is never quoted. Nothing here relaxes a check: untrusted figures are quoted only with their reason, and the ranking is the leaderboard&#39;s.</p>
+<h3>RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic</h3>
+<p>Hardware: 2×H100 (runpod h100-sxm-x2, $8.0156/h on-demand incl. 260 GB storage).</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>Workload</th><th>Config</th><th>Standing</th><th>Goodput at SLO</th><th class="num">$/1M input</th><th class="num">$/1M output</th><th class="num">$/1M blended</th><th>Quality</th></tr>
+</thead>
+<tbody>
+<tr class="">
+<td>fixed-1k-1k</td>
+<td><strong>vllm-tp2-fp8</strong><span class="sub">quoted</span></td>
+<td>rank 1</td>
+<td>2 req/s (fails at 4)</td>
+<td class="num">$0.4548<span class="ci">$0.4350 – $0.4755</span></td>
+<td class="num">$0.6381<span class="ci">$0.6133 – $0.6636</span></td>
+<td class="num">$0.5464<span class="ci">$0.5320 – $0.5612</span></td>
+<td>+0.001 (gsm8k) · pass</td>
+</tr>
+<tr class="">
+<td>shared-prefix</td>
+<td><strong>vllm-tp2-fp8</strong><span class="sub">quoted</span></td>
+<td>rank 1</td>
+<td>4 req/s (fails at 8)</td>
+<td class="num">$0.2551<span class="ci">$0.2082 – $0.3069</span></td>
+<td class="num">$0.3879<span class="ci">$0.0000 – $0.8952</span></td>
+<td class="num">$0.2628<span class="ci">$0.2390 – $0.2891</span></td>
+<td>+0.001 (gsm8k) · pass</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h4>fixed-1k-1k <span class="sub">1,025 input / 1,024 output tokens per request</span></h4>
+<ul>
+<li>vllm-tp2-fp8: $0.4548 [0.4350, 0.4755] per 1M input tokens, $0.6381 [0.6133, 0.6636] per 1M output tokens, $0.5464 [0.5320, 0.5612] per 1M tokens blended at this mix, holding the SLO up to 2 req/s (fails at 4).</li>
+<li>What limits vllm-tp2-fp8: at 4 req/s, TTFT p95 is 61,747.5 [45,107.8, 84,525.4] ms against the 1000 ms target; TPOT p95 is 79.9 [70.0, 91.2] ms against the 50 ms target.</li>
+<li>Market: public list prices of llama-3.3-70b-instruct (the model this config serves at another precision; providers price the model) at this mix, per 1M tokens: Together AI $1.0400 (our cost 0.53×); Fireworks AI $0.9000 (availability unverified, our cost 0.61×); DeepInfra $0.2099 (fp8, same precision as ours: like for like, our cost 2.60×); Novita AI $0.2674 (our cost 2.04×); OpenRouter $0.2099 (aggregator, our cost 2.60×). Our blended cost is $0.5464, 2.60× the lowest eligible list price (DeepInfra, $0.2099).</li>
+</ul>
+<h4>shared-prefix <span class="sub">2,083 input / 128 output tokens per request</span></h4>
+<ul>
+<li>vllm-tp2-fp8: $0.2551 [0.2082, 0.3069] per 1M input tokens, $0.3879 [0.0000, 0.8952] per 1M output tokens, $0.2628 [0.2390, 0.2891] per 1M tokens blended at this mix, holding the SLO up to 4 req/s (fails at 8).</li>
+<li>What limits vllm-tp2-fp8: at 8 req/s, TTFT p95 is 2,155.1 [518.8, 8,952.2] ms against the 1000 ms target; TPOT p95 is 188.9 [143.2, 249.1] ms against the 50 ms target.</li>
+<li>Market: public list prices of llama-3.3-70b-instruct (the model this config serves at another precision; providers price the model) at this mix, per 1M tokens: Together AI $1.0400 (our cost 0.25×); Fireworks AI $0.9000 (availability unverified, our cost 0.29×); DeepInfra $0.1127 (fp8, same precision as ours: like for like, our cost 2.33×); Novita AI $0.1503 (our cost 1.75×); OpenRouter $0.1127 (aggregator, our cost 2.33×). Our blended cost is $0.2628, 2.33× the lowest eligible list price (DeepInfra, $0.1127).</li>
+</ul>
+<h4>Quality</h4>
+<ul>
+<li>vllm-tp2-fp8 (fp8): quality gate vs 2f7fb3f9372b is pass: gsm8k, ifeval, tool_calling, tool_calling_strict, json_schema, divergence, sanity pass.</li>
+</ul>
+<h3>meta-llama/Llama-3.3-70B-Instruct</h3>
+<p>Hardware: 2×H100 (runpod h100-sxm-x2, $8.0156/h on-demand incl. 260 GB storage).</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>Workload</th><th>Config</th><th>Standing</th><th>Goodput at SLO</th><th class="num">$/1M input</th><th class="num">$/1M output</th><th class="num">$/1M blended</th><th>Quality</th></tr>
+</thead>
+<tbody>
+<tr class="">
+<td>fixed-1k-1k</td>
+<td><strong>vllm-tp2</strong><span class="sub">quoted</span></td>
+<td>untrusted, not ranked</td>
+<td>0.5 req/s (fails at 0.5946)</td>
+<td class="num">$0.4466<span class="ci">$0.2789 – $0.7153</span></td>
+<td class="num">$4.2886<span class="ci">$3.4461 – $5.2857</span></td>
+<td class="num">$2.3666<span class="ci">$1.9702 – $2.8429</span></td>
+<td>baseline</td>
+</tr>
+<tr class="">
+<td>shared-prefix</td>
+<td><strong>vllm-tp2</strong><span class="sub">quoted</span></td>
+<td>untrusted, not ranked</td>
+<td>2 req/s (fails at 2.828)</td>
+<td class="num">$0.2679<span class="ci">$0.1586 – $0.4526</span></td>
+<td class="num">$4.3098<span class="ci">$2.1042 – $6.6817</span></td>
+<td class="num">$0.5019<span class="ci">$0.4190 – $0.6012</span></td>
+<td>baseline</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h4>fixed-1k-1k <span class="sub">1,025 input / 1,024 output tokens per request</span></h4>
+<ul>
+<li>vllm-tp2: $0.4466 [0.2789, 0.7153] per 1M input tokens, $4.2886 [3.4461, 5.2857] per 1M output tokens, $2.3666 [1.9702, 2.8429] per 1M tokens blended at this mix, holding the SLO up to 0.5 req/s (fails at 0.5946). No config on this board is trusted, so this figure is indicative only.</li>
+<li>What limits vllm-tp2: at 0.5946 req/s, TTFT p95 is 673.1 [13.4, 33,816.3] ms against the 1000 ms target (the SLO is judged on the CI upper bound, which is over it).</li>
+<li class="caveat">Caveat: vllm-tp2 is untrusted, so the leaderboard does not rank it: ttft_ms.p95 at goodput: run-to-run CV 21.8% exceeds 10%. Treat its figure as indicative and rerun before relying on it.</li>
+<li>Market: public list prices at this mix, per 1M tokens: Together AI $1.0400 (our cost 2.28×); Fireworks AI $0.9000 (availability unverified, our cost 2.63×); DeepInfra $0.2099 (fp8, ours unquantized: not like for like, our cost 11.27×); Novita AI $0.2674 (our cost 8.85×); OpenRouter $0.2099 (aggregator, our cost 11.27×). Our blended cost is $2.3666, 11.27× the lowest eligible list price (DeepInfra, $0.2099).</li>
+</ul>
+<h4>shared-prefix <span class="sub">2,083 input / 128 output tokens per request</span></h4>
+<ul>
+<li>vllm-tp2: $0.2679 [0.1586, 0.4526] per 1M input tokens, $4.3098 [2.1042, 6.6817] per 1M output tokens, $0.5019 [0.4190, 0.6012] per 1M tokens blended at this mix, holding the SLO up to 2 req/s (fails at 2.828). No config on this board is trusted, so this figure is indicative only.</li>
+<li>What limits vllm-tp2: at 2.828 req/s, TTFT p95 is 972.1 [88.4, 10,683.5] ms against the 1000 ms target (the SLO is judged on the CI upper bound, which is over it); TPOT p95 is 53.2 [44.4, 63.6] ms against the 50 ms target.</li>
+<li class="caveat">Caveat: vllm-tp2 is untrusted, so the leaderboard does not rank it: ttft_ms.p95 at goodput: run-to-run CV 10.8% exceeds 10%. Treat its figure as indicative and rerun before relying on it.</li>
+<li>Market: public list prices at this mix, per 1M tokens: Together AI $1.0400 (our cost 0.48×); Fireworks AI $0.9000 (availability unverified, our cost 0.56×); DeepInfra $0.1127 (fp8, ours unquantized: not like for like, our cost 4.45×); Novita AI $0.1503 (our cost 3.34×); OpenRouter $0.1127 (aggregator, our cost 4.45×). Our blended cost is $0.5019, 4.45× the lowest eligible list price (DeepInfra, $0.1127).</li>
+</ul>
+<h4>Quality</h4>
+<ul>
+<li>vllm-tp2 (unquantized): the reference the quality gate compares against; gsm8k 0.955, ifeval 0.891, json_schema 0.973, tool_calling 0.459, tool_calling_strict 0.444.</li>
+</ul>
+</section>
+
+<section>
+<h2>Leaderboards</h2>
+<p class="lede">Each table lists one model on one workload. $/1M input and $/1M output split the replica&#39;s cost by measured prefill time; $/1M blended is its cost over all tokens at that workload&#39;s own input:output mix (methodology below). Rows are ranked by the rank key, the cost under the experiments&#39; declared allocation (all_output charges the whole replica to output tokens), at the on-demand list price, cheapest first; spot, committed-1y and as-run costs of the rank key are shown where available. Every price includes the replica&#39;s block storage. Values are point estimates (geometric means for latency and throughput) with 95% confidence intervals in brackets. Goodput is the highest tested load that met the SLO; raw peak throughput ignores the SLO and is not goodput. Unranked rows (quality gate failed, untrusted, or no cost) are listed last. The smaller line under each value is its 95% confidence interval.</p>
+<p class="lede">Goodput is searched on a grid of loads, so it is known only to a bracket: at least the goodput load, below the load that failed (shown as &#34;fails at&#34;). Configs whose brackets overlap are tied within the search resolution: their goodput, throughput and cost at SLO come from the same grid point and are not a measured equality.</p>
+</section>
+<section>
+<h3>RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic: fixed-1k-1k (open loop, synthetic content)</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th class="num">#</th><th>Config</th><th class="num">$/1M in at SLO<br>(measured split)</th><th class="num">$/1M out at SLO<br>(measured split)</th><th class="num">$/1M blended<br>at this mix</th><th class="num">Rank key: $/1M out at SLO, on-demand (all_output)</th><th class="num">$/1M out at SLO, as run</th><th class="num">Goodput out tok/s<br>per replica</th><th class="num">per GPU</th><th class="num">Goodput load<br>(search bracket)</th><th class="num">p95 TTFT<br>at goodput</th><th class="num">p95 TPOT<br>at goodput</th><th class="num">Raw peak out tok/s<br>(no SLO)</th><th>Quality Δ / gate</th><th class="num">Cold start</th><th>Status</th><th>Recommendation</th></tr>
+</thead>
+<tbody>
+<tr class="ranked">
+<td class="num">1</td>
+<td><strong>vllm-tp2-fp8</strong><span class="sub">vllm 0.30.0 · fp8 · TP2 · 2×H100 · h100-sxm-x2 (on_demand) · gpu_memory_utilization=0.95</span></td>
+<td class="num">$0.4548<span class="ci">$0.4350 – $0.4755</span></td>
+<td class="num">$0.6381<span class="ci">$0.6133 – $0.6636</span></td>
+<td class="num">$0.5464<span class="ci">$0.5320 – $0.5612</span></td>
+<td class="num">$1.0933<span class="ci">$1.0645 – $1.1229</span></td>
+<td class="num">$1.0933<span class="ci">$1.0645 – $1.1229</span></td>
+<td class="num">2,036.5<span class="ci">1,982.9 – 2,091.6</span></td>
+<td class="num">1,018.3<span class="ci">991.5 – 1,045.8</span></td>
+<td class="num">2 req/s (fails at 4)</td>
+<td class="num">304 ms<span class="ci">275 – 336</span></td>
+<td class="num">29.4 ms<span class="ci">25.2 – 34.3</span></td>
+<td class="num">2,932.8<span class="ci">2,790.6 – 3,082.3</span><span class="sub">at 4 req/s</span></td>
+<td><span class="badge pass">pass</span><span class="sub">+0.001 (gsm8k) · pass</span></td>
+<td class="num">n/a</td>
+<td><span class="badge ranked">ranked</span></td>
+<td>Only ranked config at SLO; passed the quality gate vs vllm-tp2</td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section>
+<h3>RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic: shared-prefix (open loop, synthetic content)</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th class="num">#</th><th>Config</th><th class="num">$/1M in at SLO<br>(measured split)</th><th class="num">$/1M out at SLO<br>(measured split)</th><th class="num">$/1M blended<br>at this mix</th><th class="num">Rank key: $/1M out at SLO, on-demand (all_output)</th><th class="num">$/1M out at SLO, as run</th><th class="num">Goodput out tok/s<br>per replica</th><th class="num">per GPU</th><th class="num">Goodput load<br>(search bracket)</th><th class="num">p95 TTFT<br>at goodput</th><th class="num">p95 TPOT<br>at goodput</th><th class="num">Raw peak out tok/s<br>(no SLO)</th><th>Quality Δ / gate</th><th class="num">Cold start</th><th>Status</th><th>Recommendation</th></tr>
+</thead>
+<tbody>
+<tr class="ranked">
+<td class="num">1</td>
+<td><strong>vllm-tp2-fp8</strong><span class="sub">vllm 0.30.0 · fp8 · TP2 · 2×H100 · h100-sxm-x2 (on_demand) · gpu_memory_utilization=0.95</span></td>
+<td class="num">$0.2551<span class="ci">$0.2082 – $0.3069</span></td>
+<td class="num">$0.3879<span class="ci">$0.0000 – $0.8952</span></td>
+<td class="num">$0.2628<span class="ci">$0.2390 – $0.2891</span></td>
+<td class="num">$4.5400<span class="ci">$4.1275 – $4.9938</span></td>
+<td class="num">$4.5400<span class="ci">$4.1275 – $4.9938</span></td>
+<td class="num">490.4<span class="ci">445.9 – 539.4</span></td>
+<td class="num">245.2<span class="ci">222.9 – 269.7</span></td>
+<td class="num">4 req/s (fails at 8)</td>
+<td class="num">417 ms<span class="ci">345 – 502</span></td>
+<td class="num">38.1 ms<span class="ci">36.5 – 39.8</span></td>
+<td class="num">1,014.7<span class="ci">897.9 – 1,146.6</span><span class="sub">at 8 req/s</span></td>
+<td><span class="badge pass">pass</span><span class="sub">+0.001 (gsm8k) · pass</span></td>
+<td class="num">n/a</td>
+<td><span class="badge ranked">ranked</span></td>
+<td>Only ranked config at SLO; passed the quality gate vs vllm-tp2</td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section>
+<h3>meta-llama/Llama-3.3-70B-Instruct: fixed-1k-1k (open loop, synthetic content)</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th class="num">#</th><th>Config</th><th class="num">$/1M in at SLO<br>(measured split)</th><th class="num">$/1M out at SLO<br>(measured split)</th><th class="num">$/1M blended<br>at this mix</th><th class="num">Rank key: $/1M out at SLO, on-demand (all_output)</th><th class="num">$/1M out at SLO, as run</th><th class="num">Goodput out tok/s<br>per replica</th><th class="num">per GPU</th><th class="num">Goodput load<br>(search bracket)</th><th class="num">p95 TTFT<br>at goodput</th><th class="num">p95 TPOT<br>at goodput</th><th class="num">Raw peak out tok/s<br>(no SLO)</th><th>Quality Δ / gate</th><th class="num">Cold start</th><th>Status</th><th>Recommendation</th></tr>
+</thead>
+<tbody>
+<tr class="unranked">
+<td class="num">–</td>
+<td><strong>vllm-tp2</strong><span class="sub">vllm 0.30.0 · unquantized · TP2 · 2×H100 · h100-sxm-x2 (on_demand) · gpu_memory_utilization=0.95</span></td>
+<td class="num">$0.4466<span class="ci">$0.2789 – $0.7153</span></td>
+<td class="num">$4.2886<span class="ci">$3.4461 – $5.2857</span></td>
+<td class="num">$2.3666<span class="ci">$1.9702 – $2.8429</span></td>
+<td class="num">$4.7356<span class="ci">$3.9423 – $5.6885</span></td>
+<td class="num">$4.7356<span class="ci">$3.9423 – $5.6885</span></td>
+<td class="num">470.2<span class="ci">391.4 – 564.8</span></td>
+<td class="num">235.1<span class="ci">195.7 – 282.4</span></td>
+<td class="num">0.5 req/s (fails at 0.5946)</td>
+<td class="num">271 ms<span class="ci">158 – 462</span></td>
+<td class="num">31.1 ms<span class="ci">29.0 – 33.3</span></td>
+<td class="num">969.2<span class="ci">912.6 – 1,029.3</span><span class="sub">at 1 req/s</span></td>
+<td><span class="badge baseline">baseline</span><span class="sub">baseline</span></td>
+<td class="num">641 s (median of 2)</td>
+<td><span class="badge untrusted">untrusted</span></td>
+<td>Not ranked: untrusted (high run-to-run variance); rerun before relying on it</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h4>Warnings</h4>
+<ul class="warnings">
+<li><strong>vllm-tp2</strong>: ttft_ms.p95 at goodput: run-to-run CV 21.8% exceeds 10%</li>
+</ul>
+</section>
+<section>
+<h3>meta-llama/Llama-3.3-70B-Instruct: shared-prefix (open loop, synthetic content)</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th class="num">#</th><th>Config</th><th class="num">$/1M in at SLO<br>(measured split)</th><th class="num">$/1M out at SLO<br>(measured split)</th><th class="num">$/1M blended<br>at this mix</th><th class="num">Rank key: $/1M out at SLO, on-demand (all_output)</th><th class="num">$/1M out at SLO, as run</th><th class="num">Goodput out tok/s<br>per replica</th><th class="num">per GPU</th><th class="num">Goodput load<br>(search bracket)</th><th class="num">p95 TTFT<br>at goodput</th><th class="num">p95 TPOT<br>at goodput</th><th class="num">Raw peak out tok/s<br>(no SLO)</th><th>Quality Δ / gate</th><th class="num">Cold start</th><th>Status</th><th>Recommendation</th></tr>
+</thead>
+<tbody>
+<tr class="unranked">
+<td class="num">–</td>
+<td><strong>vllm-tp2</strong><span class="sub">vllm 0.30.0 · unquantized · TP2 · 2×H100 · h100-sxm-x2 (on_demand) · gpu_memory_utilization=0.95</span></td>
+<td class="num">$0.2679<span class="ci">$0.1586 – $0.4526</span></td>
+<td class="num">$4.3098<span class="ci">$2.1042 – $6.6817</span></td>
+<td class="num">$0.5019<span class="ci">$0.4190 – $0.6012</span></td>
+<td class="num">$8.6696<span class="ci">$7.2381 – $10.3840</span></td>
+<td class="num">$8.6696<span class="ci">$7.2381 – $10.3840</span></td>
+<td class="num">256.8<span class="ci">214.4 – 307.6</span></td>
+<td class="num">128.4<span class="ci">107.2 – 153.8</span></td>
+<td class="num">2 req/s (fails at 2.828)</td>
+<td class="num">411 ms<span class="ci">315 – 537</span></td>
+<td class="num">42.0 ms<span class="ci">39.3 – 44.7</span></td>
+<td class="num">490.4<span class="ci">445.9 – 539.4</span><span class="sub">at 4 req/s</span></td>
+<td><span class="badge baseline">baseline</span><span class="sub">baseline</span></td>
+<td class="num">641 s (median of 2)</td>
+<td><span class="badge untrusted">untrusted</span></td>
+<td>Not ranked: untrusted (high run-to-run variance); rerun before relying on it</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h4>Warnings</h4>
+<ul class="warnings">
+<li><strong>vllm-tp2</strong>: ttft_ms.p95 at goodput: run-to-run CV 10.8% exceeds 10%</li>
+</ul>
+</section>
+<section class="competitiveness">
+<h2>Competitiveness: our cost at SLO vs public list prices</h2><p class="note"><strong>Public list prices only: competitor numbers are the per-token prices each provider publishes on its pricing page, with the source and the date it was checked. No competitor endpoint was called or benchmarked, and list prices say nothing about a provider&#39;s latency, quality or quantization unless the page discloses it.</strong></p>
+<p class="lede">Competitor prices last checked 2026-10-04. Flags leave out aggregators and entries whose availability is unverified; they are listed for reference. Our cost is the headline config&#39;s cost at SLO (see the summary) at the on-demand list price, storage included: $/1M input and $/1M output split the replica&#39;s cost by measured prefill time, and $/1M blended is its cost over all tokens at the workload&#39;s own input:output mix. Each public price is also shown at every workload&#39;s mix, so blended compares like with like. With no price set, the break-even price is the lowest price that covers our cost: at the point estimate, and at the cost CI high bound.</p>
+<h3>Llama 3.3 70B Instruct <code>llama-3.3-70b-instruct</code>, ours unquantized</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>Workload</th><th>Our config at SLO (basis)</th><th class="num">Tokens per request<br>in / out</th><th class="num">Our cost<br>$/1M in</th><th class="num">Our cost<br>$/1M out</th><th class="num">Our cost<br>$/1M blended</th><th class="num">Our price<br>$/1M in</th><th class="num">Our price<br>$/1M out</th><th class="num">Break-even<br>$/1M in</th><th class="num">Break-even<br>$/1M out</th><th class="num">Margin in</th><th class="num">Margin out</th></tr>
+</thead>
+<tbody>
+<tr class="">
+<td>fixed-1k-1k (open loop)</td>
+<td>vllm-tp2 (untrusted, not ranked: high run-to-run variance)</td>
+<td class="num">1,025 / 1,024</td>
+<td class="num">$0.4466<span class="ci">$0.2789 – $0.7153</span></td>
+<td class="num">$4.2886<span class="ci">$3.4461 – $5.2857</span></td>
+<td class="num">$2.3666<span class="ci">$1.9702 – $2.8429</span></td>
+<td class="num">no price set</td>
+<td class="num">no price set</td>
+<td class="num">$0.4466 (CI high $0.7153)</td>
+<td class="num">$4.2886 (CI high $5.2857)</td>
+<td class="num">n/a</td>
+<td class="num">n/a</td>
+</tr>
+<tr class="">
+<td>shared-prefix (open loop)</td>
+<td>vllm-tp2 (untrusted, not ranked: high run-to-run variance)</td>
+<td class="num">2,083 / 128</td>
+<td class="num">$0.2679<span class="ci">$0.1586 – $0.4526</span></td>
+<td class="num">$4.3098<span class="ci">$2.1042 – $6.6817</span></td>
+<td class="num">$0.5019<span class="ci">$0.4190 – $0.6012</span></td>
+<td class="num">no price set</td>
+<td class="num">no price set</td>
+<td class="num">$0.2679 (CI high $0.4526)</td>
+<td class="num">$4.3098 (CI high $6.6817)</td>
+<td class="num">n/a</td>
+<td class="num">n/a</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h4>Public list prices (per 1M tokens)</h4>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>Provider</th><th>Provider model</th><th class="num">$/1M in</th><th class="num">$/1M out</th><th>Precision</th><th class="num">At fixed-1k-1k mix (1,025 / 1,024)</th><th class="num">At shared-prefix mix (2,083 / 128)</th><th>Availability</th><th>In flag comparison</th><th>Source</th><th>Last checked</th></tr>
+</thead>
+<tbody>
+<tr class="">
+<td>Together AI</td>
+<td></td>
+<td class="num">$1.0400</td>
+<td class="num">$1.0400</td>
+<td>not disclosed</td>
+<td class="num">$1.0400 (our cost 2.28×)</td>
+<td class="num">$1.0400 (our cost 0.48×)</td>
+<td>listed</td>
+<td>yes</td>
+<td><a href="https://www.together.ai/pricing">https://www.together.ai/pricing</a></td>
+<td>2026-10-04</td>
+</tr>
+<tr class="unranked">
+<td>Fireworks AI</td>
+<td></td>
+<td class="num">$0.9000</td>
+<td class="num">$0.9000</td>
+<td>not disclosed</td>
+<td class="num">$0.9000 (our cost 2.63×)</td>
+<td class="num">$0.9000 (our cost 0.56×)</td>
+<td>unverified</td>
+<td>no</td>
+<td><a href="https://docs.fireworks.ai/serverless/pricing">https://docs.fireworks.ai/serverless/pricing</a><span class="sub">Size-bucket price for models above 16B parameters.</span></td>
+<td>2026-10-04</td>
+</tr>
+<tr class="">
+<td>DeepInfra</td>
+<td>meta-llama/Llama-3.3-70B-Instruct-Turbo</td>
+<td class="num">$0.1000</td>
+<td class="num">$0.3200</td>
+<td>fp8 (ours unquantized: not like for like)</td>
+<td class="num">$0.2099 (our cost 11.27×)</td>
+<td class="num">$0.1127 (our cost 4.45×)</td>
+<td>listed</td>
+<td>yes</td>
+<td><a href="https://deepinfra.com/meta-llama/Llama-3.3-70B-Instruct-Turbo">https://deepinfra.com/meta-llama/Llama-3.3-70B-Instruct-Turbo</a></td>
+<td>2026-10-04</td>
+</tr>
+<tr class="">
+<td>Novita AI</td>
+<td></td>
+<td class="num">$0.1350</td>
+<td class="num">$0.4000</td>
+<td>not disclosed</td>
+<td class="num">$0.2674 (our cost 8.85×)</td>
+<td class="num">$0.1503 (our cost 3.34×)</td>
+<td>listed</td>
+<td>yes</td>
+<td><a href="https://novita.ai/pricing">https://novita.ai/pricing</a><span class="sub">Listed with a 12K-token context window.</span></td>
+<td>2026-10-04</td>
+</tr>
+<tr class="unranked">
+<td>OpenRouter<span class="sub">aggregator</span></td>
+<td>meta-llama/llama-3.3-70b-instruct</td>
+<td class="num">$0.1000</td>
+<td class="num">$0.3200</td>
+<td>not disclosed</td>
+<td class="num">$0.2099 (our cost 11.27×)</td>
+<td class="num">$0.1127 (our cost 4.45×)</td>
+<td>listed</td>
+<td>no</td>
+<td><a href="https://openrouter.ai/meta-llama/llama-3.3-70b-instruct">https://openrouter.ai/meta-llama/llama-3.3-70b-instruct</a><span class="sub">Headline price; requests are routed across underlying providers.</span></td>
+<td>2026-10-04</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h4>Flags</h4>
+<ul class="flags">
+<li class="no_price_set">[fixed-1k-1k (open loop); shared-prefix (open loop)] <code>no_price_set</code>: llama-3.3-70b-instruct: no price set</li>
+<li class="cost_above_market">[fixed-1k-1k (open loop)] <code>cost_above_market</code>: llama-3.3-70b-instruct input: our cost at SLO $0.4466/1M is $0.3466 (346.6%) above the lowest public list price, $0.1000/1M (DeepInfra); median $0.1350/1M of 3 providers</li>
+<li class="cost_above_market">[fixed-1k-1k (open loop)] <code>cost_above_market</code>: llama-3.3-70b-instruct output: our cost at SLO $4.2886/1M is $3.9686 (1240.2%) above the lowest public list price, $0.3200/1M (DeepInfra); median $0.4000/1M of 3 providers</li>
+<li class="cost_above_market">[fixed-1k-1k (open loop)] <code>cost_above_market</code>: llama-3.3-70b-instruct blended: our cost at SLO $2.3666/1M is $2.1567 (1027.3%) above the lowest public list price at the workload&#39;s token mix, $0.2099/1M (DeepInfra); median $0.2674/1M of 3 providers</li>
+<li class="cost_above_market">[shared-prefix (open loop)] <code>cost_above_market</code>: llama-3.3-70b-instruct input: our cost at SLO $0.2679/1M is $0.1679 (167.9%) above the lowest public list price, $0.1000/1M (DeepInfra); median $0.1350/1M of 3 providers</li>
+<li class="cost_above_market">[shared-prefix (open loop)] <code>cost_above_market</code>: llama-3.3-70b-instruct output: our cost at SLO $4.3098/1M is $3.9898 (1246.8%) above the lowest public list price, $0.3200/1M (DeepInfra); median $0.4000/1M of 3 providers</li>
+<li class="cost_above_market">[shared-prefix (open loop)] <code>cost_above_market</code>: llama-3.3-70b-instruct blended: our cost at SLO $0.5019/1M is $0.3892 (345.2%) above the lowest public list price at the workload&#39;s token mix, $0.1127/1M (DeepInfra); median $0.1503/1M of 3 providers</li>
+</ul>
+<h3>Llama 3.3 70B FP8 <code>llama-3.3-70b-instruct-fp8</code>, ours fp8</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>Workload</th><th>Our config at SLO (basis)</th><th class="num">Tokens per request<br>in / out</th><th class="num">Our cost<br>$/1M in</th><th class="num">Our cost<br>$/1M out</th><th class="num">Our cost<br>$/1M blended</th><th class="num">Our price<br>$/1M in</th><th class="num">Our price<br>$/1M out</th><th class="num">Break-even<br>$/1M in</th><th class="num">Break-even<br>$/1M out</th><th class="num">Margin in</th><th class="num">Margin out</th></tr>
+</thead>
+<tbody>
+<tr class="">
+<td>fixed-1k-1k (open loop)</td>
+<td>vllm-tp2-fp8 (leaderboard rank 1)</td>
+<td class="num">1,025 / 1,024</td>
+<td class="num">$0.4548<span class="ci">$0.4350 – $0.4755</span></td>
+<td class="num">$0.6381<span class="ci">$0.6133 – $0.6636</span></td>
+<td class="num">$0.5464<span class="ci">$0.5320 – $0.5612</span></td>
+<td class="num">no price set</td>
+<td class="num">no price set</td>
+<td class="num">$0.4548 (CI high $0.4755)</td>
+<td class="num">$0.6381 (CI high $0.6636)</td>
+<td class="num">n/a</td>
+<td class="num">n/a</td>
+</tr>
+<tr class="">
+<td>shared-prefix (open loop)</td>
+<td>vllm-tp2-fp8 (leaderboard rank 1)</td>
+<td class="num">2,083 / 128</td>
+<td class="num">$0.2551<span class="ci">$0.2082 – $0.3069</span></td>
+<td class="num">$0.3879<span class="ci">$0.0000 – $0.8952</span></td>
+<td class="num">$0.2628<span class="ci">$0.2390 – $0.2891</span></td>
+<td class="num">no price set</td>
+<td class="num">no price set</td>
+<td class="num">$0.2551 (CI high $0.3069)</td>
+<td class="num">$0.3879 (CI high $0.8952)</td>
+<td class="num">n/a</td>
+<td class="num">n/a</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h4>Public list prices (per 1M tokens)</h4>
+<p class="note">Public list prices are those of llama-3.3-70b-instruct, the model this entry serves at another precision: providers price the model, and the precision column says which listings match ours.</p><div class="table-wrap">
+<table>
+<thead>
+<tr><th>Provider</th><th>Provider model</th><th class="num">$/1M in</th><th class="num">$/1M out</th><th>Precision</th><th class="num">At fixed-1k-1k mix (1,025 / 1,024)</th><th class="num">At shared-prefix mix (2,083 / 128)</th><th>Availability</th><th>In flag comparison</th><th>Source</th><th>Last checked</th></tr>
+</thead>
+<tbody>
+<tr class="">
+<td>Together AI</td>
+<td></td>
+<td class="num">$1.0400</td>
+<td class="num">$1.0400</td>
+<td>not disclosed</td>
+<td class="num">$1.0400 (our cost 0.53×)</td>
+<td class="num">$1.0400 (our cost 0.25×)</td>
+<td>listed</td>
+<td>yes</td>
+<td><a href="https://www.together.ai/pricing">https://www.together.ai/pricing</a></td>
+<td>2026-10-04</td>
+</tr>
+<tr class="unranked">
+<td>Fireworks AI</td>
+<td></td>
+<td class="num">$0.9000</td>
+<td class="num">$0.9000</td>
+<td>not disclosed</td>
+<td class="num">$0.9000 (our cost 0.61×)</td>
+<td class="num">$0.9000 (our cost 0.29×)</td>
+<td>unverified</td>
+<td>no</td>
+<td><a href="https://docs.fireworks.ai/serverless/pricing">https://docs.fireworks.ai/serverless/pricing</a><span class="sub">Size-bucket price for models above 16B parameters.</span></td>
+<td>2026-10-04</td>
+</tr>
+<tr class="">
+<td>DeepInfra</td>
+<td>meta-llama/Llama-3.3-70B-Instruct-Turbo</td>
+<td class="num">$0.1000</td>
+<td class="num">$0.3200</td>
+<td>fp8 (same precision as ours: like for like)</td>
+<td class="num">$0.2099 (our cost 2.60×)</td>
+<td class="num">$0.1127 (our cost 2.33×)</td>
+<td>listed</td>
+<td>yes</td>
+<td><a href="https://deepinfra.com/meta-llama/Llama-3.3-70B-Instruct-Turbo">https://deepinfra.com/meta-llama/Llama-3.3-70B-Instruct-Turbo</a></td>
+<td>2026-10-04</td>
+</tr>
+<tr class="">
+<td>Novita AI</td>
+<td></td>
+<td class="num">$0.1350</td>
+<td class="num">$0.4000</td>
+<td>not disclosed</td>
+<td class="num">$0.2674 (our cost 2.04×)</td>
+<td class="num">$0.1503 (our cost 1.75×)</td>
+<td>listed</td>
+<td>yes</td>
+<td><a href="https://novita.ai/pricing">https://novita.ai/pricing</a><span class="sub">Listed with a 12K-token context window.</span></td>
+<td>2026-10-04</td>
+</tr>
+<tr class="unranked">
+<td>OpenRouter<span class="sub">aggregator</span></td>
+<td>meta-llama/llama-3.3-70b-instruct</td>
+<td class="num">$0.1000</td>
+<td class="num">$0.3200</td>
+<td>not disclosed</td>
+<td class="num">$0.2099 (our cost 2.60×)</td>
+<td class="num">$0.1127 (our cost 2.33×)</td>
+<td>listed</td>
+<td>no</td>
+<td><a href="https://openrouter.ai/meta-llama/llama-3.3-70b-instruct">https://openrouter.ai/meta-llama/llama-3.3-70b-instruct</a><span class="sub">Headline price; requests are routed across underlying providers.</span></td>
+<td>2026-10-04</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h4>Flags</h4>
+<ul class="flags">
+<li class="no_price_set">[fixed-1k-1k (open loop); shared-prefix (open loop)] <code>no_price_set</code>: llama-3.3-70b-instruct-fp8: no price set</li>
+<li class="cost_above_market">[fixed-1k-1k (open loop)] <code>cost_above_market</code>: llama-3.3-70b-instruct-fp8 input: our cost at SLO $0.4548/1M is $0.3548 (354.8%) above the lowest public list price, $0.1000/1M (DeepInfra); median $0.1350/1M of 3 providers</li>
+<li class="cost_above_market">[fixed-1k-1k (open loop)] <code>cost_above_market</code>: llama-3.3-70b-instruct-fp8 output: our cost at SLO $0.6381/1M is $0.3181 (99.4%) above the lowest public list price, $0.3200/1M (DeepInfra); median $0.4000/1M of 3 providers</li>
+<li class="cost_above_market">[fixed-1k-1k (open loop)] <code>cost_above_market</code>: llama-3.3-70b-instruct-fp8 blended: our cost at SLO $0.5464/1M is $0.3364 (160.3%) above the lowest public list price at the workload&#39;s token mix, $0.2099/1M (DeepInfra); median $0.2674/1M of 3 providers</li>
+<li class="cost_above_market">[shared-prefix (open loop)] <code>cost_above_market</code>: llama-3.3-70b-instruct-fp8 input: our cost at SLO $0.2551/1M is $0.1551 (155.1%) above the lowest public list price, $0.1000/1M (DeepInfra); median $0.1350/1M of 3 providers</li>
+<li class="cost_above_market">[shared-prefix (open loop)] <code>cost_above_market</code>: llama-3.3-70b-instruct-fp8 output: our cost at SLO $0.3879/1M is $0.0679 (21.2%) above the lowest public list price, $0.3200/1M (DeepInfra); median $0.4000/1M of 3 providers</li>
+<li class="cost_above_market">[shared-prefix (open loop)] <code>cost_above_market</code>: llama-3.3-70b-instruct-fp8 blended: our cost at SLO $0.2628/1M is $0.1501 (133.1%) above the lowest public list price at the workload&#39;s token mix, $0.1127/1M (DeepInfra); median $0.1503/1M of 3 providers</li>
+</ul>
+<h3>Providers with no public per-token price</h3>
+<ul>
+<li>Groq: Enterprise plans only; contact sales. (checked 2026-10-04)</li>
+<li>Cerebras: No public per-token price. (checked 2026-10-04)</li>
+<li>Lambda: Inference offering winding down. (checked 2026-10-04)</li>
+<li>Hyperbolic: Inference offering retired. (checked 2026-10-04)</li>
+<li>Nebius: Neither model is in its catalog. (checked 2026-10-04)</li>
+</ul>
+</section>
+
+<footer class="method">
+<h2>Methodology and provenance</h2>
+<dl>
+<dt>SLO</dt><dd>TTFT p95 ≤ 1000 ms, TPOT p95 ≤ 50 ms, error rate ≤ 1.00%</dd>
+<dt>Load generation</dt><dd>open loop (requests arrive on a fixed schedule at a set rate, req/s)</dd>
+<dt>Content</dt><dd>synthetic</dd>
+<dt>Dataset</dt><dd>unnamed dataset (license: not recorded)</dd>
+<dt>Repetitions</dt><dd>3 per load point</dd>
+<dt>Confidence intervals</dt><dd>Repetitions of a load point are combined per metric, with a two-sided 95% Student-t interval on the scale that fits the metric. Latencies, throughputs and rates are strictly positive and right-skewed: the value shown is the geometric mean and the interval is the t-interval of ln(value), exponentiated (geometric mean ×/÷ a factor), so both bounds are positive. Proportions such as error rate and SLO attainment use the arithmetic mean of the per-run proportions with the t-interval clipped to [0, 1]; it measures run-to-run variation, not binomial sampling, so it is [0, 0] when no repetition saw an error. Counts use the arithmetic t-interval clipped at 0, as does a positive metric when a repetition measured 0. A load meets the SLO only if the CI upper bound of every target is within it; goodput is the highest passing load below the first failing one. Cost CI bounds come from the goodput throughput CI (low cost from high throughput), so they are finite whenever the throughput lower bound is above zero. Results with a single repetition have no CI and are never trusted.<ul class="ci-methods"><li>request counts and sample sizes: arithmetic mean, Student-t interval clipped at 0 (t_clipped)</li><li>latency percentiles and means (ms): geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0</li><li>throughput and goodput (tok/s, req/s): geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0</li><li>requests in prefill (request rate × mean TTFT): geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0</li><li>server queue time, measurement window: geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0</li><li>error rate, SLO attainment, cache fractions and hit rates: arithmetic mean of per-run proportions, Student-t interval clipped to [0, 1] (t_clipped)</li><li>GPU utilization (%): arithmetic mean, Student-t interval clipped to [0, 100] (t_clipped)</li><li>other server and GPU gauges: arithmetic mean, Student-t interval clipped at 0 (t_clipped)</li><li>anything else: arithmetic mean, Student-t interval (t)</li></ul></dd>
+<dt>Cost allocation (ranking)</dt><dd>all_output: all of the replica&#39;s hourly cost is charged to output tokens, so input tokens have no separate price ($/1M input is n/a, not $0); $/1M output is the headline number</dd>
+<dt>Input/output split (headline)</dt><dd>Headline $/1M input and $/1M output use the prefill_time split, measured at the goodput point: input tokens pay for the share φ of the replica&#39;s time spent prefilling prompts, output tokens for the rest (decode steps, and any idle headroom the SLO needs). φ is the mean number of requests in their prefill phase, request rate × mean TTFT (Little&#39;s law), per repetition, combined like a throughput (geometric mean, log-t CI) and capped at 1. Input = φ × hourly price / input tok/s; output = (1 − φ) × hourly price / output tok/s; at the measured mix they bill exactly the replica&#39;s hourly price. TTFT includes queueing and the first decode step and concurrent prefills are each counted, so φ tends to overstate prefill time (input high, output low); idle headroom is charged to output (output high). The price CIs combine the φ and throughput CIs at the ends that push each price the same way, an outer bound. Blended $/1M is the hourly price over all tokens at the workload&#39;s own input:output mix and needs no split. The ranking still uses the declared cost allocation, shown in its own column.</dd>
+<dt>Price book last checked</dt><dd>2026-10-08</dd>
+</dl>
+<details>
+<summary>vllm-tp2-fp8 · fixed-1k-1k, open loop <code>0381825d763025fdf1752037fbd925abe0a992e191215227ccb01e48039e5afd</code></summary>
+<dl>
+<dt>Config</dt><dd>vllm 0.30.0 · fp8 · TP2 · 2×H100 · h100-sxm-x2 (on_demand) · gpu_memory_utilization=0.95</dd>
+<dt>Engine</dt><dd>vllm 0.30.0; image <code>vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90</code>; digest <code>sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90</code></dd>
+<dt>Model</dt><dd>RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic @ f50dbad2c84590ca17dc51e207c34321b65ff14b</dd>
+<dt>Hardware</dt><dd>2×H100 · runpod / secure · h100-sxm-x2 · on_demand; CUDA 13.0, driver 580.126.09</dd>
+<dt>Code</dt><dd>commit <code>7374a4b618fb5c4d941a5102dfa8d8c0a290ddf8</code>; loom-bench 0.1.0</dd>
+<dt>Price</dt><dd>runpod/secure h100-sxm-x2 + 260 GB block storage, from the price book: on-demand $8.0156/h; spot n/a; committed 1y n/a; source: <a href="https://www.runpod.io/pricing">https://www.runpod.io/pricing</a>, <a href="https://docs.runpod.io/pods/pricing">https://docs.runpod.io/pods/pricing</a>; last checked 2026-10-08</dd>
+<dt>Price as run</dt><dd>$8.0156/h, on_demand host: runpod API price observed at launch in US-MO-1 (2026-10-09T04:44:27.075823+00:00) + 260 GB block storage</dd>
+<dt>Runs</dt><dd>12; provenance digests: <code>14db207a4f0bbeabccea5beb309dab583e0a5d0f3726419e67e3846e71410138</code>, <code>3446d34d791b3f1f2babe01742b9925c2a7d714e1cf488180e91532a59b7a0b8</code>, <code>36ffecbfc87698e144aa51dc6d76907b8aed0260d89e44cc2ed52e8d7ceb2a9d</code>, <code>41c1967e0fbd44556b86cbfdc42de1d9bf3c3fb14d87a2cab66e5254c0b360b3</code>, <code>638f0131e317a9938c86f654255fd66236ea231712929d1ba207d8866a9a9850</code>, <code>77b58e7fcbcca938d693bc14f07518ba11894ee6442ffebab1acf258b2b9be32</code>, <code>77ff616a8ee750c5aa5dbd8375fca772cebdd61dba5d280129ba7d842779d430</code>, <code>9270e72fec59c5abea4470b13ecca4c71aac67f14586ce3d335369d91f627f78</code>, <code>ab230123446ecba993c05480ce38c1cfc047d597276fcf0d9b6e11ca90bc2da3</code>, <code>e3909f5d63f03e14263086ce729f3716d12bb67e83c733f02bb7b12a3956d8b4</code>, <code>e944714572ec66d67a2ac9066a722ded25a2aab1baebc3a4f6db1eb455bfe52e</code>, <code>fd045a2d4d66ec58463f858a352232691681f5ac9dd1c4a7c4e79a5aee84b10f</code></dd>
+<dt>Reproduce</dt><dd><code>bench reproduce 3d413b1f-c5eb-48d8-8e44-279b742de24d</code></dd>
+</dl>
+</details>
+<details>
+<summary>vllm-tp2-fp8 · shared-prefix, open loop <code>0381825d763025fdf1752037fbd925abe0a992e191215227ccb01e48039e5afd</code></summary>
+<dl>
+<dt>Config</dt><dd>vllm 0.30.0 · fp8 · TP2 · 2×H100 · h100-sxm-x2 (on_demand) · gpu_memory_utilization=0.95</dd>
+<dt>Engine</dt><dd>vllm 0.30.0; image <code>vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90</code>; digest <code>sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90</code></dd>
+<dt>Model</dt><dd>RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic @ f50dbad2c84590ca17dc51e207c34321b65ff14b</dd>
+<dt>Hardware</dt><dd>2×H100 · runpod / secure · h100-sxm-x2 · on_demand; CUDA 13.0, driver 580.126.09</dd>
+<dt>Code</dt><dd>commit <code>7374a4b618fb5c4d941a5102dfa8d8c0a290ddf8</code>; loom-bench 0.1.0</dd>
+<dt>Price</dt><dd>runpod/secure h100-sxm-x2 + 260 GB block storage, from the price book: on-demand $8.0156/h; spot n/a; committed 1y n/a; source: <a href="https://www.runpod.io/pricing">https://www.runpod.io/pricing</a>, <a href="https://docs.runpod.io/pods/pricing">https://docs.runpod.io/pods/pricing</a>; last checked 2026-10-08</dd>
+<dt>Price as run</dt><dd>$8.0156/h, on_demand host: runpod API price observed at launch in US-MO-1 (2026-10-09T04:44:27.075823+00:00) + 260 GB block storage</dd>
+<dt>Runs</dt><dd>12; provenance digests: <code>0f0df246941dfbb4f01cff87b824ba55ab0ac7e6cb71b708611e99ee3bf7456a</code>, <code>47534095783006c44a4a6e07d60a63c1495ee0815a49f1a31e2c747733a0ef1b</code>, <code>4b71e71d7875436ccddde271317343d573f7b7eaaee9cae5d3a2e091cf5a542d</code>, <code>5ff203dc793f311f1493365c0886dc8aab0be0426936185d6dff6dd8fddee7bc</code>, <code>6329ca0de38c7c344bcf3e19e1f7f89dd4d4b5778fb913013f3dc9aa316e7c2b</code>, <code>6b061f5cbfcb01cf71b2b113c06580bcb7d0744e626f3323d6b341f13765edee</code>, <code>759d6da25d6e5d56cf17af4a41b162f1a4362203f89df3e3a0a39979da97600e</code>, <code>78ae560f78be6adbf6de2997f9ca579c8024bc29b90c5853a008bd4b6f5dcccb</code>, <code>b5f25dae52d50eaf756fbdbe68a409e9bc927f02144db21399615bca4da84149</code>, <code>c0c5d3d104bf61bf7deacb8ca4d93bd25cadf4bd95f03c0387ea181651d255cf</code>, <code>c5fc7e18e18c6a1274d874a0c5001d8616370277d792844678e49ab27d448ab9</code>, <code>e64bdf17d2561e98fcbd49f716bb8140cd73817e79d2abb165def0b181cee968</code></dd>
+<dt>Reproduce</dt><dd><code>bench reproduce edc55500-bfb3-41ef-9a8f-323e6b8f4bc4</code></dd>
+</dl>
+</details>
+<details>
+<summary>vllm-tp2 · fixed-1k-1k, open loop <code>2f7fb3f9372ba09550198b14978459e35c68866db852f44d4856c293a5adf8f9</code></summary>
+<dl>
+<dt>Config</dt><dd>vllm 0.30.0 · unquantized · TP2 · 2×H100 · h100-sxm-x2 (on_demand) · gpu_memory_utilization=0.95</dd>
+<dt>Engine</dt><dd>vllm 0.30.0; image <code>vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90</code>; digest <code>sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90</code></dd>
+<dt>Model</dt><dd>meta-llama/Llama-3.3-70B-Instruct @ 6f6073b423013f6a7d4d9f39144961bfbfbc386b</dd>
+<dt>Hardware</dt><dd>2×H100 · runpod / secure · h100-sxm-x2 · on_demand; CUDA 13.0, driver 580.126.09</dd>
+<dt>Code</dt><dd>commit <code>7374a4b618fb5c4d941a5102dfa8d8c0a290ddf8</code>; loom-bench 0.1.0</dd>
+<dt>Price</dt><dd>runpod/secure h100-sxm-x2 + 260 GB block storage, from the price book: on-demand $8.0156/h; spot n/a; committed 1y n/a; source: <a href="https://www.runpod.io/pricing">https://www.runpod.io/pricing</a>, <a href="https://docs.runpod.io/pods/pricing">https://docs.runpod.io/pods/pricing</a>; last checked 2026-10-08</dd>
+<dt>Price as run</dt><dd>$8.0156/h, on_demand host: runpod API price observed at launch in US-MO-1 (2026-10-09T04:44:27.075823+00:00) + 260 GB block storage</dd>
+<dt>Runs</dt><dd>12; provenance digests: <code>09783ef8cb9ae185eb109175e9d420c7b41bb204790503d7bd4aababccaa0ce0</code>, <code>3db93366ba0eb7e3d0966083da719d9ccbd5f0498f9bcc480cb68fbf59ecb56d</code>, <code>54ebaa78fdb34498f9159a9b8eba2e4f595bf1c953a8353a7e6b4b38aa3df050</code>, <code>5b1188e1f2f8b73b44cd8cd993d5442e7d0c5655ec6a20443e881ec014da0626</code>, <code>65845c060a094e84ace2b9174ebf72162ffeac69f450b0360c4c071dbabe9f39</code>, <code>75b150ce8ff766453ae1f716832ce027c4d773a23b9baab5c75cb09b4b68a6dd</code>, <code>7f057e01fb94ba2810b51e00b9690d99105f71c2ff1516382d7bae6c2b4ec1a6</code>, <code>cb7e3994be3e1429f3b98d423f18d8da1ef9ddecfcd9fef7bdcc82087e40d85c</code>, <code>d969d96226fdb765e26009694604a185e431aca63998577c55d5c498078059e5</code>, <code>e03e3970dcf2682b525c34a48e90decc923b9af82f096e820ee9ec4e654deaf6</code>, <code>ec2e646d82e744f495945747274d274a086e7c776f288474cac1941493d41712</code>, <code>fd8643b45f5837c843647497b778f1f1573856535502e187017654dc5a614ff8</code></dd>
+<dt>Reproduce</dt><dd><code>bench reproduce 9fc516b1-4050-463e-b181-793f50824f90</code></dd>
+</dl>
+</details>
+<details>
+<summary>vllm-tp2 · shared-prefix, open loop <code>2f7fb3f9372ba09550198b14978459e35c68866db852f44d4856c293a5adf8f9</code></summary>
+<dl>
+<dt>Config</dt><dd>vllm 0.30.0 · unquantized · TP2 · 2×H100 · h100-sxm-x2 (on_demand) · gpu_memory_utilization=0.95</dd>
+<dt>Engine</dt><dd>vllm 0.30.0; image <code>vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90</code>; digest <code>sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90</code></dd>
+<dt>Model</dt><dd>meta-llama/Llama-3.3-70B-Instruct @ 6f6073b423013f6a7d4d9f39144961bfbfbc386b</dd>
+<dt>Hardware</dt><dd>2×H100 · runpod / secure · h100-sxm-x2 · on_demand; CUDA 13.0, driver 580.126.09</dd>
+<dt>Code</dt><dd>commit <code>7374a4b618fb5c4d941a5102dfa8d8c0a290ddf8</code>; loom-bench 0.1.0</dd>
+<dt>Price</dt><dd>runpod/secure h100-sxm-x2 + 260 GB block storage, from the price book: on-demand $8.0156/h; spot n/a; committed 1y n/a; source: <a href="https://www.runpod.io/pricing">https://www.runpod.io/pricing</a>, <a href="https://docs.runpod.io/pods/pricing">https://docs.runpod.io/pods/pricing</a>; last checked 2026-10-08</dd>
+<dt>Price as run</dt><dd>$8.0156/h, on_demand host: runpod API price observed at launch in US-MO-1 (2026-10-09T04:44:27.075823+00:00) + 260 GB block storage</dd>
+<dt>Runs</dt><dd>12; provenance digests: <code>08728df1e4ff5cded1929cc2932dd216b526689a4b45a8e2be59520c1bdd805c</code>, <code>11ecbae1ec83341159291185fe575b0324431fa3236114871831b724ef0b21ec</code>, <code>18f3db412ea37c26c450dd80996e5457b31fce2e8a3673d71c9f8d066d7c16ba</code>, <code>692befa28b8c800f09b0898535ebf89751487076452d999404b955c9b31764c3</code>, <code>6fd64a536908c9bbb3664533a56ef0f0debee810446518572d7e6ef031082335</code>, <code>7f203d2b31990ae53fe664eb1e8c4e9bf0d8bdf41d02705f19d88e7c38ba393e</code>, <code>8a8f37aad182e234f309d8312be2f839ee4ed559cb5195c52083b4a5f49ecc94</code>, <code>bebaabb2d860688d4b296578d9854ddc902dcd18322f8fba3df09e6664a42a3e</code>, <code>e246471cca908fac31829c8cfb343c5e767614cf83c32c54a5ccdcace7ebcbd9</code>, <code>e6a939eb1e9d2c699cde2f143346a1c62af823aca2aa463d9415f3940a485164</code>, <code>f15f02238d50ff798910df9c649ed922f2dc1222779b71b9c0f4ada0696482f8</code>, <code>fc5c4709e3c9334e68d38ca1bcf28546a7755398caf833edc26163721df58a24</code></dd>
+<dt>Reproduce</dt><dd><code>bench reproduce 3457581f-bfdd-4c36-a302-43b92bffc196</code></dd>
+</dl>
+</details>
+</footer>
+
+</main>
+</body>
+</html>
