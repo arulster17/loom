@@ -264,7 +264,7 @@ clouds:
         # NVLink/NVSwitch). From the API on 2026-10-08 19:03 UTC (gpuTypes lowestPrice,
         # gpuCount 2, secureCloud: true): $7.98/h ($3.99 per GPU), stockStatus "Low".
         # Same query: H100 NVL $3.19/GPU with 1x "Low" and no 2x listed; 4x L40S none listed.
-        # Used by the not-yet-approved llama-3.3-70b-h100-tp2-runpod draft.
+        # Used by llama-3.3-70b-h100-tp2-runpod (approved 2026-10-08) and its smoke.
         h100-sxm-x2:
           gpu: H100
           gpu_count: 2

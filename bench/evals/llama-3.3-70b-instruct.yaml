@@ -167,7 +167,7 @@ sanity_limits:
 # phase0-strict adds tool_calling_strict (60 items, ~1 min) to phase0: the FP8 runs use it.
 # Gated against a phase0 baseline from an earlier experiment (BF16 run cf4d1614), the four
 # shared tasks pair item for item and the strict task is reported, not gated; a run that
-# carries its own BF16 baseline (the H100 draft) gates it too.
+# carries its own BF16 baseline (the H100 run) gates it too.
 subsets:
   phase0: [gsm8k, ifeval, tool_calling, json_schema]
   phase0-strict: [gsm8k, ifeval, tool_calling, tool_calling_strict, json_schema]

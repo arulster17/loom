@@ -1,5 +1,5 @@
-# NOT APPROVED - DRAFT, like the run it smokes (llama-3.3-70b-h100-tp2-runpod.yaml). Do
-# not run it until that run is approved; then run it first.
+# APPROVED 2026-10-08, with the run it smokes: run this smoke first ($9 cap), then
+# llama-3.3-70b-h100-tp2-runpod.yaml ($45 cap).
 #
 # The H100 run's paths at smoke scale on one RunPod Secure 2x H100 SXM pod ($7.98/h on
 # 2026-10-08): Qwen3-8B BF16 (baseline, captures the divergence reference) and RedHatAI's
@@ -11,7 +11,7 @@
 # the H100 run, with an in-run BF16 baseline as there. The 70B weights (141 GB + 73 GB)
 # and the BF16 KV-cache margin at 0.95 are what it cannot run.
 name: runpod-smoke-h100
-description: "DRAFT, not approved: the 70B H100 run's paths at smoke scale on 2x H100 SXM (Qwen3-8B BF16 vs FP8-dynamic, TP=2)."
+description: "The 70B H100 run's paths at smoke scale on 2x H100 SXM (Qwen3-8B BF16 vs FP8-dynamic, TP=2)."
 model: qwen3-8b
 smoke: true
 provider:

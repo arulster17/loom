@@ -1,7 +1,6 @@
-# NOT APPROVED - DRAFT. Do not run this spec. The approved 70B hardware is 4x L40S
-# (llama-3.3-70b-fp8-tp4-runpod.yaml, $15 cap). 2x H100 SXM with TP=2 is the original
-# brief's other option, drafted here so it can be quoted; it needs an explicit approval of
-# hardware and budget first (docs/PLAN.md).
+# APPROVED 2026-10-08: 2x H100 SXM with TP=2 is the 70B hardware, $45 cap. Run the smoke
+# runpod-smoke-h100.yaml ($9 cap) first, then this spec. It replaces the FP8 run on 4x
+# L40S (llama-3.3-70b-fp8-tp4-runpod.yaml), which stays on hold (docs/PLAN.md).
 #
 # Llama 3.3 70B on one RunPod Secure Cloud 2x H100 SXM pod (on-demand, $7.98/h on
 # 2026-10-08, stock "Low"), TP=2, vLLM v0.30.0: the BF16 reference and its FP8 row, both
@@ -22,7 +21,7 @@
 # ranges' top (2 and 4 req/s), and a sweep whose every point passes only bounds the
 # answer from below.
 name: llama-3.3-70b-h100-tp2-runpod
-description: "DRAFT, not approved: Llama 3.3 70B BF16 and FP8, TP=2 on RunPod Secure 2x H100 SXM, vLLM v0.30.0, FP8 gated against BF16 in-run."
+description: "Llama 3.3 70B BF16 and FP8, TP=2 on RunPod Secure 2x H100 SXM, vLLM v0.30.0, FP8 gated against BF16 in-run."
 model: llama-3.3-70b-instruct
 provider:
   kind: runpod
@@ -79,7 +78,7 @@ quality:
   suite: llama-3.3-70b-instruct
   subset: phase0-strict
   baseline_variant: vllm-tp2
-# A quote, not an approval: `bench plan` puts the pod at the estimate in docs/benchmark-
+# Approved at this cap on 2026-10-08: `bench plan` puts the pod at the estimate in docs/benchmark-
 # lab.md; the TTL holds it with margin and max_spend holds the worst case to TTL. H100 SXM
 # Secure stock was "Low" on 2026-10-08: check it and run with
 # LOOM_RUNPOD_CAPACITY_WAIT_S=7200.

@@ -1,3 +1,6 @@
+# ON HOLD (2026-10-08): superseded by the 2x H100 run (llama-3.3-70b-h100-tp2-runpod.yaml).
+# 4x L40S had no stock, and its cross-socket host is the known TPOT floor. Kept for reference.
+#
 # Llama 3.3 70B FP8 (`llama-3.3-70b-instruct-fp8`: RedHatAI's FP8-dynamic compressed-
 # tensors checkpoint, ~73 GB) with TP=4 on one RunPod Secure Cloud 4x L40S pod
 # (on-demand), vLLM v0.30.0 at defaults: its own labeled row next to the BF16 reference

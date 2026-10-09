@@ -1,4 +1,4 @@
-"""The 2x H100 SXM option for Llama 3.3 70B (a draft, not approved): BF16 reference and
+"""The 2x H100 SXM run for Llama 3.3 70B (approved 2026-10-08): BF16 reference and
 FP8 row on one pod at TP=2, the FP8 cell gated against the BF16 cell in-run; its smoke;
 variants that serve another registry entry (`Variant.model`); and the phase0-strict
 subset the FP8 runs use."""
@@ -57,10 +57,18 @@ def _swap(args: list[str]) -> list[str]:
 
 
 @pytest.mark.parametrize("path", [LLAMA_H100_RUNPOD, RUNPOD_SMOKE_H100], ids=lambda p: p.stem)
-def test_the_h100_specs_are_marked_not_approved(path):
+def test_the_h100_specs_carry_the_approval_note(path):
     text = path.read_text()
-    assert text.startswith("# NOT APPROVED - DRAFT")
-    assert load_experiment(path).description.startswith("DRAFT, not approved")
+    assert text.startswith("# APPROVED 2026-10-08")
+    header = text.split("\nname:")[0]
+    # The caps and the order: the $9 smoke runs first, then the $45 run.
+    assert "$45 cap" in header and "$9 cap" in header and "first" in header
+    assert "DRAFT" not in text and "not approved" not in text.lower()
+    assert "DRAFT" not in load_experiment(path).description
+
+
+def test_the_l40s_fp8_spec_is_on_hold():
+    assert LLAMA_FP8_RUNPOD.read_text().startswith("# ON HOLD (2026-10-08): superseded by")
 
 
 def test_the_h100_price_is_recorded_with_its_source_and_date():

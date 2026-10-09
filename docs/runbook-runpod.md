@@ -313,9 +313,11 @@ both cells' `engine_started` events, `quality` events for both, a `gate` event f
 What it cannot run (TP=4, the stored-baseline gate) is covered by the BF16 70B runs and
 offline tests (`bench/tests/runner/test_stored_baseline.py`, `test_fp8_70b.py`).
 
-The 2x H100 SXM option (`llama-3.3-70b-h100-tp2-runpod.yaml`, BF16 baseline and FP8 on one
-pod, TP=2) is a draft that is **not approved**. If it is approved, run its smoke
-`runpod-smoke-h100.yaml` first (also a draft, about $6.78): it adds the H100 SXM GPU type,
+The 70B run is 2x H100 SXM (`llama-3.3-70b-h100-tp2-runpod.yaml`, BF16 reference and FP8
+on one pod, TP=2, FP8 gated in-run; approved 2026-10-08 with a $45 cap). It replaces the
+FP8 run on 4x L40S (`llama-3.3-70b-fp8-tp4-runpod.yaml`), which is on hold: 4x L40S had no
+stock, and its cross-socket host is the known TPOT floor. Run its smoke
+`runpod-smoke-h100.yaml` first ($9 cap, about $6.78): it adds the H100 SXM GPU type,
 sm_90 FP8 GEMMs, TP=2 with NCCL P2P over NVLink (`NCCL_P2P_LEVEL=NVL`) and
 `gpu_memory_utilization: 0.95`. Check its `engine_started.system.gpu_topology` shows
 `NV*` links between the two GPUs. H100 SXM Secure 2x was "Low" stock on 2026-10-08.
