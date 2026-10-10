@@ -353,7 +353,8 @@ def test_reproduce_a_run_from_its_provenance(ctx, db, tmp_path, replay):
     assert outcome.status.value == "completed"
     run_id = outcome.run_ids[1]  # repetition 1: its own seed
 
-    result = invoke("reproduce", run_id, "--db", db, "--out", tmp_path / "repro")
+    short = str(run_id)[:8]  # a unique prefix, like a short git hash
+    result = invoke("reproduce", short, "--db", db, "--out", tmp_path / "repro")
     assert result.exit_code == 0, result.output
     assert "reproduced within normal variance" in result.output
     with session_scope(db) as s:

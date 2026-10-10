@@ -2,11 +2,15 @@
 
 Exit codes: 0 ok, 1 failed, 2 invalid input, 3 refused by the planner (over a
 cap), 4 stopped before a step that would pass the cap, 5 hard budget abort,
-6 reproduction outside normal variance, 7 quality gate blocked, 8 finished but some runs
-or quality evals failed (every load run failing marks the experiment failed and exits 1;
-a gate missing a side is inconclusive). A gate that needs
+6 reproduction or comparison outside normal variance, 7 quality gate blocked, 8 finished
+but some runs or quality evals failed (every load run failing marks the experiment failed
+and exits 1; a gate missing a side is inconclusive). A gate that needs
 review (divergence above the calibrated limits while every task passes) exits 0 unless
 the suite sets `gate.review_blocks`, in which case it is blocked and exits 7.
+`bench compare` exits 2 when nothing in the two experiments matched.
+
+Experiment and run ids can be given in full or as a unique prefix of at least 4 hex
+digits, like git's short hashes (`7a8237d0`); an ambiguous or unknown one exits 2.
 """
 
 from __future__ import annotations
@@ -119,12 +123,21 @@ def _invalid_input(what: str) -> Iterator[None]:
         raise typer.Exit(EXIT_INVALID) from None
 
 
-def _experiment_id(value: str) -> uuid.UUID:
-    try:
-        return uuid.UUID(value)
-    except ValueError:
-        err.print(f"[red]not an experiment id:[/red] {value!r}")
-        raise typer.Exit(EXIT_INVALID) from None
+def _experiment_ids(session: Session, values: Sequence[str]) -> list[uuid.UUID]:
+    """Experiment ids given in full or as a unique prefix (`repo.resolve_experiment_id`),
+    in order, without repeats; an unknown or ambiguous one exits 2."""
+    from loom_bench.store import repo
+
+    out: list[uuid.UUID] = []
+    for value in values:
+        try:
+            found = repo.resolve_experiment_id(session, value)
+        except (ValueError, LookupError) as e:
+            err.print(f"[red]{escape(str(e))}")
+            raise typer.Exit(EXIT_INVALID) from None
+        if found not in out:
+            out.append(found)
+    return out
 
 
 def _load(path: Path) -> Experiment:
@@ -352,7 +365,9 @@ def render_reproduce(result: ReproduceOutcome) -> None:
 
 @app.command("reproduce")
 def reproduce_cmd(
-    ref: Annotated[str, typer.Argument(help="Run id, or a run's provenance.json.")],
+    ref: Annotated[
+        str, typer.Argument(help="Run id (or a unique prefix), or a run's provenance.json.")
+    ],
     db: DbOpt = None,
     out: OutOpt = Path("results"),
     spec: Annotated[
@@ -464,7 +479,9 @@ def db_upgrade(db: DbOpt = None) -> None:
 def export(
     fmt: Annotated[Literal["csv", "parquet"], typer.Argument(metavar="csv|parquet")],
     out: Annotated[Path, typer.Option("--out", help="Output file.")],
-    experiment: Annotated[str | None, typer.Option(help="Experiment id (default: all).")] = None,
+    experiment: Annotated[
+        str | None, typer.Option(help="Experiment id or unique prefix (default: all).")
+    ] = None,
     db: DbOpt = None,
 ) -> None:
     """One row per run: summary and provenance flattened into columns."""
@@ -472,8 +489,8 @@ def export(
     from loom_bench.store.db import session_scope
     from loom_bench.store.export import export_runs_csv, export_runs_parquet
 
-    exp_id = _experiment_id(experiment) if experiment else None
     with session_scope(db) as s:
+        exp_id = _experiment_ids(s, [experiment])[0] if experiment else None
         runs = repo.list_runs(s, experiment_id=exp_id)
         path = (export_runs_csv if fmt == "csv" else export_runs_parquet)(runs, out)
     console.print(f"wrote {len(runs)} runs to {path}")
@@ -521,7 +538,8 @@ ExperimentsOpt = Annotated[
     typer.Option(
         "--experiment",
         "-e",
-        help="Experiment id, repeatable (default: every completed experiment but reproductions).",
+        help="Experiment id or unique prefix, repeatable "
+        "(default: every completed experiment but reproductions).",
     ),
 ]
 ReportDirOpt = Annotated[Path, typer.Option("--out", help="Directory for the report files.")]
@@ -544,7 +562,7 @@ def _analyze(
     with session_scope(db) as s:
         stmt = select(BenchExperiment)
         if experiments:
-            stmt = stmt.where(BenchExperiment.id.in_([_experiment_id(e) for e in experiments]))
+            stmt = stmt.where(BenchExperiment.id.in_(_experiment_ids(s, experiments)))
         else:
             stmt = stmt.where(
                 BenchExperiment.status == "completed",
@@ -669,8 +687,8 @@ def competitiveness(
 
 @app.command("compare")
 def compare_cmd(
-    a: Annotated[str, typer.Argument(help="Experiment id (A).")],
-    b: Annotated[str, typer.Argument(help="Experiment id (B).")],
+    a: Annotated[str, typer.Argument(help="Experiment id or unique prefix (A).")],
+    b: Annotated[str, typer.Argument(help="Experiment id or unique prefix (B).")],
     match_by: Annotated[
         Literal["config_hash", "cell_key", "workload"],
         typer.Option(help="How sweeps are paired across A and B."),
@@ -679,24 +697,36 @@ def compare_cmd(
     out: Annotated[Path | None, typer.Option("--out", help="Write compare.md/json here.")] = None,
     db: DbOpt = None,
 ) -> None:
-    """Per-metric deltas between two experiments; exit 6 when outside normal variance."""
+    """Per-metric deltas between two experiments, judged on the cells and loads both ran.
+
+    Exit 0 when every matched metric is within normal variance, 6 when one is outside,
+    2 when nothing matched. Cells or loads in only one experiment are listed, not judged.
+    """
     from loom_bench.report import write_reports
     from loom_bench.report.compare import compare, render_json
     from loom_bench.store import repo
     from loom_bench.store.db import session_scope
 
-    id_a, id_b = _experiment_id(a), _experiment_id(b)
     with session_scope(db) as s:
+        id_a, id_b = (_experiment_ids(s, [ref])[0] for ref in (a, b))
         runs_a = repo.list_runs(s, experiment_id=id_a)
         runs_b = repo.list_runs(s, experiment_id=id_b)
     if not runs_a or not runs_b:
         err.print("[red]both experiments need runs")
         raise typer.Exit(EXIT_INVALID)
-    c = compare(runs_a, runs_b, match_by=match_by, rel_tol=tolerance, label_a=a, label_b=b)
+    c = compare(
+        runs_a, runs_b, match_by=match_by, rel_tol=tolerance, label_a=str(id_a), label_b=str(id_b)
+    )
     md = render_compare_markdown(c)
     console.print(Markdown(md))
     if out is not None:
         _written(write_reports(out, compare={"md": md, "json": render_json(c)}))
+    if c.verdict == "nothing_matched":
+        err.print(
+            f"[red]nothing to compare:[/red] no sweep or load point of {id_a} matches one "
+            f"of {id_b} by {match_by} (try --match-by cell_key or workload)"
+        )
+        raise typer.Exit(EXIT_INVALID)
     raise typer.Exit(EXIT_OK if c.within_normal_variance else EXIT_MISMATCH)
 
 
@@ -780,6 +810,11 @@ def quality_gate(
     console.print(f"baseline {base_hash[:12]} -> candidate {cand_hash[:12]}")
     console.print(decision.summary())
     raise typer.Exit(EXIT_GATE_BLOCKED if decision.blocked else EXIT_OK)
+
+
+SiteConfigOpt = Annotated[
+    Path | None, typer.Option("--config", help="Site config YAML (default site/config.yaml).")
+]
 
 
 @site_app.command("export")
