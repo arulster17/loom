@@ -13,7 +13,11 @@ deliverable, plus the §7.7 outputs and the §7.5 optimizer, with:
 
 Snapshot: 2026-10-10, commit `efaf62a`. Every command below was run on that commit; the
 expected output shown (abbreviated) is what it printed. Nothing on this page launches a
-RunPod pod or an EC2 instance.
+RunPod pod or an EC2 instance. Writing this page found three defects, fixed the same day:
+`bench compare` counted unmatched cells against its verdict (A1), ids had to be given in
+full (A3), and `bench site export` defaulted to the newest experiment of each name (D8).
+The D6 report is now committed. The commands in A1, A3, D6 and D8 were re-run after
+those fixes.
 
 ## Setup
 
@@ -42,7 +46,7 @@ The whole test suite (about 3.5 minutes):
 
 ```bash
 uv run pytest -q -n auto
-# 1452 passed, 20 skipped   (19 of the 20 skips are the Postgres tests; see D5)
+# 1466 passed, 20 skipped   (19 of the 20 skips are the Postgres tests; see D5)
 ```
 
 ## Summary
@@ -59,7 +63,7 @@ uv run pytest -q -n auto
 | D3 | Workload profiles | **met** as profiles; 4 of 10 have run on a GPU |
 | D4 | Quality gate with pinned eval subsets per model | **met**; the long-context, MMLU-Pro and code tasks have never run on a GPU |
 | D5 | Provenance in Postgres + CSV export | **met**; the real results live in SQLite, not Postgres |
-| D6 | Model A leaderboard: vLLM vs SGLang, one GPU type, AWS | **changed**: RunPod 1x L40S; the report is not in git |
+| D6 | Model A leaderboard: vLLM vs SGLang, one GPU type, AWS | **changed**: RunPod 1x L40S (report in `reports/8b-engines-v1`) |
 | D7 | Model B leaderboard: one tensor-parallel config | **changed**: RunPod 2x H100 SXM, TP=2 |
 | D8 | Public results page + waitlist | **partly**: site built, not published; no waitlist backend |
 | D9 | Docs | **met** |
@@ -156,18 +160,21 @@ by replaying a fixed point.
 The real-hardware comparison (read-only):
 
 ```bash
-uv run bench compare 565b8d3f-b521-4e3e-91e5-ee07ee02b94d 7a8237d0-9917-47e7-b93e-8cb0230e0059 \
-  --db $REAL --out $ACC/cmp; echo "exit=$?"
-#   Verdict: outside normal variance (0 metrics outside; 22 unmatched)
+uv run bench compare 565b8d3f 7a8237d0 --db $REAL --out $ACC/cmp; echo "exit=$?"
+#   Verdict: within normal variance (1 load point matched; 22 unmatched, not judged)
 #   vllm vs bf16: fixed-1k-1k @ 1 req/s — within
 #     TTFT p95 298 vs 256 ms (-14%, not significant, Welch p=0.093); TPOT p95 44.0 vs 43.7 ms;
 #     output tok/s 1,031 vs 1,068 (+3.5%)
-#   exit=6
+#   Only in 565b8d3f-...: sglang code-completion open_loop; ...; vllm fixed-1k-1k @ 2 req/s
+#   Only in 7a8237d0-...: fp8-kv8-mbt1024 chat-sharegpt open_loop; ...
+#   exit=0
 ```
 
-Exit 6 is expected here. The two experiments share only that one point, and `compare`
-counts the 22 unmatched cells against the verdict. No metric at the shared point is
-outside.
+The two experiments share only that one point. `compare` judges the cells and loads both
+sides ran and lists the other 22 without counting them (before the fix on 2026-10-10 it
+counted them and exited 6 here). Exit codes: 0 within normal variance, 6 when a matched
+metric is outside, 2 when nothing matched at all (try `--match-by cell_key` or
+`workload`). Test: `bench/tests/runner/test_cli_ids.py::test_compare_exit_judges_only_the_cells_both_ran`.
 
 Reproducing a GPU run is paid. `bench reproduce <run id> --db $REAL` launches a pod
 straight away: it has no `--dry-run`, although it does refuse to run over the caps. The
@@ -263,8 +270,13 @@ diff -q reports/70b-h100-v2/leaderboard.csv $ACC/70b-h100/leaderboard.csv && ech
 #   identical
 ```
 
-Experiment ids must be given in full (`-e 7a8237d0` alone is refused: "not an
-experiment id").
+Experiment and run ids can be given in full or as a unique prefix of at least 4 hex
+digits, like git's short hashes: `bench report -e 7a8237d0` is the same as the full id
+above. An ambiguous prefix is refused with the ids it matches, and an unknown one with
+"no experiment ..." (exit 2). This holds for every command that takes an id: `report`,
+`competitiveness`, `compare`, `export`, `site export`, `reproduce` (run ids) and
+`quality gate` (experiment ids or config hashes). Tests:
+`bench/tests/runner/test_cli_ids.py`.
 
 ### A4. Hard budget abort
 
@@ -545,16 +557,19 @@ Evidence:
   code-completion, vLLM holds 1.297 req/s against SGLang's 1.091, but both are untrusted
   (CV 12-15%). SGLang's gate against vLLM is inconclusive on IFEval, so SGLang is blocked
   and vLLM stays the 8B engine.
-- The report is **not in git**. It is at `/Users/mathurs/Projects/loom/reports/8b-final-v4/`
-  (gitignored; `8b-final-v3` is an earlier version without the competitiveness CSV).
-  The command below regenerates it.
+- Report: [reports/8b-engines-v1](../reports/8b-engines-v1/leaderboard.md), generated
+  2026-10-10 from the real DB with the command below. It replaces the uncommitted
+  `reports/8b-final-v4/` (gitignored) under a new name, so it cannot collide with that
+  local copy. Against 8b-final-v4 no number changed: the price book date is 2026-10-09
+  instead of 2026-10-06, and the competitiveness CSV has the newer
+  `competitor_listing_model_id` column.
 
 ```bash
-uv run bench report --db $REAL --out $ACC/8b-engines \
-  -e 565b8d3f-b521-4e3e-91e5-ee07ee02b94d -e b1b904dc-5bec-40ab-ba13-1fd96dd2fd69 \
-  -e b03b3c52-aaf8-4f11-bac4-25c82b02505f
-diff reports/8b-final-v4/leaderboard.md $ACC/8b-engines/leaderboard.md
-#   one line differs: "Price book last checked: 2026-10-06" -> "2026-10-09"
+uv run bench report --db $REAL --out $ACC/8b-engines -e 565b8d3f -e b1b904dc -e b03b3c52
+for f in md csv equal_load.csv competitiveness.csv html; do
+  diff -q reports/8b-engines-v1/leaderboard.$f $ACC/8b-engines/leaderboard.$f && echo identical
+done
+#   identical (x5)
 ```
 
 ### D7. Model B leaderboard: one tensor-parallel config
@@ -591,6 +606,13 @@ backend, so it shows "Waitlist opens soon" and no form.
   done, and PLAN.md says to hold publishing until you say so.
 - The committed snapshot `site/data/` is empty (0 experiments), so the committed build
   says "No published results yet — first runs pending."
+- What gets published is pinned by full id in `site/config.yaml` (`publish.experiments`,
+  empty today). `bench site export` without `-e` exports exactly those, and the deploy
+  workflow builds with `--require-pinned`, which refuses a `site/data` snapshot of
+  anything else. There is no "newest experiment of each name" default any more: it picked
+  the 70B EAGLE3 sweep 55102ddb over cf4d1614. Tests: `bench/tests/site/test_site_cli.py`,
+  `test_site_snapshot.py::test_export_takes_exactly_the_named_experiments`. Docs:
+  [site.md](site.md#publishing-results-after-runs).
 - Waitlist: `site/config.yaml` has `waitlist.action_url: null`. The backend (Formspree /
   Buttondown, or a Loom endpoint into `waitlist_signups`) is an open question in PLAN.md.
   [waitlist.md](waitlist.md) has an empty count table.
@@ -601,18 +623,27 @@ Check it yourself (free; builds a site from the real results into a temp dir, wi
 touching `site/data`):
 
 ```bash
-uv run bench site export --db $REAL --out $ACC/site-data
+uv run bench site export --db $REAL --out $ACC/site-none
+#   wrote .../site-none: 0 experiments, 0 configs, 0 runs
+#   no experiments pinned in .../site/config.yaml (publish.experiments): the snapshot has no results
+uv run bench site export --db $REAL --out $ACC/site-data \
+  -e 565b8d3f -e b03b3c52 -e 7a8237d0 -e cf4d1614 -e 9f0853d7 -e 9e5f7866
+#   a table of the six experiments (id, name, status, created), then
 #   wrote .../site-data: 6 experiments, 21 configs, 297 runs
+#   these are not the experiments pinned in .../site/config.yaml (publish.experiments): use this
+#   snapshot for a local preview, or pin them before committing it; ...
 uv run bench site build --data $ACC/site-data --out $ACC/site
 #   wrote 8 pages
+uv run bench site build --data $ACC/site-data --out $ACC/site --require-pinned; echo "exit=$?"
+#   cannot build the site: the snapshot does not hold the experiments pinned ... exit=2
 python3 -m http.server 8000 --directory $ACC/site      # open http://localhost:8000
 uv run bench waitlist count --no-record --db $REAL
 #   0 signups
 ```
 
-By default the export takes the newest completed experiment of each name. For the 70B
-on 4x L40S that is the EAGLE3 sweep 55102ddb, not cf4d1614. Choose the experiments with
-`-e` before publishing anything.
+The `-e` list above is one possible selection (the 8B engines and quality rerun, the 8B
+sweep, the 70B on 4x L40S and on 2x H100 with its quality rerun), not a decision. To
+publish, pin your choice in `site/config.yaml` (open item 7).
 
 ### D9. Docs
 
@@ -732,8 +763,9 @@ These are either not met or wait on a decision from you:
    sweep in the AWS reaper Lambda with the RunPod key is listed in PLAN.md as a
    follow-up and is not built.
 7. **Results site and waitlist (D8).** Choose a waitlist backend (Formspree / Buttondown,
-   or a Loom endpoint), choose which experiments to publish, and say when to enable
-   GitHub Pages. The committed snapshot is empty.
+   or a Loom endpoint), choose which experiments to publish (pinned by full id in
+   `site/config.yaml`, `publish.experiments`), and say when to enable GitHub Pages. The
+   committed snapshot and the pinned list are empty.
 8. **Results store (D5).** The real results are in SQLite. If you want them in Postgres
    for Phase 1, they need loading into it; the code already supports Postgres.
 9. **Coverage not exercised on a GPU (D2-D4).** These are built and tested on the mock
