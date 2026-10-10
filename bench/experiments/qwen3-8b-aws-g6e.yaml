@@ -1,0 +1,66 @@
+# Qwen3-8B on AWS (build prompt 7.8: a Model A leaderboard on one GPU type, AWS): BF16
+# (the reference row and the gate's baseline) and fp8-kv8 (FP8-dynamic weights + FP8 KV
+# cache, the cheapest config at the SLO in the RunPod sweep 7a8237d0) on one g6e.xlarge
+# on-demand host (1x L40S, 4 vCPU, 32 GiB; $1.861/h + 200 GB gp3). The account's G/VT
+# on-demand quota is 4 vCPU (spot 0): exactly one g6e.xlarge, so both cells share one
+# host through a warm restart onto the FP8 checkpoint.
+#
+# Three jobs in one run:
+# 1. The AWS leaderboard rows: chat-sharegpt (the realistic workload) at the SLO.
+# 2. fp8-kv8's gate against BF16, with more replicated passes than the sweep's 3. Sized
+#    from the per-item variance in 7a8237d0 (docs/benchmark-lab.md, "Qwen3-8B on AWS"):
+#    on gsm8k, Var(D_i) = 0.0250 per item = 0.0190 of consistent per-item differences
+#    (FP8 flips the same items every pass) + 0.0061 of run noise at R = 3. Replicates
+#    divide only the run noise, so the CI half-width goes 0.85 pts (R=3) -> 0.81 (R=5)
+#    -> 0.78 (R=10) -> 0.74 (R -> inf) against a delta of -0.28 and a 1-pt margin: the
+#    gate resolves with probability ~37% at R=5, ~41% at R=10, never above ~46%. R = 5
+#    takes most of what replicates can give; more items, not passes, is the lever.
+# 3. A cross-check of RunPod's cost and goodput against AWS on the same GPU: the same
+#    variants (names, checkpoints, KV dtype, image and vLLM args as the sweep's bf16 and
+#    fp8-kv8), the same chat profile, windows and search (lo 4.5, step 1.5, descend 3,
+#    5 points), so where AWS behaves like RunPod the search visits the same loads and
+#    `bench compare 7a8237d0 <this> --match-by cell_key` compares them at equal load.
+#    Config hashes differ from the sweep's (the hardware, cloud and market are part of
+#    the hash). The host differs too: g6e.xlarge has 4 vCPU and 32 GiB against the
+#    RunPod pod's 16 vCPU and 94 GiB, with the load client on the same host.
+#
+# Run the smoke (aws-smoke-g6e.yaml) first: no aws_ec2 GPU run has ever happened.
+name: qwen3-8b-aws-g6e
+description: Qwen3-8B on one AWS g6e.xlarge on-demand (1x L40S), vLLM v0.30.0, BF16 vs FP8 weights + FP8 KV on chat at SLO, fp8-kv8 gated vs BF16 on 5 passes, cross-checked against RunPod 7a8237d0.
+model: qwen3-8b
+provider:
+  kind: aws_ec2
+  region: us-east-1
+  instance_type: g6e.xlarge
+  market: on_demand
+  disk_gb: 200
+variants:
+  - name: bf16
+  - name: fp8-kv8
+    model: qwen3-8b-fp8
+    kv_cache_dtype: fp8
+workloads:
+  - profile: chat-sharegpt
+    load:
+      mode: open_loop
+      search: {lo: 4.5, hi: 16, rel_tol: 0.05, max_points: 5, scale: geometric, step: 1.5, descend: 3}
+      duration_s: 255
+      warmup_s: 45
+      drain_timeout_s: 60
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+quality:
+  suite: qwen3-8b
+  subset: phase0-strict
+  baseline_variant: bf16
+  replicates: 5
+# The TTL holds `bench plan`'s estimate with margin (the planner's eval times are ~1.8x
+# the measured ones); max_spend holds the worst case of the host living to its TTL.
+budget:
+  max_spend: "$12.50"
+  ttl_minutes: 390
+  accrual_interval_s: 15
+seed: 0
