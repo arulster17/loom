@@ -5,20 +5,21 @@
 # 11% more bandwidth), L40 $0.82 (864 GB/s, half the L40S's tensor throughput, so chat
 # prefill may cost TTFT). Same vLLM image and sm_89 FP8 kernels as the sweep.
 #
-# DRAFT, NOT RUN. Fill in from the sweep before planning it:
-# 1. Both variants: replace the config below the `# winner` marker with the sweep's
-#    cheapest config that passed its gate (the draft holds the expected winner, fp8-kv8:
-#    FP8-dynamic weights by `model: qwen3-8b-fp8`, `kv_cache_dtype: fp8`; add the
-#    `engine.args` of fp8-kv8-mbt1024 if that cell won). Keep each `hardware` block.
-# 2. `quality.baseline`: the sweep's experiment id and its bf16 cell's config hash
-#    (`bench report` or bench_eval_runs), so both cells are gated against the stored
-#    L40S BF16 baseline and scored on its divergence reference, as the 70B FP8 run on
-#    4x L40S was (llama-3.3-70b-fp8-tp4-runpod). Until then `bench plan` refuses it.
-#    A new GPU is a new config (the hardware is in the config hash), so it ships only
-#    on its own gate pass (docs/PLAN.md, quality standard).
-# 3. chat-sharegpt `search.lo`: the winner's chat knee on the L40S from the sweep. The
-#    two cards have about the L40S's bandwidth, so their knees should sit near it; four
-#    points at step 1.5 with a two-step descent bracket it to ~5% either way.
+# Filled in from the sweep (7a8237d0, 2026-10-10), NOT RUN: it needs the user's go.
+# 1. The config is fp8-kv8 (FP8-dynamic weights by `model: qwen3-8b-fp8`,
+#    `kv_cache_dtype: fp8`, default engine args): the cheapest at the SLO on chat
+#    ($0.0467 [0.0418, 0.0522] per 1M blended, 5.239 req/s) and tied cheapest on 1k/1k.
+#    No candidate passed its gate in the sweep: fp8-kv8's was INCONCLUSIVE on gsm8k
+#    alone (-0.28 pts [-1.14, +0.61], margin 1.00), every other task non-inferior. So
+#    this is the leading candidate, not a shipped winner, and these cards ship it only
+#    on their own gate pass against the stored L40S BF16 baseline below.
+# 2. `quality.baseline`: the sweep's experiment id and its bf16 cell's config hash, so
+#    both cells are gated against the stored L40S BF16 evals and scored on its
+#    divergence reference. A new GPU is a new config (the hardware is in the config
+#    hash), so it ships only on its own gate pass (docs/PLAN.md, quality standard).
+# 3. chat-sharegpt `search.lo`: fp8-kv8's chat goodput on the L40S (5.239 req/s, failing
+#    at 5.511). Both cards have about the L40S's bandwidth, so their knees should sit
+#    near it; four points at step 1.5 with a two-step descent bracket it.
 #
 # Only chat-sharegpt, the workload the price is set from (docs/how-to/price-a-model.md),
 # with the sweep's windows (210 s measured after 45 s of warmup), so the per-token cost
@@ -48,7 +49,7 @@ workloads:
   - profile: chat-sharegpt
     load:
       mode: open_loop
-      search: {lo: 9, hi: 16, rel_tol: 0.05, max_points: 4, scale: geometric, step: 1.5, descend: 2}
+      search: {lo: 5.239, hi: 16, rel_tol: 0.05, max_points: 4, scale: geometric, step: 1.5, descend: 2}
       duration_s: 255
       warmup_s: 45
       drain_timeout_s: 60
@@ -61,10 +62,10 @@ quality:
   suite: qwen3-8b
   subset: phase0-strict
   replicates: 3
-  # Placeholders: the sweep's experiment id and its bf16 config hash (see step 2 above).
+  # The sweep's bf16 cell (7a8237d0), stored evals and divergence reference.
   baseline:
-    experiment: 00000000-0000-0000-0000-000000000000
-    config_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+    experiment: 7a8237d0-9917-47e7-b93e-8cb0230e0059
+    config_hash: "7a203a3ffaccb1820fd23e6da9fab1d00c4cb51c427ce1572c56b08a8036107a"
 budget:
   max_spend: "$5"
   ttl_minutes: 150
