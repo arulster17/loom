@@ -2,6 +2,7 @@ import json
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import ValidationError
 from site_helpers import EXPORT_GIT, GENERATED_AT, SLO, SPEC, export, make_runs, store_runs
 
 from loom_bench.cost import CostAllocation
@@ -9,8 +10,8 @@ from loom_bench.prices import load_prices
 from loom_bench.provenance import GitInfo, config_hash
 from loom_bench.registry import load_registry
 from loom_bench.report import analyze_runs, default_price_resolver, with_quality
-from loom_bench.site import load_snapshot
-from loom_bench.site.snapshot import model_slug
+from loom_bench.site import SiteConfig, load_site_config, load_snapshot
+from loom_bench.site.snapshot import check_pinned, model_slug
 from loom_bench.slo import Slo
 from loom_bench.store.db import session_scope
 from loom_bench.store.models import BenchEvalRun, BenchGateDecision
@@ -123,17 +124,46 @@ def _experiment(url, name, status, created, runs=(), spec=None):
         return exp.id
 
 
-def test_latest_takes_newest_completed_experiment_of_each_name(empty_db, tmp_path):
+def test_export_takes_exactly_the_named_experiments(empty_db, tmp_path):
+    """No "newest of each name" default: that picked the 70B EAGLE3 sweep over the run
+    meant for publishing. A later experiment is exported only when it is named."""
     runs = make_runs("vllm-bf16", reps=(1, 2), loads=(2.0, 4.0, 6.0))
     old = _experiment(empty_db, "a", "completed", datetime(2026, 9, 1, tzinfo=UTC), runs)
     new = _experiment(empty_db, "a", "completed", datetime(2026, 9, 2, tzinfo=UTC))
-    _experiment(empty_db, "a", "aborted", datetime(2026, 9, 3, tzinfo=UTC))
-    other = _experiment(empty_db, "b", "completed", datetime(2026, 8, 1, tzinfo=UTC))
 
-    assert export(empty_db, tmp_path).experiment_ids == [str(other), str(new)]
     explicit = export(empty_db, tmp_path, [old])
     assert explicit.experiment_ids == [str(old)]
     assert explicit.run_count == 6
+    assert export(empty_db, tmp_path, [str(old)[:8], str(old)]).experiment_ids == [str(old)]
+    assert export(empty_db, tmp_path, [new, old]).experiment_ids == [str(new), str(old)]
+    nothing = export(empty_db, tmp_path, [])
+    assert nothing.experiment_ids == [] and nothing.empty
+    with pytest.raises(TypeError, match="list of experiment ids"):
+        export(empty_db, tmp_path, "latest")
+
+
+def test_check_pinned_accepts_only_the_pinned_experiments(empty_db, tmp_path):
+    a = _experiment(empty_db, "a", "completed", datetime(2026, 9, 1, tzinfo=UTC))
+    b = _experiment(empty_db, "b", "completed", datetime(2026, 9, 2, tzinfo=UTC))
+    manifest = export(empty_db, tmp_path, [a])
+    check_pinned(manifest, [a])
+    with pytest.raises(ValueError, match=f"in the snapshot but not pinned: {a}"):
+        check_pinned(manifest, [])
+    with pytest.raises(ValueError, match=f"pinned but not in the snapshot: {b}"):
+        check_pinned(manifest, [a, b])
+    check_pinned(export(empty_db, tmp_path, []), [])  # the committed empty snapshot
+
+
+def test_publish_config_takes_full_ids_only():
+    full = "565b8d3f-b521-4e3e-91e5-ee07ee02b94d"
+    cfg = SiteConfig.model_validate({"publish": {"experiments": [full]}})
+    assert [str(i) for i in cfg.publish.experiments] == [full]
+    assert SiteConfig().publish.experiments == []
+    with pytest.raises(ValidationError, match="full experiment ids"):
+        SiteConfig.model_validate({"publish": {"experiments": ["565b8d3f"]}})
+    with pytest.raises(ValidationError, match="twice"):
+        SiteConfig.model_validate({"publish": {"experiments": [full, full.upper()]}})
+    assert load_site_config().publish.experiments == []  # nothing pinned in the repo yet
 
 
 def test_reexport_replaces_previous_files(populated, empty_db, tmp_path):

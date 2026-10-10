@@ -16,3 +16,11 @@ waitlist:
   honeypot: _gotcha
   # Extra hidden fields the endpoint needs, e.g. {tag: results-page}.
   extra_fields: {}
+
+publish:
+  # The experiments the site shows, by full id (one per line, with a comment naming it).
+  # `bench site export` with no -e exports exactly these; the deploy workflow's build
+  # (`bench site build --require-pinned`) refuses a site/data snapshot of anything else.
+  # There is no "newest experiment of each name" default: pin what you mean to publish.
+  # Empty: the site says "No published results yet".
+  experiments: []

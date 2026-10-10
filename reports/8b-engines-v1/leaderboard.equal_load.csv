@@ -1,0 +1,81 @@
+model,workload,load_mode,load,config,metric,value,value_lo,value_hi,value_ci_method,slo_met,significantly_lower,verdict
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,0.5,sglang,ttft_ms.p50,139.544,130.843,148.8236,log_t,True,True,sglang lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,0.5,sglang,ttft_ms.p95,197.8994,112.8915,346.9186,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,0.5,sglang,tpot_ms.p50,29.0899,26.1244,32.392,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,0.5,sglang,tpot_ms.p95,31.0198,28.3389,33.9543,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,0.5,sglang,e2e_ms.p95,31876.3275,29096.3104,34921.9623,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,0.5,vllm,ttft_ms.p50,160.6268,155.9256,165.4698,log_t,True,False,sglang lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,0.5,vllm,ttft_ms.p95,221.5397,142.5177,344.3771,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,0.5,vllm,tpot_ms.p50,28.6374,25.8237,31.7578,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,0.5,vllm,tpot_ms.p95,30.4668,27.9213,33.2443,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,0.5,vllm,e2e_ms.p95,31354.015,28670.7792,34288.3689,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,sglang,ttft_ms.p50,163.1735,153.036,173.9825,log_t,True,True,sglang lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,sglang,ttft_ms.p95,239.5108,206.8388,277.3437,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,sglang,tpot_ms.p50,44.613,38.9464,51.104,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,sglang,tpot_ms.p95,46.6256,43.5555,49.9121,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,sglang,e2e_ms.p95,47878.6199,44729.1757,51249.8209,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,vllm,ttft_ms.p50,200.2023,190.2431,210.683,log_t,True,False,sglang lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,vllm,ttft_ms.p95,298.4732,238.1649,374.0528,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,vllm,tpot_ms.p50,42.1346,36.7976,48.2455,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,vllm,tpot_ms.p95,43.9501,40.9912,47.1226,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,vllm,e2e_ms.p95,45165.0848,42135.5132,48412.4846,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,2.0,sglang,ttft_ms.p50,15638.6449,9439.3133,25909.4287,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,2.0,sglang,ttft_ms.p95,38827.6703,27750.7535,54326.0196,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,2.0,sglang,tpot_ms.p50,67.5753,66.5013,68.6666,log_t,False,True,sglang lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,2.0,sglang,tpot_ms.p95,76.6248,47.9324,122.4924,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,2.0,sglang,e2e_ms.p95,111503.3596,96935.456,128260.5944,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,2.0,vllm,ttft_ms.p50,9140.5096,4546.2502,18377.5446,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,2.0,vllm,ttft_ms.p95,29225.6123,20575.6344,41512.033,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,2.0,vllm,tpot_ms.p50,80.2941,79.8335,80.7574,log_t,False,False,sglang lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,2.0,vllm,tpot_ms.p95,83.5819,82.8084,84.3628,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,2.0,vllm,e2e_ms.p95,111228.3317,100383.7865,123244.4222,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,1.0,vllm,ttft_ms.p50,178.9916,156.1875,205.1252,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,1.0,vllm,ttft_ms.p95,251.9446,172.6425,367.6736,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,1.0,vllm,tpot_ms.p50,25.6188,23.9397,27.4156,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,1.0,vllm,tpot_ms.p95,33.3077,30.1173,36.8361,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,1.0,vllm,e2e_ms.p95,1899.0867,1512.2803,2384.8293,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,1.0,sglang,ttft_ms.p50,185.3948,161.9378,212.2496,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,1.0,sglang,ttft_ms.p95,266.2,183.1135,386.9864,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,1.0,sglang,tpot_ms.p50,26.3234,24.0806,28.7751,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,1.0,sglang,tpot_ms.p95,36.3446,31.7472,41.6077,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,1.0,sglang,e2e_ms.p95,2005.4928,1558.8997,2580.0256,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,2.0,vllm,ttft_ms.p50,195.2568,174.4838,218.5029,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,2.0,vllm,ttft_ms.p95,384.6362,257.8209,573.8286,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,2.0,vllm,tpot_ms.p50,31.0319,28.2173,34.1273,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,2.0,vllm,tpot_ms.p95,45.4408,33.8759,60.9537,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,2.0,vllm,e2e_ms.p95,2519.3705,2047.5118,3099.9711,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,2.0,sglang,ttft_ms.p50,203.3202,180.4869,229.0422,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,2.0,sglang,ttft_ms.p95,428.1296,243.054,754.1326,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,2.0,sglang,tpot_ms.p50,33.6464,29.3678,38.5482,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,2.0,sglang,tpot_ms.p95,52.9124,39.299,71.2417,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,code-completion,open_loop,2.0,sglang,e2e_ms.p95,2820.7963,2329.4648,3415.7596,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,1.0,sglang,ttft_ms.p50,164.9441,159.9754,170.0672,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,1.0,sglang,ttft_ms.p95,224.2131,160.1073,313.9862,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,1.0,sglang,tpot_ms.p50,27.2835,25.9267,28.7113,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,1.0,sglang,tpot_ms.p95,30.781,28.2413,33.549,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,1.0,sglang,e2e_ms.p95,4072.6953,3752.133,4420.6449,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,1.0,vllm,ttft_ms.p50,156.9726,153.1025,160.9407,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,1.0,vllm,ttft_ms.p95,206.4899,143.5805,296.963,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,1.0,vllm,tpot_ms.p50,26.3203,25.4122,27.2609,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,1.0,vllm,tpot_ms.p95,28.9273,27.2582,30.6985,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,1.0,vllm,e2e_ms.p95,3829.1953,3609.8138,4061.9094,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,2.0,sglang,ttft_ms.p50,172.1407,166.8108,177.641,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,2.0,sglang,ttft_ms.p95,309.5169,252.3,379.7095,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,2.0,sglang,tpot_ms.p50,33.7472,31.2174,36.4821,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,2.0,sglang,tpot_ms.p95,41.9004,38.6232,45.4557,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,2.0,sglang,e2e_ms.p95,5536.6906,5199.4013,5895.8602,log_t,True,False,vllm lower
+Qwen/Qwen3-8B,shared-prefix,open_loop,2.0,vllm,ttft_ms.p50,166.8271,158.1246,176.0085,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,2.0,vllm,ttft_ms.p95,297.3312,226.5181,390.2814,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,2.0,vllm,tpot_ms.p50,31.2204,29.3006,33.2659,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,2.0,vllm,tpot_ms.p95,36.5698,34.4962,38.768,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,2.0,vllm,e2e_ms.p95,4838.584,4564.9773,5128.5895,log_t,True,True,vllm lower
+Qwen/Qwen3-8B,shared-prefix,open_loop,4.0,sglang,ttft_ms.p50,223.9551,187.2695,267.8272,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,4.0,sglang,ttft_ms.p95,450.2805,384.1732,527.7634,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,4.0,sglang,tpot_ms.p50,58.2858,46.1433,73.6236,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,4.0,sglang,tpot_ms.p95,75.6942,67.3499,85.0723,log_t,False,False,vllm lower
+Qwen/Qwen3-8B,shared-prefix,open_loop,4.0,sglang,e2e_ms.p95,9920.7554,8649.004,11379.5055,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,4.0,vllm,ttft_ms.p50,221.7782,179.405,274.1596,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,4.0,vllm,ttft_ms.p95,455.9991,377.3762,551.0024,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,4.0,vllm,tpot_ms.p50,46.3998,40.3821,53.3143,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,shared-prefix,open_loop,4.0,vllm,tpot_ms.p95,58.4438,53.9105,63.3583,log_t,False,True,vllm lower
+Qwen/Qwen3-8B,shared-prefix,open_loop,4.0,vllm,e2e_ms.p95,7768.6858,6914.6894,8728.1546,log_t,False,False,no significant difference

@@ -104,7 +104,8 @@ Other mock runs:
 ```bash
 uv run bench run bench/experiments/mock-budget-abort.yaml   # budget guard trips: exit 5
 uv run bench reproduce <run id>       # re-run one stored run, compare (exit 0 or 6)
-uv run bench compare <exp A> <exp B>  # per-metric deltas (exit 6 outside variance)
+uv run bench compare <exp A> <exp B>  # per-metric deltas at the cells and loads both ran:
+                                      # exit 0 within variance, 6 outside, 2 nothing matched
 uv run bench export csv --out runs.csv
 uv run bench reap --dry-run           # expired resources (none for finished mock runs)
 ```
@@ -112,6 +113,10 @@ uv run bench reap --dry-run           # expired resources (none for finished moc
 `bench report` prints the `bench reproduce <run id>` command for each result. With no
 `-e/--experiment`, reports cover every completed experiment except reproductions; the
 selected experiments must share one `slo` and `cost_allocation`.
+
+Experiment and run ids can be given in full or as a unique prefix of at least 4 hex
+digits, like git's short hashes: `bench report -e 7a8237d0`. An ambiguous prefix is
+refused with the ids it matches (exit 2).
 
 `results/` and `reports/` are written to the current directory (the defaults of `--out`
 on `run`, `reproduce`, `report` and `competitiveness`); at the repo root both are in
@@ -183,11 +188,12 @@ uv run bench site build                         # committed snapshot site/data -
 python -m http.server 8000 --directory site/_build
 ```
 
-To preview mock results, export a snapshot somewhere other than `site/data` (the default
-`--out`, which is the committed, published snapshot):
+To preview mock results, export a snapshot of the experiments you name somewhere other
+than `site/data` (the default `--out`, which is the committed, published snapshot). Without
+`-e` the export takes only the experiments pinned in `site/config.yaml`:
 
 ```bash
-uv run bench site export --out /tmp/loom-site-data
+uv run bench site export -e <experiment id> --out /tmp/loom-site-data
 uv run bench site build --data /tmp/loom-site-data --out /tmp/loom-site
 ```
 

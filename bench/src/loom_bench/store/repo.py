@@ -201,6 +201,70 @@ def get_run(session: Session, run_id: uuid.UUID) -> BenchRun | None:
     return session.get(BenchRun, run_id)
 
 
+# --- ids given by a person: full, or a unique prefix like git's short hashes ----------
+
+MIN_ID_PREFIX = 4  # hex digits; shorter prefixes are refused rather than guessed
+_HEX_REF = re.compile(r"^[0-9a-f-]+$")
+
+
+def match_prefix(candidates: Sequence[str], ref: str, what: str) -> list[str]:
+    """The candidates (uuids or hex digests) that start with `ref`, case and dashes
+    ignored. `what` names the expected id in errors, e.g. "an experiment id"; text that
+    is not hex, or shorter than `MIN_ID_PREFIX` digits, raises ValueError."""
+    text = ref.strip().lower()
+    if not _HEX_REF.match(text):
+        raise ValueError(f"not {what}: {ref!r}")
+    digits = text.replace("-", "")
+    if len(digits) < MIN_ID_PREFIX:
+        raise ValueError(
+            f"{ref!r} is too short for {what}: give at least {MIN_ID_PREFIX} characters"
+        )
+    return [c for c in candidates if c.replace("-", "").lower().startswith(digits)]
+
+
+def unique_match(matches: Sequence[str], ref: str, noun: str) -> str:
+    """The one match of `ref`; LookupError when there is none or more than one."""
+    if not matches:
+        raise LookupError(f"no {noun} {ref}")
+    if len(matches) > 1:
+        shown = ", ".join(sorted(matches)[:5]) + (", ..." if len(matches) > 5 else "")
+        raise LookupError(
+            f"{ref!r} is ambiguous: it matches {len(matches)} ({shown}); give more characters"
+        )
+    return matches[0]
+
+
+def _full_uuid(text: str) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(text.strip())
+    except ValueError:
+        return None
+
+
+def _resolve_id(session: Session, column: Any, ref: str | uuid.UUID, noun: str) -> uuid.UUID:
+    full = ref if isinstance(ref, uuid.UUID) else _full_uuid(ref)
+    if full is not None:
+        if session.scalar(select(column).where(column == full)) is None:
+            raise LookupError(f"no {noun} {ref}")
+        return full
+    assert isinstance(ref, str)
+    article = "an" if noun[0] in "aeiou" else "a"
+    ids = [str(i) for i in session.scalars(select(column))]
+    return uuid.UUID(unique_match(match_prefix(ids, ref, f"{article} {noun} id"), ref, noun))
+
+
+def resolve_experiment_id(session: Session, ref: str | uuid.UUID) -> uuid.UUID:
+    """An experiment id from its full form or a unique prefix (at least `MIN_ID_PREFIX`
+    hex digits, e.g. "7a8237d0"). Raises ValueError for text that is not an id, and
+    LookupError when no experiment or more than one matches."""
+    return _resolve_id(session, BenchExperiment.id, ref, "experiment")
+
+
+def resolve_run_id(session: Session, ref: str | uuid.UUID) -> uuid.UUID:
+    """A run id from its full form or a unique prefix; errors as `resolve_experiment_id`."""
+    return _resolve_id(session, BenchRun.id, ref, "run")
+
+
 def list_runs(
     session: Session,
     *,

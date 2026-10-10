@@ -1423,15 +1423,33 @@ class _EvalRef:
     samples_uri: str
 
 
-def _latest_eval(s: Session, ref: str) -> _EvalRef:
-    """Latest recorded suite run for a config hash, or for an experiment's only config."""
+def _gate_ref(s: Session, ref: str) -> uuid.UUID | str:
+    """An experiment id or a config hash that has eval runs, each in full or as a unique
+    prefix (`repo.match_prefix`); an experiment id comes back as a UUID."""
     exp_id = _uuid(ref)
-    column = BenchEvalRun.experiment_id if exp_id is not None else BenchEvalRun.config_hash
+    if exp_id is not None:
+        return exp_id
+    what = "an experiment id or config hash"
+    experiments = repo.match_prefix(
+        [str(i) for i in s.scalars(select(BenchExperiment.id))], ref, what
+    )
+    hashes = repo.match_prefix(
+        list(s.scalars(select(BenchEvalRun.config_hash).distinct())), ref, what
+    )
+    found = repo.unique_match([*experiments, *hashes], ref, "experiment or evaluated config hash")
+    return uuid.UUID(found) if found in experiments else found
+
+
+def _latest_eval(s: Session, ref: str) -> _EvalRef:
+    """Latest recorded suite run for a config hash, or for an experiment's only config
+    (either given in full or as a unique prefix)."""
+    resolved = _gate_ref(s, ref)
+    column = (
+        BenchEvalRun.experiment_id if isinstance(resolved, uuid.UUID) else BenchEvalRun.config_hash
+    )
     rows = list(
         s.scalars(
-            select(BenchEvalRun)
-            .where(column == (exp_id if exp_id is not None else ref))
-            .order_by(BenchEvalRun.created_at.desc())
+            select(BenchEvalRun).where(column == resolved).order_by(BenchEvalRun.created_at.desc())
         )
     )
     if not rows:
@@ -1564,8 +1582,9 @@ def _load_original(ref: str, db_url: str | None, spec_path: Path | None) -> _Ori
     path = Path(ref)
     from_file = path.suffix == ".json" and path.is_file()
     prov = Provenance.model_validate_json(path.read_text()) if from_file else None
-    run_id = _uuid(path.parent.name) if from_file else uuid.UUID(ref)
     with session_scope(db_url) as s:
+        # A run id may be a unique prefix, like the experiment ids `bench` takes.
+        run_id = _uuid(path.parent.name) if from_file else repo.resolve_run_id(s, ref)
         run = repo.get_run(s, run_id) if run_id is not None else None
         if run is None and not from_file:
             raise LookupError(f"no run {ref}")

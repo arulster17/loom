@@ -1,6 +1,7 @@
 """Smoke experiments (`smoke: true`) run the real code paths at minimal scale: their eval
-jobs carry the limited suite, and they are left out of default reports and the site
-because their cells share config hashes with the real experiment's."""
+jobs carry the limited suite, and they are left out of default reports because their
+cells share config hashes with the real experiment's. The site publishes only the
+experiments pinned in site/config.yaml, so a smoke never gets there by default either."""
 
 import pytest
 from pydantic import ValidationError
@@ -12,7 +13,7 @@ from loom_bench.jobs import EvalJob, EvalJobResult
 from loom_bench.providers.base import Host
 from loom_bench.providers.mock import MockProvider
 from loom_bench.runner import run_experiment
-from loom_bench.site.snapshot import _experiments
+from loom_bench.site.snapshot import _experiments, load_snapshot
 from loom_bench.store.db import session_scope
 
 from .conftest import mock_experiment
@@ -67,8 +68,18 @@ async def test_smoke_experiments_stay_out_of_default_reports_and_the_site(ctx, t
     assert picked.exit_code == 0, picked.output  # still reportable when asked for by id
 
     real = await run_experiment(mock_experiment(name="real-unit"), ctx)
+    # The site publishes only experiments pinned by id, so the newer smoke never sneaks in.
+    pins = tmp_path / "site.yaml"
+    pins.write_text(f"publish:\n  experiments: ['{real.experiment_id}']\n")
+    site = CliRunner().invoke(
+        app,
+        ["site", "export", "--config", str(pins), "--out", str(tmp_path / "snap"),
+         "--db", ctx.db_url],
+    )  # fmt: skip
+    assert site.exit_code == 0, site.output
     with session_scope(ctx.db_url) as s:
-        assert [e.id for e in _experiments(s, "latest")] == [real.experiment_id]
+        assert [e.id for e in _experiments(s, [real.experiment_id])] == [real.experiment_id]
+    assert load_snapshot(tmp_path / "snap").manifest.experiment_ids == [str(real.experiment_id)]
 
 
 def test_a_smoke_is_flagged_or_named_after_a_shipped_smoke_spec(tmp_path):
@@ -98,5 +109,3 @@ async def test_unflagged_runs_of_a_smoke_spec_stay_out_too(ctx, tmp_path):
     assert legacy.status.value == "completed", legacy.reason
     run = CliRunner().invoke(app, ["report", "--db", ctx.db_url, "--out", str(tmp_path)])
     assert run.exit_code != 0 and "no matching experiments" in run.output
-    with session_scope(ctx.db_url) as s:
-        assert _experiments(s, "latest") == []

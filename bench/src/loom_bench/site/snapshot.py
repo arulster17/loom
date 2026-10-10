@@ -23,15 +23,13 @@ import uuid
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import AwareDatetime, BaseModel
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from loom_bench import __version__
 from loom_bench.cost import CostAllocation
-from loom_bench.experiment import is_smoke, smoke_spec_names
 from loom_bench.prices import Competitors, PriceBook, load_competitors, load_prices
 from loom_bench.provenance import GitInfo, canonical_json, git_info
 from loom_bench.registry import REPO_ROOT, Registry, load_registry
@@ -47,7 +45,7 @@ from loom_bench.report.analyze import (
 from loom_bench.report.competitiveness import CompetitivenessReport, build_competitiveness
 from loom_bench.slo import Slo
 from loom_bench.store import repo
-from loom_bench.store.models import BenchExperiment, BenchRun, ExperimentStatus
+from loom_bench.store.models import BenchExperiment, BenchRun
 
 # 2: Estimate.method (log-scale CIs), Methodology.ci_methods. 3: price columns
 # (ConfigResult.prices and spot, committed_1y and as_run costs; PriceSource.as_run).
@@ -59,8 +57,6 @@ PRICES = "prices.json"
 MODELS_DIR = "models"
 EXPERIMENTS_DIR = "experiments"
 PROVENANCE_DIR = "provenance"
-
-Latest = Literal["latest"]
 
 
 class ModelIndexEntry(BaseModel):
@@ -160,32 +156,17 @@ def _dump(model: BaseModel) -> Any:
     return model.model_dump(mode="json")
 
 
-def _uuid(value: uuid.UUID | str) -> uuid.UUID:
-    return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
-
-
 def _experiments(
-    session: Session, experiment_ids: Sequence[uuid.UUID | str] | Latest
+    session: Session, experiment_ids: Sequence[uuid.UUID | str]
 ) -> list[BenchExperiment]:
-    if experiment_ids == "latest":
-        rows = session.scalars(
-            select(BenchExperiment)
-            .where(BenchExperiment.status == ExperimentStatus.COMPLETED.value)
-            .order_by(BenchExperiment.created_at.desc(), BenchExperiment.id)
-        )
-        latest: dict[str, BenchExperiment] = {}
-        smoke_names = smoke_spec_names()
-        for exp in rows:
-            if is_smoke(exp.spec, smoke_names):  # smoke checks are never published
-                continue
-            latest.setdefault(exp.name, exp)
-        return sorted(latest.values(), key=lambda e: (e.created_at, str(e.id)))
-    out = []
+    if isinstance(experiment_ids, str):  # "latest" used to pick newest-of-each-name
+        raise TypeError("experiment_ids must be a list of experiment ids")
+    out: list[BenchExperiment] = []
     for value in experiment_ids:
-        found = session.get(BenchExperiment, _uuid(value))
-        if found is None:
-            raise LookupError(f"no experiment {value}")
-        out.append(found)
+        found = session.get(BenchExperiment, repo.resolve_experiment_id(session, value))
+        assert found is not None
+        if found not in out:
+            out.append(found)
     return out
 
 
@@ -303,7 +284,7 @@ def _clear(out: Path) -> None:
 def export_snapshot(
     session: Session,
     out_dir: str | Path,
-    experiment_ids: Sequence[uuid.UUID | str] | Latest = "latest",
+    experiment_ids: Sequence[uuid.UUID | str],
     *,
     slo: Slo | None = None,
     allocation: CostAllocation | None = None,
@@ -316,8 +297,11 @@ def export_snapshot(
 ) -> Manifest:
     """Write a results snapshot of `experiment_ids` to `out_dir`, replacing a previous one.
 
-    "latest" takes the most recent completed experiment of each name, skipping smoke
-    experiments (`experiment.is_smoke`: `smoke: true`, or a shipped smoke spec's name).
+    The experiments are always named (full ids or unique prefixes); there is no "newest
+    of each name" default, which once picked a later tuning sweep over the run meant
+    for publishing. `bench site export` passes the ids pinned in `site/config.yaml`
+    (`publish.experiments`) unless given `-e`. An empty list writes a snapshot with no
+    results.
     The SLO defaults to the one recorded in the experiment specs and run summaries (they
     must agree); cost allocation defaults to all_output.
     Price book, registry and competitors default to the files in the repository.
@@ -389,6 +373,25 @@ def export_snapshot(
 
 def _read(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def check_pinned(manifest: Manifest, pinned: Sequence[uuid.UUID]) -> None:
+    """Raise ValueError unless the snapshot holds exactly the experiments pinned in the
+    site config (`publish.experiments`), so what deploys is what was reviewed there."""
+    have = {uuid.UUID(i) for i in manifest.experiment_ids}
+    want = set(pinned)
+    if have == want:
+        return
+    parts = []
+    if extra := sorted(str(i) for i in have - want):
+        parts.append("in the snapshot but not pinned: " + ", ".join(extra))
+    if missing := sorted(str(i) for i in want - have):
+        parts.append("pinned but not in the snapshot: " + ", ".join(missing))
+    raise ValueError(
+        "the snapshot does not hold the experiments pinned in the site config "
+        f"(publish.experiments); {'; '.join(parts)}. Pin them, or re-export with "
+        "`bench site export` and no -e"
+    )
 
 
 def load_snapshot(snapshot_dir: str | Path) -> Snapshot:
