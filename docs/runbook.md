@@ -225,10 +225,12 @@ a host, is planned and capped like any run), and compares: exit 0 within normal 
    docker compose exec postgres pg_dump -U loom loom > loom-$(date +%F).sql
    ```
 
-2. Export the snapshot (newest completed experiment of each name, or pick with `-e`):
+2. Pin the experiments to publish by full id in `site/config.yaml`
+   (`publish.experiments`), then export exactly those (with `-e` the snapshot is a
+   preview; the deploy workflow's `bench site build --require-pinned` refuses it):
 
    ```sh
-   uv run bench site export --out site/data      # -e <experiment id> ... to choose
+   uv run bench site export --out site/data      # the pinned experiments
    uv run bench site build
    python -m http.server 8000 --directory site/_build
    ```

@@ -38,11 +38,11 @@ To benchmark an endpoint you already run (vLLM, SGLang, or `bench mock-server`),
 | `bench reap [--dry-run]` | Terminates resources whose TTL passed (DB-recorded; all Loom-tagged EC2 instances when AWS is configured; all Loom-managed RunPod pods when a RunPod API key is found). |
 | `bench report [-e EXP]... [--alt-slo T=V]` | Leaderboard (md, html, csv): a plain-English summary per model and workload, the boards ranked by $/1M output tokens at SLO with goodput brackets and latency at equal load (also `leaderboard.equal_load.csv`), and a competitiveness section (also `leaderboard.competitiveness.csv`); see "Reading the reports". |
 | `bench competitiveness [-e EXP]...` | Our cost at SLO vs competitors' list prices. |
-| `bench compare EXP_A EXP_B [--match-by]` | Per-metric deltas with variance verdicts, goodput brackets and latency at equal load. Exit 6 if outside normal variance. |
+| `bench compare EXP_A EXP_B [--match-by]` | Per-metric deltas with variance verdicts, goodput brackets and latency at equal load, judged only on the cells and loads both ran (the rest are listed). Exit 0 within normal variance, 6 outside, 2 if nothing matched. Ids here and elsewhere in the CLI accept a unique prefix (4+ hex). |
 | `bench quality run SUITE --base-url URL --model NAME` | Runs a pinned eval suite against an endpoint. |
 | `bench quality gate --baseline X --candidate Y` | Re-decides the gate from stored per-item samples (X, Y: experiment id or config hash). Exit 7 if blocked. |
 | `bench export csv\|parquet --out FILE` | One row per run with summary and provenance flattened. |
-| `bench site export [-e EXP]... [--out site/data]` / `bench site build` | Results snapshot and static site (`docs/site.md`). |
+| `bench site export [-e EXP]... [--out site/data]` / `bench site build [--require-pinned]` | Results snapshot and static site (`docs/site.md`). Without `-e` the export takes exactly the experiments pinned in `site/config.yaml` (`publish.experiments`); `--require-pinned` refuses any other snapshot. |
 | `bench waitlist count [--no-record]` | Signups in `waitlist_signups`, recorded in `docs/waitlist.md`. |
 | `bench db upgrade` | Applies schema migrations. |
 | `bench job run --in job.json --out result.json` | Executes one load job; cloud providers run this on the GPU host. |
@@ -425,8 +425,8 @@ A smoke experiment (`smoke: true`) runs a real experiment's code paths at minima
 at N prompts (`Suite.limited`), the suite's `divergence.hard_prompts` first (prompts whose
 continuations split characters across byte-level tokens; Qwen3: 20 and 40). Smoke
 experiments share config hashes with the real ones,
-so default `bench report` selection and the site's latest snapshot leave them out; pass
-`-e <id>` to report one. An experiment counts as a smoke when its spec sets `smoke: true`
+so default `bench report` selection leaves them out (the site exports only the
+experiments pinned in `site/config.yaml`); pass `-e <id>` to report one. An experiment counts as a smoke when its spec sets `smoke: true`
 or carries the name of a shipped spec that does (`experiment.is_smoke`), so runpod-smoke
 runs recorded before the flag existed stay out too.
 
