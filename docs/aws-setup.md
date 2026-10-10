@@ -137,6 +137,8 @@ Fields (any field can be overridden with `LOOM_AWS_<FIELD>`, e.g.
 | `owner` | yes | | `loom:owner` tag |
 | `name_prefix` | yes | `loom-bench` | `Name` tag prefix |
 | `dlami_ssm_parameter` | | DLAMI Ubuntu 24.04 base OSS driver | AMI lookup |
+| `ami_id` | | unset | Pin one AMI instead of the parameter's latest (it moves about weekly), e.g. the one a smoke ran on |
+| `data_dir` | | `/opt/dlami/nvme/loom-data` | Pinned workload datasets on the host (`<sha256>/<file>`), mounted read-only at `/data` in the client container |
 | `root_volume_gb` | | 200 | Root gp3 volume (Docker images) |
 | `weights_dir` | | `/opt/dlami/nvme/loom-hf` | HF cache on the instance-store NVMe |
 | `spot_price_multiplier` | | 1.25 | Budget accrual = spot price x this, rounded up |

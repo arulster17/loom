@@ -239,7 +239,65 @@ a host, is planned and capped like any run), and compares: exit 0 within normal 
 
 Snapshots publish experiment specs and provenance in full: keep secrets out of them.
 
-## 7. Tearing down the whole stack
+## 7. The Qwen3-8B g6e.xlarge on-demand run (proposed 2026-10-10)
+
+`aws-smoke-g6e` then `qwen3-8b-aws-g6e`: one g6e.xlarge on-demand host each, the first
+GPU runs on this path ([benchmark-lab.md](benchmark-lab.md#qwen3-8b-on-aws-g6exlarge-proposed)
+has the design, the replicate arithmetic and the plans). Preflight as of 2026-10-10, free
+read-only calls:
+
+| Check | Found |
+|---|---|
+| Identity | `arn:aws:iam::735792833179:user/arul-cli`, with `AdministratorAccess` (the narrower `loom-bench-runner` policy is not attached; it would also work) |
+| Quotas | on-demand G/VT `L-DB2E81BA` = 4 vCPU (one g6e.xlarge), spot `L-3819A6DF` = 0 |
+| g6e.xlarge offerings | us-east-1a, b, c, d; not 1e or 1f (two of the six configured subnets: `Unsupported`, tried and skipped) |
+| On-demand price | $1.861/h (Price List API, effective 2026-10-01), as in `bench/prices.yaml` |
+| DLAMI | `ami-028357be7d5b15c53`, Base OSS Nvidia Driver GPU AMI (Ubuntu 24.04) 20261006: driver 595.91.07, CUDA 13.2, NVMe at `/opt/dlami/nvme`, SSM agent 3.3.4793 |
+| Stack | bucket `loom-bench-5791dcdd765e549af6838bf64b` (lifecycle on `runs/`, `ssm/`), instance profile `loom-bench-instance`, SG with no ingress and all egress, secret `loom/hf-token`, reaper Lambda active (`LOOM_REAPER_DRY_RUN=false`, rule `rate(15 minutes)` ENABLED, dry-run invoke returned `{"reaped": [], "dry_run": true}`) |
+| Managed instances | none |
+| `~/.config/loom/aws.yaml` | **missing**: create it (below) |
+
+The only quota-sized host: if a managed instance is still running or shutting down, the
+next RunInstances fails with `VcpuLimitExceeded` (not retried), so run the smoke and the
+real run one after the other, never together, and check nothing managed is alive first.
+
+```sh
+mkdir -p ~/.config/loom
+terraform -chdir=infra/aws/bench output -raw aws_settings_yaml > ~/.config/loom/aws.yaml
+export LOOM_AWS_CONFIG=~/.config/loom/aws.yaml
+export LOOM_DATABASE_URL=sqlite:///$PWD/results/loom.db     # the main checkout's DB
+uv run bench plan bench/experiments/aws-smoke-g6e.yaml       # $3.87, worst $4.71, cap $5
+caffeinate -i uv run bench run bench/experiments/aws-smoke-g6e.yaml --out results/
+```
+
+After the smoke, before the real run (each from `results/<id>/events.jsonl` and the DB):
+
+- exit 0; one `provisioned` event at `hourly_micros` 1882918 and `bench_spend.basis`
+  with market `on_demand` (prices.yaml on-demand + 200 GB gp3);
+- two `engine_started` events (bf16 cold, fp8-kv8 warm) with `driver_version`,
+  `cuda_version`, `image_digest`; the cold one with `ttl_shutdown_at` and
+  `ttl_shutdown_lead_s` between 0 and 60 (user-data schedules it in whole minutes);
+  note the `ami` in that event;
+- chat-sharegpt runs for both cells: each search's first point (12 req/s) fails with
+  aborted stragglers, then 4, then a pass and a bisection point; no failed runs;
+- five `quality` passes per cell (`replicates: 5`), no `quality_failed` or
+  `divergence_failed`, one `gate` event for fp8-kv8 against bf16 (its verdict means
+  nothing at 4 items);
+- the instance is `terminated` (the runner did it), `bench reap --dry-run` is clean;
+- from the start stages: image pull, weights, engine init and eval-pass times, to check
+  the real run's plan (cold start planned at 14.5 min).
+
+Then pin the smoke's AMI so the real run gets the same image
+(`export LOOM_AWS_AMI_ID=ami-...`), check the plan and run:
+
+```sh
+uv run bench plan bench/experiments/qwen3-8b-aws-g6e.yaml    # $10.34, worst $12.24, cap $12.50
+caffeinate -i uv run bench run bench/experiments/qwen3-8b-aws-g6e.yaml --out results/
+uv run bench compare 7a8237d0-9917-47e7-b93e-8cb0230e0059 <aws id> --match-by cell_key
+uv run bench report -e <aws id>
+```
+
+## 8. Tearing down the whole stack
 
 1. Make sure no managed instance or volume is left (section 4).
 2. Detach the runner policy from every user or role it was attached to (IAM refuses to

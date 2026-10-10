@@ -597,14 +597,14 @@ def _remote_dataset_problem(kind: str, name: str, profile: WorkloadProfile) -> s
     path = getattr(profile, "path", None)
     if kind not in ("aws_ec2", "runpod") or path is None:
         return None
-    if kind == "runpod" and getattr(profile, "download", None) is not None:
-        return None
+    if getattr(profile, "download", None) is not None:
+        return None  # the pod or EC2 host fetches the pinned file itself
     fix = (
         "give the profile a pinned `download:` block (Hugging Face dataset, revision, file, "
-        "sha256), which the pod fetches itself"
-        if kind == "runpod" and isinstance(profile, ChatDatasetProfile)
-        else f"the {kind} provider cannot fetch this profile's file yet; run it on runpod "
-        "with a pinned `download:` block, or locally"
+        "sha256), which the host fetches itself"
+        if isinstance(profile, ChatDatasetProfile)
+        else f"the {kind} provider cannot fetch this profile's file yet; run it with a "
+        "pinned `download:` block, or locally"
     )
     return f"workload {name} reads {path}, which the {kind} host does not have: {fix}"
 

@@ -163,10 +163,13 @@ changes, never the config hash.
 `download:` block (Hugging Face dataset, 40-hex revision, file, sha256, size), a RunPod
 pod fetches the file itself: the first load job on the pod downloads it into
 `/opt/loom/data/<sha256>/`, checks the sha256 and leaves it root-owned and world-readable;
-every job's workload `path` points there. `bench plan` refuses a file-reading workload
-(chat dataset or trace) on a cloud host that cannot fetch it: no `download:` on RunPod,
-any such workload on `aws_ec2` (not built there yet). `chat-sharegpt` pins
-ShareGPT_V3_unfiltered_cleaned_split.json at commit `192ab218` (673 MB).
+every job's workload `path` points there. An `aws_ec2` host does the same (since
+2026-10-10): the first load job downloads it into `AwsSettings.data_dir`
+(`/opt/dlami/nvme/loom-data/<sha256>/`, on the instance-store NVMe), and the client
+container mounts that directory read-only at `/data`, where the job's `path` points.
+`bench plan` refuses a file-reading workload (chat dataset or trace) without a `download:`
+block on either cloud. `chat-sharegpt` pins ShareGPT_V3_unfiltered_cleaned_split.json at
+commit `192ab218` (673 MB).
 
 **Open vs closed loop.** Open loop sends on an arrival schedule regardless of the server
 (the honest mode for latency SLOs; `load_value` is req/s). Closed loop keeps a fixed number
@@ -464,6 +467,8 @@ The AWS specs stay as the secondary path:
 | `qwen3-8b-vllm-vs-sglang` | 1x g6e.xlarge spot, 7.1 h of an 8 h TTL | $16.56 | $18.56 | $40 |
 | `llama-3.3-70b-tp4` | 1x g6e.12xlarge spot, 2.7 h of a 3.5 h TTL | $28.04 | $35.86 | $45 |
 | `llama-3.3-70b-fp8-tp4` | 1x g6e.12xlarge spot, 2.6 h of a 3.25 h TTL | $26.48 | $33.25 | $45 |
+| `qwen3-8b-aws-g6e` (proposed 2026-10-10, not run; [section below](#qwen3-8b-on-aws-g6exlarge-proposed)) | 1x g6e.xlarge **on-demand**, bf16 + fp8-kv8 on chat, 5 passes each, 5.5 h of a 6.5 h TTL | $10.34 | $12.24 | $12.50 |
+| `aws-smoke-g6e` (run first) | the same host and cells at smoke scale, 2.05 h of a 2.5 h TTL | $3.87 | $4.71 | $5 |
 
 Rates are searched geometrically, with ranges sized for one L40S from the first RunPod
 sweep (058128e9): Qwen3-8B fixed-1k-1k passed 1.22 req/s and failed 1.94; shared-prefix
@@ -837,3 +842,103 @@ cost on both sides down to about 61% utilization (input binds: 0.0710 / 0.117). 
 chat's split puts nearly all of fp8-kv8's cost on input, its blended cost ($0.0522 CI high, against about $0.20 for both
 listings at this mix) is the steadier comparison.
 
+### Qwen3-8B on AWS g6e.xlarge (proposed)
+
+`qwen3-8b-aws-g6e` (proposed 2026-10-10, quoted, not run) is the brief's §7.8 Model A
+leaderboard on one GPU type on AWS, and it does three things on one host:
+
+1. **AWS leaderboard rows** for Qwen3-8B: BF16 (reference row, gate baseline) and
+   fp8-kv8 (FP8-dynamic weights + FP8 KV cache, the cheapest config at the SLO in
+   7a8237d0) on chat-sharegpt at the SLO.
+2. **fp8-kv8's gate** against BF16 with 5 replicated phase0-strict passes per side
+   (7a8237d0 ran 3), sized below.
+3. **A RunPod-vs-AWS cross-check** on the same GPU: the sweep's two cells (same
+   checkpoints, KV dtype, image and vLLM args) on the same chat profile, windows (255 s
+   with 45 s warmup, 60 s drain) and search (lo 4.5, step 1.5, descend 3, 5 points).
+   Where AWS has RunPod's knees, the search visits 7a8237d0's loads exactly (bf16 4.5,
+   3, 2, 2.449, 2.213; fp8-kv8 4.5, 6.75, 5.511, 4.98, 5.239), so
+   `bench compare 7a8237d0 <aws id> --match-by cell_key` compares them at equal load.
+   The config hashes differ (cloud, instance type and market are hardware), and so does
+   the host: a g6e.xlarge has 4 vCPU (2 cores) and 32 GiB against the pod's 16 vCPU and
+   94 GiB, with the load client on the same host, so the cross-check measures the AWS SKU
+   as a deployment, CPU included.
+
+**Host.** The account's G/VT quotas are 4 vCPU on-demand and 0 spot, which fits exactly
+one g6e.xlarge (1x L40S, $1.861/h on-demand, checked against the AWS Price List API on
+2026-10-10, + $0.0219/h for the 200 GB gp3 root: accrued at $1.8829/h). Both cells share
+it through a warm restart onto the FP8 checkpoint, which the host downloads then. Weights
+(16.4 + 9.4 GB) and the dataset (0.7 GB) go on the 250 GB instance-store NVMe, the
+images and client virtualenvs on the root volume.
+
+**Replicates: the arithmetic.** Per gsm8k item (n = 1319), the paired difference of the
+two configs' pass means is D_i = (p_i^fp8 − p_i^bf16) + run noise, so with R passes per
+side
+
+    Var(D_i) = τ² + (σ²_bf16 + σ²_fp8) / R,     CI half-width ≈ 1.96 √(Var(D_i) / n)
+
+From 7a8237d0's stored per-pass scores (`replicate_scores`, 3 passes per side), the
+within-item run variance per pass is σ²_bf16 = 0.0040 (16 items unstable across passes)
+and σ²_fp8 = 0.0142 (56 unstable), and Var(D_i) = 0.0250, so τ² = 0.0250 − 0.0182/3 =
+0.0190: three quarters of the variance is items FP8 flips **consistently** (19 items
+right on every pass of one config and wrong on every pass of the other, 11 of them in
+FP8's favour). Replicates divide only the run-noise quarter:
+
+| R per side | CI half-width (pts) | P(resolves), true delta = −0.28 | P(resolves), predictive |
+|---|---|---|---|
+| 3 (7a8237d0) | 0.85 | 27% | 33% |
+| 5 (proposed) | 0.81 | 30% | 37% |
+| 10 | 0.78 | 32% | 41% |
+| 20 | 0.76 | 32% | 43% |
+| → ∞ | 0.74 | 3% | 46% |
+
+"Resolves" is a PASS: lower bound ≥ −1 pt, so the new delta must land at or above
+−1 + half-width (−0.19 pts at R = 5) against −0.28 measured. The predictive column
+allows for the run noise in 7a8237d0's −0.28 itself (sd 0.21 pts); a FAIL (point delta
+or upper bound below −1) is under 1% either way. The other three FP8 cells show the same
+structure (τ² 0.012-0.021, run noise 21-30% of the variance), while SGLang vs vLLM, both
+BF16, has τ² 0.0029 (b03b3c52: half-width 0.39 pts at R = 3). The normal approximation
+gives 0.85 pts at R = 3 against the gate's percentile bootstrap's 0.87 ([−1.14, +0.61]).
+
+So no replicate count makes this gate likely to resolve: R = 5 takes most of what
+passes can give (0.85 → 0.81 pts) for about 25 min of host time, R = 10 adds 4 points of
+probability for another ~$2. IFEval must pass too (fp8-kv8 +0.43 [−1.60, +2.46] against
+2 pts: predictive 84% at R = 5, 88% at R = 10), and divergence top-1 (95.80% against
+the 95% limit) can fall under its limit on a new reference, which makes the gate REVIEW
+(allowed, not a PASS). Overall a PASS is about 28% at R = 5. The lever that can decide
+it is **more items**: at τ² ≈ 0.019 a non-inferiority bound of 1 pt needs ~3000 items of
+comparable math for a ~0.54-pt half-width (P(PASS on gsm8k-like items) ≈ 64%), ~5000
+for 0.42 (73%), ~8800 for 0.31 (81%), with the remaining risk being that the true delta
+is nearer −1 than −0.28. GSM8K has only 1319 test items; the candidates (its 7473-item
+train split, which Qwen3 has likely trained on, biasing both configs toward agreement;
+GSM-Plus or GSM-Symbolic variants, which cluster on their source problems and need a
+clustered bootstrap) are a suite decision, not made here.
+
+**Plans** (`bench plan` against the results DB, 2026-10-10; $78.74 billable spent):
+
+| Spec | Plan | Estimate | Worst case (TTL) | Cap | Expected |
+|---|---|---|---|---|---|
+| `aws-smoke-g6e` | 2.05 h of a 2.5 h TTL | $3.87 | $4.71 | $5 | ~1.5 h, ~$2.80 |
+| `qwen3-8b-aws-g6e` | 5.49 h of a 6.5 h TTL | $10.34 | $12.24 | $12.50 | ~4.5 h, ~$8.50 |
+
+"Expected" uses 7a8237d0's measured times (chat search 75-76 min per cell, a
+phase0-strict pass 7.7 min on bf16 and 5.2 min on fp8-kv8) plus an EC2 cold start of
+~15 min; the 4 vCPUs may stretch both. The laptop drives each run for its whole length.
+
+**The smoke** (`aws-smoke-g6e`, run first; `bench/tests/aws/test_aws_g6e.py` fails if it
+drifts from the real spec): same provider block, variants, config hashes, chat profile
+(the full-size dataset download, full-length requests), repetitions, SLO and quality
+section (5 passes, gated in-run) with tasks capped at 4 items; its search starts at 12
+req/s with step 3 so both cells fail their first point, drain an overload, descend, pass
+and bisect (the test checks every knee from the floor to lo). Offline,
+`bench/tests/aws/hostsim.py` runs both specs end to end on the aws_ec2 provider (moto
+EC2 and S3, a simulated host behind SSM serving the mock engine).
+
+Paths the smoke runs on AWS for the first time: every one of them, since no aws_ec2 GPU
+run has happened: on-demand RunInstances in the configured subnets (us-east-1e and 1f
+do not offer g6e.xlarge and answer `Unsupported`; the provider moves on), the DLAMI
+(Ubuntu 24.04, driver 595.91.07, CUDA 13.2) with the vLLM v0.30.0 image (CUDA 13.0),
+user-data's TTL shutdown (now recorded as `ttl_shutdown_at` and `ttl_shutdown_lead_s` in
+the cold start's `engine_started` event), the HF token from Secrets Manager, weights on
+the NVMe, the warm restart onto the FP8 checkpoint, the pinned dataset download, the
+client container (load and lm-eval jobs, uid 10001, presigned S3 URLs), and on-demand
+accrual.

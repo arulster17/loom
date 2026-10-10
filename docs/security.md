@@ -40,7 +40,9 @@ no customer data: prompts are synthetic or come from public datasets.
 - **Load-generator container**: `python:3.12.15-slim-trixie` pinned by digest
   (`AwsSettings.client_image`, which rejects a tag), non-root (uid 10001), the bench wheel
   and its requirements verified by sha256 before install, the virtualenv mounted
-  read-only, inputs and outputs only through presigned URLs.
+  read-only, inputs and outputs only through presigned URLs. A pinned workload dataset
+  (chat-sharegpt) is fetched by the host as root over HTTPS, checked against its sha256,
+  and mounted read-only at `/data`.
 - **Lifetime**: every instance schedules its own shutdown at its TTL with shutdown
   behaviour `terminate`; the root volume is encrypted and deleted on termination.
 - **Shell rendering**: `providers/aws_ssm.render_script` passes every value as a
@@ -220,7 +222,8 @@ egress and no credentials.
   commit). Three lm-eval dependencies (`rouge-score`, `sqlitedict`, `word2number`) ship
   only as source; their sdists are hash-checked, but pip builds them with an isolated,
   unpinned setuptools.
-- Not pinned today: the DLAMI (latest via its SSM parameter), lm-eval datasets (guarded
+- Not pinned by default: the DLAMI (latest via its SSM parameter; `AwsSettings.ami_id`
+  pins one), lm-eval datasets (guarded
   by per-item content hashes instead) and the tokenizer of the wrapped `vllm bench` /
   `sglang` tools.
 

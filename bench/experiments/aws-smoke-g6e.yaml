@@ -1,0 +1,71 @@
+# AWS smoke test for qwen3-8b-aws-g6e.yaml: every code path the real run uses, at the
+# smallest scale that still runs it, on the same host type. No aws_ec2 GPU run has ever
+# happened (every GPU bench so far ran on RunPod), so this is the first time the EC2
+# path meets a GPU: on-demand provisioning in the configured subnets (us-east-1e and 1f
+# do not offer g6e.xlarge: RunInstances answers `Unsupported` and the next AZ is tried),
+# the DLAMI's driver (595.91.07, CUDA 13.2) with the vLLM v0.30.0 image (CUDA 13.0),
+# user-data's TTL shutdown, SSM-driven engine starts, the HF token from Secrets Manager,
+# weights on the instance-store NVMe, the client container's jobs with presigned S3 URLs,
+# and on-demand budget accrual (prices.yaml rate + root gp3).
+#
+# Same as the real run: model, provider block (g6e.xlarge, on_demand, 200 GB), the two
+# variants (bf16 and fp8-kv8 by `Variant.model` and `kv_cache_dtype`, so the same image,
+# launch args and config hashes, and the same warm restart onto a second checkpoint the
+# host has not downloaded), the chat-sharegpt profile unchanged (the pinned 673 MB
+# ShareGPT download onto the host, now built for aws_ec2, and full-length chat
+# requests), open loop with a geometric search that can descend, 3 repetitions, the SLO,
+# and the quality section (phase0-strict, 5 replicated passes, gated against bf16 in-run)
+# with every task capped at 4 items (`quality.limit`). bench/tests/aws/test_aws_g6e.py
+# fails if the two drift apart.
+#
+# Different, on purpose, so the search's failure branches run on this host:
+# - `lo: 12`, a certain overload for both cells (RunPod L40S chat knees: bf16 2.2 req/s,
+#   fp8-kv8 5.2): the first point fails and drains an overload (stragglers cancelled at
+#   the 60 s drain timeout), the search descends by `step: 3` (to 4, then 1.33), passes,
+#   and bisects (bf16 ~2.31, fp8-kv8 ~5.27). The real run's own search (lo 4.5, step 1.5)
+#   descends on bf16 and climbs on fp8-kv8; the search code is the runner's either way.
+# - 45 s windows after 15 s of warmup, 4 points.
+#
+# Its scores and goodput measure nothing (4 items per task); `smoke: true` keeps it out
+# of default reports and the results site.
+name: aws-smoke-g6e
+description: The Qwen3-8B AWS g6e.xlarge run at smoke scale on one on-demand host, every code path once.
+model: qwen3-8b
+smoke: true
+provider:
+  kind: aws_ec2
+  region: us-east-1
+  instance_type: g6e.xlarge
+  market: on_demand
+  disk_gb: 200
+variants:
+  - name: bf16
+  - name: fp8-kv8
+    model: qwen3-8b-fp8
+    kv_cache_dtype: fp8
+workloads:
+  - profile: chat-sharegpt
+    load:
+      mode: open_loop
+      search: {lo: 12, hi: 16, rel_tol: 0.05, max_points: 4, scale: geometric, step: 3, descend: 3}
+      duration_s: 45
+      warmup_s: 15
+      drain_timeout_s: 60
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+quality:
+  suite: qwen3-8b
+  subset: phase0-strict
+  baseline_variant: bf16
+  replicates: 5
+  limit: 4
+# The TTL holds `bench plan`'s estimate with margin; max_spend holds the worst case of
+# the host living to its TTL.
+budget:
+  max_spend: "$5"
+  ttl_minutes: 150
+  accrual_interval_s: 15
+seed: 0

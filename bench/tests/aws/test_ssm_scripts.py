@@ -1,7 +1,9 @@
+import hashlib
 import re
 import shlex
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -57,6 +59,11 @@ JOB_VARS: dict[str, Any] = {
     "MODEL_CACHE_DIR": "",
     "MODEL_CACHE_MOUNT": "",
     "MODEL_REVISION": "",
+    "DATA_URL": "",
+    "DATA_SHA256": "",
+    "DATA_PATH": "",
+    "DATA_DIR": "",
+    "DATA_MOUNT": "",
 }
 RENDERED = {
     "start_engine": START_VARS,
@@ -169,12 +176,14 @@ STUBS = {
 }
 
 
-def run_job_on_stubbed_host(tmp_path: Any, **over: Any) -> tuple[Any, list[str]]:
+def run_job_on_stubbed_host(
+    tmp_path: Any, stubs: dict[str, str] | None = None, **over: Any
+) -> tuple[Any, list[str]]:
     """Run the rendered run_job.sh with curl, docker and friends stubbed; return the
     process and one `|`-joined argv per docker call."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
-    for name, body in STUBS.items():
+    for name, body in (stubs or STUBS).items():
         (bin_dir / name).write_text(f"#!/bin/sh\n{body}\n")
         (bin_dir / name).chmod(0o755)
     log = tmp_path / "docker.log"
@@ -233,6 +242,92 @@ def test_job_without_an_hf_tokenizer_mounts_no_model(tmp_path: Any) -> None:
     assert proc.returncode == 0, proc.stderr
     assert f"|--volume|{tmp_path}/jobs/r1:/work|{CLIENT_IMAGE}|/env/bin/bench|" in calls[-1]
     assert f":ro|{CLIENT_IMAGE}" not in calls[-1]
+
+
+# GNU `sha256sum --check --quiet`, as on the DLAMI's Ubuntu (macOS's lacks --quiet), for
+# the dataset; the other inputs are empty stand-ins, so their checks pass as in STUBS.
+SHA256_CHECK_PY = """
+import hashlib, sys
+for line in sys.stdin:
+    want, path = line.split(None, 1)
+    if "convs.json" not in path:
+        continue
+    if hashlib.sha256(open(path.strip(), "rb").read()).hexdigest() != want:
+        sys.exit(1)
+"""
+
+
+def _dataset_host(tmp_path: Any, body: bytes, **over: Any) -> tuple[Any, list[str], dict[str, Any]]:
+    """run_job.sh with a pinned dataset: curl serves `body` for the dataset URL (and
+    logs every fetch), sha256sum really checks. Returns (process, docker calls, vars)."""
+    served = tmp_path / "served"
+    served.mkdir(exist_ok=True)
+    (served / "convs.json").write_bytes(body)
+    fetches = tmp_path / "fetches.log"
+    stubs = {
+        **STUBS,
+        "curl": f'echo "$*" >>{shlex.quote(str(fetches))}\n'
+        'out=""; url=""\n'
+        "while [ $# -gt 0 ]; do\n"
+        '  case "$1" in -o) out="$2"; shift ;; https://*) url="$1" ;; esac; shift\n'
+        "done\n"
+        '[ -n "$out" ] || exit 0\n'
+        'case "$url" in */convs.json) cp '
+        + shlex.quote(str(served))
+        + '/convs.json "$out" ;; *) : >"$out" ;; esac\n',
+        "sha256sum": f"exec python3 -c {shlex.quote(SHA256_CHECK_PY)}",
+    }
+    data_dir = tmp_path / "nvme" / "loom-data"
+    sha = hashlib.sha256(b"conversations").hexdigest()
+    values = {
+        "DATA_URL": f"https://huggingface.co/datasets/o/d/resolve/{'a' * 40}/convs.json",
+        "DATA_SHA256": sha,
+        "DATA_PATH": str(data_dir / sha / "convs.json"),
+        "DATA_DIR": str(data_dir),
+        "DATA_MOUNT": "/data",
+        **over,
+    }
+    proc, calls = run_job_on_stubbed_host(tmp_path, stubs=stubs, **values)
+    return proc, calls, values
+
+
+@needs_bash
+def test_job_fetches_a_pinned_dataset_once_and_mounts_it_read_only(tmp_path: Any) -> None:
+    for _ in range(2):
+        proc, calls, values = _dataset_host(tmp_path, b"conversations")
+        assert proc.returncode == 0, proc.stderr
+        assert (
+            f"|--volume|{values['DATA_DIR']}:/data:ro|{CLIENT_IMAGE}|/env/bin/bench|" in calls[-1]
+        )
+    data = Path(values["DATA_PATH"])
+    assert data.read_bytes() == b"conversations"
+    # Root-owned on the host and readable by the client uid, which only reads it.
+    assert data.stat().st_mode & 0o777 == 0o644
+    assert data.parent.stat().st_mode & 0o777 == 0o755
+    assert Path(values["DATA_DIR"]).stat().st_mode & 0o777 == 0o755
+    assert not data.with_name(data.name + ".part").exists()
+    fetched = (tmp_path / "fetches.log").read_text().splitlines()
+    dataset = [line for line in fetched if "convs.json" in line]
+    assert len(dataset) == 1  # the second job reuses it
+    assert "--proto =https --proto-redir =https" in dataset[0] and " -L " in dataset[0]
+
+
+@needs_bash
+def test_job_refuses_a_dataset_with_the_wrong_checksum(tmp_path: Any) -> None:
+    proc, calls, values = _dataset_host(tmp_path, b"something else")
+    assert proc.returncode == 1
+    assert "workload dataset checksum mismatch" in proc.stderr
+    data = Path(values["DATA_PATH"])
+    assert not data.exists() and not data.with_name(data.name + ".part").exists()
+    assert not [c for c in calls if "/env/bin/bench" in c]
+
+
+@needs_bash
+def test_job_refuses_a_dataset_path_outside_the_data_dir(tmp_path: Any) -> None:
+    proc, calls, _ = _dataset_host(tmp_path, b"conversations", DATA_PATH="/etc/passwd")
+    assert proc.returncode == 1
+    assert "is not under" in proc.stderr
+    assert calls == []
 
 
 def test_user_data_arms_ttl_shutdown() -> None:

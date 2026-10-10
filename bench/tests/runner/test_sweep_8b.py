@@ -16,6 +16,7 @@ from loom_bench.experiment import (
 )
 from loom_bench.money import parse_usd
 from loom_bench.plan import (
+    AWS_TIMING,
     DATASET_JOB_S,
     EVAL_HARNESS_TASK_S,
     EVAL_ITEM_S_PER_STEP_MS,
@@ -264,9 +265,23 @@ def test_a_dataset_the_host_cannot_fetch_is_refused_before_anything_starts():
     no_download = _with_chat(load_experiment(QWEN_SWEEP_RUNPOD), download=None)
     (refusal,) = [r for r in _plan(no_download).refusals if "chat-sharegpt" in r]
     assert "runpod host does not have" in refusal and "download" in refusal
-    aws = _with_chat(load_experiment(QWEN))
-    (refusal,) = [r for r in _plan(aws).refusals if "chat-sharegpt" in r]
-    assert "aws_ec2 provider cannot fetch" in refusal
+    aws_no_download = _with_chat(load_experiment(QWEN), download=None)
+    (refusal,) = [r for r in _plan(aws_no_download).refusals if "chat-sharegpt" in r]
+    assert "aws_ec2 host does not have" in refusal and "download" in refusal
+
+
+def test_a_pinned_dataset_on_an_ec2_host_is_planned_with_its_download():
+    # Since 2026-10-10 the aws_ec2 host fetches a pinned dataset itself, as a pod does.
+    exp = _with_chat(load_experiment(QWEN))
+    plan = _plan(exp)
+    assert not [r for r in plan.refusals if "chat-sharegpt" in r]
+    p = load_profile("chat-sharegpt")
+    (host,) = plan.hosts
+    fetches = [s for s in host.steps if s.kind == "dataset"]
+    assert len(fetches) == 1
+    assert fetches[0].seconds == pytest.approx(
+        p.download.size_bytes / AWS_TIMING.download_bytes_per_s  # type: ignore[union-attr]
+    )
 
 
 # --- the sweep and its smoke ------------------------------------------------------------
