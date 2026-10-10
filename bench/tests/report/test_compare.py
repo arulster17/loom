@@ -118,7 +118,9 @@ def test_cell_key_match_requires_identical_config_hash(vllm_runs):
     assert not any(p.config_hash_match for p in c.points)
     assert not c.within_normal_variance
     assert all(d.within_normal_variance for p in c.points for d in p.metrics)
-    assert not compare(vllm_runs, changed).points  # by config hash nothing matches
+    assert c.verdict == "outside"  # matched cells with different configs
+    by_hash = compare(vllm_runs, changed)
+    assert not by_hash.points and by_hash.verdict == "nothing_matched"
 
 
 def test_two_configs_by_workload(vllm_runs, sglang_runs, price_book):
@@ -135,12 +137,48 @@ def test_two_configs_by_workload(vllm_runs, sglang_runs, price_book):
         compare([*vllm_runs, *sglang_runs], vllm_runs, match_by="workload")
 
 
-def test_unmatched_points_are_reported(vllm_runs):
+def test_unmatched_points_are_reported_not_judged(vllm_runs):
     partial = make_runs("vllm-bf16", experiment_id=RERUN, loads=(2.0, 4.0))
     c = compare(vllm_runs, partial)
     assert len(c.points) == 2
     assert c.only_in_a == ["vllm-bf16 chat @ 6 req/s", "vllm-bf16 chat @ 8 req/s"]
-    assert not c.within_normal_variance
+    assert c.verdict == "within" and c.within_normal_variance
+    md = render_markdown(c)
+    head = "**Verdict: within normal variance** (2 load points matched; 2 unmatched, not judged)"
+    assert head in md
+    assert "**Only in A:** vllm-bf16 chat @ 6 req/s; vllm-bf16 chat @ 8 req/s" in md
+
+
+def test_unmatched_cells_do_not_count_against_the_verdict(vllm_runs, sglang_runs):
+    """Two experiments sharing one cell at one load (like 565b8d3f and 7a8237d0): the
+    verdict is the shared point's, the cells only one side ran are listed."""
+    shared = make_runs("vllm-bf16", experiment_id=RERUN, loads=(4.0,), latency_scale=1.03)
+    other = make_runs("vllm-fp8", quantization="fp8", experiment_id=RERUN)
+    c = compare([*vllm_runs, *sglang_runs], [*shared, *other])
+    assert [p.load for p in c.points] == [4.0]
+    assert c.verdict == "within"
+    assert "sglang-bf16 chat open_loop" in c.only_in_a
+    assert "vllm-fp8 chat open_loop" in c.only_in_b
+    assert len(c.only_in_a) == 4  # sglang's sweep plus vllm-bf16 @ 2, 6 and 8 req/s
+
+    shifted = make_runs("vllm-bf16", experiment_id=RERUN, loads=(4.0,), latency_scale=1.8)
+    c = compare([*vllm_runs, *sglang_runs], [*shifted, *other])
+    assert c.verdict == "outside" and not c.within_normal_variance
+    assert render_markdown(c).startswith(
+        "# Comparison: A vs B\n\n**Verdict: outside normal variance** ("
+    )
+    assert "1 load point matched; 5 unmatched, not judged)" in render_markdown(c)
+
+
+def test_nothing_matched_is_its_own_verdict(vllm_runs, sglang_runs):
+    c = compare(vllm_runs, sglang_runs)
+    assert not c.points and not c.configs
+    assert c.verdict == "nothing_matched" and not c.within_normal_variance
+    assert c.only_in_a == ["vllm-bf16 chat open_loop"]
+    assert c.only_in_b == ["sglang-bf16 chat open_loop"]
+    md = render_markdown(c)
+    assert "**Verdict: nothing to compare**: no sweep or load point matched by config_hash" in md
+    assert json.loads(render_json(c))["verdict"] == "nothing_matched"
 
 
 def test_mixed_or_empty_input_is_rejected(vllm_runs, price_book):

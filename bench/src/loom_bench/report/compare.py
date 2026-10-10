@@ -20,9 +20,15 @@ cost CIs. Goodput is shown with its search bracket; when the two brackets overla
 search cannot separate the configs (`resolution.brackets_overlap`) and the comparison
 says so. Every matched sweep also gets a latency table at the loads both sides ran
 (`equal_load`), where a side is lower only when its CI lies entirely below the
-other's. The comparison as a whole is within normal variance only if every metric
-is, every sweep and point matched, and (except when matching by workload) config
-hashes are identical.
+other's.
+
+The verdict judges only what both sides measured. Sweeps and load points found on one
+side only are listed (`only_in_a`, `only_in_b`) but are not evidence either way, so
+they do not count against it. The comparison is within normal variance when at least
+one point or sweep matched and every matched metric is within normal variance, with
+(except when matching by workload) identical config hashes. When nothing matched,
+`verdict` is "nothing_matched" and `within_normal_variance` is False: there is no
+evidence of a reproduction, but none of a difference either (`bench compare` exits 2).
 """
 
 from __future__ import annotations
@@ -52,6 +58,7 @@ from loom_bench.stats import Estimate
 from loom_bench.store.models import BenchRun
 
 MatchBy = Literal["config_hash", "cell_key", "workload"]
+Verdict = Literal["within", "outside", "nothing_matched"]
 DEFAULT_METRICS = (*HEADLINE_METRICS, "error_rate")
 DEFAULT_ABS_TOL: Mapping[str, float] = {"error_rate": 0.01}
 COST_METRICS = ("output_per_mtok", "input_per_mtok", "total_per_mtok")
@@ -122,9 +129,10 @@ class Comparison(BaseModel):
     configs: list[ConfigComparison]
     points: list[PointComparison]
     equal_load: list[EqualLoadTable] = []  # latency at the loads both sides ran
-    only_in_a: list[str]
+    only_in_a: list[str]  # sweeps and load points B lacks: listed, not judged
     only_in_b: list[str]
-    within_normal_variance: bool
+    verdict: Verdict  # over the matched points and sweeps only
+    within_normal_variance: bool  # verdict == "within"
 
 
 @dataclass(frozen=True)
@@ -453,6 +461,14 @@ def compare(
                 )
             )
 
+    if not points and not configs:
+        verdict: Verdict = "nothing_matched"
+    elif all(p.within_normal_variance for p in points) and all(
+        c.within_normal_variance for c in configs
+    ):
+        verdict = "within"
+    else:
+        verdict = "outside"
     return Comparison(
         label_a=label_a,
         label_b=label_b,
@@ -466,11 +482,8 @@ def compare(
         equal_load=tables,
         only_in_a=only_a,
         only_in_b=only_b,
-        within_normal_variance=bool(points)
-        and not only_a
-        and not only_b
-        and all(p.within_normal_variance for p in points)
-        and all(c.within_normal_variance for c in configs),
+        verdict=verdict,
+        within_normal_variance=verdict == "within",
     )
 
 
@@ -524,12 +537,22 @@ def render_markdown(c: Comparison) -> str:
         + sum(not d.within_normal_variance for cfg in c.configs for d in cfg.metrics)
         + sum(not e.within_normal_variance for cfg in c.configs for e in cfg.cost)
     )
-    head = (
-        "**Verdict: within normal variance**"
-        if c.within_normal_variance
-        else f"**Verdict: outside normal variance** ({n_bad} metrics outside; "
-        f"{len(c.only_in_a) + len(c.only_in_b)} unmatched)"
+    n_unmatched = len(c.only_in_a) + len(c.only_in_b)
+    unmatched = f"; {n_unmatched} unmatched, not judged" if n_unmatched else ""
+    matched = f"{len(c.points)} load point{'' if len(c.points) == 1 else 's'} matched" + (
+        f", {len(c.configs)} at goodput" if c.configs else ""
     )
+    if c.verdict == "nothing_matched":
+        head = (
+            f"**Verdict: nothing to compare**: no sweep or load point matched by "
+            f"{c.match_by} ({n_unmatched} unmatched)"
+        )
+    elif c.verdict == "within":
+        head = f"**Verdict: within normal variance** ({matched}{unmatched})"
+    else:
+        head = (
+            f"**Verdict: outside normal variance** ({n_bad} metrics outside; {matched}{unmatched})"
+        )
     abs_tol = ", ".join(f"{k} ±{v:g}" for k, v in c.abs_tol.items())
     parts = [
         f"# Comparison: {c.label_a} vs {c.label_b}",
