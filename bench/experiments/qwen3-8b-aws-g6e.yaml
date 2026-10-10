@@ -7,14 +7,15 @@
 #
 # Three jobs in one run:
 # 1. The AWS leaderboard rows: chat-sharegpt (the realistic workload) at the SLO.
-# 2. fp8-kv8's gate against BF16, with more replicated passes than the sweep's 3. Sized
-#    from the per-item variance in 7a8237d0 (docs/benchmark-lab.md, "Qwen3-8B on AWS"):
-#    on gsm8k, Var(D_i) = 0.0250 per item = 0.0190 of consistent per-item differences
-#    (FP8 flips the same items every pass) + 0.0061 of run noise at R = 3. Replicates
-#    divide only the run noise, so the CI half-width goes 0.85 pts (R=3) -> 0.81 (R=5)
-#    -> 0.78 (R=10) -> 0.74 (R -> inf) against a delta of -0.28 and a 1-pt margin: the
-#    gate resolves with probability ~37% at R=5, ~41% at R=10, never above ~46%. R = 5
-#    takes most of what replicates can give; more items, not passes, is the lever.
+# 2. fp8-kv8's gate against BF16 on 3 replicated passes per side, as in the sweep (the
+#    user's choice, 2026-10-10: more passes barely move the odds). From the per-item
+#    variance in 7a8237d0 (docs/benchmark-lab.md, "Qwen3-8B on AWS"): on gsm8k,
+#    Var(D_i) = 0.0250 per item = 0.0190 of consistent per-item differences (FP8 flips
+#    the same items every pass) + 0.0061 of run noise at R = 3. Replicates divide only
+#    the run noise, so the CI half-width goes 0.85 pts (R=3) -> 0.81 (R=5) -> 0.78
+#    (R=10) -> 0.74 (R -> inf) against a delta of -0.28 and a 1-pt margin: the gate
+#    resolves with probability ~33% at R=3, ~37% at R=5, never above ~46%. More items,
+#    not passes, is the lever.
 # 3. A cross-check of RunPod's cost and goodput against AWS on the same GPU: the same
 #    variants (names, checkpoints, KV dtype, image and vLLM args as the sweep's bf16 and
 #    fp8-kv8), the same chat profile, windows and search (lo 4.5, step 1.5, descend 3,
@@ -26,7 +27,7 @@
 #
 # Run the smoke (aws-smoke-g6e.yaml) first: no aws_ec2 GPU run has ever happened.
 name: qwen3-8b-aws-g6e
-description: Qwen3-8B on one AWS g6e.xlarge on-demand (1x L40S), vLLM v0.30.0, BF16 vs FP8 weights + FP8 KV on chat at SLO, fp8-kv8 gated vs BF16 on 5 passes, cross-checked against RunPod 7a8237d0.
+description: Qwen3-8B on one AWS g6e.xlarge on-demand (1x L40S), vLLM v0.30.0, BF16 vs FP8 weights + FP8 KV on chat at SLO, fp8-kv8 gated vs BF16 on 3 passes, cross-checked against RunPod 7a8237d0.
 model: qwen3-8b
 provider:
   kind: aws_ec2
@@ -56,7 +57,7 @@ quality:
   suite: qwen3-8b
   subset: phase0-strict
   baseline_variant: bf16
-  replicates: 5
+  replicates: 3
 # The TTL holds `bench plan`'s estimate with margin (the planner's eval times are ~1.8x
 # the measured ones); max_spend holds the worst case of the host living to its TTL.
 budget:

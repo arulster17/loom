@@ -266,7 +266,7 @@ mkdir -p ~/.config/loom
 terraform -chdir=infra/aws/bench output -raw aws_settings_yaml > ~/.config/loom/aws.yaml
 export LOOM_AWS_CONFIG=~/.config/loom/aws.yaml
 export LOOM_DATABASE_URL=sqlite:///$PWD/results/loom.db     # the main checkout's DB
-uv run bench plan bench/experiments/aws-smoke-g6e.yaml       # $3.87, worst $4.71, cap $5
+uv run bench plan bench/experiments/aws-smoke-g6e.yaml       # $3.48, worst $4.71, cap $5
 caffeinate -i uv run bench run bench/experiments/aws-smoke-g6e.yaml --out results/
 ```
 
@@ -280,7 +280,7 @@ After the smoke, before the real run (each from `results/<id>/events.jsonl` and 
   note the `ami` in that event;
 - chat-sharegpt runs for both cells: each search's first point (12 req/s) fails with
   aborted stragglers, then 4, then a pass and a bisection point; no failed runs;
-- five `quality` passes per cell (`replicates: 5`), no `quality_failed` or
+- three `quality` passes per cell (`replicates: 3`), no `quality_failed` or
   `divergence_failed`, one `gate` event for fp8-kv8 against bf16 (its verdict means
   nothing at 4 items);
 - the instance is `terminated` (the runner did it), `bench reap --dry-run` is clean;
@@ -291,7 +291,7 @@ Then pin the smoke's AMI so the real run gets the same image
 (`export LOOM_AWS_AMI_ID=ami-...`), check the plan and run:
 
 ```sh
-uv run bench plan bench/experiments/qwen3-8b-aws-g6e.yaml    # $10.34, worst $12.24, cap $12.50
+uv run bench plan bench/experiments/qwen3-8b-aws-g6e.yaml    # $8.90, worst $12.24, cap $12.50
 caffeinate -i uv run bench run bench/experiments/qwen3-8b-aws-g6e.yaml --out results/
 uv run bench compare 7a8237d0-9917-47e7-b93e-8cb0230e0059 <aws id> --match-by cell_key
 uv run bench report -e <aws id>

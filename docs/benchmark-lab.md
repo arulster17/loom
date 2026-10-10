@@ -467,8 +467,8 @@ The AWS specs stay as the secondary path:
 | `qwen3-8b-vllm-vs-sglang` | 1x g6e.xlarge spot, 7.1 h of an 8 h TTL | $16.56 | $18.56 | $40 |
 | `llama-3.3-70b-tp4` | 1x g6e.12xlarge spot, 2.7 h of a 3.5 h TTL | $28.04 | $35.86 | $45 |
 | `llama-3.3-70b-fp8-tp4` | 1x g6e.12xlarge spot, 2.6 h of a 3.25 h TTL | $26.48 | $33.25 | $45 |
-| `qwen3-8b-aws-g6e` (proposed 2026-10-10, not run; [section below](#qwen3-8b-on-aws-g6exlarge-proposed)) | 1x g6e.xlarge **on-demand**, bf16 + fp8-kv8 on chat, 5 passes each, 5.5 h of a 6.5 h TTL | $10.34 | $12.24 | $12.50 |
-| `aws-smoke-g6e` (run first) | the same host and cells at smoke scale, 2.05 h of a 2.5 h TTL | $3.87 | $4.71 | $5 |
+| `qwen3-8b-aws-g6e` (proposed 2026-10-10, not run; [section below](#qwen3-8b-on-aws-g6exlarge-proposed)) | 1x g6e.xlarge **on-demand**, bf16 + fp8-kv8 on chat, 3 passes each, 4.7 h of a 6.5 h TTL | $8.90 | $12.24 | $12.50 |
+| `aws-smoke-g6e` (run first) | the same host and cells at smoke scale, 1.85 h of a 2.5 h TTL | $3.48 | $4.71 | $5 |
 
 Rates are searched geometrically, with ranges sized for one L40S from the first RunPod
 sweep (058128e9): Qwen3-8B fixed-1k-1k passed 1.22 req/s and failed 1.94; shared-prefix
@@ -850,8 +850,9 @@ leaderboard on one GPU type on AWS, and it does three things on one host:
 1. **AWS leaderboard rows** for Qwen3-8B: BF16 (reference row, gate baseline) and
    fp8-kv8 (FP8-dynamic weights + FP8 KV cache, the cheapest config at the SLO in
    7a8237d0) on chat-sharegpt at the SLO.
-2. **fp8-kv8's gate** against BF16 with 5 replicated phase0-strict passes per side
-   (7a8237d0 ran 3), sized below.
+2. **fp8-kv8's gate** against BF16 with 3 replicated phase0-strict passes per side, as
+   in 7a8237d0 (the user's choice on 2026-10-10: more passes barely move the odds, see
+   the arithmetic below).
 3. **A RunPod-vs-AWS cross-check** on the same GPU: the sweep's two cells (same
    checkpoints, KV dtype, image and vLLM args) on the same chat profile, windows (255 s
    with 45 s warmup, 60 s drain) and search (lo 4.5, step 1.5, descend 3, 5 points).
@@ -885,27 +886,27 @@ FP8's favour). Replicates divide only the run-noise quarter:
 
 | R per side | CI half-width (pts) | P(resolves), true delta = −0.28 | P(resolves), predictive |
 |---|---|---|---|
-| 3 (7a8237d0) | 0.85 | 27% | 33% |
-| 5 (proposed) | 0.81 | 30% | 37% |
+| 3 (7a8237d0; this run) | 0.85 | 27% | 33% |
+| 5 | 0.81 | 30% | 37% |
 | 10 | 0.78 | 32% | 41% |
 | 20 | 0.76 | 32% | 43% |
 | → ∞ | 0.74 | 3% | 46% |
 
 "Resolves" is a PASS: lower bound ≥ −1 pt, so the new delta must land at or above
-−1 + half-width (−0.19 pts at R = 5) against −0.28 measured. The predictive column
-allows for the run noise in 7a8237d0's −0.28 itself (sd 0.21 pts); a FAIL (point delta
-or upper bound below −1) is under 1% either way. The other three FP8 cells show the same
+−1 + half-width (−0.15 pts at R = 3, −0.19 at R = 5) against −0.28 measured. The
+predictive column allows for the run noise in 7a8237d0's −0.28 itself (sd 0.21 pts); a
+FAIL (point delta or upper bound below −1) is under 1% either way. The other three FP8 cells show the same
 structure (τ² 0.012-0.021, run noise 21-30% of the variance), while SGLang vs vLLM, both
 BF16, has τ² 0.0029 (b03b3c52: half-width 0.39 pts at R = 3). The normal approximation
 gives 0.85 pts at R = 3 against the gate's percentile bootstrap's 0.87 ([−1.14, +0.61]).
 
-So no replicate count makes this gate likely to resolve: R = 5 takes most of what
-passes can give (0.85 → 0.81 pts) for about 25 min of host time, R = 10 adds 4 points of
-probability for another ~$2. IFEval must pass too (fp8-kv8 +0.43 [−1.60, +2.46] against
-2 pts: predictive 84% at R = 5, 88% at R = 10), and divergence top-1 (95.80% against
-the 95% limit) can fall under its limit on a new reference, which makes the gate REVIEW
-(allowed, not a PASS). Overall a PASS is about 28% at R = 5. The lever that can decide
-it is **more items**: at τ² ≈ 0.019 a non-inferiority bound of 1 pt needs ~3000 items of
+So no replicate count makes this gate likely to resolve: R = 5 would add 4 points of
+probability (0.85 → 0.81 pts) for about 26 min of host time (~$0.80), R = 10 another 4
+for ~$2 more; the user chose R = 3. IFEval must pass too (fp8-kv8 +0.43 [−1.60, +2.46]
+against 2 pts: predictive 78% at R = 3, 84% at R = 5, 88% at R = 10), and divergence
+top-1 (95.80% against the 95% limit) can fall under its limit on a new reference, which
+makes the gate REVIEW (allowed, not a PASS). Overall a PASS is about 23% at R = 3 (28%
+at R = 5). The lever that can decide it is **more items**: at τ² ≈ 0.019 a non-inferiority bound of 1 pt needs ~3000 items of
 comparable math for a ~0.54-pt half-width (P(PASS on gsm8k-like items) ≈ 64%), ~5000
 for 0.42 (73%), ~8800 for 0.31 (81%), with the remaining risk being that the true delta
 is nearer −1 than −0.28. GSM8K has only 1319 test items; the candidates (its 7473-item
@@ -917,8 +918,8 @@ clustered bootstrap) are a suite decision, not made here.
 
 | Spec | Plan | Estimate | Worst case (TTL) | Cap | Expected |
 |---|---|---|---|---|---|
-| `aws-smoke-g6e` | 2.05 h of a 2.5 h TTL | $3.87 | $4.71 | $5 | ~1.5 h, ~$2.80 |
-| `qwen3-8b-aws-g6e` | 5.49 h of a 6.5 h TTL | $10.34 | $12.24 | $12.50 | ~4.5 h, ~$8.50 |
+| `aws-smoke-g6e` | 1.85 h of a 2.5 h TTL | $3.48 | $4.71 | $5 | ~1.4 h, ~$2.60 |
+| `qwen3-8b-aws-g6e` | 4.73 h of a 6.5 h TTL | $8.90 | $12.24 | $12.50 | ~4.1 h, ~$7.70 |
 
 "Expected" uses 7a8237d0's measured times (chat search 75-76 min per cell, a
 phase0-strict pass 7.7 min on bf16 and 5.2 min on fp8-kv8) plus an EC2 cold start of
@@ -927,7 +928,7 @@ phase0-strict pass 7.7 min on bf16 and 5.2 min on fp8-kv8) plus an EC2 cold star
 **The smoke** (`aws-smoke-g6e`, run first; `bench/tests/aws/test_aws_g6e.py` fails if it
 drifts from the real spec): same provider block, variants, config hashes, chat profile
 (the full-size dataset download, full-length requests), repetitions, SLO and quality
-section (5 passes, gated in-run) with tasks capped at 4 items; its search starts at 12
+section (3 passes, gated in-run) with tasks capped at 4 items; its search starts at 12
 req/s with step 3 so both cells fail their first point, drain an overload, descend, pass
 and bisect (the test checks every knee from the floor to lo). Offline,
 `bench/tests/aws/hostsim.py` runs both specs end to end on the aws_ec2 provider (moto

@@ -428,7 +428,7 @@ def test_the_chat_dataset_is_fetched_once_and_read_through_the_mount(aws_run):
 def test_every_cell_runs_its_passes_and_fp8_kv8_is_gated_against_bf16(aws_run):
     outcome, sim, ctx, cells, exp, _, _ = aws_run
     replicates = exp.quality.replicates  # type: ignore[union-attr]
-    assert replicates == 5
+    assert replicates == 3
     evals = [j for j in sim.jobs if isinstance(j, EvalJob)]
     assert len(evals) == replicates * len(cells)
     modes = [j.divergence for j in evals]

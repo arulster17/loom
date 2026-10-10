@@ -14,7 +14,7 @@
 # host has not downloaded), the chat-sharegpt profile unchanged (the pinned 673 MB
 # ShareGPT download onto the host, now built for aws_ec2, and full-length chat
 # requests), open loop with a geometric search that can descend, 3 repetitions, the SLO,
-# and the quality section (phase0-strict, 5 replicated passes, gated against bf16 in-run)
+# and the quality section (phase0-strict, 3 replicated passes, gated against bf16 in-run)
 # with every task capped at 4 items (`quality.limit`). bench/tests/aws/test_aws_g6e.py
 # fails if the two drift apart.
 #
@@ -60,7 +60,7 @@ quality:
   suite: qwen3-8b
   subset: phase0-strict
   baseline_variant: bf16
-  replicates: 5
+  replicates: 3
   limit: 4
 # The TTL holds `bench plan`'s estimate with margin; max_spend holds the worst case of
 # the host living to its TTL.
