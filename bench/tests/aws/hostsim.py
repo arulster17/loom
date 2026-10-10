@@ -7,13 +7,18 @@ themselves:
 
 - start_engine.sh: CACHED_WEIGHTS must be in the host's Hugging Face cache, FETCH_WEIGHTS
   are added to it, and the engine, which runs offline, starts only if its checkpoint is in
-  it. A cold start reports user-data's stages and the TTL shutdown systemd armed, read
-  from the instance's own user data (TTL_EPOCH).
-- run_job.sh: a job's tokenizer snapshot (MODEL_CACHE_DIR, MODEL_REVISION) must be in the
-  cache; a pinned dataset (DATA_URL) is fetched once per host from `served`, checked
-  against DATA_SHA256 and kept under DATA_DIR, and the job reads it where the client
-  container mounts DATA_DIR (DATA_MOUNT). Inputs come from, and results go to, the S3 keys
-  the script's presigned URLs name.
+  it. The cache is written to disk under WEIGHTS_DIR as the vLLM image's huggingface_hub
+  lays it out on a real host: tokenizer.json links through the model's blobs/ into a
+  hub-level store, hub/blobs/<xx>/<sha256>. A cold start reports user-data's stages and
+  the TTL shutdown systemd armed, read from the instance's own user data (TTL_EPOCH).
+- run_job.sh: a job's tokenizer snapshot (MODEL_FOLDER, MODEL_REVISION under
+  MODEL_CACHE_DIR) must be in the cache, and the job opens its tokenizer.json as the client
+  container would: through the MODEL_CACHE_DIR mount only, so a link that leaves the mount
+  fails as it did on the first AWS smoke ("No such file or directory (os error 2)"); a
+  pinned dataset (DATA_URL) is fetched once per host from `served`, checked against
+  DATA_SHA256 and kept under DATA_DIR, and the job reads it where the client container
+  mounts DATA_DIR (DATA_MOUNT). Inputs come from, and results go to, the S3 keys the
+  script's presigned URLs name.
 """
 
 from __future__ import annotations
@@ -21,6 +26,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
+import os
 import re
 import shlex
 import threading
@@ -76,6 +83,28 @@ def engine_checkpoint(script: str) -> tuple[str, str]:
     cmd = array(script, "ENGINE_CMD")
     i = cmd.index("serve")
     return cmd[i + 1], cmd[cmd.index("--revision") + 1]
+
+
+def write_hub_snapshot(host_root: Path, weights_dir: str, repo: str, rev: str) -> None:
+    """`repo`@`rev` in the host's HF hub cache, laid out as on the first AWS smoke's host
+    (2026-10-10): config.json a blob in the model's folder, tokenizer.json a link to a
+    blob that links on into the hub-level store hub/blobs/<xx>/<sha256>."""
+    hub = host_root / weights_dir.lstrip("/") / "hub"
+    model = hub / hf_cache_folder(repo)
+    snap = model / "snapshots" / rev
+    snap.mkdir(parents=True, exist_ok=True)
+    (model / "blobs").mkdir(exist_ok=True)
+    sha = hashlib.sha256(f"{repo}@{rev}/tokenizer.json".encode()).hexdigest()
+    (hub / "blobs" / sha[:2]).mkdir(parents=True, exist_ok=True)
+    (hub / "blobs" / sha[:2] / sha).write_text("{}")
+    etag = sha[:40]
+    if not (model / "blobs" / etag).is_symlink():
+        (model / "blobs" / etag).symlink_to(f"../../blobs/{sha[:2]}/{sha}")
+    if not (snap / "tokenizer.json").is_symlink():
+        (snap / "tokenizer.json").symlink_to(f"../../blobs/{etag}")
+    (model / "blobs" / "config").write_text("{}")
+    if not (snap / "config.json").is_symlink():
+        (snap / "config.json").symlink_to("../../blobs/config")
 
 
 def _started_server(cfg: MockConfig) -> Any:
@@ -146,6 +175,8 @@ class HostSim(FakeSsm):
         fetch = pairs(script, "FETCH_WEIGHTS")
         cache.update(fetch)
         self.downloads.setdefault(instance, []).extend(fetch)
+        for repo, rev in fetch:
+            write_hub_snapshot(self.root / instance, var(script, "WEIGHTS_DIR"), repo, rev)
         if engine_checkpoint(script) not in cache:
             return 1, "", f"OfflineModeIsEnabled: the engine's {engine_checkpoint(script)}"
         cfg = MockConfig(
@@ -209,16 +240,32 @@ class HostSim(FakeSsm):
         assert host_path == f"{data_dir}/{rel}"
         return {**workload, "path": str(local)}
 
+    def _container_tokenizer(self, instance: str, script: str, raw: bytes) -> str | None:
+        """Why the client container could not open the job's tokenizer, or None."""
+        hub_dir = var(script, "MODEL_CACHE_DIR")
+        if not hub_dir:
+            return None
+        folder, revision = var(script, "MODEL_FOLDER"), var(script, "MODEL_REVISION")
+        held = {(hf_cache_folder(r), rev) for r, rev in self.cache.get(instance, set())}
+        if (folder, revision) not in held:
+            return f"loom-error no tokenizer.json in snapshot {revision}"
+        local_dir = json.loads(raw)["tokenizer"]["local_dir"]
+        mount = var(script, "MODEL_CACHE_MOUNT")
+        assert local_dir.startswith(mount + "/"), (local_dir, mount)
+        hub = (self.root / instance / hub_dir.lstrip("/")).resolve()
+        tokenizer = hub / local_dir.removeprefix(mount + "/") / "tokenizer.json"
+        real = Path(os.path.realpath(tokenizer))
+        # The container sees only the mount: a link resolving outside it dangles there.
+        if not (real.is_relative_to(hub) and real.is_file()):
+            return "job failed: Exception: No such file or directory (os error 2)"
+        return None
+
     def job(self, instance: str, script: str) -> tuple[int, str, str]:
-        model_dir = var(script, "MODEL_CACHE_DIR")
-        if model_dir:
-            revision = var(script, "MODEL_REVISION")
-            held = {(hf_cache_folder(r), rev) for r, rev in self.cache.get(instance, set())}
-            if (Path(model_dir).name, revision) not in held:
-                return 1, "", f"loom-error no tokenizer.json in snapshot {revision}"
         root = f"http://127.0.0.1:{self.servers[instance].port}"
         body = self.s3.get_object(Bucket=BUCKET, Key=s3_key(var(script, "JOB_URL")))["Body"]
         raw = body.read()
+        if (error := self._container_tokenizer(instance, script, raw)) is not None:
+            return 1, "", error
         simple = TokenizerSpec(kind="simple")
         if array(script, "BENCH_CMD") == ["quality", "job"]:
             ej = EvalJob.model_validate_json(raw)

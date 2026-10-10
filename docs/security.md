@@ -40,7 +40,9 @@ no customer data: prompts are synthetic or come from public datasets.
 - **Load-generator container**: `python:3.12.15-slim-trixie` pinned by digest
   (`AwsSettings.client_image`, which rejects a tag), non-root (uid 10001), the bench wheel
   and its requirements verified by sha256 before install, the virtualenv mounted
-  read-only, inputs and outputs only through presigned URLs. A pinned workload dataset
+  read-only, inputs and outputs only through presigned URLs. Jobs that need a tokenizer
+  also get the host's Hugging Face hub cache read-only at `/models` (public or licensed
+  weights and tokenizers; the token is never written there). A pinned workload dataset
   (chat-sharegpt) is fetched by the host as root over HTTPS, checked against its sha256,
   and mounted read-only at `/data`.
 - **Lifetime**: every instance schedules its own shutdown at its TTL with shutdown

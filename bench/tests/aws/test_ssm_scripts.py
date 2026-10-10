@@ -58,6 +58,7 @@ JOB_VARS: dict[str, Any] = {
     "SAMPLE_GPU": 0,
     "MODEL_CACHE_DIR": "",
     "MODEL_CACHE_MOUNT": "",
+    "MODEL_FOLDER": "",
     "MODEL_REVISION": "",
     "DATA_URL": "",
     "DATA_SHA256": "",
@@ -204,31 +205,101 @@ def run_job_on_stubbed_host(
     return proc, calls
 
 
+QWEN = "models--Qwen--Qwen3-8B"
+
+
+def hf_hub_cache(root: Path, rev: str, *, folder: str = QWEN) -> Path:
+    """An HF hub cache as the vLLM image's huggingface_hub lays it out on the GPU host
+    (seen on the first AWS smoke, 2026-10-10): small files are blobs in the model's
+    folder, and large ones (tokenizer.json, safetensors) link on into a hub-level store,
+    hub/blobs/<xx>/<sha256>. Returns the hub directory."""
+    hub = root / "hf" / "hub"
+    snap = hub / folder / "snapshots" / rev
+    snap.mkdir(parents=True)
+    blobs = hub / folder / "blobs"
+    blobs.mkdir()
+    (blobs / "c0ffee").write_text("{}")
+    (snap / "config.json").symlink_to("../../blobs/c0ffee")
+    sha = "6aec" + "0" * 60
+    (hub / "blobs" / "6a").mkdir(parents=True)
+    (hub / "blobs" / "6a" / sha).write_text("{}")
+    (blobs / "aeb1").symlink_to(f"../../blobs/6a/{sha}")
+    (snap / "tokenizer.json").symlink_to("../../blobs/aeb1")
+    return hub
+
+
 @needs_bash
-def test_job_mounts_the_model_snapshot_read_only(tmp_path: Any) -> None:
+def test_job_mounts_the_hub_cache_read_only(tmp_path: Path) -> None:
     rev = "b" * 40
-    cache = tmp_path / "hf" / "hub" / "models--Qwen--Qwen3-8B"
-    (cache / "snapshots" / rev).mkdir(parents=True)
-    (cache / "snapshots" / rev / "tokenizer.json").write_text("{}")
-    mount = "/models/models--Qwen--Qwen3-8B"
+    hub = hf_hub_cache(tmp_path, rev)
     proc, calls = run_job_on_stubbed_host(
-        tmp_path, MODEL_CACHE_DIR=str(cache), MODEL_CACHE_MOUNT=mount, MODEL_REVISION=rev
+        tmp_path,
+        MODEL_CACHE_DIR=str(hub),
+        MODEL_CACHE_MOUNT="/models",
+        MODEL_FOLDER=QWEN,
+        MODEL_REVISION=rev,
     )
     assert proc.returncode == 0, proc.stderr
     bench = calls[-1]
-    assert f"|--volume|{cache}:{mount}:ro|{CLIENT_IMAGE}|/env/bin/bench|job|run|" in bench
+    # The whole hub cache: tokenizer.json's content lives in hub/blobs/, outside the
+    # model's folder, so mounting only the folder left it dangling in the container.
+    assert f"|--volume|{hub}:/models:ro|{CLIENT_IMAGE}|/env/bin/bench|job|run|" in bench
     assert "HF_TOKEN" not in bench
 
 
 @needs_bash
-def test_job_fails_before_running_without_the_pinned_snapshot(tmp_path: Any) -> None:
-    cache = tmp_path / "hf" / "hub" / "models--Qwen--Qwen3-8B"
-    (cache / "snapshots" / ("a" * 40)).mkdir(parents=True)  # another revision only
-    (cache / "snapshots" / ("a" * 40) / "tokenizer.json").write_text("{}")
+@pytest.mark.parametrize("bad", ["outside", "dangling"])
+def test_job_fails_before_running_when_a_snapshot_link_leaves_the_mount(
+    tmp_path: Path, bad: str
+) -> None:
+    rev = "b" * 40
+    hub = hf_hub_cache(tmp_path, rev)
+    snap = hub / QWEN / "snapshots" / rev
+    if bad == "outside":
+        (tmp_path / "elsewhere.json").write_text("{}")
+        (snap / "vocab.json").symlink_to(tmp_path / "elsewhere.json")
+        match = "resolves outside"
+    else:
+        (snap / "vocab.json").symlink_to("../../blobs/missing")
+        match = "dangling link"
     proc, calls = run_job_on_stubbed_host(
         tmp_path,
-        MODEL_CACHE_DIR=str(cache),
-        MODEL_CACHE_MOUNT="/models/models--Qwen--Qwen3-8B",
+        MODEL_CACHE_DIR=str(hub),
+        MODEL_CACHE_MOUNT="/models",
+        MODEL_FOLDER=QWEN,
+        MODEL_REVISION=rev,
+    )
+    assert proc.returncode == 1
+    assert "loom-error snapshot file" in proc.stderr and match in proc.stderr, proc.stderr
+    assert calls == []
+
+
+@needs_bash
+def test_a_model_folder_mount_fails_here_not_in_the_container(tmp_path: Path) -> None:
+    # The first AWS smoke's bug: the mount was the model's folder, whose tokenizer.json
+    # resolves into hub/blobs/. The check refuses such a mount before any container.
+    rev = "b" * 40
+    hub = hf_hub_cache(tmp_path, rev)
+    proc, calls = run_job_on_stubbed_host(
+        tmp_path,
+        MODEL_CACHE_DIR=str(hub / QWEN),
+        MODEL_CACHE_MOUNT="/models/" + QWEN,
+        MODEL_FOLDER=".",
+        MODEL_REVISION=rev,
+    )
+    assert proc.returncode == 1
+    assert "tokenizer.json resolves outside" in proc.stderr, proc.stderr
+    assert calls == []
+
+
+@needs_bash
+def test_job_fails_before_running_without_the_pinned_snapshot(tmp_path: Path) -> None:
+    hub = hf_hub_cache(tmp_path, "a" * 40)  # another revision only
+    proc, calls = run_job_on_stubbed_host(
+        tmp_path,
+        MODEL_CACHE_DIR=str(hub),
+        MODEL_CACHE_MOUNT="/models",
+        MODEL_FOLDER=QWEN,
         MODEL_REVISION="b" * 40,
     )
     assert proc.returncode == 1

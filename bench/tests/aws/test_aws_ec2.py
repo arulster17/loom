@@ -586,8 +586,9 @@ async def test_run_job_round_trip_through_s3(aws: dict[str, Any], tmp_path: Path
 
 LLAMA_REPO = "meta-llama/Llama-3.3-70B-Instruct"
 LLAMA_REV = "6f6073b423013f6a7d4d9f39144961bfbfbc386b"
-LLAMA_CACHE = "/opt/dlami/nvme/loom-hf/hub/models--meta-llama--Llama-3.3-70B-Instruct"
-LLAMA_MOUNT = "/models/models--meta-llama--Llama-3.3-70B-Instruct"
+LLAMA_FOLDER = "models--meta-llama--Llama-3.3-70B-Instruct"
+# The whole hub cache is mounted: snapshot links can point into hub/blobs/.
+HUB_CACHE = "/opt/dlami/nvme/loom-hf/hub"
 
 
 def host_writes(s3: Any, prefix: str, result_json: str) -> Any:
@@ -601,8 +602,9 @@ def host_writes(s3: Any, prefix: str, result_json: str) -> Any:
 
 
 def assert_mounts_the_snapshot(script: str, stored_tokenizer: TokenizerSpec) -> None:
-    assert f"MODEL_CACHE_DIR={LLAMA_CACHE}" in script
-    assert f"MODEL_CACHE_MOUNT={LLAMA_MOUNT}" in script
+    assert f"MODEL_CACHE_DIR={HUB_CACHE}" in script
+    assert "MODEL_CACHE_MOUNT=/models" in script
+    assert f"MODEL_FOLDER={LLAMA_FOLDER}" in script
     assert f"MODEL_REVISION={LLAMA_REV}" in script
     assert '--volume "$WORK_DIR:/work" ${MODEL_MOUNT:+--volume "$MODEL_MOUNT"}' in script
     assert 'MODEL_MOUNT="$MODEL_CACHE_DIR:$MODEL_CACHE_MOUNT:ro"' in script
@@ -610,7 +612,7 @@ def assert_mounts_the_snapshot(script: str, stored_tokenizer: TokenizerSpec) -> 
         kind="hf",
         repo=LLAMA_REPO,
         revision=LLAMA_REV,
-        local_dir=f"{LLAMA_MOUNT}/snapshots/{LLAMA_REV}",
+        local_dir=f"/models/{LLAMA_FOLDER}/snapshots/{LLAMA_REV}",
     )
     assert "HF_TOKEN" not in script and "loom/hf-token" not in script
 

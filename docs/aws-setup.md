@@ -237,13 +237,19 @@ talks to it runs on the host, in the client container:
   the `lmeval` extra's locked requirements (lm-eval, torch, transformers) into a separate cached virtualenv on
   first use, about 5 minutes once per host; datasets come from the Hugging Face Hub inside
   the container.
-- **Tokenizers.** The client container has no Hugging Face token. Instead, the model's
-  cache folder that the engine start downloaded (`<weights_dir>/hub/models--<org>--<name>`)
-  is mounted read-only at `/models/models--<org>--<name>`. Jobs load the tokenizer from its
-  `snapshots/<revision>` directory: load generation, external tools and lm-eval tasks that
-  name the model repo (RULER). This works for gated models (Llama) and pins the RULER
-  tokenizer to the model's revision. The job fails before it starts if the host has no
-  snapshot at that revision, and the client checks that the path is that repo and revision.
+- **Tokenizers.** The client container has no Hugging Face token. Instead, the hub cache
+  the engine start downloaded into (`<weights_dir>/hub`) is mounted read-only at
+  `/models`, and jobs load the tokenizer from
+  `/models/models--<org>--<name>/snapshots/<revision>`: load generation, external tools
+  and lm-eval tasks that name the model repo (RULER). This works for gated models (Llama)
+  and pins the RULER tokenizer to the model's revision. The whole hub cache, not the
+  model's folder: the vLLM image's huggingface_hub keeps large files (tokenizer.json,
+  safetensors) in a hub-level store (`snapshots/<rev>/tokenizer.json` →
+  `../../blobs/<etag>` → `hub/blobs/<xx>/<sha256>`), so a folder-only mount left them
+  dangling and every load job failed with `No such file or directory (os error 2)` on the
+  first AWS smoke (2026-10-10). The job fails before it starts if the host has no snapshot
+  at that revision or a snapshot file resolves outside the mount, and the client checks
+  that the path is that repo and revision.
 - **Isolation.** The container runs as uid 10001, which user-data denies the instance
   metadata service, so it has no instance-role credentials; it gets no secrets or AWS
   settings in its environment; its virtualenv and the model cache are mounted read-only and

@@ -73,7 +73,8 @@ LOG_DIR = "/var/log/loom"
 JOBS_DIR = "/var/lib/loom/jobs"
 CLIENT_ENV_ROOT = "/var/lib/loom/clientenv"
 CLIENT_UID = 10001
-# Where the client container sees the model's HF cache folder (read-only).
+# Where the client container sees the host's HF hub cache (read-only): a model's
+# snapshot is at /models/models--<org>--<name>/snapshots/<rev>.
 CLIENT_MODEL_CACHE = "/models"
 # Where the client container sees the host's pinned workload datasets (read-only).
 CLIENT_DATA_MOUNT = "/data"
@@ -754,26 +755,33 @@ class AwsEc2Provider:
         self, spec: TokenizerSpec | None
     ) -> tuple[TokenizerSpec | None, dict[str, str]]:
         """`spec` pointed at the model snapshot the engine start downloaded on the host,
-        and the run_job.sh variables that mount its cache folder read-only into the
+        and the run_job.sh variables that mount the host's hub cache read-only into the
         client container.
 
         The client container has no Hugging Face token, so an `hf` tokenizer (gated or
         not) always loads from that snapshot; the script fails if the host lacks it.
         """
         if spec is None or spec.kind != "hf":
-            return spec, {"MODEL_CACHE_DIR": "", "MODEL_CACHE_MOUNT": "", "MODEL_REVISION": ""}
+            return spec, {
+                "MODEL_CACHE_DIR": "",
+                "MODEL_CACHE_MOUNT": "",
+                "MODEL_FOLDER": "",
+                "MODEL_REVISION": "",
+            }
         repo, revision = spec.repo, spec.revision
         if repo is None or not _HF_REPO_RE.match(repo):
             raise ValueError(f"hf tokenizer repo must be org/name, got {repo!r}")
         if revision is None or not _COMMIT_RE.match(revision):
             raise ValueError(f"hf tokenizer {repo} needs a pinned commit, got {revision!r}")
         folder = hf_cache_folder(repo)
-        mount = f"{CLIENT_MODEL_CACHE}/{folder}"
-        local = spec.model_copy(update={"local_dir": f"{mount}/snapshots/{revision}"})
+        snapshot = f"{CLIENT_MODEL_CACHE}/{folder}/snapshots/{revision}"
+        local = spec.model_copy(update={"local_dir": snapshot})
         return local, {
             # The engine start downloads with HF_HOME=weights_dir: the hub cache is hub/.
-            "MODEL_CACHE_DIR": f"{self.settings.weights_dir}/hub/{folder}",
-            "MODEL_CACHE_MOUNT": mount,
+            # All of it is mounted: snapshot links can point into a hub-level blob store.
+            "MODEL_CACHE_DIR": f"{self.settings.weights_dir}/hub",
+            "MODEL_CACHE_MOUNT": CLIENT_MODEL_CACHE,
+            "MODEL_FOLDER": folder,
             "MODEL_REVISION": revision,
         }
 

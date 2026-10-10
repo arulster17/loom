@@ -1,13 +1,17 @@
-# requires: WORK_DIR ENV_ROOT CLIENT_IMAGE CLIENT_UID JOB_URL WHEEL_URL WHEEL_NAME WHEEL_SHA256 REQS_URL REQS_SHA256 BENCH_CMD RESULT_URL GPU_CSV_URL SAMPLE_GPU MODEL_CACHE_DIR MODEL_CACHE_MOUNT MODEL_REVISION DATA_URL DATA_SHA256 DATA_PATH DATA_DIR DATA_MOUNT
+# requires: WORK_DIR ENV_ROOT CLIENT_IMAGE CLIENT_UID JOB_URL WHEEL_URL WHEEL_NAME WHEEL_SHA256 REQS_URL REQS_SHA256 BENCH_CMD RESULT_URL GPU_CSV_URL SAMPLE_GPU MODEL_CACHE_DIR MODEL_CACHE_MOUNT MODEL_FOLDER MODEL_REVISION DATA_URL DATA_SHA256 DATA_PATH DATA_DIR DATA_MOUNT
 # Run one LoadJob (`bench job run`) or EvalJob (`bench quality job`) on the GPU
 # host: measured latency has no WAN hop, and the engine is only reachable on the
 # host's loopback. Inputs and outputs move through presigned URLs. The client
 # container runs as CLIENT_UID (denied the metadata service by user-data, so no
 # instance-role credentials), gets no secrets or AWS settings in its environment,
 # mounts its virtualenv read-only and only WORK_DIR writable, and is removed after.
-# With MODEL_CACHE_DIR set it also mounts, read-only at MODEL_CACHE_MOUNT, the
-# model's HF cache folder the engine start downloaded: the job loads the tokenizer
-# from its MODEL_REVISION snapshot, so a gated model needs no token here.
+# With MODEL_CACHE_DIR set (the HF hub cache the engine start downloaded into) it also
+# mounts that cache read-only at MODEL_CACHE_MOUNT: the job loads the tokenizer from
+# MODEL_FOLDER's MODEL_REVISION snapshot, so a gated model needs no token here. The
+# whole hub cache, not the model's folder: huggingface_hub may keep a file's content in
+# a hub-level store (snapshots/<rev>/tokenizer.json -> ../../blobs/<etag> ->
+# ../../blobs/<xx>/<sha256>), which a folder-only mount leaves dangling. Every snapshot
+# file must resolve inside the mount, or the job fails here instead of in the container.
 # With DATA_URL set (a workload's pinned public dataset), the first job on the host
 # downloads it to DATA_PATH (under DATA_DIR), checks DATA_SHA256 and leaves it
 # root-owned and world-readable; later jobs reuse it. DATA_DIR is mounted read-only at
@@ -27,8 +31,18 @@ chown -R "$CLIENT_UID:$CLIENT_UID" "$WORK_DIR"
 
 MODEL_MOUNT=""
 if [ -n "$MODEL_CACHE_DIR" ]; then
-  [ -f "$MODEL_CACHE_DIR/snapshots/$MODEL_REVISION/tokenizer.json" ] \
-    || fail "no tokenizer.json in snapshot $MODEL_REVISION under $MODEL_CACHE_DIR: was this model's engine started on this host?"
+  snapshot="$MODEL_CACHE_DIR/$MODEL_FOLDER/snapshots/$MODEL_REVISION"
+  [ -f "$snapshot/tokenizer.json" ] \
+    || fail "no tokenizer.json in snapshot $MODEL_REVISION under $MODEL_CACHE_DIR/$MODEL_FOLDER: was this model's engine started on this host?"
+  hub="$(readlink -f "$MODEL_CACHE_DIR")"
+  for f in "$snapshot"/*; do
+    real="$(readlink -f "$f" || true)"
+    [ -n "$real" ] && [ -e "$real" ] || fail "snapshot file $f is a dangling link"
+    case "$real" in
+      "$hub"/*) ;;
+      *) fail "snapshot file $f resolves outside $MODEL_CACHE_DIR ($real): the client container would not see it" ;;
+    esac
+  done
   MODEL_MOUNT="$MODEL_CACHE_DIR:$MODEL_CACHE_MOUNT:ro"
 fi
 
