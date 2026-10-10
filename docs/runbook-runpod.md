@@ -389,6 +389,23 @@ pod simulator runs the sweep's three-pod plan in `bench/tests/runpod/test_runpod
 Its goodput rows are identical across cells by construction: at a passing open-loop
 point throughput is the offered load, and every cell gets the same seeded requests.
 
+The search's failure branches got their own smoke before the sweep,
+`runpod-smoke-8b-search-fail.yaml` ($2 cap, $1.54 planned): the sweep's pod a (bf16,
+bf16-kv8, same config hashes) on full-length fixed-1k-1k, starting at 3.375 req/s (2.4x
+bf16's measured saturation) with the sweep's deepest search (descend 3, max_points 5)
+and 45 s windows. Offline first: `bench/tests/runpod/test_runpod_search_fail.py` (every
+knee between its floor and start runs all three branches; the spec at test scale on the
+pod simulator descends, bisects, cancels stragglers and starts every run on an empty
+engine). Result (2026-10-09, `55a6222b`, $1.12, exit 0, one pod in EUR-IS-2, 61 min):
+passed. bf16 went 3.375 (fail), 2.25 (fail), 1.5 (fail on the CI upper bound, TPOT p95
+44-47 ms), 1.0 (pass), 1.225 (bisection, pass); bf16-kv8 went 3.375 (fail), 2.25 (pass),
+2.756 (bisection, fail), 2.49 (fail), 2.367 (pass). At bf16's 3.375 the KV cache filled
+(46-59 preemptions, up to 42 waiting) and each run cancelled 13, 34 and 22 stragglers at
+the 60 s drain timeout, finishing in 126-156 s; the next run's first request had a 0.10 s
+TTFT with nothing waiting (vLLM had dropped the cancelled requests). All 30 runs
+completed; the pod was terminated by the runner, `pods: []`, `networkVolumes: []`,
+`bench reap --dry-run` clean, and the balance fell $1.11 against $1.12 recorded.
+
 The sweep's follow-up on L40 and RTX 6000 Ada (`qwen3-8b-winner-ada-runpod.yaml`, a
 draft) is filled in from the sweep's result before it is planned
 ([benchmark-lab.md](benchmark-lab.md#qwen3-8b-config-sweep-proposed)). Two things in it

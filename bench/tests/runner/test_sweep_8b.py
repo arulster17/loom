@@ -372,6 +372,7 @@ def test_the_smoke_fits_its_cap_to_ttl():
 
 # --- the L40 / RTX 6000 Ada follow-up ---------------------------------------------------
 
+SWEEP_EXPERIMENT = "7a8237d0-9917-47e7-b93e-8cb0230e0059"  # the sweep, 2026-10-09/10
 ADA_CARDS = {
     "winner-l40": ("L40", "l40-x1"),
     "winner-rtx6000ada": ("RTX 6000 Ada", "rtx6000ada-x1"),
@@ -433,8 +434,18 @@ def test_the_follow_up_fits_its_cap_to_ttl():
         assert host.seconds < 0.85 * host.ttl_s
 
 
-def test_the_follow_up_draft_is_refused_until_its_baseline_is_filled_in(ctx):
-    # The draft names a placeholder baseline: planning it refuses before any pod exists.
+def test_the_follow_up_is_gated_against_the_sweeps_stored_bf16_baseline():
+    follow = load_experiment(QWEN_WINNER_ADA_RUNPOD)
+    assert follow.quality is not None and follow.quality.baseline is not None
+    assert str(follow.quality.baseline.experiment) == SWEEP_EXPERIMENT
+    sweep_cells = expand(load_experiment(QWEN_SWEEP_RUNPOD), REGISTRY)
+    bf16 = next(c for c in sweep_cells if c.key == "bf16")
+    assert follow.quality.baseline.config_hash == bf16.config_hash
+
+
+def test_the_follow_up_is_refused_where_the_sweeps_baseline_is_not_stored(ctx):
+    # The baseline's evals live in the results database the sweep ran against; anywhere
+    # else (this empty test database) planning refuses before any pod exists.
     _, plan = plan_experiment(load_experiment(QWEN_WINNER_ADA_RUNPOD), ctx)
     assert not plan.ok
     assert any(r.startswith("quality.baseline:") for r in plan.refusals)

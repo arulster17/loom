@@ -443,8 +443,9 @@ The real runs are on RunPod Secure Cloud on-demand, since the AWS GPU spot quota
 | `runpod-smoke-h100` (ran three times: 4e50b5a5, e929eb0c, 4680fa3e, $6.15) | 1x RunPod 2x H100 SXM, the H100 run's paths at smoke scale (Qwen3-8B BF16 vs FP8, TP=2, NVLink P2P), 51 min of a 65 min TTL | $6.78 | $8.66 | $9 |
 | `llama-3.3-70b-h100-tp2-quality-runpod` (ran 2026-10-09 as 9e5f7866: $3.29 in 24.6 min, FP8 gate passes, results below) | 1x RunPod 2x H100 SXM, 9f0853d7's BF16 and FP8 cells again, evals and gate only (`workloads: []`), tool-calling data version 2; 1.27 h of a 2.5 h TTL (planner; ~45 min at 9f0853d7's timings) | $10.20 | $20.04 | $22 |
 | `qwen3-8b-quality-runpod` | 2x RunPod 1x L40S, evals and gate only, 3 eval passes per engine (finishes 565b8d3f's gate), 105 min each of a 135 min TTL (planned; ~35 min at b1b904dc's measured pass time) | $3.85 | $4.95 | $5.00 |
-| `qwen3-8b-config-sweep-runpod` (**proposed** 2026-10-09, not approved) | 3x RunPod 1x L40S in sequence (host groups), 5 vLLM cells: BF16, BF16 + FP8 KV, FP8, FP8 + FP8 KV, FP8 + FP8 KV + `max_num_batched_tokens` 1024; chat-sharegpt and fixed-1k-1k; every candidate gated vs BF16 in-run, 3 passes; 7.0 / 6.6 / 3.4 h of a 7.5 h TTL. [Section below](#qwen3-8b-config-sweep-proposed) | $18.71 | $24.77 | $25 |
-| `runpod-smoke-8b-sweep` (**proposed**, runs first) | The sweep at smoke scale on the same three pods, 68 / 67 / 39 min of a 75 min TTL | $3.20 | $4.13 | $4.25 |
+| `qwen3-8b-config-sweep-runpod` (ran 2026-10-09/10 as 7a8237d0: $14.44, 13.1 pod-hours, [results below](#qwen3-8b-config-sweep-result-7a8237d0-2026-10-10)) | 3x RunPod 1x L40S in sequence (host groups), 5 vLLM cells: BF16, BF16 + FP8 KV, FP8, FP8 + FP8 KV, FP8 + FP8 KV + `max_num_batched_tokens` 1024; chat-sharegpt and fixed-1k-1k; every candidate gated vs BF16 in-run, 3 passes; 7.0 / 6.6 / 3.4 h of a 7.5 h TTL. [Section below](#qwen3-8b-config-sweep-proposed) | $18.71 | $24.77 | $25 |
+| `runpod-smoke-8b-sweep` (ran 2026-10-09 as 8bc65cfa: $1.02, passed) | The sweep at smoke scale on the same three pods, 68 / 67 / 39 min of a 75 min TTL | $3.20 | $4.13 | $4.25 |
+| `runpod-smoke-8b-search-fail` (ran 2026-10-09 as 55a6222b: $1.12, passed) | The sweep's pod a (bf16, bf16-kv8) on fixed-1k-1k from an overloading 3.375 req/s, so the search descends, bisects and drains an overload; 1.40 h of a 1.67 h TTL | $1.54 | $1.83 | $2 |
 
 The estimates above were planned when eval time was a fixed per-task constant (~30 min a
 phase0 pass on any model). Since 2026-10-09 it scales with the decode-step floor (Budget
@@ -750,11 +751,89 @@ RunPod Secure 1x L40 pod ($0.82/h) and one 1x RTX 6000 Ada pod ($0.99/h; both "L
 stock on 2026-10-09), one after the other: chat-sharegpt only, the workload the price is
 set from, at the sweep's windows and search step, and three phase0-strict passes per card
 gated against the sweep's **stored** BF16 baseline (a new GPU is a new config hash, so it
-ships only on its own gate pass). Before planning it, fill in three things the spec's
-header lists: the winner's config in both variants (the draft holds fp8-kv8), the sweep's
-experiment id and bf16 config hash in `quality.baseline` (placeholders now, so `bench
-plan` refuses it), and chat's `search.lo` at the winner's L40S knee. `bench plan`
-(build_plan, 2026-10-09): 1.98 h + 1.95 h, estimate $3.60, worst case $4.58, cap $5.
-Dropping to three search points brings it to about $3.0 at a coarser knee. Its stored-
-baseline gate has never run on a real pod (the 70B FP8 run on 4x L40S that would have
+ships only on its own gate pass). Filled in from the sweep on 2026-10-10, not run: fp8-kv8
+in both variants (the sweep's cheapest at the SLO, though its own gate was inconclusive,
+so it is the leading candidate rather than a winner), `quality.baseline` = 7a8237d0's
+bf16 (`7a203a3f...`), chat `search.lo` 5.239 (fp8-kv8's L40S goodput). `bench plan`
+against the results DB accepts it: 1.98 h + 1.95 h, estimate $3.60, worst case $4.58,
+cap $5 (four search points). Dropping to three search points brings it to about $3.0 at
+a coarser knee. Its stored-baseline gate has never run on a real pod (the 70B FP8 run on 4x L40S that would have
 used it is on hold); it is covered offline by `bench/tests/runner/test_stored_baseline.py`.
+
+### Qwen3-8B config sweep result (7a8237d0, 2026-10-10)
+
+Ran 2026-10-09 23:28 to 2026-10-10 12:36 UTC: exit 0, $14.44 recorded against $18.78
+planned (three Secure 1x L40S pods at $1.10/h, 5.4, 5.2 and 2.5 h of their 7.5 h TTLs),
+135 of 135 load runs completed, five `quality` events with three phase0-strict passes,
+four gates, no `quality_failed` or `divergence_failed`. Every pod was terminated by the
+runner (`pods: []`, `networkVolumes: []`, `bench reap --dry-run` clean). Report:
+[reports/8b-config-sweep-v1](../reports/8b-config-sweep-v1/leaderboard.md). Before it,
+`runpod-smoke-8b-search-fail` (55a6222b, $1.12) ran the search's failure branches on a
+pod ([runbook-runpod.md](runbook-runpod.md#smoke-test)); the sweep then hit them for real
+(bf16 descended on both workloads; fp8 at 2.25 req/s on 1k/1k cancelled 156-209
+stragglers per run at the drain timeout).
+
+Cost at the SLO (TTFT p95 1 s, TPOT p95 50 ms), on-demand $1.1010/h, every goodput
+trusted; $/1M in and out under the prefill-time split, with 95% CIs in the report:
+
+| Cell | chat goodput (fails at) | chat $/1M in / out / blended | 1k/1k goodput (fails at) | 1k/1k $/1M in / out / blended | Gate vs bf16 |
+|---|---|---|---|---|---|
+| bf16 | 2.213 (2.449) | 0.0557 / 0.2517 / 0.1032 | 1.0 (1.107) | 0.0572 / 0.2293 / 0.1432 | reference |
+| bf16-kv8 | 3.674 (3.865) | 0.0655 / 0.0713 / 0.0670 | 1.66 (1.837) | 0.0593 / 0.1187 / 0.0890 | inconclusive (gsm8k, ifeval) |
+| fp8 | 3.865 (4.066) | 0.0525 / 0.0961 / 0.0636 | 1.5 (1.66) | 0.0542 / 0.1464 / 0.1003 | inconclusive (gsm8k) |
+| fp8-kv8 | 5.239 (5.511) | 0.0544 / 0.0242 / 0.0467 | 2.25 (2.756) | 0.0495 / 0.0827 / 0.0661 | inconclusive (gsm8k) |
+| fp8-kv8-mbt1024 | 4.734 (4.98) | 0.0603 / 0.0278 / 0.0522 | 2.25 (2.756), tied | 0.0637 / 0.0686 / 0.0661 | inconclusive (gsm8k, ifeval) |
+
+Gates (paired deltas in points with 95% CIs; margins gsm8k 1, ifeval 2, json_schema 3,
+tool tasks 6):
+
+| Cell | gsm8k | ifeval | tool_calling | tool_calling_strict | json_schema | KL / top-1 | sanity (trunc / rep / drift) |
+|---|---|---|---|---|---|---|---|
+| bf16-kv8 | -0.58 [-1.29, +0.13] | -0.86 [-2.34, +0.49] | +0.74 [-1.48, +2.96] | +0.25 [-1.98, +2.47] | +0.11 [-1.00, +1.22] | 0.0036 / 97.78% | 1.02 / 1.55 / 0.86% |
+| fp8 | -0.51 [-1.29, +0.33] | -0.12 [-1.73, +1.48] | 0.00 [-2.22, +2.22] | 0.00 [-2.22, +2.22] | -0.11 [-1.67, +1.33] | 0.0064 / 97.00% | 1.04 / 1.35 / 0.82% |
+| fp8-kv8 | -0.28 [-1.14, +0.61] | +0.43 [-1.60, +2.46] | 0.00 [-2.22, +2.22] | 0.00 [-2.22, +2.22] | -0.33 [-2.00, +1.22] | 0.0109 / 95.80% | 1.07 / 1.50 / 0.82% |
+| fp8-kv8-mbt1024 | -0.66 [-1.54, +0.25] | -1.23 [-2.96, +0.49] | 0.00 [-2.22, +2.22] | 0.00 [-2.22, +2.22] | +0.33 [-1.22, +1.89] | 0.0108 / 96.25% | 0.99 / 1.48 / 0.86% |
+
+Divergence passes on every candidate (limits KL 0.05 nats, top-1 95%; the bf16 noise
+floor is self-KL 0.0005, self top-1 99.25%), and so does sanity. BF16's own scores:
+gsm8k 0.904, ifeval 0.821, json_schema 0.910, tool_calling and tool_calling_strict 0.978.
+
+**No candidate ships.** Under the quality standard a candidate ships only on a gate pass
+within every task's margin, and every gate is inconclusive: gsm8k's CI crosses its
+1-point margin on all four (none of them is a measured drop: every CI includes 0), and
+ifeval's crosses 2 points on bf16-kv8 and fp8-kv8-mbt1024. BF16 stays the only verified
+row (chat $0.1032 per 1M blended). The cheapest config, fp8-kv8 (FP8-dynamic weights and
+an FP8 KV cache), serves chat at 2.4x bf16's rate for 45% of its blended cost; its gate
+misses only on gsm8k (-0.28 [-1.14, +0.61] against -1.00), and its top-1 agreement
+(95.80%) sits closest to its limit of the four. What would settle it is a quality-only
+rerun of fp8-kv8 against these configs with more replicated passes (as
+`qwen3-8b-quality-runpod` did for 565b8d3f); that is not approved, nor run. FP8
+weights alone and an FP8 KV cache alone gave about the same gain (chat 3.865 and 3.674
+req/s against bf16's 2.213; 1k/1k 1.5 and 1.66 against 1.0), and together they compound
+(5.239 and 2.25). The max_num_batched_tokens knob cost chat goodput (4.734 against 5.239
+req/s) for no TPOT difference at equal load and a higher TTFT.
+
+Measured knees against the plan's guesses: bf16 chat 2.2 req/s (planned near 3), 1k/1k
+1.0 (1.2); the FP8 + FP8 KV chat knee 5.2 (planned near 9). Chat's prefill-time split
+puts most of the replica's cost on input tokens (the prefill share at fp8-kv8's goodput
+is near 1), so its $/1M output CI reaches $0; the blended figure is the stable one.
+
+**Pricing, information only** (`config/models.yaml` is unchanged; the margin is the
+user's call, [how-to/price-a-model.md](how-to/price-a-model.md)). Chat-sharegpt costs at
+the CI high bound, per 1M tokens; market is the lowest public list price per side
+(OpenRouter $0.117 input, Fireworks $0.20 output; both outside the flag comparison:
+aggregator, unverified):
+
+| Row | Basis | u = 100%, +0% | u = 100%, +20% | u = 50%, +0% | u = 50%, +20% |
+|---|---|---|---|---|---|
+| bf16 (`qwen3-8b`, shippable today) | cost-plus in / out | 0.0638 / 0.3060 | 0.0766 / 0.3672 | 0.1276 / 0.6120 | 0.1531 / 0.7344 |
+| bf16 | market floored at that cost-plus | 0.117 / 0.3060 | 0.117 / 0.3672 | 0.1276 / 0.6120 | 0.1531 / 0.7344 |
+| fp8-kv8 (`qwen3-8b-fp8`, only after a gate pass) | cost-plus in / out | 0.0710 / 0.0584 | 0.0852 / 0.0701 | 0.1420 / 0.1168 | 0.1704 / 0.1401 |
+| fp8-kv8 | market floored at that cost-plus | 0.117 / 0.20 | 0.117 / 0.20 | 0.1420 / 0.20 | 0.1704 / 0.20 |
+
+Market alone is $0.117 / $0.20. BF16 at market loses money on output tokens at any
+utilization (cost CI high $0.306 against $0.20); fp8-kv8 at market clears its CI-high
+cost on both sides down to about 61% utilization (input binds: 0.0710 / 0.117). Because
+chat's split puts nearly all of fp8-kv8's cost on input, its blended cost ($0.0522 CI high, against about $0.20 for both
+listings at this mix) is the steadier comparison.
+

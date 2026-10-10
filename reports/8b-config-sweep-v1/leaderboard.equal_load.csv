@@ -1,0 +1,66 @@
+model,workload,load_mode,load,config,metric,value,value_lo,value_hi,value_ci_method,slo_met,significantly_lower,verdict
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16-kv8,ttft_ms.p50,224.3004,213.425,235.73,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16-kv8,ttft_ms.p95,446.4447,415.0941,480.1632,log_t,False,True,bf16-kv8 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16-kv8,tpot_ms.p50,50.2471,48.2544,52.322,log_t,False,True,bf16-kv8 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16-kv8,tpot_ms.p95,58.8531,52.9095,65.4644,log_t,False,True,bf16-kv8 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16-kv8,e2e_ms.p95,36274.1428,32969.9454,39909.4818,log_t,False,True,bf16-kv8 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16,ttft_ms.p50,1141.6065,31.4897,41387.0976,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16,ttft_ms.p95,19698.2552,9076.1958,42751.5299,log_t,False,False,bf16-kv8 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16,tpot_ms.p50,93.6958,77.405,113.4153,log_t,False,False,bf16-kv8 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16,tpot_ms.p95,112.5489,107.9934,117.2966,log_t,False,False,bf16-kv8 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16,e2e_ms.p95,72294.6081,58608.4533,89176.7324,log_t,False,False,bf16-kv8 lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16-kv8,ttft_ms.p50,183.7351,181.081,186.4281,log_t,True,True,bf16-kv8 lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16-kv8,ttft_ms.p95,268.6819,255.8642,282.1417,log_t,True,True,bf16-kv8 lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16-kv8,tpot_ms.p50,41.1316,38.9754,43.4071,log_t,True,True,bf16-kv8 lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16-kv8,tpot_ms.p95,43.3654,42.7506,43.9891,log_t,True,True,bf16-kv8 lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16-kv8,e2e_ms.p95,44573.2051,43974.1141,45180.458,log_t,True,True,bf16-kv8 lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16,ttft_ms.p50,325.4877,189.9057,557.8676,log_t,False,False,bf16-kv8 lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16,ttft_ms.p95,10738.4689,9382.2403,12290.7441,log_t,False,False,bf16-kv8 lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16,tpot_ms.p50,67.2248,54.0517,83.6082,log_t,False,False,bf16-kv8 lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16,tpot_ms.p95,75.1464,63.6745,88.6852,log_t,False,False,bf16-kv8 lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16,e2e_ms.p95,80541.2193,62233.7593,104234.2305,log_t,False,False,bf16-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8-kv8,ttft_ms.p50,143.9956,133.4262,155.4024,log_t,True,True,fp8-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8-kv8,ttft_ms.p95,295.1081,276.4875,314.9827,log_t,True,True,fp8-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8-kv8,tpot_ms.p50,29.1325,27.9193,30.3983,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8-kv8,tpot_ms.p95,35.4295,31.0155,40.4717,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8-kv8,e2e_ms.p95,21369.2473,18991.636,24044.5178,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8-kv8-mbt1024,ttft_ms.p50,186.2235,173.2208,200.2022,log_t,True,False,fp8-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8-kv8-mbt1024,ttft_ms.p95,367.5464,340.5847,396.6425,log_t,True,False,fp8-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8-kv8-mbt1024,tpot_ms.p50,29.7538,28.5159,31.0454,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8-kv8-mbt1024,tpot_ms.p95,36.526,31.9678,41.7342,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8-kv8-mbt1024,e2e_ms.p95,21950.0267,19675.8736,24487.0281,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8,ttft_ms.p50,198.5692,172.5588,228.5003,log_t,False,False,fp8-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8,ttft_ms.p95,397.411,341.933,461.8901,log_t,False,False,fp8-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8,tpot_ms.p50,47.4543,40.3377,55.8263,log_t,False,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8,tpot_ms.p95,60.5568,46.5554,78.7691,log_t,False,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8,e2e_ms.p95,34864.8851,28586.6673,42521.928,log_t,False,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,1.5,fp8-kv8,ttft_ms.p50,127.0472,124.432,129.7174,log_t,True,True,fp8-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,1.5,fp8-kv8,ttft_ms.p95,188.0813,176.3247,200.6217,log_t,True,True,fp8-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,1.5,fp8-kv8,tpot_ms.p50,26.2546,25.6744,26.848,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,1.5,fp8-kv8,tpot_ms.p95,27.4847,25.5088,29.6136,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,1.5,fp8-kv8,e2e_ms.p95,28261.9242,26234.5869,30445.9287,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,1.5,fp8-kv8-mbt1024,ttft_ms.p50,160.2559,155.6263,165.0233,log_t,True,False,fp8-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,1.5,fp8-kv8-mbt1024,ttft_ms.p95,221.6173,209.7637,234.1407,log_t,True,False,fp8-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,1.5,fp8-kv8-mbt1024,tpot_ms.p50,26.2715,25.6723,26.8846,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,1.5,fp8-kv8-mbt1024,tpot_ms.p95,27.4746,25.6068,29.4786,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,1.5,fp8-kv8-mbt1024,e2e_ms.p95,28287.7592,26325.3639,30396.4391,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,1.5,fp8,ttft_ms.p50,173.1195,157.6711,190.0815,log_t,True,False,fp8-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,1.5,fp8,ttft_ms.p95,258.279,245.2244,272.0285,log_t,True,False,fp8-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,1.5,fp8,tpot_ms.p50,40.5316,35.4468,46.3457,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,1.5,fp8,tpot_ms.p95,44.5515,43.9209,45.1911,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,1.5,fp8,e2e_ms.p95,45770.5805,45116.1288,46434.5257,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,2.25,fp8-kv8,ttft_ms.p50,154.4856,152.529,156.4673,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,2.25,fp8-kv8,ttft_ms.p95,241.3851,222.8374,261.4765,log_t,True,True,fp8-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,2.25,fp8-kv8,tpot_ms.p50,34.4893,31.5052,37.7561,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,2.25,fp8-kv8,tpot_ms.p95,39.7167,38.6125,40.8524,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,2.25,fp8-kv8,e2e_ms.p95,40795.9706,39680.4114,41942.8923,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,2.25,fp8-kv8-mbt1024,ttft_ms.p50,199.337,190.1075,209.0146,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,2.25,fp8-kv8-mbt1024,ttft_ms.p95,300.1306,274.7895,327.8086,log_t,True,False,fp8-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,2.25,fp8-kv8-mbt1024,tpot_ms.p50,34.7117,31.6769,38.0372,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,2.25,fp8-kv8-mbt1024,tpot_ms.p95,40.0217,39.1283,40.9354,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,2.25,fp8-kv8-mbt1024,e2e_ms.p95,41161.1122,40271.9453,42069.911,log_t,True,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,2.25,fp8,ttft_ms.p50,5330.6452,35.2584,805928.7253,log_t,False,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,2.25,fp8,ttft_ms.p95,30144.8372,26547.1867,34230.0381,log_t,False,False,fp8-kv8 lower
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,2.25,fp8,tpot_ms.p50,92.7405,90.5153,95.0205,log_t,False,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,2.25,fp8,tpot_ms.p95,98.6448,86.3394,112.7041,log_t,False,False,no significant difference
+RedHatAI/Qwen3-8B-FP8-dynamic,fixed-1k-1k,open_loop,2.25,fp8,e2e_ms.p95,130232.2103,108776.5935,155919.8358,log_t,False,False,no significant difference
