@@ -21,6 +21,9 @@ if [ "$WARM" = 0 ]; then
   cloud-init status --wait >/dev/null 2>&1 || true
   grep -q '^user_data_done ' "$STAGE_FILE" || fail "user-data did not finish: TTL backstop not armed"
   sed 's/^/loom-stage /' "$STAGE_FILE"
+  # When systemd will power the host off (user-data's TTL backstop), in microseconds
+  # since the epoch: recorded so a run can show the backstop was armed at its TTL.
+  sysinfo ttl_shutdown_usec "$(sed -n 's/^USEC=//p' /run/systemd/shutdown/scheduled 2>/dev/null | head -n 1)"
 fi
 
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true

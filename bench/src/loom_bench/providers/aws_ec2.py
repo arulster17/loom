@@ -27,7 +27,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from fractions import Fraction
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
 
 import boto3  # type: ignore[import-untyped]
@@ -53,6 +53,7 @@ from loom_bench.providers.weights import HostWeights, WeightsPlan, flat
 from loom_bench.records import Market
 from loom_bench.registry import PinnedImage, read_yaml
 from loom_bench.tokenize import hf_cache_folder
+from loom_bench.workloads.profiles import DatasetDownload
 
 PROVIDER_NAME = "aws_ec2"
 DLAMI_PARAMETER = (
@@ -74,6 +75,16 @@ CLIENT_ENV_ROOT = "/var/lib/loom/clientenv"
 CLIENT_UID = 10001
 # Where the client container sees the model's HF cache folder (read-only).
 CLIENT_MODEL_CACHE = "/models"
+# Where the client container sees the host's pinned workload datasets (read-only).
+CLIENT_DATA_MOUNT = "/data"
+# run_job.sh's dataset variables for a job that reads no pinned dataset.
+NO_DATASET: dict[str, str] = {
+    "DATA_URL": "",
+    "DATA_SHA256": "",
+    "DATA_PATH": "",
+    "DATA_DIR": "",
+    "DATA_MOUNT": "",
+}
 # Weight download allowance on top of the engine's ready timeout (Llama 70B is ~141 GB).
 DOWNLOAD_ALLOWANCE_S = 3600
 # Run-time allowance for a job on top of its own time budget (wheel install, drain).
@@ -134,8 +145,13 @@ class AwsSettings(BaseModel):
     owner: SafeId
     name_prefix: SafeId = "loom-bench"
     dlami_ssm_parameter: str = DLAMI_PARAMETER
+    # Pin one AMI (e.g. the one a smoke ran on) instead of the parameter's latest: the
+    # DLAMI parameter moves about weekly, so a smoke and its real run can otherwise differ.
+    ami_id: Annotated[str, StringConstraints(pattern=r"^ami-[0-9a-f]{8,17}$")] | None = None
     root_volume_gb: Annotated[int, Field(ge=50, le=2000)] = 200
     weights_dir: str = "/opt/dlami/nvme/loom-hf"
+    # Root-owned, world-readable copies of pinned workload datasets: <sha256>/<file name>.
+    data_dir: str = "/opt/dlami/nvme/loom-data"
     spot_price_multiplier: Annotated[Decimal, Field(ge=1)] = Decimal("1.25")
     max_ttl_s: Annotated[int, Field(gt=0)] = 8 * 3600
     wheel_path: Path | None = None
@@ -362,7 +378,10 @@ class AwsEc2Provider:
         return sorted(spot, key=lambda c: c["hourly_micros"]) + fallback
 
     def _ami(self) -> tuple[str, str]:
-        ami = self.ssm.get_parameter(Name=self.settings.dlami_ssm_parameter)["Parameter"]["Value"]
+        ami = (
+            self.settings.ami_id
+            or self.ssm.get_parameter(Name=self.settings.dlami_ssm_parameter)["Parameter"]["Value"]
+        )
         image = self.ec2.describe_images(ImageIds=[ami])["Images"][0]
         return ami, image["RootDeviceName"]
 
@@ -610,6 +629,13 @@ class AwsEc2Provider:
         if "gpus" in info:
             info["gpus"] = [g.strip() for g in str(info["gpus"]).split(",") if g.strip()]
             info["gpu_count"] = len(info["gpus"])
+        usec = info.pop("ttl_shutdown_usec", None)
+        if usec is not None and str(usec).isdigit():
+            # The TTL backstop as armed on the host, and how long before the runner's TTL
+            # it fires (user-data schedules it in whole minutes from its own start, so 0-60 s).
+            shutdown_at = datetime.fromtimestamp(int(usec) / 1e6, UTC)
+            info["ttl_shutdown_at"] = shutdown_at.isoformat()
+            info["ttl_shutdown_lead_s"] = round((host.ttl_at - shutdown_at).total_seconds(), 1)
         base = f"http://127.0.0.1:{launch.port}"
         return Endpoint(
             base_url=f"{base}/v1",
@@ -661,6 +687,7 @@ class AwsEc2Provider:
         model_cache: Mapping[str, str],
         extras: str = "",
         sample_gpu: bool = False,
+        data: Mapping[str, str] | None = None,
     ) -> tuple[str, str]:
         """Upload the job JSON, the wheel and its locked requirements; return (key prefix,
         rendered script)."""
@@ -701,8 +728,27 @@ class AwsEc2Provider:
             GPU_CSV_URL=self._presign("put_object", prefix + "gpu.csv") if sample_gpu else "",
             SAMPLE_GPU=int(sample_gpu),
             **model_cache,
+            **(data or NO_DATASET),
         )
         return prefix, script
+
+    def _host_dataset(self, workload: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+        """The job's workload reading its pinned dataset where the client container sees
+        it (`CLIENT_DATA_MOUNT/<sha256>/<file name>`), and the run_job.sh variables that
+        fetch it once per host into `data_dir`, check it and mount it read-only. A
+        workload without a `download` block is returned as is."""
+        download = workload.get("download")
+        if not download:
+            return dict(workload), dict(NO_DATASET)
+        spec = DatasetDownload.model_validate(download)
+        rel = f"{spec.sha256}/{PurePosixPath(spec.filename).name}"
+        return {**workload, "path": f"{CLIENT_DATA_MOUNT}/{rel}"}, {
+            "DATA_URL": spec.url,
+            "DATA_SHA256": spec.sha256,
+            "DATA_PATH": f"{self.settings.data_dir}/{rel}",
+            "DATA_DIR": self.settings.data_dir,
+            "DATA_MOUNT": CLIENT_DATA_MOUNT,
+        }
 
     def _host_tokenizer(
         self, spec: TokenizerSpec | None
@@ -733,13 +779,15 @@ class AwsEc2Provider:
 
     def _stage_job(self, host: Host, job: LoadJob) -> tuple[str, str]:
         tokenizer, model_cache = self._host_tokenizer(job.tokenizer)
+        workload, data = self._host_dataset(job.workload)
         return self._stage(
             host,
             job.run_id,
-            job.model_copy(update={"tokenizer": tokenizer}).model_dump_json(),
+            job.model_copy(update={"tokenizer": tokenizer, "workload": workload}).model_dump_json(),
             command=LOAD_JOB_CMD,
             model_cache=model_cache,
             sample_gpu=job.sample_gpu,
+            data=data,
         )
 
     def _stage_eval(self, host: Host, job: EvalJob) -> tuple[str, str]:

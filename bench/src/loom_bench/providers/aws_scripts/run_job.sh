@@ -1,4 +1,4 @@
-# requires: WORK_DIR ENV_ROOT CLIENT_IMAGE CLIENT_UID JOB_URL WHEEL_URL WHEEL_NAME WHEEL_SHA256 REQS_URL REQS_SHA256 BENCH_CMD RESULT_URL GPU_CSV_URL SAMPLE_GPU MODEL_CACHE_DIR MODEL_CACHE_MOUNT MODEL_REVISION
+# requires: WORK_DIR ENV_ROOT CLIENT_IMAGE CLIENT_UID JOB_URL WHEEL_URL WHEEL_NAME WHEEL_SHA256 REQS_URL REQS_SHA256 BENCH_CMD RESULT_URL GPU_CSV_URL SAMPLE_GPU MODEL_CACHE_DIR MODEL_CACHE_MOUNT MODEL_REVISION DATA_URL DATA_SHA256 DATA_PATH DATA_DIR DATA_MOUNT
 # Run one LoadJob (`bench job run`) or EvalJob (`bench quality job`) on the GPU
 # host: measured latency has no WAN hop, and the engine is only reachable on the
 # host's loopback. Inputs and outputs move through presigned URLs. The client
@@ -8,6 +8,10 @@
 # With MODEL_CACHE_DIR set it also mounts, read-only at MODEL_CACHE_MOUNT, the
 # model's HF cache folder the engine start downloaded: the job loads the tokenizer
 # from its MODEL_REVISION snapshot, so a gated model needs no token here.
+# With DATA_URL set (a workload's pinned public dataset), the first job on the host
+# downloads it to DATA_PATH (under DATA_DIR), checks DATA_SHA256 and leaves it
+# root-owned and world-readable; later jobs reuse it. DATA_DIR is mounted read-only at
+# DATA_MOUNT, where the job's workload path points.
 # Dependencies come only from requirements.txt, exported from uv.lock with every
 # package hash-pinned (pip --require-hashes); the wheel is installed --no-deps and
 # `pip check` confirms the two agree. CLIENT_IMAGE is pinned by digest.
@@ -26,6 +30,23 @@ if [ -n "$MODEL_CACHE_DIR" ]; then
   [ -f "$MODEL_CACHE_DIR/snapshots/$MODEL_REVISION/tokenizer.json" ] \
     || fail "no tokenizer.json in snapshot $MODEL_REVISION under $MODEL_CACHE_DIR: was this model's engine started on this host?"
   MODEL_MOUNT="$MODEL_CACHE_DIR:$MODEL_CACHE_MOUNT:ro"
+fi
+
+DATA_MOUNT_ARG=""
+if [ -n "$DATA_URL" ]; then
+  case "$DATA_PATH" in "$DATA_DIR"/*) ;; *) fail "dataset path $DATA_PATH is not under $DATA_DIR" ;; esac
+  if [ ! -f "$DATA_PATH" ]; then
+    data_dir="$(dirname "$DATA_PATH")"
+    mkdir -p "$data_dir"
+    chmod 755 "$DATA_DIR" "$data_dir"
+    curl -fsS -L --proto =https --proto-redir =https --retry 3 -o "$DATA_PATH.part" "$DATA_URL" \
+      || { rm -f "$DATA_PATH.part"; fail "could not fetch the workload dataset"; }
+    echo "$DATA_SHA256  $DATA_PATH.part" | sha256sum --check --quiet \
+      || { rm -f "$DATA_PATH.part"; fail "workload dataset checksum mismatch"; }
+    chmod 644 "$DATA_PATH.part"
+    mv "$DATA_PATH.part" "$DATA_PATH"
+  fi
+  DATA_MOUNT_ARG="$DATA_DIR:$DATA_MOUNT:ro"
 fi
 
 # One virtualenv per wheel and requirements (so per extra), reused by every job on this host.
@@ -52,7 +73,8 @@ fi
 
 rc=0
 docker run --rm --network host --user "$CLIENT_UID:$CLIENT_UID" --env HOME=/tmp \
-  --volume "$ENV_DIR:/env:ro" --volume "$WORK_DIR:/work" ${MODEL_MOUNT:+--volume "$MODEL_MOUNT"} "$CLIENT_IMAGE" \
+  --volume "$ENV_DIR:/env:ro" --volume "$WORK_DIR:/work" ${MODEL_MOUNT:+--volume "$MODEL_MOUNT"} \
+  ${DATA_MOUNT_ARG:+--volume "$DATA_MOUNT_ARG"} "$CLIENT_IMAGE" \
   /env/bin/bench "${BENCH_CMD[@]}" --in /work/job.json --out /work/result.json \
   >>"$WORK_DIR/client.log" 2>&1 || rc=$?
 
