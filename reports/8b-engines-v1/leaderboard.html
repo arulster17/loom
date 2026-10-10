@@ -1,0 +1,642 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loom leaderboard: cost at SLO</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1b1f24;
+  --muted: #59636e;
+  --border: #d1d9e0;
+  --stripe: #f6f8fa;
+  --accent: #0969da;
+  --good: #1a7f37;
+  --warn: #9a6700;
+  --bad: #cf222e;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #9198a1;
+    --border: #3d444d;
+    --stripe: #151b23;
+    --accent: #4493f8;
+    --good: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 2rem 1rem 3rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+main { max-width: 84rem; margin: 0 auto; }
+h1 { font-size: 1.6rem; margin: 0 0 .5rem; }
+h2 { font-size: 1.2rem; margin: 2.5rem 0 .75rem; }
+h3 { font-size: 1rem; margin: 1.5rem 0 .5rem; }
+p.lede { color: var(--muted); max-width: 60rem; margin: 0 0 .5rem; }
+a { color: var(--accent); }
+code { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { padding: .5rem .65rem; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); }
+th { font-size: 12px; font-weight: 600; color: var(--muted); background: var(--stripe); white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; white-space: nowrap; }
+tr.unranked td { color: var(--muted); }
+.sub, .ci { display: block; color: var(--muted); font-size: 12px; }
+.badge { display: inline-block; padding: 0 .45rem; border-radius: 999px; border: 1px solid currentColor; font-size: 12px; white-space: nowrap; }
+.badge.ranked, .badge.pass, .badge.within { color: var(--good); }
+.badge.untrusted, .badge.inconclusive, .badge.review, .badge.no_cost, .badge.baseline { color: var(--warn); }
+.badge.gate_failed, .badge.fail, .badge.outside { color: var(--bad); }
+ul.warnings, ul.flags { padding-left: 1.2rem; }
+ul.warnings li { color: var(--warn); }
+ul.flags li { color: var(--warn); }
+ul.flags li.price_above_market, ul.flags li.negative_margin, ul.flags li.cost_above_market { color: var(--bad); }
+section.summary ul li { margin: .25rem 0; }
+section.summary .caveat { color: var(--warn); }
+.note { border-left: 3px solid var(--accent); padding: .25rem .75rem; margin: 1rem 0; }
+footer.method { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); font-size: 14px; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1rem; margin: 0; }
+dt { font-weight: 600; }
+dd { margin: 0; overflow-wrap: anywhere; }
+details { border: 1px solid var(--border); border-radius: 6px; padding: .5rem .75rem; margin: .5rem 0; }
+summary { cursor: pointer; font-weight: 600; }
+details dl { margin-top: .5rem; }
+@media (max-width: 40rem) { dl { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+<header>
+<h1>Loom leaderboard: cost at SLO</h1>
+</header>
+<section class="summary">
+<h2>Summary</h2>
+<p class="lede">What one replica costs us to serve at the SLO (TTFT p95 ≤ 1000 ms, TPOT p95 ≤ 50 ms, error rate ≤ 1.00%), at the on-demand list price including its storage, at the highest tested load that met the SLO; 95% confidence intervals in brackets. $/1M input and $/1M output split the replica&#39;s cost by measured prefill time (methodology at the end); $/1M blended is the replica&#39;s cost over all tokens at that workload&#39;s own input:output mix and needs no split. Each workload quotes one config: trusted first, then quality verified (the gate&#39;s reference or a gate pass), then leaderboard rank; a config that failed the quality gate is never quoted. Nothing here relaxes a check: untrusted figures are quoted only with their reason, and the ranking is the leaderboard&#39;s.</p>
+<h3>Qwen/Qwen3-8B</h3>
+<p>Hardware: 1×L40S (runpod l40s-x1, $1.1010/h on-demand incl. 80 GB storage).</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>Workload</th><th>Config</th><th>Standing</th><th>Goodput at SLO</th><th class="num">$/1M input</th><th class="num">$/1M output</th><th class="num">$/1M blended</th><th>Quality</th></tr>
+</thead>
+<tbody>
+<tr class="unranked">
+<td>fixed-1k-1k</td>
+<td>sglang</td>
+<td>rank 1</td>
+<td>1 req/s (fails at 1.091)</td>
+<td class="num">$0.0508<span class="ci">$0.0342 – $0.0756</span></td>
+<td class="num">$0.2458<span class="ci">$0.1926 – $0.3106</span></td>
+<td class="num">$0.1483<span class="ci">$0.1218 – $0.1806</span></td>
+<td>-0.008 (ifeval) · inconclusive</td>
+</tr>
+<tr class="">
+<td>fixed-1k-1k</td>
+<td><strong>vllm</strong><span class="sub">quoted</span></td>
+<td>rank 2</td>
+<td>1 req/s (fails at 1.091)</td>
+<td class="num">$0.0639<span class="ci">$0.0402 – $0.1015</span></td>
+<td class="num">$0.2328<span class="ci">$0.1752 – $0.3016</span></td>
+<td class="num">$0.1483<span class="ci">$0.1218 – $0.1806</span></td>
+<td>baseline</td>
+</tr>
+<tr class="">
+<td>code-completion</td>
+<td><strong>vllm</strong><span class="sub">quoted</span></td>
+<td>untrusted, not ranked</td>
+<td>1.297 req/s (fails at 1.414)</td>
+<td class="num">$0.0378<span class="ci">$0.0171 – $0.0835</span></td>
+<td class="num">$3.6321<span class="ci">$2.1004 – $5.8063</span></td>
+<td class="num">$0.1468<span class="ci">$0.1002 – $0.2151</span></td>
+<td>baseline</td>
+</tr>
+<tr class="unranked">
+<td>code-completion</td>
+<td>sglang</td>
+<td>untrusted, not ranked</td>
+<td>1.091 req/s (fails at 1.189)</td>
+<td class="num">$0.0378<span class="ci">$0.0202 – $0.0710</span></td>
+<td class="num">$4.7465<span class="ci">$3.1472 – $6.8942</span></td>
+<td class="num">$0.1787<span class="ci">$0.1333 – $0.2397</span></td>
+<td>-0.008 (ifeval) · inconclusive</td>
+</tr>
+<tr class="">
+<td>shared-prefix</td>
+<td><strong>sglang</strong><span class="sub">quoted</span></td>
+<td>rank 1</td>
+<td>2 req/s (fails at 2.378)</td>
+<td class="num">$0.0286<span class="ci">$0.0180 – $0.0455</span></td>
+<td class="num">$0.7295<span class="ci">$0.4826 – $1.0104</span></td>
+<td class="num">$0.0695<span class="ci">$0.0580 – $0.0832</span></td>
+<td>-0.008 (ifeval) · inconclusive</td>
+</tr>
+<tr class="unranked">
+<td>shared-prefix</td>
+<td>vllm</td>
+<td>untrusted, not ranked</td>
+<td>2 req/s (fails at 2.378)</td>
+<td class="num">$0.0276<span class="ci">$0.0172 – $0.0444</span></td>
+<td class="num">$0.7447<span class="ci">$0.4954 – $1.0274</span></td>
+<td class="num">$0.0695<span class="ci">$0.0580 – $0.0832</span></td>
+<td>baseline</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h4>fixed-1k-1k <span class="sub">1,024 input / 1,024 output tokens per request</span></h4>
+<ul>
+<li>vllm: $0.0639 [0.0402, 0.1015] per 1M input tokens, $0.2328 [0.1752, 0.3016] per 1M output tokens, $0.1483 [0.1218, 0.1806] per 1M tokens blended at this mix, holding the SLO up to 1 req/s (fails at 1.091). sglang ranks first but its quality is not verified (-0.008 (ifeval) · inconclusive), so the figure quoted is vllm&#39;s (baseline, rank 2).</li>
+<li>vllm and sglang are tied: their goodput brackets overlap, so the load search cannot separate them on cost; the latency at equal load table compares them.</li>
+<li>What limits vllm: at 1.091 req/s, TPOT p95 is 47.7 [43.3, 52.4] ms against the 50 ms target (the SLO is judged on the CI upper bound, which is over it).</li>
+<li>Market: public list prices at this mix, per 1M tokens: Fireworks AI $0.2000 (availability unverified, our cost 0.74×); OpenRouter $0.2860 (aggregator, our cost 0.52×). Our blended cost is $0.1483; no listed price is eligible for the flags (aggregators and unverified listings are left out).</li>
+</ul>
+<h4>code-completion <span class="sub">1,537 input / 48 output tokens per request</span></h4>
+<ul>
+<li>vllm: $0.0378 [0.0171, 0.0835] per 1M input tokens, $3.6321 [2.1004, 5.8063] per 1M output tokens, $0.1468 [0.1002, 0.2151] per 1M tokens blended at this mix, holding the SLO up to 1.297 req/s (fails at 1.414). No config on this board is trusted, so this figure is indicative only.</li>
+<li>What limits vllm: at 1.414 req/s, TPOT p95 is 38.7 [28.6, 52.4] ms against the 50 ms target (the SLO is judged on the CI upper bound, which is over it).</li>
+<li class="caveat">Caveat: vllm is untrusted, so the leaderboard does not rank it: throughput.request_rate at goodput: run-to-run CV 14.4% exceeds 10%; throughput.output_tok_s at goodput: run-to-run CV 14.7% exceeds 10%. Treat its figure as indicative and rerun before relying on it.</li>
+<li class="caveat">Caveat: sglang is untrusted, so the leaderboard does not rank it: throughput.request_rate at goodput: run-to-run CV 12.0% exceeds 10%; throughput.output_tok_s at goodput: run-to-run CV 12.2% exceeds 10%. Treat its figure as indicative and rerun before relying on it.</li>
+<li>Market: public list prices at this mix, per 1M tokens: Fireworks AI $0.2000 (availability unverified, our cost 0.73×); OpenRouter $0.1272 (aggregator, our cost 1.15×). Our blended cost is $0.1468; no listed price is eligible for the flags (aggregators and unverified listings are left out).</li>
+</ul>
+<h4>shared-prefix <span class="sub">2,065 input / 128 output tokens per request</span></h4>
+<ul>
+<li>sglang: $0.0286 [0.0180, 0.0455] per 1M input tokens, $0.7295 [0.4826, 1.0104] per 1M output tokens, $0.0695 [0.0580, 0.0832] per 1M tokens blended at this mix, holding the SLO up to 2 req/s (fails at 2.378). Its quality is not verified against the reference (-0.008 (ifeval) · inconclusive); see Quality below.</li>
+<li>sglang and vllm are tied: their goodput brackets overlap, so the load search cannot separate them on cost; the latency at equal load table compares them.</li>
+<li>What limits sglang: at 2.378 req/s, TPOT p95 is 49.2 [34.4, 70.4] ms against the 50 ms target (the SLO is judged on the CI upper bound, which is over it).</li>
+<li class="caveat">Caveat: vllm is untrusted, so the leaderboard does not rank it: ttft_ms.p95 at goodput: run-to-run CV 11.0% exceeds 10%. Treat its figure as indicative and rerun before relying on it.</li>
+<li>Market: public list prices at this mix, per 1M tokens: Fireworks AI $0.2000 (availability unverified, our cost 0.35×); OpenRouter $0.1367 (aggregator, our cost 0.51×). Our blended cost is $0.0695; no listed price is eligible for the flags (aggregators and unverified listings are left out).</li>
+</ul>
+<h4>Quality</h4>
+<ul>
+<li>sglang (unquantized): quality gate vs vllm is inconclusive: gsm8k, tool_calling, json_schema, divergence, sanity pass; ifeval inconclusive (delta -0.80 pts [-2.03 pts, +0.37 pts], n=541: CI crosses -2.00 pts, more samples needed). An inconclusive gate blocks the config: its quality is not shown to match vllm.</li>
+<li>vllm (unquantized): the reference the quality gate compares against; gsm8k 0.903, ifeval 0.818, json_schema 0.911, tool_calling 0.967.</li>
+</ul>
+</section>
+
+<section>
+<h2>Leaderboards</h2>
+<p class="lede">Each table lists one model on one workload. $/1M input and $/1M output split the replica&#39;s cost by measured prefill time; $/1M blended is its cost over all tokens at that workload&#39;s own input:output mix (methodology below). Rows are ranked by the rank key, the cost under the experiments&#39; declared allocation (all_output charges the whole replica to output tokens), at the on-demand list price, cheapest first; spot, committed-1y and as-run costs of the rank key are shown where available. Every price includes the replica&#39;s block storage. Values are point estimates (geometric means for latency and throughput) with 95% confidence intervals in brackets. Goodput is the highest tested load that met the SLO; raw peak throughput ignores the SLO and is not goodput. Unranked rows (quality gate failed, untrusted, or no cost) are listed last. The smaller line under each value is its 95% confidence interval.</p>
+<p class="lede">Goodput is searched on a grid of loads, so it is known only to a bracket: at least the goodput load, below the load that failed (shown as &#34;fails at&#34;). Configs whose brackets overlap are tied within the search resolution: their goodput, throughput and cost at SLO come from the same grid point and are not a measured equality.</p>
+</section>
+<section>
+<h3>Qwen/Qwen3-8B: fixed-1k-1k (open loop, synthetic content)</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th class="num">#</th><th>Config</th><th class="num">$/1M in at SLO<br>(measured split)</th><th class="num">$/1M out at SLO<br>(measured split)</th><th class="num">$/1M blended<br>at this mix</th><th class="num">Rank key: $/1M out at SLO, on-demand (all_output)</th><th class="num">$/1M out at SLO, as run</th><th class="num">Goodput out tok/s<br>per replica</th><th class="num">per GPU</th><th class="num">Goodput load<br>(search bracket)</th><th class="num">p95 TTFT<br>at goodput</th><th class="num">p95 TPOT<br>at goodput</th><th class="num">Raw peak out tok/s<br>(no SLO)</th><th>Quality Δ / gate</th><th class="num">Cold start</th><th>Status</th><th>Recommendation</th></tr>
+</thead>
+<tbody>
+<tr class="ranked">
+<td class="num">1</td>
+<td><strong>sglang</strong><span class="sub">sglang 0.5.21 · unquantized · TP1 · 1×L40S · l40s-x1 (on_demand)</span></td>
+<td class="num">$0.0508<span class="ci">$0.0342 – $0.0756</span></td>
+<td class="num">$0.2458<span class="ci">$0.1926 – $0.3106</span></td>
+<td class="num">$0.1483<span class="ci">$0.1218 – $0.1806</span></td>
+<td class="num">$0.2966<span class="ci">$0.2436 – $0.3613</span></td>
+<td class="num">$0.2966<span class="ci">$0.2436 – $0.3613</span></td>
+<td class="num">1,030.9<span class="ci">846.5 – 1,255.5</span></td>
+<td class="num">1,030.9<span class="ci">846.5 – 1,255.5</span></td>
+<td class="num">1 req/s (fails at 1.091)<span class="sub">tied with vllm</span></td>
+<td class="num">240 ms<span class="ci">207 – 277</span></td>
+<td class="num">46.6 ms<span class="ci">43.6 – 49.9</span></td>
+<td class="num">1,430.1<span class="ci">1,157.9 – 1,766.3</span><span class="sub">at 1.414 req/s</span></td>
+<td><span class="badge inconclusive">inconclusive</span><span class="sub">-0.008 (ifeval) · inconclusive</span></td>
+<td class="num">337 s (median of 3)</td>
+<td><span class="badge ranked">ranked</span></td>
+<td>Tied for cheapest at SLO with vllm: goodput brackets overlap (1 req/s (fails at 1.091)), so the search cannot separate them; compare latency at equal load; quality gate inconclusive vs vllm (worst: ifeval -0.008)</td>
+</tr>
+<tr class="ranked">
+<td class="num">2</td>
+<td><strong>vllm</strong><span class="sub">vllm 0.30.0 · unquantized · TP1 · 1×L40S · l40s-x1 (on_demand)</span></td>
+<td class="num">$0.0639<span class="ci">$0.0402 – $0.1015</span></td>
+<td class="num">$0.2328<span class="ci">$0.1752 – $0.3016</span></td>
+<td class="num">$0.1483<span class="ci">$0.1218 – $0.1806</span></td>
+<td class="num">$0.2966<span class="ci">$0.2436 – $0.3613</span></td>
+<td class="num">$0.2966<span class="ci">$0.2436 – $0.3613</span></td>
+<td class="num">1,030.9<span class="ci">846.5 – 1,255.5</span></td>
+<td class="num">1,030.9<span class="ci">846.5 – 1,255.5</span></td>
+<td class="num">1 req/s (fails at 1.091)<span class="sub">tied with sglang</span></td>
+<td class="num">298 ms<span class="ci">238 – 374</span></td>
+<td class="num">44.0 ms<span class="ci">41.0 – 47.1</span></td>
+<td class="num">1,430.1<span class="ci">1,157.9 – 1,766.3</span><span class="sub">at 1.414 req/s</span></td>
+<td><span class="badge baseline">baseline</span><span class="sub">baseline</span></td>
+<td class="num">299 s (median of 3)</td>
+<td><span class="badge ranked">ranked</span></td>
+<td>Tied with sglang at SLO: goodput brackets overlap (1 req/s (fails at 1.091)), so the search cannot separate them; compare latency at equal load; quality baseline</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h4>Latency at equal load</h4>
+<p class="lede">Latency at equal load: each config at the loads every config on this board ran (the loads at or below the lowest goodput, plus the highest common load). Geometric means across repetitions with 95% CIs; a config is lower on a metric only when its CI lies entirely below every other config&#39;s, otherwise there is no significant difference.</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th class="num">Load</th><th>Metric</th><th class="num">sglang</th><th class="num">vllm</th><th>Verdict</th></tr>
+</thead>
+<tbody>
+<tr><td class="num">0.5 req/s</td><td>SLO at this load</td><td class="num">met</td><td class="num">met</td><td></td></tr>
+<tr><td class="num">0.5 req/s</td><td>TTFT p50</td><td class="num"><strong>140 ms<span class="ci">131 – 149</span></strong></td><td class="num">161 ms<span class="ci">156 – 165</span></td><td>sglang lower</td></tr>
+<tr><td class="num">0.5 req/s</td><td>TTFT p95</td><td class="num">198 ms<span class="ci">113 – 347</span></td><td class="num">222 ms<span class="ci">143 – 344</span></td><td>no significant difference</td></tr>
+<tr><td class="num">0.5 req/s</td><td>TPOT p50</td><td class="num">29.1 ms<span class="ci">26.1 – 32.4</span></td><td class="num">28.6 ms<span class="ci">25.8 – 31.8</span></td><td>no significant difference</td></tr>
+<tr><td class="num">0.5 req/s</td><td>TPOT p95</td><td class="num">31.0 ms<span class="ci">28.3 – 34.0</span></td><td class="num">30.5 ms<span class="ci">27.9 – 33.2</span></td><td>no significant difference</td></tr>
+<tr><td class="num">0.5 req/s</td><td>E2E p95</td><td class="num">31,876 ms<span class="ci">29,096 – 34,922</span></td><td class="num">31,354 ms<span class="ci">28,671 – 34,288</span></td><td>no significant difference</td></tr>
+<tr><td class="num">1 req/s</td><td>SLO at this load</td><td class="num">met</td><td class="num">met</td><td></td></tr>
+<tr><td class="num">1 req/s</td><td>TTFT p50</td><td class="num"><strong>163 ms<span class="ci">153 – 174</span></strong></td><td class="num">200 ms<span class="ci">190 – 211</span></td><td>sglang lower</td></tr>
+<tr><td class="num">1 req/s</td><td>TTFT p95</td><td class="num">240 ms<span class="ci">207 – 277</span></td><td class="num">298 ms<span class="ci">238 – 374</span></td><td>no significant difference</td></tr>
+<tr><td class="num">1 req/s</td><td>TPOT p50</td><td class="num">44.6 ms<span class="ci">38.9 – 51.1</span></td><td class="num">42.1 ms<span class="ci">36.8 – 48.2</span></td><td>no significant difference</td></tr>
+<tr><td class="num">1 req/s</td><td>TPOT p95</td><td class="num">46.6 ms<span class="ci">43.6 – 49.9</span></td><td class="num">44.0 ms<span class="ci">41.0 – 47.1</span></td><td>no significant difference</td></tr>
+<tr><td class="num">1 req/s</td><td>E2E p95</td><td class="num">47,879 ms<span class="ci">44,729 – 51,250</span></td><td class="num">45,165 ms<span class="ci">42,136 – 48,412</span></td><td>no significant difference</td></tr>
+<tr><td class="num">2 req/s</td><td>SLO at this load</td><td class="num">failed</td><td class="num">failed</td><td></td></tr>
+<tr><td class="num">2 req/s</td><td>TTFT p50</td><td class="num">15,639 ms<span class="ci">9,439 – 25,909</span></td><td class="num">9,141 ms<span class="ci">4,546 – 18,378</span></td><td>no significant difference</td></tr>
+<tr><td class="num">2 req/s</td><td>TTFT p95</td><td class="num">38,828 ms<span class="ci">27,751 – 54,326</span></td><td class="num">29,226 ms<span class="ci">20,576 – 41,512</span></td><td>no significant difference</td></tr>
+<tr><td class="num">2 req/s</td><td>TPOT p50</td><td class="num"><strong>67.6 ms<span class="ci">66.5 – 68.7</span></strong></td><td class="num">80.3 ms<span class="ci">79.8 – 80.8</span></td><td>sglang lower</td></tr>
+<tr><td class="num">2 req/s</td><td>TPOT p95</td><td class="num">76.6 ms<span class="ci">47.9 – 122.5</span></td><td class="num">83.6 ms<span class="ci">82.8 – 84.4</span></td><td>no significant difference</td></tr>
+<tr><td class="num">2 req/s</td><td>E2E p95</td><td class="num">111,503 ms<span class="ci">96,935 – 128,261</span></td><td class="num">111,228 ms<span class="ci">100,384 – 123,244</span></td><td>no significant difference</td></tr>
+</tbody>
+</table>
+</div>
+</section>
+<section>
+<h3>Qwen/Qwen3-8B: code-completion (open loop, synthetic content)</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th class="num">#</th><th>Config</th><th class="num">$/1M in at SLO<br>(measured split)</th><th class="num">$/1M out at SLO<br>(measured split)</th><th class="num">$/1M blended<br>at this mix</th><th class="num">Rank key: $/1M out at SLO, on-demand (all_output)</th><th class="num">$/1M out at SLO, as run</th><th class="num">Goodput out tok/s<br>per replica</th><th class="num">per GPU</th><th class="num">Goodput load<br>(search bracket)</th><th class="num">p95 TTFT<br>at goodput</th><th class="num">p95 TPOT<br>at goodput</th><th class="num">Raw peak out tok/s<br>(no SLO)</th><th>Quality Δ / gate</th><th class="num">Cold start</th><th>Status</th><th>Recommendation</th></tr>
+</thead>
+<tbody>
+<tr class="unranked">
+<td class="num">–</td>
+<td><strong>vllm</strong><span class="sub">vllm 0.30.0 · unquantized · TP1 · 1×L40S · l40s-x1 (on_demand)</span></td>
+<td class="num">$0.0378<span class="ci">$0.0171 – $0.0835</span></td>
+<td class="num">$3.6321<span class="ci">$2.1004 – $5.8063</span></td>
+<td class="num">$0.1468<span class="ci">$0.1002 – $0.2151</span></td>
+<td class="num">$4.8415<span class="ci">$3.3676 – $6.9604</span></td>
+<td class="num">$4.8415<span class="ci">$3.3676 – $6.9604</span></td>
+<td class="num">63.2<span class="ci">43.9 – 90.8</span></td>
+<td class="num">63.2<span class="ci">43.9 – 90.8</span></td>
+<td class="num">1.297 req/s (fails at 1.414)</td>
+<td class="num">295 ms<span class="ci">245 – 356</span></td>
+<td class="num">38.6 ms<span class="ci">31.6 – 47.2</span></td>
+<td class="num">93.8<span class="ci">81.8 – 107.5</span><span class="sub">at 2 req/s</span></td>
+<td><span class="badge baseline">baseline</span><span class="sub">baseline</span></td>
+<td class="num">299 s (median of 3)</td>
+<td><span class="badge untrusted">untrusted</span></td>
+<td>Not ranked: untrusted (high run-to-run variance); rerun before relying on it</td>
+</tr>
+<tr class="unranked">
+<td class="num">–</td>
+<td><strong>sglang</strong><span class="sub">sglang 0.5.21 · unquantized · TP1 · 1×L40S · l40s-x1 (on_demand)</span></td>
+<td class="num">$0.0378<span class="ci">$0.0202 – $0.0710</span></td>
+<td class="num">$4.7465<span class="ci">$3.1472 – $6.8942</span></td>
+<td class="num">$0.1787<span class="ci">$0.1333 – $0.2397</span></td>
+<td class="num">$5.9735<span class="ci">$4.4154 – $8.0813</span></td>
+<td class="num">$5.9735<span class="ci">$4.4154 – $8.0813</span></td>
+<td class="num">51.2<span class="ci">37.8 – 69.3</span></td>
+<td class="num">51.2<span class="ci">37.8 – 69.3</span></td>
+<td class="num">1.091 req/s (fails at 1.189)</td>
+<td class="num">283 ms<span class="ci">262 – 305</span></td>
+<td class="num">36.5 ms<span class="ci">33.6 – 39.7</span></td>
+<td class="num">93.8<span class="ci">81.8 – 107.5</span><span class="sub">at 2 req/s</span></td>
+<td><span class="badge inconclusive">inconclusive</span><span class="sub">-0.008 (ifeval) · inconclusive</span></td>
+<td class="num">337 s (median of 3)</td>
+<td><span class="badge untrusted">untrusted</span></td>
+<td>Not ranked: untrusted (high run-to-run variance); rerun before relying on it</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h4>Latency at equal load</h4>
+<p class="lede">Latency at equal load: each config at the loads every config on this board ran (the loads at or below the lowest goodput, plus the highest common load). Geometric means across repetitions with 95% CIs; a config is lower on a metric only when its CI lies entirely below every other config&#39;s, otherwise there is no significant difference.</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th class="num">Load</th><th>Metric</th><th class="num">vllm</th><th class="num">sglang</th><th>Verdict</th></tr>
+</thead>
+<tbody>
+<tr><td class="num">1 req/s</td><td>SLO at this load</td><td class="num">met</td><td class="num">met</td><td></td></tr>
+<tr><td class="num">1 req/s</td><td>TTFT p50</td><td class="num">179 ms<span class="ci">156 – 205</span></td><td class="num">185 ms<span class="ci">162 – 212</span></td><td>no significant difference</td></tr>
+<tr><td class="num">1 req/s</td><td>TTFT p95</td><td class="num">252 ms<span class="ci">173 – 368</span></td><td class="num">266 ms<span class="ci">183 – 387</span></td><td>no significant difference</td></tr>
+<tr><td class="num">1 req/s</td><td>TPOT p50</td><td class="num">25.6 ms<span class="ci">23.9 – 27.4</span></td><td class="num">26.3 ms<span class="ci">24.1 – 28.8</span></td><td>no significant difference</td></tr>
+<tr><td class="num">1 req/s</td><td>TPOT p95</td><td class="num">33.3 ms<span class="ci">30.1 – 36.8</span></td><td class="num">36.3 ms<span class="ci">31.7 – 41.6</span></td><td>no significant difference</td></tr>
+<tr><td class="num">1 req/s</td><td>E2E p95</td><td class="num">1,899 ms<span class="ci">1,512 – 2,385</span></td><td class="num">2,005 ms<span class="ci">1,559 – 2,580</span></td><td>no significant difference</td></tr>
+<tr><td class="num">2 req/s</td><td>SLO at this load</td><td class="num">failed</td><td class="num">failed</td><td></td></tr>
+<tr><td class="num">2 req/s</td><td>TTFT p50</td><td class="num">195 ms<span class="ci">174 – 219</span></td><td class="num">203 ms<span class="ci">180 – 229</span></td><td>no significant difference</td></tr>
+<tr><td class="num">2 req/s</td><td>TTFT p95</td><td class="num">385 ms<span class="ci">258 – 574</span></td><td class="num">428 ms<span class="ci">243 – 754</span></td><td>no significant difference</td></tr>
+<tr><td class="num">2 req/s</td><td>TPOT p50</td><td class="num">31.0 ms<span class="ci">28.2 – 34.1</span></td><td class="num">33.6 ms<span class="ci">29.4 – 38.5</span></td><td>no significant difference</td></tr>
+<tr><td class="num">2 req/s</td><td>TPOT p95</td><td class="num">45.4 ms<span class="ci">33.9 – 61.0</span></td><td class="num">52.9 ms<span class="ci">39.3 – 71.2</span></td><td>no significant difference</td></tr>
+<tr><td class="num">2 req/s</td><td>E2E p95</td><td class="num">2,519 ms<span class="ci">2,048 – 3,100</span></td><td class="num">2,821 ms<span class="ci">2,329 – 3,416</span></td><td>no significant difference</td></tr>
+</tbody>
+</table>
+</div>
+<h4>Warnings</h4>
+<ul class="warnings">
+<li><strong>vllm</strong>: throughput.request_rate at goodput: run-to-run CV 14.4% exceeds 10%</li>
+<li><strong>vllm</strong>: throughput.output_tok_s at goodput: run-to-run CV 14.7% exceeds 10%</li>
+<li><strong>sglang</strong>: throughput.request_rate at goodput: run-to-run CV 12.0% exceeds 10%</li>
+<li><strong>sglang</strong>: throughput.output_tok_s at goodput: run-to-run CV 12.2% exceeds 10%</li>
+</ul>
+</section>
+<section>
+<h3>Qwen/Qwen3-8B: shared-prefix (open loop, synthetic content)</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th class="num">#</th><th>Config</th><th class="num">$/1M in at SLO<br>(measured split)</th><th class="num">$/1M out at SLO<br>(measured split)</th><th class="num">$/1M blended<br>at this mix</th><th class="num">Rank key: $/1M out at SLO, on-demand (all_output)</th><th class="num">$/1M out at SLO, as run</th><th class="num">Goodput out tok/s<br>per replica</th><th class="num">per GPU</th><th class="num">Goodput load<br>(search bracket)</th><th class="num">p95 TTFT<br>at goodput</th><th class="num">p95 TPOT<br>at goodput</th><th class="num">Raw peak out tok/s<br>(no SLO)</th><th>Quality Δ / gate</th><th class="num">Cold start</th><th>Status</th><th>Recommendation</th></tr>
+</thead>
+<tbody>
+<tr class="ranked">
+<td class="num">1</td>
+<td><strong>sglang</strong><span class="sub">sglang 0.5.21 · unquantized · TP1 · 1×L40S · l40s-x1 (on_demand)</span></td>
+<td class="num">$0.0286<span class="ci">$0.0180 – $0.0455</span></td>
+<td class="num">$0.7295<span class="ci">$0.4826 – $1.0104</span></td>
+<td class="num">$0.0695<span class="ci">$0.0580 – $0.0832</span></td>
+<td class="num">$1.1908<span class="ci">$0.9942 – $1.4263</span></td>
+<td class="num">$1.1908<span class="ci">$0.9942 – $1.4263</span></td>
+<td class="num">256.8<span class="ci">214.4 – 307.6</span></td>
+<td class="num">256.8<span class="ci">214.4 – 307.6</span></td>
+<td class="num">2 req/s (fails at 2.378)<span class="sub">tied with vllm</span></td>
+<td class="num">310 ms<span class="ci">252 – 380</span></td>
+<td class="num">41.9 ms<span class="ci">38.6 – 45.5</span></td>
+<td class="num">490.4<span class="ci">445.9 – 539.4</span><span class="sub">at 4 req/s</span></td>
+<td><span class="badge inconclusive">inconclusive</span><span class="sub">-0.008 (ifeval) · inconclusive</span></td>
+<td class="num">337 s (median of 3)</td>
+<td><span class="badge ranked">ranked</span></td>
+<td>Only ranked config at SLO; quality gate inconclusive vs vllm (worst: ifeval -0.008)</td>
+</tr>
+<tr class="unranked">
+<td class="num">–</td>
+<td><strong>vllm</strong><span class="sub">vllm 0.30.0 · unquantized · TP1 · 1×L40S · l40s-x1 (on_demand)</span></td>
+<td class="num">$0.0276<span class="ci">$0.0172 – $0.0444</span></td>
+<td class="num">$0.7447<span class="ci">$0.4954 – $1.0274</span></td>
+<td class="num">$0.0695<span class="ci">$0.0580 – $0.0832</span></td>
+<td class="num">$1.1908<span class="ci">$0.9942 – $1.4263</span></td>
+<td class="num">$1.1908<span class="ci">$0.9942 – $1.4263</span></td>
+<td class="num">256.8<span class="ci">214.4 – 307.6</span></td>
+<td class="num">256.8<span class="ci">214.4 – 307.6</span></td>
+<td class="num">2 req/s (fails at 2.378)<span class="sub">tied with sglang</span></td>
+<td class="num">297 ms<span class="ci">227 – 390</span></td>
+<td class="num">36.6 ms<span class="ci">34.5 – 38.8</span></td>
+<td class="num">490.4<span class="ci">445.9 – 539.4</span><span class="sub">at 4 req/s</span></td>
+<td><span class="badge baseline">baseline</span><span class="sub">baseline</span></td>
+<td class="num">299 s (median of 3)</td>
+<td><span class="badge untrusted">untrusted</span></td>
+<td>Not ranked: untrusted (high run-to-run variance); rerun before relying on it</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h4>Latency at equal load</h4>
+<p class="lede">Latency at equal load: each config at the loads every config on this board ran (the loads at or below the lowest goodput, plus the highest common load). Geometric means across repetitions with 95% CIs; a config is lower on a metric only when its CI lies entirely below every other config&#39;s, otherwise there is no significant difference.</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th class="num">Load</th><th>Metric</th><th class="num">sglang</th><th class="num">vllm</th><th>Verdict</th></tr>
+</thead>
+<tbody>
+<tr><td class="num">1 req/s</td><td>SLO at this load</td><td class="num">met</td><td class="num">met</td><td></td></tr>
+<tr><td class="num">1 req/s</td><td>TTFT p50</td><td class="num">165 ms<span class="ci">160 – 170</span></td><td class="num">157 ms<span class="ci">153 – 161</span></td><td>no significant difference</td></tr>
+<tr><td class="num">1 req/s</td><td>TTFT p95</td><td class="num">224 ms<span class="ci">160 – 314</span></td><td class="num">206 ms<span class="ci">144 – 297</span></td><td>no significant difference</td></tr>
+<tr><td class="num">1 req/s</td><td>TPOT p50</td><td class="num">27.3 ms<span class="ci">25.9 – 28.7</span></td><td class="num">26.3 ms<span class="ci">25.4 – 27.3</span></td><td>no significant difference</td></tr>
+<tr><td class="num">1 req/s</td><td>TPOT p95</td><td class="num">30.8 ms<span class="ci">28.2 – 33.5</span></td><td class="num">28.9 ms<span class="ci">27.3 – 30.7</span></td><td>no significant difference</td></tr>
+<tr><td class="num">1 req/s</td><td>E2E p95</td><td class="num">4,073 ms<span class="ci">3,752 – 4,421</span></td><td class="num">3,829 ms<span class="ci">3,610 – 4,062</span></td><td>no significant difference</td></tr>
+<tr><td class="num">2 req/s</td><td>SLO at this load</td><td class="num">met</td><td class="num">met</td><td></td></tr>
+<tr><td class="num">2 req/s</td><td>TTFT p50</td><td class="num">172 ms<span class="ci">167 – 178</span></td><td class="num">167 ms<span class="ci">158 – 176</span></td><td>no significant difference</td></tr>
+<tr><td class="num">2 req/s</td><td>TTFT p95</td><td class="num">310 ms<span class="ci">252 – 380</span></td><td class="num">297 ms<span class="ci">227 – 390</span></td><td>no significant difference</td></tr>
+<tr><td class="num">2 req/s</td><td>TPOT p50</td><td class="num">33.7 ms<span class="ci">31.2 – 36.5</span></td><td class="num">31.2 ms<span class="ci">29.3 – 33.3</span></td><td>no significant difference</td></tr>
+<tr><td class="num">2 req/s</td><td>TPOT p95</td><td class="num">41.9 ms<span class="ci">38.6 – 45.5</span></td><td class="num">36.6 ms<span class="ci">34.5 – 38.8</span></td><td>no significant difference</td></tr>
+<tr><td class="num">2 req/s</td><td>E2E p95</td><td class="num">5,537 ms<span class="ci">5,199 – 5,896</span></td><td class="num"><strong>4,839 ms<span class="ci">4,565 – 5,129</span></strong></td><td>vllm lower</td></tr>
+<tr><td class="num">4 req/s</td><td>SLO at this load</td><td class="num">failed</td><td class="num">failed</td><td></td></tr>
+<tr><td class="num">4 req/s</td><td>TTFT p50</td><td class="num">224 ms<span class="ci">187 – 268</span></td><td class="num">222 ms<span class="ci">179 – 274</span></td><td>no significant difference</td></tr>
+<tr><td class="num">4 req/s</td><td>TTFT p95</td><td class="num">450 ms<span class="ci">384 – 528</span></td><td class="num">456 ms<span class="ci">377 – 551</span></td><td>no significant difference</td></tr>
+<tr><td class="num">4 req/s</td><td>TPOT p50</td><td class="num">58.3 ms<span class="ci">46.1 – 73.6</span></td><td class="num">46.4 ms<span class="ci">40.4 – 53.3</span></td><td>no significant difference</td></tr>
+<tr><td class="num">4 req/s</td><td>TPOT p95</td><td class="num">75.7 ms<span class="ci">67.3 – 85.1</span></td><td class="num"><strong>58.4 ms<span class="ci">53.9 – 63.4</span></strong></td><td>vllm lower</td></tr>
+<tr><td class="num">4 req/s</td><td>E2E p95</td><td class="num">9,921 ms<span class="ci">8,649 – 11,380</span></td><td class="num">7,769 ms<span class="ci">6,915 – 8,728</span></td><td>no significant difference</td></tr>
+</tbody>
+</table>
+</div>
+<h4>Warnings</h4>
+<ul class="warnings">
+<li><strong>vllm</strong>: ttft_ms.p95 at goodput: run-to-run CV 11.0% exceeds 10%</li>
+</ul>
+</section>
+<section class="competitiveness">
+<h2>Competitiveness: our cost at SLO vs public list prices</h2><p class="note"><strong>Public list prices only: competitor numbers are the per-token prices each provider publishes on its pricing page, with the source and the date it was checked. No competitor endpoint was called or benchmarked, and list prices say nothing about a provider&#39;s latency, quality or quantization unless the page discloses it.</strong></p>
+<p class="lede">Competitor prices last checked 2026-10-04. Flags leave out aggregators and entries whose availability is unverified; they are listed for reference. Our cost is the headline config&#39;s cost at SLO (see the summary) at the on-demand list price, storage included: $/1M input and $/1M output split the replica&#39;s cost by measured prefill time, and $/1M blended is its cost over all tokens at the workload&#39;s own input:output mix. Each public price is also shown at every workload&#39;s mix, so blended compares like with like. With no price set, the break-even price is the lowest price that covers our cost: at the point estimate, and at the cost CI high bound.</p>
+<h3>Qwen3 8B <code>qwen3-8b</code>, ours unquantized</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>Workload</th><th>Our config at SLO (basis)</th><th class="num">Tokens per request<br>in / out</th><th class="num">Our cost<br>$/1M in</th><th class="num">Our cost<br>$/1M out</th><th class="num">Our cost<br>$/1M blended</th><th class="num">Our price<br>$/1M in</th><th class="num">Our price<br>$/1M out</th><th class="num">Break-even<br>$/1M in</th><th class="num">Break-even<br>$/1M out</th><th class="num">Margin in</th><th class="num">Margin out</th></tr>
+</thead>
+<tbody>
+<tr class="">
+<td>fixed-1k-1k (open loop)</td>
+<td>vllm (leaderboard rank 2; tied with sglang)</td>
+<td class="num">1,024 / 1,024</td>
+<td class="num">$0.0639<span class="ci">$0.0402 – $0.1015</span></td>
+<td class="num">$0.2328<span class="ci">$0.1752 – $0.3016</span></td>
+<td class="num">$0.1483<span class="ci">$0.1218 – $0.1806</span></td>
+<td class="num">no price set</td>
+<td class="num">no price set</td>
+<td class="num">$0.0639 (CI high $0.1015)</td>
+<td class="num">$0.2328 (CI high $0.3016)</td>
+<td class="num">n/a</td>
+<td class="num">n/a</td>
+</tr>
+<tr class="">
+<td>code-completion (open loop)</td>
+<td>vllm (untrusted, not ranked: high run-to-run variance)</td>
+<td class="num">1,537 / 48</td>
+<td class="num">$0.0378<span class="ci">$0.0171 – $0.0835</span></td>
+<td class="num">$3.6321<span class="ci">$2.1004 – $5.8063</span></td>
+<td class="num">$0.1468<span class="ci">$0.1002 – $0.2151</span></td>
+<td class="num">no price set</td>
+<td class="num">no price set</td>
+<td class="num">$0.0378 (CI high $0.0835)</td>
+<td class="num">$3.6321 (CI high $5.8063)</td>
+<td class="num">n/a</td>
+<td class="num">n/a</td>
+</tr>
+<tr class="">
+<td>shared-prefix (open loop)</td>
+<td>sglang (leaderboard rank 1; tied with vllm)</td>
+<td class="num">2,065 / 128</td>
+<td class="num">$0.0286<span class="ci">$0.0180 – $0.0455</span></td>
+<td class="num">$0.7295<span class="ci">$0.4826 – $1.0104</span></td>
+<td class="num">$0.0695<span class="ci">$0.0580 – $0.0832</span></td>
+<td class="num">no price set</td>
+<td class="num">no price set</td>
+<td class="num">$0.0286 (CI high $0.0455)</td>
+<td class="num">$0.7295 (CI high $1.0104)</td>
+<td class="num">n/a</td>
+<td class="num">n/a</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h4>Public list prices (per 1M tokens)</h4>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>Provider</th><th>Provider model</th><th class="num">$/1M in</th><th class="num">$/1M out</th><th>Precision</th><th class="num">At fixed-1k-1k mix (1,024 / 1,024)</th><th class="num">At code-completion mix (1,537 / 48)</th><th class="num">At shared-prefix mix (2,065 / 128)</th><th>Availability</th><th>In flag comparison</th><th>Source</th><th>Last checked</th></tr>
+</thead>
+<tbody>
+<tr class="unranked">
+<td>Fireworks AI</td>
+<td></td>
+<td class="num">$0.2000</td>
+<td class="num">$0.2000</td>
+<td>not disclosed</td>
+<td class="num">$0.2000 (our cost 0.74×)</td>
+<td class="num">$0.2000 (our cost 0.73×)</td>
+<td class="num">$0.2000 (our cost 0.35×)</td>
+<td>unverified</td>
+<td>no</td>
+<td><a href="https://docs.fireworks.ai/serverless/pricing">https://docs.fireworks.ai/serverless/pricing</a><span class="sub">Size-bucket price for models of 4B-16B parameters.</span></td>
+<td>2026-10-04</td>
+</tr>
+<tr class="unranked">
+<td>OpenRouter<span class="sub">aggregator</span></td>
+<td>qwen/qwen3-8b</td>
+<td class="num">$0.1170</td>
+<td class="num">$0.4550</td>
+<td>not disclosed</td>
+<td class="num">$0.2860 (our cost 0.52×)</td>
+<td class="num">$0.1272 (our cost 1.15×)</td>
+<td class="num">$0.1367 (our cost 0.51×)</td>
+<td>listed</td>
+<td>no</td>
+<td><a href="https://openrouter.ai/qwen/qwen3-8b">https://openrouter.ai/qwen/qwen3-8b</a></td>
+<td>2026-10-04</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h4>Flags</h4>
+<ul class="flags">
+<li class="no_price_set">[fixed-1k-1k (open loop); code-completion (open loop); shared-prefix (open loop)] <code>no_price_set</code>: qwen3-8b: no price set</li>
+<li class="no_public_comparison">[fixed-1k-1k (open loop); code-completion (open loop); shared-prefix (open loop)] <code>no_public_comparison</code>: qwen3-8b: no eligible public list price</li>
+</ul>
+<h3>Providers with no public per-token price</h3>
+<ul>
+<li>Groq: Enterprise plans only; contact sales. (checked 2026-10-04)</li>
+<li>Cerebras: No public per-token price. (checked 2026-10-04)</li>
+<li>Lambda: Inference offering winding down. (checked 2026-10-04)</li>
+<li>Hyperbolic: Inference offering retired. (checked 2026-10-04)</li>
+<li>Nebius: Neither model is in its catalog. (checked 2026-10-04)</li>
+</ul>
+</section>
+
+<footer class="method">
+<h2>Methodology and provenance</h2>
+<dl>
+<dt>SLO</dt><dd>TTFT p95 ≤ 1000 ms, TPOT p95 ≤ 50 ms, error rate ≤ 1.00%</dd>
+<dt>Load generation</dt><dd>open loop (requests arrive on a fixed schedule at a set rate, req/s)</dd>
+<dt>Content</dt><dd>synthetic</dd>
+<dt>Dataset</dt><dd>unnamed dataset (license: not recorded)</dd>
+<dt>Repetitions</dt><dd>3 per load point</dd>
+<dt>Confidence intervals</dt><dd>Repetitions of a load point are combined per metric, with a two-sided 95% Student-t interval on the scale that fits the metric. Latencies, throughputs and rates are strictly positive and right-skewed: the value shown is the geometric mean and the interval is the t-interval of ln(value), exponentiated (geometric mean ×/÷ a factor), so both bounds are positive. Proportions such as error rate and SLO attainment use the arithmetic mean of the per-run proportions with the t-interval clipped to [0, 1]; it measures run-to-run variation, not binomial sampling, so it is [0, 0] when no repetition saw an error. Counts use the arithmetic t-interval clipped at 0, as does a positive metric when a repetition measured 0. A load meets the SLO only if the CI upper bound of every target is within it; goodput is the highest passing load below the first failing one. Cost CI bounds come from the goodput throughput CI (low cost from high throughput), so they are finite whenever the throughput lower bound is above zero. Results with a single repetition have no CI and are never trusted.<ul class="ci-methods"><li>request counts and sample sizes: arithmetic mean, Student-t interval clipped at 0 (t_clipped)</li><li>latency percentiles and means (ms): geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0</li><li>throughput and goodput (tok/s, req/s): geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0</li><li>requests in prefill (request rate × mean TTFT): geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0</li><li>server queue time, measurement window: geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0</li><li>error rate, SLO attainment, cache fractions and hit rates: arithmetic mean of per-run proportions, Student-t interval clipped to [0, 1] (t_clipped)</li><li>GPU utilization (%): arithmetic mean, Student-t interval clipped to [0, 100] (t_clipped)</li><li>other server and GPU gauges: arithmetic mean, Student-t interval clipped at 0 (t_clipped)</li><li>anything else: arithmetic mean, Student-t interval (t)</li></ul></dd>
+<dt>Cost allocation (ranking)</dt><dd>all_output: all of the replica&#39;s hourly cost is charged to output tokens, so input tokens have no separate price ($/1M input is n/a, not $0); $/1M output is the headline number</dd>
+<dt>Input/output split (headline)</dt><dd>Headline $/1M input and $/1M output use the prefill_time split, measured at the goodput point: input tokens pay for the share φ of the replica&#39;s time spent prefilling prompts, output tokens for the rest (decode steps, and any idle headroom the SLO needs). φ is the mean number of requests in their prefill phase, request rate × mean TTFT (Little&#39;s law), per repetition, combined like a throughput (geometric mean, log-t CI) and capped at 1. Input = φ × hourly price / input tok/s; output = (1 − φ) × hourly price / output tok/s; at the measured mix they bill exactly the replica&#39;s hourly price. TTFT includes queueing and the first decode step and concurrent prefills are each counted, so φ tends to overstate prefill time (input high, output low); idle headroom is charged to output (output high). The price CIs combine the φ and throughput CIs at the ends that push each price the same way, an outer bound. Blended $/1M is the hourly price over all tokens at the workload&#39;s own input:output mix and needs no split. The ranking still uses the declared cost allocation, shown in its own column.</dd>
+<dt>Price book last checked</dt><dd>2026-10-09</dd>
+</dl>
+<details>
+<summary>sglang · fixed-1k-1k, open loop <code>67df38a32da2c3963020756df69ca25e6244c4099ee6ce4fce59bc954eaadbc0</code></summary>
+<dl>
+<dt>Config</dt><dd>sglang 0.5.21 · unquantized · TP1 · 1×L40S · l40s-x1 (on_demand)</dd>
+<dt>Engine</dt><dd>sglang 0.5.21; image <code>lmsysorg/sglang@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469</code>; digest <code>sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469</code></dd>
+<dt>Model</dt><dd>Qwen/Qwen3-8B @ b968826d9c46dd6066d109eabc6255188de91218</dd>
+<dt>Hardware</dt><dd>1×L40S · runpod / secure · l40s-x1 · on_demand; CUDA 13.0, driver 580.159.03</dd>
+<dt>Code</dt><dd>commit <code>aa7d38d77b7d74ad448ca49b6559732eb26dd30c</code>; loom-bench 0.1.0</dd>
+<dt>Price</dt><dd>runpod/secure l40s-x1 + 80 GB block storage, from the price book: on-demand $1.1010/h; spot n/a; committed 1y n/a; source: <a href="https://www.runpod.io/pricing">https://www.runpod.io/pricing</a>, <a href="https://docs.runpod.io/pods/pricing">https://docs.runpod.io/pods/pricing</a>; last checked 2026-10-06</dd>
+<dt>Price as run</dt><dd>$1.1010/h, on_demand host: runpod API price observed at launch in US-MO-1 (2026-10-07T08:18:12.389030+00:00) + 80 GB block storage</dd>
+<dt>Runs</dt><dd>18; provenance digests: <code>00f714baa3d1f4ede368eacd633034c424b467f8e41ae404a51a278022a76bee</code>, <code>0fa6fbad698c723789c87e313dec16357b7f9ba136c32ee7f5d9dc37aa2036a0</code>, <code>3e404f616c7697d103b9ac9764a139878a9c033f40e9b9350e2771cedfc54944</code>, <code>628503998749ae0cc0ded2481c8fc75c5ad52eaaed79c42ded37ecfa4fd454e2</code>, <code>646d3dfd0d7bfc0c8cc40303f6ada3167474c908f2850544156a12d3307557d0</code>, <code>65c316520228b7fd7b0b404a815cdb6ec43a876884441e09a60695f4ee628860</code>, <code>773b6c704b5d8ed446bc065ab9adb9dcb2688fd1b280116057367a72ef67b16a</code>, <code>7a153309e15c85fa33cae4d65b0e93c2672d945f2e61b1536657c8dba4ed98ac</code>, <code>94de0efde15fd9f6173504a6ea590ead33d7644f41d21e8254b8fe12ac125f49</code>, <code>a140c64a9f9945e05e93ea77234c8b0ad3e6497939316aa4ab906f216a00891c</code>, <code>b4cf086080d4ca403454460e29d7a639aadf72e12de1b7a12c4e7843bd55dbbe</code>, <code>b6f1408103f26700ab1d2fc62be21a37c80f9156371aba5e8394524c048c5cd7</code>, <code>c55a1e2d7e264c453039febbb0d71c721a7e38c2a38d241281b5852fa517aef5</code>, <code>d16dbe036fd0c96c8cbc2b1b67826b5d64a14899a8e962c5e14924cb9e871da0</code>, <code>e1699fd7c4102a33cb4563f5cf16165cb642ec8cb14454d34581919a2a0a3448</code>, <code>f1c881056d047f57781f25010180326c2b0b321e14dfdf5c02810e2616701c8c</code>, <code>f4e703cc30fb743ad4e9a7da838aa03bb2297c689916657d4325f19e297f61cf</code>, <code>f9483d3e73805c087054289447ab2f79a6a63b6e47c8d7908ffe1572d0b7d139</code></dd>
+<dt>Reproduce</dt><dd><code>bench reproduce b83314e7-82f6-4a5c-af85-2b5b0ac83e17</code></dd>
+</dl>
+</details>
+<details>
+<summary>vllm · fixed-1k-1k, open loop <code>7a203a3ffaccb1820fd23e6da9fab1d00c4cb51c427ce1572c56b08a8036107a</code></summary>
+<dl>
+<dt>Config</dt><dd>vllm 0.30.0 · unquantized · TP1 · 1×L40S · l40s-x1 (on_demand)</dd>
+<dt>Engine</dt><dd>vllm 0.30.0; image <code>vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90</code>; digest <code>sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90</code></dd>
+<dt>Model</dt><dd>Qwen/Qwen3-8B @ b968826d9c46dd6066d109eabc6255188de91218</dd>
+<dt>Hardware</dt><dd>1×L40S · runpod / secure · l40s-x1 · on_demand; CUDA 13.0, driver 580.159.03</dd>
+<dt>Code</dt><dd>commit <code>aa7d38d77b7d74ad448ca49b6559732eb26dd30c</code>; loom-bench 0.1.0</dd>
+<dt>Price</dt><dd>runpod/secure l40s-x1 + 80 GB block storage, from the price book: on-demand $1.1010/h; spot n/a; committed 1y n/a; source: <a href="https://www.runpod.io/pricing">https://www.runpod.io/pricing</a>, <a href="https://docs.runpod.io/pods/pricing">https://docs.runpod.io/pods/pricing</a>; last checked 2026-10-06</dd>
+<dt>Price as run</dt><dd>$1.1010/h, on_demand host: runpod API price observed at launch in US-MO-1 (2026-10-07T05:40:31.406858+00:00) + 80 GB block storage</dd>
+<dt>Runs</dt><dd>18; provenance digests: <code>0cb7ec2456e9210f64ca0abf04890e4f3741caf84eed1dc45b94f3f007b30e4b</code>, <code>218c828f41305070963f2c9d8128878f2dd53ef915e6dbeb559fdbaab8ff3cac</code>, <code>266972031fc241072f837382576ca849be9dafb790f8498871b2941d9784ef27</code>, <code>2e366ab112cbdc9050d6764e737621e7bee22e870a1cfe108cc45f180c503a89</code>, <code>322743a4041b8ba12e332a04b70a2c40a8197a558ccb9544f58579a86678843e</code>, <code>32d22eaa2f6ffccef92d9a07ba732e1d766e535ee08d1f8eba25db532b56d1a3</code>, <code>410b62514d8572b66d648c14d0d2eeaba2937112dddc345951f47d4f435c027a</code>, <code>463a08e020340083d7284ccf515910fffc262f525a2e18f546f1c776b24b020c</code>, <code>7d85b863ee0ffc1231817651f9ec5b3720fe4205e7f361d21017688574798fb3</code>, <code>8612421cb935561ba97e821ab8d170578d182ad830adb40950e5e5c864c15020</code>, <code>8ada7e8247ac75e33baeb62845a7ac99106b51c4ca217222ac194692ccdf09a2</code>, <code>a2b1fe6fd164940c82af513ed172d4eb5ff69404e56522f1d47123af74db3c0c</code>, <code>af5ac085ff1899eb1e82e65640b26ee0c8d6e7e8eb6c5fd51e4f7bbc9ced1f94</code>, <code>d02de35477be78b9700f08f151cb4152f35da3687efbb2a85db681e0fa654ea7</code>, <code>d90980b3226b96f0827e578d5054e5345ab7caeb48fe8f8166473043f433d24c</code>, <code>dee2556c964aa9a138feadf0803770d6bd8925d764ef73d556cce036283a32d5</code>, <code>dfac7a7271ae4d0b8b1f99cf2d4387fc84954a97947445d2fdc4fa8873c1cd50</code>, <code>e9bd02aa433910a08220a993232c9f9b57043db1586d520a511947720d763c2f</code></dd>
+<dt>Reproduce</dt><dd><code>bench reproduce 29f42d2c-c2aa-41bf-89c8-78f3ae8a303b</code></dd>
+</dl>
+</details>
+<details>
+<summary>vllm · code-completion, open loop <code>7a203a3ffaccb1820fd23e6da9fab1d00c4cb51c427ce1572c56b08a8036107a</code></summary>
+<dl>
+<dt>Config</dt><dd>vllm 0.30.0 · unquantized · TP1 · 1×L40S · l40s-x1 (on_demand)</dd>
+<dt>Engine</dt><dd>vllm 0.30.0; image <code>vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90</code>; digest <code>sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90</code></dd>
+<dt>Model</dt><dd>Qwen/Qwen3-8B @ b968826d9c46dd6066d109eabc6255188de91218</dd>
+<dt>Hardware</dt><dd>1×L40S · runpod / secure · l40s-x1 · on_demand; CUDA 13.0, driver 580.159.03</dd>
+<dt>Code</dt><dd>commit <code>aa7d38d77b7d74ad448ca49b6559732eb26dd30c</code>; loom-bench 0.1.0</dd>
+<dt>Price</dt><dd>runpod/secure l40s-x1 + 80 GB block storage, from the price book: on-demand $1.1010/h; spot n/a; committed 1y n/a; source: <a href="https://www.runpod.io/pricing">https://www.runpod.io/pricing</a>, <a href="https://docs.runpod.io/pods/pricing">https://docs.runpod.io/pods/pricing</a>; last checked 2026-10-06</dd>
+<dt>Price as run</dt><dd>$1.1010/h, on_demand host: runpod API price observed at launch in US-MO-1 (2026-10-07T05:40:31.406858+00:00) + 80 GB block storage</dd>
+<dt>Runs</dt><dd>15; provenance digests: <code>26f52fb97f2debfa9b553395195f85d7c82aef39ed1541b593f09ddc4d9234f4</code>, <code>28bf2a4936c2cab057b937afff0fb3b3ecd850714c12b34f3f235bafe9635aed</code>, <code>29c204d0eac08a4393147edf87a79592b59a6d0e0aa7a47addcca63db8c2a2d0</code>, <code>334c1213a4557fe0e58f6caf64835249672547f44ba13d5f9e74b44dd7d99dcd</code>, <code>3a56cfa145f8fe6ea75b11dc5c5636e128af67a30dd3b42da9b75c07a4abd780</code>, <code>645b5676cb1b0034aef2f54ea3c666adbf7cddd2eb7468e8e893835cd90458b8</code>, <code>73288e56267a3de2d0986fac6757afd97efe7cbd1b8d37431a2f1aa49ddf4dda</code>, <code>75af781ca7b6ae90846f62416038886fd7b8e7e66b798541d5966c48ca5a0d0b</code>, <code>79ebaab81694b3899dbabde6b8b675725bae3a4b5dbe0580bf9ca1cea77e3f68</code>, <code>9d9f52f73fac28d67ae03187f2397b9e99a2d3ad3e8fecf6e554aa14a9a0db4e</code>, <code>cc6e3b45e2a1e1acf1997dec5f324f1eb9df1c88e7e072c4852ed91a607952cd</code>, <code>ddcbbe61516d716a367ba9c0dbcb68496e835ffc7a9f44f15ab4fc1a3e65b2a9</code>, <code>e5e1842201bcaa60e1cb0d56487a6e2913dcaa69e8eac0a11b8d353a7d864384</code>, <code>f5699a07289e2acdc945923b54b6cb70b27f6b10353ce9b22721113161fcd4f1</code>, <code>ffac13717de63bee3d8b339e05b9aa4eded2c240ab010b29960b460127fe8a5e</code></dd>
+<dt>Reproduce</dt><dd><code>bench reproduce ced8b807-f7f5-4927-8cee-c0dbbb23fc5e</code></dd>
+</dl>
+</details>
+<details>
+<summary>sglang · code-completion, open loop <code>67df38a32da2c3963020756df69ca25e6244c4099ee6ce4fce59bc954eaadbc0</code></summary>
+<dl>
+<dt>Config</dt><dd>sglang 0.5.21 · unquantized · TP1 · 1×L40S · l40s-x1 (on_demand)</dd>
+<dt>Engine</dt><dd>sglang 0.5.21; image <code>lmsysorg/sglang@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469</code>; digest <code>sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469</code></dd>
+<dt>Model</dt><dd>Qwen/Qwen3-8B @ b968826d9c46dd6066d109eabc6255188de91218</dd>
+<dt>Hardware</dt><dd>1×L40S · runpod / secure · l40s-x1 · on_demand; CUDA 13.0, driver 580.159.03</dd>
+<dt>Code</dt><dd>commit <code>aa7d38d77b7d74ad448ca49b6559732eb26dd30c</code>; loom-bench 0.1.0</dd>
+<dt>Price</dt><dd>runpod/secure l40s-x1 + 80 GB block storage, from the price book: on-demand $1.1010/h; spot n/a; committed 1y n/a; source: <a href="https://www.runpod.io/pricing">https://www.runpod.io/pricing</a>, <a href="https://docs.runpod.io/pods/pricing">https://docs.runpod.io/pods/pricing</a>; last checked 2026-10-06</dd>
+<dt>Price as run</dt><dd>$1.1010/h, on_demand host: runpod API price observed at launch in US-MO-1 (2026-10-07T08:18:12.389030+00:00) + 80 GB block storage</dd>
+<dt>Runs</dt><dd>15; provenance digests: <code>31f48d15e024c455060e133fc6e0b466b88a46843ea81c07d48961526cf6b8a0</code>, <code>403e696934af1b20ec9ed286b8f5d8ceae731ce3ad8869452d8826cc7ae75af2</code>, <code>437e52b0aba2a188940206d76ea9aad450b4de50a7c293315e716d220ccab84c</code>, <code>489d38fdc65737ec192b2dc8e83529f4d1855168af591485869d44a4e87607d9</code>, <code>520e6cf1b11b012623235f549e71f530f5cb31b4ce149d809d060eaeba3a4da6</code>, <code>6b6d26848f770704a335dca2d532569c5d1e22e746e64d4a28edcc5c046426dd</code>, <code>713abc724751fbb22ce260425e234d6832062c0f2f2c49861cdf89ada1738be0</code>, <code>75898d1ec532c98741a12bd6026863bc9f4c8f6cdbdefc8bc0c6a5c69aa03971</code>, <code>7a9118a427c193858e793bf0ded27387e8b4c3d02669d1eb310b0585473dd9c3</code>, <code>8a6d07d16b9b65ddaa6360d3a210ff1e64e99b1da346e0786f978995db06f6a0</code>, <code>97542f6a19ac0f54e649ac73ee3cabd59131ab9fbdbfe66cbaf1b7a7db3c6da7</code>, <code>a1e1ffcbc5931b95ca1b698807bb426c8baf2f74918c30ab34015efae65d41ba</code>, <code>b0aa1d909611e0ee97f6ea532ed8c0fcd457428f877a765f88da3dc82663798b</code>, <code>e32f7c6154cf942736cf0c81835644e25b6736924d2d57b84f01a1dc1b82f274</code>, <code>f88b46a20ebe3511bc32ebe4df7d21f1efc9c7f20ab4fae65ff98607c5722efc</code></dd>
+<dt>Reproduce</dt><dd><code>bench reproduce c6f370e1-a7a5-4f69-b329-7c368e2c0f60</code></dd>
+</dl>
+</details>
+<details>
+<summary>sglang · shared-prefix, open loop <code>67df38a32da2c3963020756df69ca25e6244c4099ee6ce4fce59bc954eaadbc0</code></summary>
+<dl>
+<dt>Config</dt><dd>sglang 0.5.21 · unquantized · TP1 · 1×L40S · l40s-x1 (on_demand)</dd>
+<dt>Engine</dt><dd>sglang 0.5.21; image <code>lmsysorg/sglang@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469</code>; digest <code>sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469</code></dd>
+<dt>Model</dt><dd>Qwen/Qwen3-8B @ b968826d9c46dd6066d109eabc6255188de91218</dd>
+<dt>Hardware</dt><dd>1×L40S · runpod / secure · l40s-x1 · on_demand; CUDA 13.0, driver 580.159.03</dd>
+<dt>Code</dt><dd>commit <code>aa7d38d77b7d74ad448ca49b6559732eb26dd30c</code>; loom-bench 0.1.0</dd>
+<dt>Price</dt><dd>runpod/secure l40s-x1 + 80 GB block storage, from the price book: on-demand $1.1010/h; spot n/a; committed 1y n/a; source: <a href="https://www.runpod.io/pricing">https://www.runpod.io/pricing</a>, <a href="https://docs.runpod.io/pods/pricing">https://docs.runpod.io/pods/pricing</a>; last checked 2026-10-06</dd>
+<dt>Price as run</dt><dd>$1.1010/h, on_demand host: runpod API price observed at launch in US-MO-1 (2026-10-07T08:18:12.389030+00:00) + 80 GB block storage</dd>
+<dt>Runs</dt><dd>15; provenance digests: <code>0504bb3b50fd8b32411d11ce61abcd58e3973d3ed764cb81065b9ac0c3cb3110</code>, <code>2246383fddf3e8edce86d10048ed9df48b7ba02fb917521db103ab1f698a87f1</code>, <code>33d2d524cbe0e473be1a63fc20486d405137e4946812478e480f9b6bdf4d7222</code>, <code>33de9b76903aa672cf8f5b4f2ffff5de1a811ca237fe650fb85c5715ff24bbdf</code>, <code>50a0cb3da6efa285699a110e34454cfd4fc1dbc8daca49bd5625f7d4cea4a239</code>, <code>6a69050051c3ff65c2202c86e095256b1a7f3224361e67c179cec097994ae546</code>, <code>72233ff9802bf044c6f82ad6b41cd8f2f03a969514bae9cddebb7b24b66e7db7</code>, <code>7f6f66c4ff177a655fa2bb6bdeca7aa34ea2696b541bd2c5eb4a9a0ac97af75c</code>, <code>8d925655b5be51c08b7b3d91d19788fcd8d87d6368512b25808bca2ed6c416c7</code>, <code>9f55065eb1a0110c3605f1af8950d5af065db7b582060ab975ebcd086e5ba5c4</code>, <code>a17b8c08f066b0a9c079b8ce3d12adcf87df6f6c229d7d6fd74e280b648664a9</code>, <code>a5d6b2358af28e25ebf7eb21c6447828cf30d410e4c09f450566095b37ae0afe</code>, <code>b51ed43327e96e9ce53be615e7036a43ffc6dee1104114245901d2f8757b9cf5</code>, <code>bc3ff6ce35bcc885cf792a12c16cf1361fb34eea9ed6394f5c2d88900462168d</code>, <code>e8ac9d4c111c2be4a90c795d6d564879ee49a8234f2ec4b6ef6ca0a62fa67fac</code></dd>
+<dt>Reproduce</dt><dd><code>bench reproduce f484a1f4-74bb-4e6b-9f39-984847102106</code></dd>
+</dl>
+</details>
+<details>
+<summary>vllm · shared-prefix, open loop <code>7a203a3ffaccb1820fd23e6da9fab1d00c4cb51c427ce1572c56b08a8036107a</code></summary>
+<dl>
+<dt>Config</dt><dd>vllm 0.30.0 · unquantized · TP1 · 1×L40S · l40s-x1 (on_demand)</dd>
+<dt>Engine</dt><dd>vllm 0.30.0; image <code>vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90</code>; digest <code>sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90</code></dd>
+<dt>Model</dt><dd>Qwen/Qwen3-8B @ b968826d9c46dd6066d109eabc6255188de91218</dd>
+<dt>Hardware</dt><dd>1×L40S · runpod / secure · l40s-x1 · on_demand; CUDA 13.0, driver 580.159.03</dd>
+<dt>Code</dt><dd>commit <code>aa7d38d77b7d74ad448ca49b6559732eb26dd30c</code>; loom-bench 0.1.0</dd>
+<dt>Price</dt><dd>runpod/secure l40s-x1 + 80 GB block storage, from the price book: on-demand $1.1010/h; spot n/a; committed 1y n/a; source: <a href="https://www.runpod.io/pricing">https://www.runpod.io/pricing</a>, <a href="https://docs.runpod.io/pods/pricing">https://docs.runpod.io/pods/pricing</a>; last checked 2026-10-06</dd>
+<dt>Price as run</dt><dd>$1.1010/h, on_demand host: runpod API price observed at launch in US-MO-1 (2026-10-07T05:40:31.406858+00:00) + 80 GB block storage</dd>
+<dt>Runs</dt><dd>15; provenance digests: <code>0338f3916eecdbe49eaedfa46e206318ed969e3f5a835e91c4fecfb2bd59043c</code>, <code>0677055c8da73f2b37301f80fc6666cd9840f98a6c7ca2319c7d7ff007760e44</code>, <code>0afeec6b7fadb641f2e9439bbbdc5afb14dcc269a20a8bde59723e031eb8023a</code>, <code>161ea0eedaccfd36d0683c679acd3dbbec1e7052d65fa2f85e6b4214c204a643</code>, <code>2ef1a9ac5f424952b3938aa8e4f081311a717f7f21184b96beeb47edfb9631f9</code>, <code>45860f17965094d64e8db296804688b43cc9bcc124d03939a8c6af2bd36fc27f</code>, <code>53ba158542203e6668375e3b40a9cc940a253b14ac7681e7e73d5f67fc653d69</code>, <code>56b938f63988a4e65180821527098296f7c52a41d1b32f7c51a4cce83411f777</code>, <code>6c12200ebeb0610a1e17631d98cdf110e9087a70db9e6ab40a358e5227772377</code>, <code>a0b7622ea2d804c5baf4b4cc502215e9ba87c1d5864c8185b7ead5bd067305ee</code>, <code>c3c3ecdf9b38e1044dd777928f1d09583f385b8bca66c14840c350dba60f92b4</code>, <code>d27b9dd8104b3340634afc679ea4ced64fa311575419adf0cf83bbc9dfe3f3ef</code>, <code>d4d32f70458a22f801c36a59ec2df61ad2557b46a4ecbfbe7ecebc81cbc71995</code>, <code>df7704e2d7b8498864fbde5a669acb410581c93ad5e6d68448c7cd0cf1252fb6</code>, <code>e64b588d3d980290c78fbb7fb9b8a348fbbebb2f747ffbf557e012198373626d</code></dd>
+<dt>Reproduce</dt><dd><code>bench reproduce 1b07f0b8-b191-4090-913d-207420cd72cf</code></dd>
+</dl>
+</details>
+</footer>
+
+</main>
+</body>
+</html>
