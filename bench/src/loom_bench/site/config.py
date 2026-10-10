@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -39,12 +40,40 @@ class WaitlistConfig(BaseModel):
         return self.action_url is not None
 
 
+class PublishConfig(BaseModel):
+    """Which experiments the site publishes: `bench site export` without `-e` exports
+    exactly these, and `bench site build --require-pinned` (the deploy workflow) refuses
+    a snapshot of anything else. Full ids only, so a later experiment cannot change what
+    an entry means; the list changes in a reviewed commit, never by "newest wins"."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    experiments: list[uuid.UUID] = Field(default_factory=list)
+
+    @field_validator("experiments", mode="before")
+    @classmethod
+    def _full_ids(cls, v: object) -> object:
+        for item in v if isinstance(v, list) else []:
+            text = str(item).strip()
+            if len(text.replace("-", "")) != 32:
+                raise ValueError(f"publish.experiments needs full experiment ids, got {text!r}")
+        return v
+
+    @field_validator("experiments")
+    @classmethod
+    def _no_repeats(cls, v: list[uuid.UUID]) -> list[uuid.UUID]:
+        if len(set(v)) != len(v):
+            raise ValueError("publish.experiments lists an experiment twice")
+        return v
+
+
 class SiteConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     title: str = "Loom"
     repo_url: HttpUrl = HttpUrl("https://github.com/arulster17/loom")
     waitlist: WaitlistConfig = Field(default_factory=WaitlistConfig)
+    publish: PublishConfig = Field(default_factory=PublishConfig)
 
     @property
     def repo(self) -> str:

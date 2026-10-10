@@ -8,9 +8,12 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from sqlalchemy import select
+
 from loom_bench.provenance import GitInfo
 from loom_bench.site import export_snapshot
 from loom_bench.store.db import session_scope, upgrade
+from loom_bench.store.models import BenchExperiment
 from loom_bench.store.repo import record_run
 
 TESTS_DIR = str(Path(__file__).resolve().parents[1])
@@ -66,8 +69,14 @@ def new_db(path: Path) -> str:
     return url
 
 
-def export(url: str, out: Path, experiment_ids="latest", **kwargs):
+def export(url: str, out: Path, experiment_ids=None, **kwargs):
+    """Export `experiment_ids`; None, for brevity in tests, names every experiment in the
+    test database (export_snapshot itself has no default selection)."""
     with session_scope(url) as s:
+        if experiment_ids is None:
+            experiment_ids = list(
+                s.scalars(select(BenchExperiment.id).order_by(BenchExperiment.created_at))
+            )
         return export_snapshot(
             s, out, experiment_ids, git=EXPORT_GIT, generated_at=GENERATED_AT, **kwargs
         )

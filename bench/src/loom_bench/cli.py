@@ -824,50 +824,98 @@ def site_export(
         typer.Option(
             "--experiment",
             "-e",
-            help="Experiment id, repeatable (default: latest completed of each name).",
+            help="Experiment id or unique prefix, repeatable (default: the experiments "
+            "pinned in the site config under publish.experiments).",
         ),
     ] = None,
     out: Annotated[Path | None, typer.Option("--out", help="Snapshot directory.")] = None,
     slo: Annotated[
         Path | None, typer.Option(help="SLO YAML, if the runs do not record one.")
     ] = None,
+    config: SiteConfigOpt = None,
     db: DbOpt = None,
 ) -> None:
-    """Write the results snapshot the site shows (default site/data)."""
-    from loom_bench.site import export_snapshot
-    from loom_bench.site.config import DEFAULT_SNAPSHOT_DIR
+    """Write the results snapshot the site shows (default site/data).
+
+    Without -e it exports exactly the experiments pinned in site/config.yaml
+    (publish.experiments); there is no "newest of each name" default. With -e the
+    snapshot is for a preview unless the same experiments are pinned: the deploy
+    workflow's `bench site build --require-pinned` refuses anything else.
+    """
+    from loom_bench.site import export_snapshot, load_site_config
+    from loom_bench.site.config import DEFAULT_SITE_CONFIG, DEFAULT_SNAPSHOT_DIR
     from loom_bench.slo import Slo
     from loom_bench.store.db import session_scope
+    from loom_bench.store.models import BenchExperiment
 
     out = out or DEFAULT_SNAPSHOT_DIR
+    config = config or DEFAULT_SITE_CONFIG
     with _invalid_input(f"invalid SLO file {slo}"):
         target = Slo.from_yaml(slo.read_text(encoding="utf-8")) if slo else None
+    with _invalid_input(f"invalid site config {config}"):
+        pinned = load_site_config(config).publish.experiments
+    chosen: Sequence[str | uuid.UUID] = experiment or pinned
     with session_scope(db) as s, _invalid_input("cannot export the snapshot"):
-        manifest = export_snapshot(s, out, experiment or "latest", slo=target)
+        manifest = export_snapshot(s, out, chosen, slo=target)
+        table = Table(
+            title="Experiments chosen with -e" if experiment else f"Experiments pinned in {config}"
+        )
+        for col in ("experiment", "name", "status", "created"):
+            table.add_column(col)
+        for exp_id in manifest.experiment_ids:
+            row = s.get(BenchExperiment, uuid.UUID(exp_id))
+            assert row is not None
+            table.add_row(exp_id, row.name, row.status, f"{row.created_at:%Y-%m-%d %H:%M}")
+    if manifest.experiment_ids:
+        console.print(table)
     configs = sum(m.configs for m in manifest.models)
     console.print(
         f"wrote {out}: {len(manifest.experiment_ids)} experiments, {configs} configs, "
         f"{manifest.run_count} runs"
     )
+    if not chosen:
+        console.print(
+            f"[yellow]no experiments pinned in {config} (publish.experiments): "
+            "the snapshot has no results"
+        )
+    elif experiment and set(manifest.experiment_ids) != {str(i) for i in pinned}:
+        console.print(
+            f"[yellow]these are not the experiments pinned in {config} (publish.experiments): "
+            "use this snapshot for a local preview, or pin them before committing it; "
+            "the deploy build refuses it until then"
+        )
 
 
 @site_app.command("build")
 def site_build(
     data: Annotated[Path | None, typer.Option(help="Snapshot directory.")] = None,
-    config: Annotated[Path | None, typer.Option(help="Site config YAML.")] = None,
+    config: SiteConfigOpt = None,
     out: Annotated[Path | None, typer.Option("--out", help="Build directory.")] = None,
+    require_pinned: Annotated[
+        bool,
+        typer.Option(
+            "--require-pinned",
+            help="Refuse a snapshot that does not hold exactly the experiments pinned in "
+            "the site config (the deploy workflow sets this).",
+        ),
+    ] = False,
 ) -> None:
     """Render the static site from a snapshot (default site/data -> site/_build)."""
-    from loom_bench.site import build_site
+    from loom_bench.site import build_site, load_site_config, load_snapshot
     from loom_bench.site.config import (
         DEFAULT_BUILD_DIR,
         DEFAULT_SITE_CONFIG,
         DEFAULT_SNAPSHOT_DIR,
     )
+    from loom_bench.site.snapshot import check_pinned
 
     out = out or DEFAULT_BUILD_DIR
+    data = data or DEFAULT_SNAPSHOT_DIR
     with _invalid_input("cannot build the site"):
-        pages = build_site(data or DEFAULT_SNAPSHOT_DIR, out, config or DEFAULT_SITE_CONFIG)
+        cfg = load_site_config(config or DEFAULT_SITE_CONFIG)
+        if require_pinned:
+            check_pinned(load_snapshot(data).manifest, cfg.publish.experiments)
+        pages = build_site(data, out, cfg)
     console.print(f"wrote {len(pages)} pages to {out}")
 
 

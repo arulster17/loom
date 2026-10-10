@@ -1,6 +1,7 @@
 """Experiment and run ids on the command line: full, or a unique prefix like git's short
 hashes; and `bench compare`'s exit code, which judges only the cells both sides ran."""
 
+import json
 import uuid
 from datetime import UTC, datetime
 
@@ -146,6 +147,7 @@ def test_every_command_reports_an_ambiguous_or_unknown_prefix(db, tmp_path):
         ("competitiveness", "-e", "7a8237d0", "--out", tmp_path),
         ("compare", "7a8237d0", "7a8237d0-9917"),
         ("export", "csv", "--out", tmp_path / "x.csv", "--experiment", "7a8237d0"),
+        ("site", "export", "-e", "7a8237d0", "--out", tmp_path / "snap"),
     ):
         result = invoke(*args, "--db", db)
         assert result.exit_code == EXIT_INVALID, (args, result.output)
@@ -178,6 +180,11 @@ async def test_short_ids_work_on_real_runs(ctx, tmp_path):
     assert same.exit_code == EXIT_OK, same.output
     md = (tmp_path / "c" / "compare.md").read_text()
     assert md.startswith(f"# Comparison: {outcome.experiment_id} vs {outcome.experiment_id}")
+    site = invoke("site", "export", "-e", short, "--out", tmp_path / "snap", "--db", db)
+    assert site.exit_code == EXIT_OK, site.output
+    manifest = json.loads((tmp_path / "snap" / "manifest.json").read_text())
+    assert manifest["experiment_ids"] == [str(outcome.experiment_id)]
+    assert "these are not the experiments pinned in" in text(site)
 
 
 # --- compare's verdict -------------------------------------------------------------

@@ -34,13 +34,34 @@ uses a real instance price with a round, clearly labelled illustrative throughpu
 
 ## Publishing results after runs
 
-1. Export a snapshot from the results store. By default it takes the newest completed
-   experiment of each name; pass `--experiment <id>` (repeatable) to choose.
+1. Pin the experiments to publish in `site/config.yaml`, by full id, with a comment
+   naming each:
+
+   ```yaml
+   publish:
+     experiments:
+       - 7a8237d0-9917-47e7-b93e-8cb0230e0059   # Qwen3-8B config sweep, 1x L40S
+   ```
+
+   There is no default selection. An earlier version took "the newest completed
+   experiment of each name", which for the 70B on 4x L40S picked the later EAGLE3 sweep
+   (55102ddb) over the run meant for publishing (cf4d1614). Full ids only: a short
+   prefix could later match a second experiment. Never pin a smoke experiment: its cells share
+   config hashes with the real run's.
+
+2. Export a snapshot from the results store. With no `-e` it exports exactly the pinned
+   experiments and prints them (id, name, status, created) so you can check the choice:
 
    ```bash
    LOOM_DATABASE_URL=postgresql+psycopg://... \
      uv run bench site export --out site/data      # or --db URL
    ```
+
+   `-e <id>` (repeatable; a unique prefix works) exports other experiments instead, for a
+   local preview. When they are not the pinned ones the command says so, and the deploy
+   workflow's build (`bench site build --require-pinned`) refuses that snapshot: what
+   deploys is always what `site/config.yaml` pins. With nothing pinned, the export writes
+   a snapshot with no results and says so.
 
    The export analyses the runs with the report module (`analyze_runs`,
    `with_quality`, `cold_starts_by_config`, `build_competitiveness`): goodput at SLO,
@@ -51,19 +72,22 @@ uses a real instance price with a round, clearly labelled illustrative throughpu
    snapshot. The SLO comes from the experiment specs and run summaries; if they
    disagree, pass `--slo slo.yaml` or publish the experiments separately.
 
-2. Build and check locally:
+3. Build and check locally, with the same check the deploy workflow makes:
 
    ```bash
-   uv run bench site build        # site/data -> site/_build
+   uv run bench site build --require-pinned       # site/data -> site/_build
    python -m http.server 8000 --directory site/_build
    # open http://localhost:8000
    ```
 
-3. Commit `site/data/` and open a pull request. Merging to `main` deploys.
+4. Commit `site/config.yaml` and `site/data/` together and open a pull request: the
+   diff shows the pinned ids and the numbers they produce. Merging to `main` deploys.
 
 From Python, the same steps are
-`export_snapshot(session, "site/data", "latest" | [experiment ids], slo=..., allocation=...)`
-and `build_site("site/data", "site/_build", "site/config.yaml")`.
+`export_snapshot(session, "site/data", [experiment ids], slo=..., allocation=...)`
+(the ids are required; `load_site_config().publish.experiments` gives the pinned ones),
+`check_pinned(load_snapshot("site/data").manifest, pinned)` and
+`build_site("site/data", "site/_build", "site/config.yaml")`.
 
 ## What gets published
 
@@ -89,7 +113,9 @@ sources named in the data.
 
 `.github/workflows/site.yml` builds and deploys on pushes to `main` that touch
 `site/**`, `bench/src/loom_bench/site/**`, `bench/src/loom_bench/report/**` or the
-workflow itself, and on manual dispatch (Actions → site → Run workflow).
+workflow itself, and on manual dispatch (Actions → site → Run workflow). Its build runs
+`bench site build --require-pinned`, so it fails, and nothing deploys, unless `site/data`
+holds exactly the experiments pinned under `publish.experiments` in `site/config.yaml`.
 
 **One-time setup, not done yet:** in the repository's Settings → Pages, set
 **Source: GitHub Actions**, then add the repository variable `LOOM_PAGES_ENABLED=true`
