@@ -467,8 +467,8 @@ The AWS specs stay as the secondary path:
 | `qwen3-8b-vllm-vs-sglang` | 1x g6e.xlarge spot, 7.1 h of an 8 h TTL | $16.56 | $18.56 | $40 |
 | `llama-3.3-70b-tp4` | 1x g6e.12xlarge spot, 2.7 h of a 3.5 h TTL | $28.04 | $35.86 | $45 |
 | `llama-3.3-70b-fp8-tp4` | 1x g6e.12xlarge spot, 2.6 h of a 3.25 h TTL | $26.48 | $33.25 | $45 |
-| `qwen3-8b-aws-g6e` (proposed 2026-10-10, not run; [section below](#qwen3-8b-on-aws-g6exlarge-proposed)) | 1x g6e.xlarge **on-demand**, bf16 + fp8-kv8 on chat, 3 passes each, 4.7 h of a 6.5 h TTL | $8.90 | $12.24 | $12.50 |
-| `aws-smoke-g6e` (run first) | the same host and cells at smoke scale, 1.85 h of a 2.5 h TTL | $3.48 | $4.71 | $5 |
+| `qwen3-8b-aws-g6e` (ran 2026-10-10/11 as 95cde129: $6.39, fp8-kv8's gate fails on ifeval; [results below](#qwen3-8b-on-aws-g6exlarge-result-95cde129-2026-10-11)) | 1x g6e.xlarge **on-demand**, bf16 + fp8-kv8 on chat, 3 passes each, 4.7 h of a 6.5 h TTL | $8.90 | $12.24 | $12.50 |
+| `aws-smoke-g6e` (passed 2026-10-10 as 80ff5648, $1.67, after a7bc3123 found the mount bug, $0.58) | the same host and cells at smoke scale, 1.85 h of a 2.5 h TTL | $3.48 | $4.71 | $5 |
 
 Rates are searched geometrically, with ranges sized for one L40S from the first RunPod
 sweep (058128e9): Qwen3-8B fixed-1k-1k passed 1.22 req/s and failed 1.94; shared-prefix
@@ -844,8 +844,9 @@ listings at this mix) is the steadier comparison.
 
 ### Qwen3-8B on AWS g6e.xlarge (proposed)
 
-`qwen3-8b-aws-g6e` (proposed 2026-10-10, quoted, not run) is the brief's §7.8 Model A
-leaderboard on one GPU type on AWS, and it does three things on one host:
+`qwen3-8b-aws-g6e` (proposed 2026-10-10, ran 2026-10-10/11:
+[result](#qwen3-8b-on-aws-g6exlarge-result-95cde129-2026-10-11)) is the brief's §7.8
+Model A leaderboard on one GPU type on AWS, and it does three things on one host:
 
 1. **AWS leaderboard rows** for Qwen3-8B: BF16 (reference row, gate baseline) and
    fp8-kv8 (FP8-dynamic weights + FP8 KV cache, the cheapest config at the SLO in
@@ -943,3 +944,129 @@ the cold start's `engine_started` event), the HF token from Secrets Manager, wei
 the NVMe, the warm restart onto the FP8 checkpoint, the pinned dataset download, the
 client container (load and lm-eval jobs, uid 10001, presigned S3 URLs), and on-demand
 accrual.
+
+### Qwen3-8B on AWS g6e.xlarge result (95cde129, 2026-10-11)
+
+`qwen3-8b-aws-g6e` ran from 2026-10-10 22:50 to 2026-10-11 02:14 UTC, as planned above with
+3 passes:
+
+- **Outcome:** exit 0, **$6.39** recorded (planned $8.90, cap $12.50), 3.39 h of a 6.5 h
+  TTL, 30 of 30 load runs completed, 3 phase0-strict passes per cell, one gate. No
+  `quality_failed` or `divergence_failed` event.
+- **Host:** one g6e.xlarge on-demand host in us-east-1c, AMI ami-028357be7d5b15c53, pinned
+  from the smoke (DLAMI 20261006, driver 595.91.07, CUDA 13.2).
+- **Teardown:** the runner terminated the host. Afterwards no Loom-managed instance or
+  volume remained, and `bench reap --dry-run` (AWS configured) was clean.
+- **AWS-side cost:** Cost Explorer is not enabled for this IAM user (`AccessDenied`). From
+  the instance's launch and stop times (22:50:18 to 02:13:47) at $1.861/h plus the
+  200 GB gp3 volume, AWS bills about $6.39, matching the DB.
+- **Report:** [reports/8b-aws-g6e-v1](../reports/8b-aws-g6e-v1/leaderboard.md).
+
+**Smokes.** The first attempt to get a host, `aws-smoke-g6e` a7bc3123 ($0.58), found a
+bug: every load job failed in the client container with `No such file or directory (os
+error 2)`. The vLLM image's huggingface_hub stores tokenizer.json and safetensors in a
+hub-level blob store (`hub/blobs/<xx>/<sha256>`), outside the model folder that was
+mounted. The fix mounts the whole hub cache and refuses links that leave the mount
+([aws-setup.md](aws-setup.md#load-and-eval-jobs-on-the-host)). RunPod never hit this:
+its jobs run on the pod itself, not in a container.
+
+80ff5648 ($1.67) then passed every path:
+- **Accrual:** on-demand at 1882918 µ$/h.
+- **TTL:** shutdown armed (lead 19.8 s).
+- **Engines:** cold start 10.2 min; warm restart onto FP8 3.2 min.
+- **Search:** both searches failed 12 req/s (69 stragglers aborted at the drain), then:
+  - bf16 failed 4, passed 1.333 and bisected at 2.309.
+  - fp8-kv8 passed 4, then bisected at 6.928 and 5.264.
+- **Quality:** 3 passes per cell, with divergence captured on bf16 and scored on fp8.
+- **Gate:** one gate event.
+
+Smoke spend: $2.25.
+
+**Capacity.** On-demand g6e.xlarge capacity in us-east-1 comes and goes. Four of the
+seven launch attempts (4efe27b6, 5d1a39c3, 96e8f54c, f16cefe2) got
+`InsufficientInstanceCapacity` in all four AZs that offer the type, before any host
+existed ($0). A try 1-11 min later succeeded each time. RunInstances is not retried
+inside a run, so a launcher retried only that $0 no-host failure, every 10 min.
+
+Cost at the SLO (TTFT p95 1 s, TPOT p95 50 ms), on-demand $1.8829/h with storage, both
+goodputs trusted; $/1M in and out under the prefill-time split, with 95% CIs in the report:
+
+| Cell | chat goodput (fails at) | $/1M in / out / blended | Trusted | Gate vs bf16 |
+|---|---|---|---|---|
+| bf16 | 2.213 (2.449) | 0.0917 / 0.4417 / 0.1765 | yes | reference |
+| fp8-kv8 | 5.239 (5.511) | 0.0937 / 0.0393 / 0.0799 | yes | **FAIL** (ifeval) |
+
+fp8-kv8's gate against bf16 (3 passes a side; margins gsm8k 1, ifeval 2, json_schema 3,
+tool tasks 6 pts):
+
+| gsm8k | ifeval | tool_calling | tool_calling_strict | json_schema | KL / top-1 | sanity (trunc / rep / drift) |
+|---|---|---|---|---|---|---|
+| -0.30 [-1.24, +0.66] | **-2.03** [-4.37, +0.25] | 0.00 [-2.22, +2.22] | 0.00 [-2.22, +2.22] | -1.11 [-2.67, +0.22] | 0.0102 / 95.96% (limits 0.05 / 94.79%) | 1.15 / 1.62 / 0.82% |
+
+**The gate fails.** ifeval's point delta (−2.03 pts) is beyond its 2-point margin, which
+the gate counts as a FAIL whatever the CI. The CI still includes 0, so this is not a
+significant drop. gsm8k is inconclusive (its CI crosses −1). Divergence, sanity and the
+tool and JSON tasks pass. fp8-kv8 is unranked, and BF16 is the only AWS row. Since 8B
+ships on BF16 regardless (the user's decision), nothing changes in `config/models.yaml`.
+
+BF16's scores on AWS are gsm8k 0.902, ifeval 0.826, json_schema 0.911, tool_calling and
+tool_calling_strict 0.978.
+
+**Why the ifeval verdict moved** (+0.43 on RunPod 7a8237d0, −2.03 here). The two runs score
+the same 541 items, so the difference is the environment, not the item sample. Per item:
+
+- **On AWS every pass repeated exactly.** bf16 had 0 items unstable across its 3 passes on
+  gsm8k and ifeval, against 16 and 31 on RunPod.
+- **Across environments, fp8-kv8's ifeval moved.** 37 items scored differently, a net
+  −1.97 pts, while bf16 moved +0.49.
+- **gsm8k barely moved.** bf16 −0.23, fp8-kv8 −0.25; paired delta −0.28 on RunPod against
+  −0.30 here.
+
+So FP8 + FP8-KV ifeval outputs depend on the host (driver 580 / CUDA 13.0 on RunPod,
+595 / 13.2 here, and the batch mix), and in-run replicates cannot see that. They repeat
+the same numerics. The replicate arithmetic above assumed run noise that this host
+does not have. Pooling both environments informally (6 passes a side) gives ifeval −0.80 ±
+1.82 pts and gsm8k −0.29 ± 0.82, which is still inconclusive on both. This is an argument,
+not a gate. Settling FP8 + FP8-KV takes more items (above) and more than one environment,
+not more passes.
+
+**RunPod 7a8237d0 vs AWS: an AWS-instance deployment comparison**
+(`bench compare 7a8237d0 95cde129 --match-by cell_key`). This is not a pure GPU
+comparison. The g6e.xlarge has 4 vCPU and 32 GiB, with the load client on the same
+host, against the RunPod pod's 16 vCPU and 94 GiB. Both runs used the same image, vLLM
+args, checkpoints, profile, windows and seeded schedule.
+
+- **Same search path.** Each search visited exactly 7a8237d0's loads (bf16 4.5, 3, 2,
+  2.449, 2.213; fp8-kv8 4.5, 6.75, 5.511, 4.98, 5.239), so the knees are identical:
+  bf16 2.213 (fails at 2.449), fp8-kv8 5.239 (fails at 5.511).
+- **Latency within normal variance.** This holds at all 10 matched (cell, load) points,
+  on every metric (0 outside the 10% tolerance or significant by Welch's t). bf16's TTFT
+  p95 is 4-6% lower on AWS, TPOT within ±1%; fp8-kv8's TPOT is 0.4-3.5% higher, TTFT
+  −3% to +4%; none of these is significant. Throughput at equal load is identical by
+  construction (same seeded arrivals and output lengths).
+- **Why compare exits 6.** Every matched point is flagged only for "Config hash differs"
+  (cloud, instance type and market are part of the hash).
+- **GPU (from the runs' nvidia-smi samples).** Utilisation is the same: bf16 97.0% on
+  both at 2-3 req/s, fp8-kv8 94.5% on both. KV-cache use and preemptions match too (bf16
+  at 4.5 req/s: 91 preemptions on both). AWS's board draws 45-70 W less at every load
+  (bf16 at 2.213 req/s: 246 W against 302 W) for the same latency.
+- **4 vCPU is enough for this load.** The load client never saturated (0
+  `client_saturated_count` on all 30 runs).
+- **Cost differs only through the hourly price:** $1.8829/h against RunPod's $1.1010/h,
+  1.71×. bf16 costs $0.1765 per 1M blended against $0.1032, and fp8-kv8 $0.0799 against
+  $0.0467. At chat's mix bf16 on AWS costs 0.88× the cheapest public listing ($0.20
+  blended; aggregator or unverified, so not flagged).
+
+**Plan against measured.**
+
+| Step | Planned | Measured |
+|---|---|---|
+| Cold start | 14.5 min | 9.5 min |
+| Warm restart onto FP8 | 5.4 min | 3.1 min |
+| bf16 chat search | 1.56 h | 74.7 min |
+| fp8-kv8 chat search | 1.56 h | 72.1 min |
+| bf16 eval (3 passes) | 42.1 min | 26.3 min |
+| fp8-kv8 eval (3 passes) | 27.7 min | 17.7 min |
+| Total | 4.73 h, $8.90 | 3.39 h, $6.39 |
+
+The planner's eval estimate is again about 1.6x the measured one.

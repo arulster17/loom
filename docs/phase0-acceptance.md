@@ -63,7 +63,7 @@ uv run pytest -q -n auto
 | D3 | Workload profiles | **met** as profiles; 4 of 10 have run on a GPU |
 | D4 | Quality gate with pinned eval subsets per model | **met**; the long-context, MMLU-Pro and code tasks have never run on a GPU |
 | D5 | Provenance in Postgres + CSV export | **met**; the real results live in SQLite, not Postgres |
-| D6 | Model A leaderboard: vLLM vs SGLang, one GPU type, AWS | **changed**: RunPod 1x L40S (report in `reports/8b-engines-v1`) |
+| D6 | Model A leaderboard: vLLM vs SGLang, one GPU type, AWS | **changed**: engines compared on RunPod 1x L40S (`reports/8b-engines-v1`); the AWS g6e.xlarge leaderboard ran 2026-10-11 (95cde129, `reports/8b-aws-g6e-v1`), vLLM only |
 | D7 | Model B leaderboard: one tensor-parallel config | **changed**: RunPod 2x H100 SXM, TP=2 |
 | D8 | Public results page + waitlist | **partly**: site built, not published; no waitlist backend |
 | D9 | Docs | **met** |
@@ -544,11 +544,13 @@ LOOM_TEST_DATABASE_URL=postgresql+psycopg://loom:loom@localhost:5432/loom uv run
 ### D6. Model A leaderboard: vLLM vs SGLang, one GPU type, AWS
 
 **Status: changed** (PLAN.md decision, 2026-10-05: RunPod Secure Cloud, because the AWS
-GPU spot quota is 0). It ran on RunPod Secure 1x L40S, the GPU in AWS g6e.xlarge. An
-AWS g6e.xlarge run is being quoted now. The spec `bench/experiments/qwen3-8b-vllm-vs-sglang.yaml`
-exists, and the AWS quota increase is still pending.
+GPU spot quota is 0). The vLLM-vs-SGLang comparison ran on RunPod Secure 1x L40S, the GPU
+in AWS g6e.xlarge. A Model A leaderboard on AWS itself ran on 2026-10-10/11 on one
+g6e.xlarge on-demand host, with vLLM only (BF16 and fp8-kv8; SGLang was not re-run on
+AWS). The spot quota is still 0; the on-demand G/VT quota (4 vCPU) fits that one host.
+The user decides whether this meets D6 (open item 4).
 
-Evidence:
+Evidence, RunPod (engines):
 
 - Load sweep 565b8d3f (2026-10-07, $5.70; SGLang's eval failed in that run). Quality-only
   reruns b1b904dc (1 pass, $0.51) and b03b3c52 (3 passes per engine, $1.13).
@@ -570,6 +572,39 @@ for f in md csv equal_load.csv competitiveness.csv html; do
   diff -q reports/8b-engines-v1/leaderboard.$f $ACC/8b-engines/leaderboard.$f && echo identical
 done
 #   identical (x5)
+```
+
+Evidence, AWS (`qwen3-8b-aws-g6e`, 95cde129, 2026-10-10 22:50 to 2026-10-11 02:14 UTC):
+
+- Smoke first. `aws-smoke-g6e` 80ff5648 passed ($1.67) after a7bc3123 ($0.58) found a
+  bug: the client container's model mount left tokenizer.json dangling (fixed in
+  `aws_ec2`, [aws-setup.md](aws-setup.md#load-and-eval-jobs-on-the-host)). Three more
+  attempts found no on-demand capacity in any AZ and launched nothing ($0).
+- Run: exit 0, $6.39 (DB), 3.39 h of a 6.5 h TTL, 30 of 30 load runs, 3 phase0-strict
+  passes per cell, one gate. The runner terminated the host. Afterwards no Loom-managed
+  instance or volume remained, and `bench reap --dry-run` was clean. AMI
+  ami-028357be7d5b15c53 (DLAMI, driver 595.91.07, CUDA 13.2), us-east-1c.
+- Leaderboard at the SLO, $1.8829/h, both trusted: bf16 2.213 req/s, $0.1765 per 1M
+  blended. fp8-kv8 5.239 req/s, $0.0799, but its gate against BF16 **fails**: ifeval
+  −2.03 pts [−4.37, +0.25] is a point drop beyond the 2-pt margin, and gsm8k is
+  inconclusive. So BF16 is the only AWS row, as on RunPod.
+- Cross-check against RunPod 7a8237d0: both searches visited the same loads. At all 10
+  matched (cell, load) points every latency metric is within normal variance, and GPU
+  utilisation is the same. `bench compare` exits 6 only because the config hashes
+  differ (the cloud is part of the hash).
+- Details: [benchmark-lab.md](benchmark-lab.md#qwen3-8b-on-aws-g6exlarge-result-95cde129-2026-10-11).
+  Report: [reports/8b-aws-g6e-v1](../reports/8b-aws-g6e-v1/leaderboard.md), regenerated
+  identically by:
+
+```bash
+uv run bench report --db $REAL --out $ACC/8b-aws -e 95cde129
+for f in md csv equal_load.csv competitiveness.csv html; do
+  diff -q reports/8b-aws-g6e-v1/leaderboard.$f $ACC/8b-aws/leaderboard.$f && echo identical
+done
+#   identical (x5)
+uv run bench compare 7a8237d0 95cde129 --match-by cell_key --db $REAL; echo "exit=$?"
+#   Verdict: outside normal variance (0 metrics outside; 10 load points matched; 8 unmatched)
+#   exit=6: every matched point is flagged only for "Config hash differs"
 ```
 
 ### D7. Model B leaderboard: one tensor-parallel config
@@ -752,9 +787,10 @@ These are either not met or wait on a decision from you:
    SLO.
 3. **8B winner (P1/P2).** Accept BF16 as the 8B row, or approve a quality-only rerun to
    settle fp8-kv8's inconclusive gate (it is about 2.2x cheaper on chat if it passes).
-4. **Model A on AWS (D6).** The brief says AWS; it ran on RunPod (same GPU). Accept the
-   change, or approve the g6e.xlarge run being quoted. The AWS GPU quota increase is
-   still pending.
+4. **Model A on AWS (D6).** The AWS g6e.xlarge leaderboard ran (95cde129, $6.39): BF16
+   on vLLM. It matches RunPod's latency at equal load, and fp8-kv8's gate failed on
+   ifeval. The engine comparison (vLLM vs SGLang) is RunPod-only. Accept that as D6, or
+   ask for SGLang on AWS too.
 5. **Reproduce on real hardware (A1).** `bench reproduce` has only run on the mock.
    Accept the mock test plus the cross-pod comparison in A1, or approve one paid
    reproduce of a stored GPU run (one cold start plus one load point).

@@ -241,7 +241,7 @@ a host, is planned and capped like any run), and compares: exit 0 within normal 
 
 Snapshots publish experiment specs and provenance in full: keep secrets out of them.
 
-## 7. The Qwen3-8B g6e.xlarge on-demand run (proposed 2026-10-10)
+## 7. The Qwen3-8B g6e.xlarge on-demand run (ran 2026-10-10/11)
 
 `aws-smoke-g6e` then `qwen3-8b-aws-g6e`: one g6e.xlarge on-demand host each, the first
 GPU runs on this path ([benchmark-lab.md](benchmark-lab.md#qwen3-8b-on-aws-g6exlarge-proposed)
@@ -298,6 +298,24 @@ caffeinate -i uv run bench run bench/experiments/qwen3-8b-aws-g6e.yaml --out res
 uv run bench compare 7a8237d0-9917-47e7-b93e-8cb0230e0059 <aws id> --match-by cell_key
 uv run bench report -e <aws id>
 ```
+
+**As run (2026-10-10/11).**
+
+- **Smokes:** a7bc3123 ($0.58) found the client-mount bug (load jobs could not open
+  tokenizer.json, [aws-setup.md](aws-setup.md#load-and-eval-jobs-on-the-host)).
+  80ff5648 ($1.67) passed every item above.
+- **Real run:** 95cde129, $6.39, exit 0
+  ([result](benchmark-lab.md#qwen3-8b-on-aws-g6exlarge-result-95cde129-2026-10-11)).
+- **Capacity:** on-demand capacity was the operational issue. Four launch attempts got
+  `InsufficientInstanceCapacity` in every g6e AZ before any host existed (exit 1, $0, a
+  `failed` experiment row each). A retry 1-11 min later got a host each time, so retry
+  that failure (and only it) every 10 min rather than giving up. A
+  `VcpuLimitExceeded` instead means the previous host is still shutting down: wait until
+  it is `terminated`.
+- **Spend:** Cost Explorer is not enabled for the CLI user (`AccessDenied`). Check AWS-side
+  spend from the instance's launch and stop times, or in the console's Billing pages.
+- **Never edit the checkout a run is using:** the host scripts are read from disk at
+  each step. An edit mid-run broke a7bc3123's last eval.
 
 ## 8. Tearing down the whole stack
 
