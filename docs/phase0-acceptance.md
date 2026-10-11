@@ -760,13 +760,15 @@ applies:
 
 - A config that **fails** the gate is never ranked or quoted
   (`test_quality_e2e.py::test_report_ranks_the_gate_failed_config_last`).
-- A config whose gate is **inconclusive** is ranked but marked, and is not quoted while a
-  verified config exists. On chat-sharegpt, fp8-kv8 is cheapest ($0.0467 [0.0418, 0.0522]
+- A config whose gate is **inconclusive** is listed with status "quality not verified"
+  and the reason, but not ranked and never quoted (changed 2026-10-11; it used to be
+  ranked and marked). On chat-sharegpt, fp8-kv8 is cheapest ($0.0467 [0.0418, 0.0522]
   blended, 5.239 req/s against BF16's 2.213 req/s and $0.1032). Its gate is inconclusive
-  (gsm8k's CI crosses the 1-point margin), so the Qwen3-8B section quotes BF16.
+  (gsm8k's CI crosses the 1-point margin), so BF16 is rank 1 and quoted.
 - Reading note: the FP8 rows sit under their own model, "RedHatAI/Qwen3-8B-FP8-dynamic".
-  Within that section none is verified, so the summary quotes the rank-1 row (fp8-kv8)
-  and labels its quality "inconclusive". It is not a gate-verified figure.
+  None is verified there, so that section ranks and quotes nothing and says why
+  (`test_site_ranking.py`, `test_summary.py::test_inconclusive_candidate_is_not_ranked_and_not_quoted`).
+  The committed reports in `reports/` predate this rule; regenerate them to see it.
 
 Sweep and random search over a declared grid: `sweep:` and `sample:` in the experiment
 YAML ([benchmark-lab.md](benchmark-lab.md#experiment-yaml)). Bayesian optimization and the
