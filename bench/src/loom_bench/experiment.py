@@ -466,11 +466,10 @@ class Experiment(_Strict):
             and self.quality.baseline_variant not in names
         ):
             raise ValueError(f"quality.baseline_variant {self.quality.baseline_variant!r} unknown")
-        if self.quality is not None and self.quality.baseline is not None and self.smoke:
-            raise ValueError(
-                "a smoke caps its eval items (quality.limit), which never pair with a stored "
-                "full-size baseline: use baseline_variant"
-            )
+        # A smoke may gate against a stored baseline too, but only one evaluated at its own
+        # item limit (an earlier smoke's): `runner.load_stored_baseline` refuses any task
+        # whose stored item count differs from the planned one, so a capped smoke never
+        # pairs with a full-size baseline, nor a real run with a smoke's.
         if self.quality is not None and self.quality.limit is not None and not self.smoke:
             raise ValueError("quality.limit is for smoke experiments only (set smoke: true)")
         is_mock = self.provider.kind == "mock"

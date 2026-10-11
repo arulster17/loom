@@ -250,3 +250,46 @@ def test_compare_across_clouds_by_cell_key(db):
     slow = invoke("compare", "7a8237d0", str(slow_id), "--match-by", "cell_key", "--db", db)
     assert slow.exit_code == EXIT_MISMATCH, slow.output
     assert "outside normal variance" in text(slow)
+
+
+def test_compare_one_engine_cell_against_another_experiments_engine(db):
+    """Like `bench compare 95cde129 <sglang run> --match-by workload --cell-a bf16`: the
+    vLLM run has two chat sweeps (bf16, fp8-kv8), the SGLang run one; keeping A's bf16
+    pairs the two engines' sweeps on the workload, at the loads both ran."""
+    vllm_id = uuid.UUID("95cde129-e626-4eda-bad6-1421ed4d8a7b")
+    sglang_id = uuid.UUID(int=7)
+    add_experiment(
+        db,
+        vllm_id,
+        [
+            *make_runs("bf16", experiment_id=vllm_id),
+            *make_runs("fp8-kv8", quantization="fp8", experiment_id=vllm_id),
+        ],
+    )
+    add_experiment(db, sglang_id, make_runs("sglang", engine="sglang", experiment_id=sglang_id))
+    both = invoke("compare", "95cde129", str(sglang_id), "--match-by", "workload", "--db", db)
+    assert both.exit_code == EXIT_INVALID, both.output
+    assert "cannot pair the sweeps" in text(both) and "--cell-a" in text(both)
+    assert "Traceback" not in both.output
+
+    one = invoke(
+        "compare",
+        "95cde129",
+        str(sglang_id),
+        "--match-by",
+        "workload",
+        "--cell-a",
+        "bf16",
+        "--db",
+        db,
+    )
+    assert one.exit_code == EXIT_OK, one.output
+    out = text(one)
+    assert "within normal variance (4 load points matched; configs differ in 1 matched" in out
+    assert "engine vllm → sglang" in out
+    assert "fp8-kv8" not in out
+
+    unknown = invoke("compare", "95cde129", str(sglang_id), "--cell-a", "vllm", "--db", db)
+    assert unknown.exit_code == EXIT_INVALID, unknown.output
+    assert "--cell-a: 95cde129-e626-4eda-bad6-1421ed4d8a7b has no cell vllm" in text(unknown)
+    assert "its cells: bf16, fp8-kv8" in text(unknown)

@@ -79,10 +79,17 @@ def kind_of(script: str) -> str:
     return "stop_engine"
 
 
+def is_sglang(script: str) -> bool:
+    """Whether the rendered ENGINE_CMD runs SGLang (`python3 -m sglang.launch_server`)."""
+    return "sglang.launch_server" in array(script, "ENGINE_CMD")
+
+
 def engine_checkpoint(script: str) -> tuple[str, str]:
+    """(repo, revision) the rendered ENGINE_CMD loads: vLLM `serve <repo>`, SGLang
+    `--model-path <repo>`, both `--revision <rev>`."""
     cmd = array(script, "ENGINE_CMD")
-    i = cmd.index("serve")
-    return cmd[i + 1], cmd[cmd.index("--revision") + 1]
+    repo = cmd[cmd.index("--model-path") + 1] if is_sglang(script) else cmd[cmd.index("serve") + 1]
+    return repo, cmd[cmd.index("--revision") + 1]
 
 
 def write_hub_snapshot(host_root: Path, weights_dir: str, repo: str, rev: str) -> None:
@@ -179,11 +186,15 @@ class HostSim(FakeSsm):
             write_hub_snapshot(self.root / instance, var(script, "WEIGHTS_DIR"), repo, rev)
         if engine_checkpoint(script) not in cache:
             return 1, "", f"OfflineModeIsEnabled: the engine's {engine_checkpoint(script)}"
+        # Qwen3's byte-level BPE splits multi-byte characters across tokens; SGLang
+        # reports every completions text_offset as -1 and renders each token alone
+        # (565b8d3f), so divergence scored on SGLang runs as it does for real.
         cfg = MockConfig(
             **{
                 "time_scale": 0.01,
                 "models": [var(script, "SERVED_MODEL")],
                 "logprob_jitter": 0.25,
+                "text_offsets": not is_sglang(script),
                 "byte_level": True,
                 **self.mock,
             }

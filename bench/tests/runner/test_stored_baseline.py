@@ -143,10 +143,79 @@ def test_quality_takes_exactly_one_baseline():
         mock_experiment(quality={"suite": "x"})
     with pytest.raises(ValidationError, match="config_hash"):
         mock_experiment(quality={"suite": "x", "baseline": {**ref, "config_hash": "eff0371d"}})
-    with pytest.raises(ValidationError, match="smoke"):
-        mock_experiment(smoke=True, quality={"suite": "x", "baseline": ref, "limit": 2})
     exp = mock_experiment(quality={"suite": "x", "baseline": ref})
     assert exp.quality is not None and exp.quality.baseline_variant is None
+    # A smoke may name a stored baseline; the plan checks that its items pair.
+    smoke = mock_experiment(smoke=True, quality={"suite": "x", "baseline": ref, "limit": 2})
+    assert smoke.quality is not None and smoke.quality.baseline is not None
+
+
+SMOKE_LIMIT = 6
+
+
+@pytest.fixture(scope="module")
+def stored_both(tmp_path_factory):
+    """The same baseline config stored twice in a DB of its own (so these runs never meet
+    the other tests' by config hash): full size, and at a smoke's `quality.limit`, as
+    95cde129 and aws-smoke-g6e 80ff5648 stored the vLLM BF16 evaluation the SGLang run and
+    its smoke are gated against."""
+    tmp = tmp_path_factory.mktemp("stored-smoke")
+    ctx = _ctx(tmp)
+    suite = write_yaml(tmp / "suite.yaml", SUITE)
+    refs = []
+    for over in ({}, {"smoke": True}):
+        quality = {"suite": str(suite), "subset": "then", "baseline_variant": "base"}
+        if over:
+            quality["limit"] = SMOKE_LIMIT
+        base = mock_experiment(
+            name="bf16-like",
+            variants=[{"name": "base", "mock": JITTER}],
+            workloads=[],
+            quality=quality,
+            **over,
+        )
+        ctx.provider = MockProvider(hourly_micros=1_000_000)
+        outcome = asyncio.run(run_experiment(base, ctx))
+        assert outcome.status.value == "completed", outcome.reason
+        refs.append(_baseline_ref(ctx, outcome.experiment_id))
+    full, smoke = refs
+    assert full["config_hash"] == smoke["config_hash"]
+    return ctx, suite, full, smoke
+
+
+def _smoke_candidate(suite: Path, baseline: dict[str, str], limit: int = SMOKE_LIMIT):
+    exp = _candidate(suite, baseline, subset="then", smoke=True)
+    doc = exp.model_dump(mode="json")
+    doc["quality"]["limit"] = limit
+    return type(exp).model_validate(doc)
+
+
+def test_a_smoke_pairs_with_a_baseline_stored_at_its_own_limit(stored_both):
+    ctx, suite, _, stored_smoke = stored_both
+    smoke = _smoke_candidate(suite, stored_smoke)
+    _, plan = plan_experiment(smoke, ctx)
+    assert plan.ok, plan.refusals
+    provider = RecordingProvider()
+    ctx.provider = provider
+    outcome = asyncio.run(run_experiment(smoke, ctx))
+    assert outcome.status.value == "completed", outcome.reason
+    assert [j.divergence for j in provider.eval_jobs] == ["score", "score"]
+    for job in provider.eval_jobs:
+        assert job.reference is not None
+        assert job.reference.config_hash == stored_smoke["config_hash"]
+        assert len(job.reference.prompts) == SMOKE_LIMIT
+    label = f"{stored_smoke['experiment'][:8]}/{stored_smoke['config_hash'][:12]}"
+    assert {g.baseline for g in outcome.gates} == {label}
+
+
+def test_capped_and_full_size_sides_never_pair(stored_both):
+    ctx, suite, full, stored_smoke = stored_both
+    # A smoke against a full-size baseline, and a full run against a smoke's.
+    assert "would not pair" in _refusal(ctx, _smoke_candidate(suite, full))
+    assert "would not pair" in _refusal(ctx, _candidate(suite, stored_smoke, subset="then"))
+    # Another limit does not pair either.
+    other = _smoke_candidate(suite, stored_smoke, limit=SMOKE_LIMIT - 2)
+    assert "would not pair" in _refusal(ctx, other)
 
 
 def test_every_cell_is_scored_on_the_stored_reference(gated):
