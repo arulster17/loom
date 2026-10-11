@@ -4,6 +4,7 @@
 
 - [PLAN.md](PLAN.md): decisions, stack, phase plan, Postgres schemas, registry schema, open questions.
 - [architecture.md](architecture.md): Phase 0 components, data flow, module contracts, where each measurement lives.
+- [phase1-runpod-plan.md](phase1-runpod-plan.md): Phase 1 serving on RunPod (draft for approval): where things run, gateway-to-pod security, replicas, costs, milestones.
 - [local-dev.md](local-dev.md): setup, tests, the mock backend, mock experiments end to end, lint, CI.
 
 ## Benchmark Lab

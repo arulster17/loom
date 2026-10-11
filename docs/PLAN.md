@@ -105,6 +105,8 @@ waitlist_signups (id uuid, email citext UNIQUE, source text, created_at timestam
 
 ### Phase 1 (platform) — accepted 2026-10-08
 
+How Phase 1 serves from RunPod (control plane, pod security, replicas, costs, milestones; draft for approval): [phase1-runpod-plan.md](phase1-runpod-plan.md).
+
 Billing and ledger design are expensive to reverse; this draft was reviewed and accepted at the start of Phase 1.
 
 ```sql
