@@ -272,6 +272,20 @@ config hash. Exit 0 within normal variance, 6 outside, or when the reproduction'
 hash differs from the original's (nothing matches, so it is not a reproduction). A `provenance.json` path works too; the spec is read from the
 experiment's `spec.json` next to it (or `--spec`).
 
+The reproduction has one repetition, so Welch's test (which needs two on each side) does
+not apply, and every metric must land within `--tolerance` (25%) of the original
+repetitions' mean. Pick a source point whose repetitions agree well inside that. The
+budget is not part of the config hash, so `--spec` can be the stored spec with only a
+lower `budget` (cap and pod TTL) without changing what is reproduced.
+
+On 2026-10-11 this reproduced a RunPod run: aa7af8ed (config sweep 7a8237d0, bf16,
+chat-sharegpt at its 2.449 req/s goodput load) was re-run as `940b437e` on a fresh Secure
+1x L40S pod, in a different location with a different driver. Same config hash, every
+metric within normal variance (largest change TTFT p50 +9.6%; TPOT p95 +0.1%), exit 0,
+$0.23 ([phase0-acceptance.md](phase0-acceptance.md#a1-reproduce-from-a-provenance-record)).
+Before paying, `bench/tests/runpod/test_runpod_reproduce.py` ran the same reproduce on
+the pod simulator from that run's stored rows.
+
 ## Reading the reports
 
 A leaderboard reads top to bottom: summary, boards, competitiveness, methodology.

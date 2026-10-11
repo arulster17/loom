@@ -13,7 +13,8 @@ deliverable, plus the §7.7 outputs and the §7.5 optimizer, with:
 
 Snapshot: 2026-10-10, commit `efaf62a`. Every command below was run on that commit; the
 expected output shown (abbreviated) is what it printed. Nothing on this page launches a
-RunPod pod or an EC2 instance. Writing this page found three defects, fixed the same day:
+RunPod pod or an EC2 instance, except the paid A1 reproduce (marked paid; it ran on
+2026-10-11 at commit `627a727`). Writing this page found three defects, fixed the same day:
 `bench compare` counted unmatched cells against its verdict (A1), ids had to be given in
 full (A3), and `bench site export` defaulted to the newest experiment of each name (D8).
 The D6 report is now committed. The commands in A1, A3, D6 and D8 were re-run after
@@ -53,7 +54,7 @@ uv run pytest -q -n auto
 
 | # | Item | Status |
 |---|---|---|
-| A1 | One command reproduces a benchmark and its report from a provenance record | **partly**: works on the mock; never run on a GPU |
+| A1 | One command reproduces a benchmark and its report from a provenance record | **met**: a RunPod L40S run reproduced within normal variance (940b437e, $0.23) |
 | A2 | The quality gate blocks a deliberately broken config, in a test | **met** |
 | A3 | The report states $/1M tokens at SLO with confidence intervals | **met** |
 | A4 | A hard budget abort works | **met** on the mock; never triggered on a paid run |
@@ -80,9 +81,12 @@ uv run pytest -q -n auto
 > "one command reproduces a benchmark and report from a provenance record within normal
 > variance"
 
-**Status: partly.** `bench reproduce` works from a run id or from a `provenance.json`, and
-it reports whether the re-run is within normal variance. It has only been run on the
-mock, never on a GPU run.
+**Status: met.** `bench reproduce` works from a run id or from a `provenance.json`, and
+it reports whether the re-run is within normal variance. On 2026-10-11 it reproduced a
+stored GPU run on RunPod: run aa7af8ed of the config sweep 7a8237d0 (bf16,
+chat-sharegpt at 2.449 req/s, repetition 0) was re-run as experiment
+`940b437e` (run `84ca206b`) on a fresh Secure 1x L40S pod, with the same config hash,
+and every metric came out within normal variance (exit 0). It cost $0.23.
 
 Evidence:
 
@@ -96,11 +100,20 @@ Evidence:
   (by run id and by `provenance.json`), and
   `bench/tests/runner/test_e2e.py::test_reproduce_reports_a_real_difference` (exit 6
   when something really changed).
-- On real hardware: the results DB has no `--reproduce` experiment. The closest real
-  evidence is the same BF16 config hash (`7a203a3f…`) measured on two pods, two to three days
-  apart: 565b8d3f (2026-10-07) and the config sweep 7a8237d0 (2026-10-09/10). At their one
-  shared point (fixed-1k-1k, 1 req/s), every metric is within normal variance (command
-  below).
+- On RunPod, offline first: `bench/tests/runpod/test_runpod_reproduce.py` runs the same
+  reproduce on the runpod provider against FakeRunpod and the pod simulator. Its inputs
+  are the source point's stored rows (fixture `bench/tests/runpod/fixtures/reproduce_7a8237d0/`,
+  taken from the results DB). It checks that today's code rebuilds the cell to the
+  stored config hash, and that the pod request (Secure, `NVIDIA L40S` x1, 80 GB, CUDA
+  13.0, image by digest), the engine command, the dataset pin and the load job (seed,
+  rate, 255 s window, 45 s warmup) are the original's. It also checks that the new run is
+  recorded under the same hash and compared by it.
+- On RunPod, paid: experiment `940b437e-9d3e-4f4e-9867-bbe3382d0dfc`
+  (`qwen3-8b-config-sweep-runpod--reproduce`), run `84ca206b-80dd-47d2-b545-1fb4eb9e7b6f`.
+  Details, the command and its output are below.
+- Same config on two pods, earlier: 565b8d3f (2026-10-07) and the config sweep 7a8237d0
+  (2026-10-09/10) share the BF16 config hash `7a203a3f…`. At their one shared point
+  (fixed-1k-1k, 1 req/s), every metric is within normal variance (command below).
 
 Check it yourself (free, about 4 minutes). This uses a one-config mock experiment that runs
 the simulated GPU in real time (30 ms decode steps, 30 s windows, 3 repetitions):
@@ -176,9 +189,86 @@ counted them and exited 6 here). Exit codes: 0 within normal variance, 6 when a 
 metric is outside, 2 when nothing matched at all (try `--match-by cell_key` or
 `workload`). Test: `bench/tests/runner/test_cli_ids.py::test_compare_exit_judges_only_the_cells_both_ran`.
 
-Reproducing a GPU run is paid. `bench reproduce <run id> --db $REAL` launches a pod
-straight away: it has no `--dry-run`, although it does refuse to run over the caps. The
-cost is one cold start plus one load point.
+**The GPU reproduction (2026-10-11, paid, about $0.25).** Reproducing a GPU run is paid.
+`bench reproduce` launches a pod straight away: it has no `--dry-run`, although it does
+refuse to run over the caps. The cost is one cold start plus one load point.
+
+Why this source point:
+
+- It is bf16's goodput load on chat-sharegpt in the config sweep. That load sets the
+  sweep's headline cost at SLO, on the realistic workload, so reproducing it reproduces
+  a number the report quotes.
+- Its three repetitions are close: at most 11.4% from their mean on every headline metric.
+  `compare` judges a one-repetition reproduction against ±25% of the original mean,
+  because Welch's test needs two repetitions on each side. So a real shift would show,
+  and noise alone would not fail it.
+- It sits near the SLO (TPOT p95 42 to 49 ms against 50). A host that decodes slower by
+  more than the tolerance would fail the check.
+
+The busier 3.0 and 4.5 req/s points were not chosen. Their spread is up to 158%
+(TTFT p50 at 4.5), so they would pass or fail by chance.
+
+The command. `--spec` is the stored spec with only its budget lowered: a $2.50 cap and a
+60-minute pod TTL, instead of the sweep's $25 and 450 minutes. The budget is not part of
+the config hash, and the plain command (no `--spec`) plans and runs the same pod. It
+was lowered to cap this check's spend, both in the runner and in the pod's own TTL
+watchdog.
+
+```bash
+jq '.budget = {"max_spend": 2500000, "ttl_minutes": 60.0, "accrual_interval_s": 15.0}' \
+  results/7a8237d0-9917-47e7-b93e-8cb0230e0059/spec.json > $ACC/repro-spec.json
+LOOM_RUNPOD_BUCKET=<bench bucket> LOOM_RUNPOD_OWNER=<you> \
+  caffeinate -i uv run bench reproduce aa7af8ed --spec $ACC/repro-spec.json \
+  --db $REAL --out results; echo "exit=$?"
+#   WARNING git sha differs: original 8a4bdb15..., now 627a727a...
+#   bf16 / chat-sharegpt @ 2.44949 rep 0: p95 TTFT 350.4 ms, 794.5 out tok/s
+#   completed experiment 940b437e-9d3e-4f4e-9867-bbe3382d0dfc: 1 runs, spent $0.2274
+#   Verdict: within normal variance (1 load point matched)
+#   Matched by config_hash.
+#   bf16 vs bf16: chat-sharegpt @ 2.44949 req/s — within
+#   reproduced within normal variance
+#   exit=0
+uv run bench report -e 940b437e --db $REAL --out $ACC/repro-report
+#   wrote .../leaderboard.{md,html,csv,...}: bf16 chat-sharegpt, goodput ≥2.449 req/s,
+#   p95 TTFT 350 ms, p95 TPOT 44.7 ms, $0.1999 per 1M output (untrusted: 1 repetition)
+```
+
+`bench plan` figures for it: 18.3 min, $0.34 estimated, $1.10 worst case (pod to TTL),
+$2.50 effective cap.
+
+Original (mean of 3 repetitions, 95% CI) against the reproduction (1 repetition):
+
+| Metric | Original | Reproduction | Δ |
+|---|---|---|---|
+| TTFT p50 | 178.8 ms [151.1, 211.7] | 195.9 ms | +9.6% |
+| TTFT p95 | 331.7 ms [321.3, 342.4] | 350.4 ms | +5.7% |
+| TPOT p50 | 36.4 ms [32.1, 41.3] | 38.0 ms | +4.2% |
+| TPOT p95 | 44.6 ms [36.5, 54.6] | 44.7 ms | +0.1% |
+| E2E p95 | 26,991 ms [21,079, 34,561] | 26,893 ms | −0.4% |
+| request rate | 2.436 req/s | 2.429 req/s | −0.3% |
+| output tok/s | 786.9 [717.9, 862.4] | 794.5 | +1.0% |
+| error rate | 0 | 0 | 0 |
+
+Every metric is within tolerance (largest change: TTFT p50, +9.6%). The equal-load
+table also finds no significant difference on any latency metric.
+
+How the two pods differed:
+
+| | Original | Reproduction |
+|---|---|---|
+| Where | location SE (RunPod named no datacenter) | datacenter US-MO-1 |
+| NVIDIA driver | 580.126.09 | 580.178.04 |
+| Engine state before the point | warm, after other loads on the same pod | first job on a fresh engine |
+| Code | 8a4bdb1 | 627a727 |
+
+The resolved config is identical, and so are the engine, model, load (seed 827133313)
+and workload profile hash. The pod became healthy 421 s after it was created (image
+pulled at 233 s).
+
+Spend: $0.2274 recorded in the DB (52 accruals). The RunPod balance fell $0.19
+($55.95 to $55.77) with no other pods on the account. Teardown: the runner terminated
+the pod (`torn_down` event); the account query showed `pods: []` and
+`networkVolumes: []`; `bench reap --dry-run` printed "no expired resources".
 
 ### A2. The quality gate blocks a broken config
 
@@ -808,9 +898,9 @@ These are either not met or wait on a decision from you:
    on vLLM. It matches RunPod's latency at equal load, and fp8-kv8's gate failed on
    ifeval. The engine comparison (vLLM vs SGLang) is RunPod-only. Accept that as D6, or
    ask for SGLang on AWS too.
-5. **Reproduce on real hardware (A1).** `bench reproduce` has only run on the mock.
-   Accept the mock test plus the cross-pod comparison in A1, or approve one paid
-   reproduce of a stored GPU run (one cold start plus one load point).
+5. **Reproduce on real hardware (A1).** Done 2026-10-11: one paid reproduce of 7a8237d0's
+   bf16 chat-sharegpt goodput point on RunPod (940b437e, $0.23) came out within normal
+   variance. Nothing to decide.
 6. **Scheduled RunPod reaper (A5).** Today the RunPod backstops are the in-pod watchdog
    and a manual `bench reap`. A pod stuck before its container starts has neither. A
    sweep in the AWS reaper Lambda with the RunPod key is listed in PLAN.md as a
