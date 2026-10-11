@@ -4,13 +4,13 @@
 {% block content %}
 <header class="page-head">
 <h1>The harness</h1>
-<p class="lede">Every number on this site is produced by the Loom Benchmark Lab, which is open source under the Apache-2.0 license. You can run it without a GPU against a simulated one, and rerun any published result from its provenance.</p>
+<p class="lede">Every number on this site comes from the Loom Benchmark Lab, open source under Apache-2.0. Run it without a GPU against a simulated one, or rerun any published result.</p>
 <p><a class="button" href="{{ config.repo }}">Source on GitHub</a></p>
 </header>
 
 <section aria-labelledby="quickstart">
 <h2 id="quickstart">Quickstart with the mock backend</h2>
-<p>The mock is an OpenAI-compatible streaming server with a simulated batching GPU: queueing, prefill and decode costs, prefix caching and Prometheus metrics. It needs Python 3.12+ and <code>uv</code>, and no GPU.</p>
+<p>The mock is an OpenAI-compatible streaming server that simulates a batching GPU: queueing, prefill and decode costs, prefix caching and Prometheus metrics. You need Python 3.12+ and <code>uv</code>; no GPU.</p>
 <ol class="steps">
 <li>
 <p>Clone the repository and install the workspace.</p>
@@ -19,7 +19,7 @@ cd loom
 uv sync</code></pre>
 </li>
 <li>
-<p>Run the test suite. It covers the mock backend, load generator, metrics, SLO, cost and report code, and needs no GPU; tests that need Postgres are skipped unless <code>LOOM_TEST_DATABASE_URL</code> is set.</p>
+<p>Run the tests. No GPU needed; tests that need Postgres are skipped unless <code>LOOM_TEST_DATABASE_URL</code> is set.</p>
 <pre class="code" tabindex="0"><code>uv run pytest</code></pre>
 </li>
 <li>
@@ -40,7 +40,12 @@ curl -N http://127.0.0.1:8000/v1/chat/completions \
 
 <section aria-labelledby="reproduce">
 <h2 id="reproduce">Reproducing a published result</h2>
-<p>Each config on a model page lists its runs, links each run's provenance file and gives a <code>bench reproduce &lt;run id&gt;</code> command. The provenance records everything the run depended on: the git commit, engine version and image digest, model revision, GPU, CUDA and driver versions, cloud, region and market, workload profile and dataset, load mode and seed. Reproducing reruns that configuration and compares the new numbers with the original, reporting whether the differences are within normal run-to-run variance. Cloud runs need your own cloud account and pay its prices.</p>
+<ul class="short">
+<li>Each config on a model page lists its runs, links each run's provenance file, and gives a <code>bench reproduce &lt;run id&gt;</code> command.</li>
+<li>The provenance records everything the run depended on: the git commit, engine version and image digest, model revision, GPU, CUDA and driver versions, cloud, region and market, workload profile and dataset, load mode and seed.</li>
+<li>Reproducing reruns that configuration and reports whether the new numbers are within normal run-to-run variance of the original.</li>
+<li>Cloud runs need your own cloud account and pay its prices.</li>
+</ul>
 </section>
 
 <section aria-labelledby="layout">
