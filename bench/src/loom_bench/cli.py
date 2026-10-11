@@ -699,6 +699,14 @@ def compare_cmd(
         typer.Option(help="How sweeps are paired across A and B."),
     ] = "config_hash",
     tolerance: Annotated[float, typer.Option(help="Relative difference accepted.")] = 0.10,
+    cell_a: Annotated[
+        list[str] | None,
+        typer.Option("--cell-a", help="Only these cells of A (cell key; repeatable)."),
+    ] = None,
+    cell_b: Annotated[
+        list[str] | None,
+        typer.Option("--cell-b", help="Only these cells of B (cell key; repeatable)."),
+    ] = None,
     out: Annotated[Path | None, typer.Option("--out", help="Write compare.md/json here.")] = None,
     db: DbOpt = None,
 ) -> None:
@@ -707,6 +715,8 @@ def compare_cmd(
     Exit 0 when every matched metric is within normal variance, 6 when one is outside,
     2 when nothing matched. Cells or loads in only one experiment are listed, not judged,
     and so are config differences between paired sweeps (--match-by cell_key/workload).
+    --cell-a/--cell-b keep only some cells of a side, e.g. one engine's sweep of a
+    multi-cell experiment against another experiment's other engine, matched by workload.
     """
     from loom_bench.report import write_reports
     from loom_bench.report.compare import compare, render_json
@@ -717,12 +727,37 @@ def compare_cmd(
         id_a, id_b = (_experiment_ids(s, [ref])[0] for ref in (a, b))
         runs_a = repo.list_runs(s, experiment_id=id_a)
         runs_b = repo.list_runs(s, experiment_id=id_b)
+    for exp_id, runs, keep, label in (
+        (id_a, runs_a, cell_a, "--cell-a"),
+        (id_b, runs_b, cell_b, "--cell-b"),
+    ):
+        known = sorted({r.cell_key for r in runs if r.cell_key is not None})
+        unknown = sorted(set(keep or ()) - set(known))
+        if unknown:
+            err.print(
+                f"[red]{label}: {exp_id} has no cell {', '.join(unknown)}[/red] "
+                f"(its cells: {', '.join(known) or 'none'})"
+            )
+            raise typer.Exit(EXIT_INVALID)
+    if cell_a:
+        runs_a = [r for r in runs_a if r.cell_key in cell_a]
+    if cell_b:
+        runs_b = [r for r in runs_b if r.cell_key in cell_b]
     if not runs_a or not runs_b:
         err.print("[red]both experiments need runs")
         raise typer.Exit(EXIT_INVALID)
-    c = compare(
-        runs_a, runs_b, match_by=match_by, rel_tol=tolerance, label_a=str(id_a), label_b=str(id_b)
-    )
+    try:
+        c = compare(
+            runs_a,
+            runs_b,
+            match_by=match_by,
+            rel_tol=tolerance,
+            label_a=str(id_a),
+            label_b=str(id_b),
+        )
+    except ValueError as e:  # e.g. two sweeps of one side share a workload
+        err.print(f"[red]cannot pair the sweeps:[/red] {e} (keep one with --cell-a/--cell-b)")
+        raise typer.Exit(EXIT_INVALID) from None
     md = render_compare_markdown(c)
     console.print(Markdown(md))
     if out is not None:
