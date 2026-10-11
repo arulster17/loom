@@ -140,6 +140,7 @@ def make_runs(
     engine_args: dict[str, Any] | None = None,
     workload: str = "chat",
     repo: str = "Qwen/Qwen3-8B",
+    hardware: dict[str, Any] | None = None,  # added to the resolved config when given
 ) -> list[BenchRun]:
     args = engine_args if engine_args is not None else {"max_num_seqs": 256}
     recorded, basis = as_run(market, region)
@@ -155,6 +156,8 @@ def make_runs(
         "quantization": quantization,
         "engine_args": args,
     }
+    if hardware is not None:
+        config["hardware"] = hardware
     runs = []
     for load in loads:
         for rep in reps:

@@ -355,10 +355,15 @@ def render_reproduce(result: ReproduceOutcome) -> None:
         console.print("[yellow]no comparison: the original or the new run did not complete")
         return
     console.print(Markdown(render_compare_markdown(result.comparison)))
-    verdict = result.comparison.within_normal_variance
+    if result.comparison.verdict == "nothing_matched":
+        console.print(
+            "[bold red]NOT reproduced: the reproduction's config hash differs from the "
+            "original's, so no load point matched"
+        )
+        return
     console.print(
         "[bold green]reproduced within normal variance"
-        if verdict
+        if result.comparison.within_normal_variance
         else "[bold red]NOT reproduced: outside normal variance"
     )
 
@@ -700,7 +705,8 @@ def compare_cmd(
     """Per-metric deltas between two experiments, judged on the cells and loads both ran.
 
     Exit 0 when every matched metric is within normal variance, 6 when one is outside,
-    2 when nothing matched. Cells or loads in only one experiment are listed, not judged.
+    2 when nothing matched. Cells or loads in only one experiment are listed, not judged,
+    and so are config differences between paired sweeps (--match-by cell_key/workload).
     """
     from loom_bench.report import write_reports
     from loom_bench.report.compare import compare, render_json

@@ -218,3 +218,35 @@ def test_compare_exit_judges_only_the_cells_both_ran(db):
     assert "nothing to compare" in text(nothing)
     assert "Traceback" not in nothing.output
     assert shared == TWIN_A
+
+
+def test_compare_across_clouds_by_cell_key(db):
+    """Like `bench compare 7a8237d0 95cde129 --match-by cell_key`: the same cells on
+    RunPod and AWS. The hashes differ because hardware is part of the config; that is
+    listed, not judged, so the exit code follows the metrics."""
+    runpod = {"provider": "runpod", "cloud": "runpod", "instance_type": "l40s-x1"}
+    aws = {"provider": "aws_ec2", "cloud": "aws", "instance_type": "g6e.xlarge"}
+    aws_id = uuid.UUID("95cde129-e626-4eda-bad6-1421ed4d8a7b")
+    add_experiment(db, TWIN_A, make_runs("bf16", hardware=runpod, experiment_id=TWIN_A))
+    add_experiment(
+        db, aws_id, make_runs("bf16", hardware=aws, experiment_id=aws_id, latency_scale=1.03)
+    )
+    same = invoke("compare", "7a8237d0", "95cde129", "--match-by", "cell_key", "--db", db)
+    assert same.exit_code == EXIT_OK, same.output
+    out = text(same)
+    assert "within normal variance (4 load points matched; configs differ in 1 matched" in out
+    assert "hardware.cloud runpod → aws" in out
+    assert "hardware.instance_type l40s-x1 → g6e.xlarge" in out
+    assert "hardware.provider runpod → aws_ec2" in out
+    assert "OUTSIDE" not in out
+
+    by_hash = invoke("compare", "7a8237d0", "95cde129", "--db", db)
+    assert by_hash.exit_code == EXIT_INVALID, by_hash.output  # nothing pairs by hash
+
+    slow_id = uuid.UUID(int=6)
+    add_experiment(
+        db, slow_id, make_runs("bf16", hardware=aws, experiment_id=slow_id, latency_scale=1.8)
+    )
+    slow = invoke("compare", "7a8237d0", str(slow_id), "--match-by", "cell_key", "--db", db)
+    assert slow.exit_code == EXIT_MISMATCH, slow.output
+    assert "outside normal variance" in text(slow)

@@ -111,16 +111,103 @@ def test_error_rate_uses_absolute_tolerance():
     assert d.within_normal_variance
 
 
-def test_cell_key_match_requires_identical_config_hash(vllm_runs):
+def test_cell_key_match_judges_metrics_not_config_hash(vllm_runs):
     changed = make_runs("vllm-bf16", experiment_id=RERUN, engine_args={"max_num_seqs": 128})
     c = compare(vllm_runs, changed, match_by="cell_key")
     assert len(c.points) == 4
     assert not any(p.config_hash_match for p in c.points)
-    assert not c.within_normal_variance
     assert all(d.within_normal_variance for p in c.points for d in p.metrics)
-    assert c.verdict == "outside"  # matched cells with different configs
+    assert c.verdict == "within" and c.within_normal_variance  # the difference is listed
+    (diff,) = c.config_differences
+    assert [(ch.path, ch.a, ch.b) for ch in diff.changes] == [
+        ("engine_args.max_num_seqs", 256, 128)
+    ]
+    # Matching by config hash (what `bench reproduce` does) stays strict.
     by_hash = compare(vllm_runs, changed)
     assert not by_hash.points and by_hash.verdict == "nothing_matched"
+    assert not by_hash.within_normal_variance and not by_hash.config_differences
+
+
+RUNPOD = {
+    "provider": "runpod",
+    "cloud": "runpod",
+    "region": "secure",
+    "instance_type": "l40s-x1",
+    "gpu": "L40S",
+    "gpu_type_id": "NVIDIA L40S",
+    "disk_gb": 80,
+    "allowed_cuda_versions": ["13.0"],
+}
+AWS = {
+    "provider": "aws_ec2",
+    "cloud": "aws",
+    "region": "us-east-1",
+    "instance_type": "g6e.xlarge",
+    "gpu": "L40S",
+    "disk_gb": 200,
+}
+
+
+def test_same_cells_on_another_cloud(price_book):
+    """Like `bench compare 7a8237d0 95cde129 --match-by cell_key`: the same bf16 and
+    fp8-kv8 cells on a RunPod L40S and an AWS g6e.xlarge. Every config hash differs
+    (hardware is part of it) but no metric does: within, with the differences listed."""
+    other = uuid.UUID(int=7)
+
+    def side(hw, exp, scale=1.0):
+        return [
+            *make_runs("bf16", hardware=hw, experiment_id=exp, latency_scale=scale),
+            *make_runs(
+                "fp8-kv8",
+                quantization="fp8",
+                hardware=hw,
+                experiment_id=exp,
+                latency_scale=scale,
+            ),
+        ]
+
+    runpod, aws = side(RUNPOD, other), side(AWS, RERUN, 1.03)
+    for a, b in ((runpod, aws), (analyze(runpod, price_book), analyze(aws, price_book))):
+        c = compare(a, b, match_by="cell_key")
+        assert len(c.points) == 8
+        assert not any(p.config_hash_match for p in c.points)
+        assert c.verdict == "within" and c.within_normal_variance
+        assert all(p.within_normal_variance for p in c.points)
+        assert all(cfg.within_normal_variance for cfg in c.configs)
+        assert [d.name_a for d in c.config_differences] == ["bf16", "fp8-kv8"]
+        changes = {ch.path: (ch.a, ch.b) for ch in c.config_differences[0].changes}
+        assert changes == {
+            "hardware.allowed_cuda_versions": (["13.0"], None),
+            "hardware.cloud": ("runpod", "aws"),
+            "hardware.disk_gb": (80, 200),
+            "hardware.gpu_type_id": ("NVIDIA L40S", None),
+            "hardware.instance_type": ("l40s-x1", "g6e.xlarge"),
+            "hardware.provider": ("runpod", "aws_ec2"),
+            "hardware.region": ("secure", "us-east-1"),
+        }
+        md = render_markdown(c)
+        assert md.startswith(
+            "# Comparison: A vs B\n\n**Verdict: within normal variance** (8 load points matched"
+        )
+        assert "; configs differ in 2 matched sweeps, not judged)" in md
+        assert "## Config differences (not judged)" in md
+        assert (
+            "hardware.cloud runpod → aws; hardware.disk_gb 80 → 200; hardware.gpu_type_id "
+            "NVIDIA L40S → unset; hardware.instance_type l40s-x1 → g6e.xlarge; "
+            "hardware.provider runpod → aws_ec2; hardware.region secure → us-east-1" in md
+        )
+        assert "- bf16 vs bf16 (chat, open_loop), `" in md
+        assert "Config hashes must match exactly" not in md
+        assert "Config hash differs (not judged)" in md
+        assert json.loads(render_json(c))["config_differences"][1]["name_b"] == "fp8-kv8"
+
+    # A real latency difference across clouds is still outside.
+    slow = side(AWS, RERUN, 1.8)
+    c = compare(runpod, slow, match_by="cell_key")
+    assert c.verdict == "outside" and not c.within_normal_variance
+    assert "metrics outside" in render_markdown(c)
+    # And by config hash nothing pairs across clouds.
+    assert compare(runpod, aws).verdict == "nothing_matched"
 
 
 def test_two_configs_by_workload(vllm_runs, sglang_runs, price_book):
@@ -201,7 +288,8 @@ def test_render_markdown_and_json(vllm_runs, price_book):
     assert md.startswith("# Comparison: run 1 vs run 2\n\n**Verdict: outside normal variance**")
     assert "| Metric | A | B | Δ = B − A [CI] (rel) | Welch p | Verdict | Reason |" in md
     assert "## vllm-bf16 vs vllm-bf16: chat @ 2 req/s — OUTSIDE" in md
-    assert "Config hashes must match exactly." in md
+    assert "Sweeps are paired only when their config hashes are identical." in md
+    assert "## Config differences" not in md
     assert "| cost.output_per_mtok |" in md
     doc = json.loads(render_json(c))
     assert doc["within_normal_variance"] is False

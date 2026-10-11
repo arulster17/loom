@@ -1,9 +1,15 @@
 """Compare two experiments or two configs, load point by load point.
 
 Sweeps are matched by config hash (default: a rerun of the same config), cell key
-(the same matrix cell, whose config hash must also match), or workload alone (two
-different configs on the same workload; each side must then hold one config per
+(the same matrix cell, possibly on another cloud or instance type), or workload alone
+(two different configs on the same workload; each side must then hold one config per
 workload). Within a matched sweep, points are matched by load value.
+
+Matching by config hash is what `bench reproduce` uses: a reproduction whose config
+hashes differently from the original's matches nothing, so it is never "within". Under
+cell_key or workload a config difference between two paired sweeps is expected (that
+is why they were not paired by hash): it is listed key by key in `config_differences`
+(e.g. hardware.cloud runpod -> aws) and does not affect the verdict.
 
 Verdict per metric, on the repetition means (delta = B - A):
 
@@ -25,14 +31,15 @@ other's.
 The verdict judges only what both sides measured. Sweeps and load points found on one
 side only are listed (`only_in_a`, `only_in_b`) but are not evidence either way, so
 they do not count against it. The comparison is within normal variance when at least
-one point or sweep matched and every matched metric is within normal variance, with
-(except when matching by workload) identical config hashes. When nothing matched,
+one point or sweep matched and every matched metric is within normal variance. When
+nothing matched,
 `verdict` is "nothing_matched" and `within_normal_variance` is False: there is no
 evidence of a reproduction, but none of a difference either (`bench compare` exits 2).
 """
 
 from __future__ import annotations
 
+import json
 import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
@@ -87,6 +94,26 @@ class CostDelta(BaseModel):
     reason: str
 
 
+class ConfigChange(BaseModel):
+    """One leaf of the resolved config that differs; None when a side lacks it."""
+
+    path: str  # dotted, e.g. "hardware.instance_type"
+    a: Any
+    b: Any
+
+
+class ConfigDifference(BaseModel):
+    """Two paired sweeps whose config hashes differ: informational, never judged."""
+
+    workload: str
+    load_mode: LoadMode
+    name_a: str
+    name_b: str
+    config_hash_a: str
+    config_hash_b: str
+    changes: list[ConfigChange]  # empty when a side has no stored config
+
+
 class PointComparison(BaseModel):
     workload: str
     load_mode: LoadMode
@@ -95,7 +122,7 @@ class PointComparison(BaseModel):
     name_b: str
     config_hash_a: str
     config_hash_b: str
-    config_hash_match: bool
+    config_hash_match: bool  # informational: the verdict judges metrics only
     metrics: list[MetricDelta]
     within_normal_variance: bool
 
@@ -129,6 +156,7 @@ class Comparison(BaseModel):
     configs: list[ConfigComparison]
     points: list[PointComparison]
     equal_load: list[EqualLoadTable] = []  # latency at the loads both sides ran
+    config_differences: list[ConfigDifference] = []  # paired sweeps' configs: not judged
     only_in_a: list[str]  # sweeps and load points B lacks: listed, not judged
     only_in_b: list[str]
     verdict: Verdict  # over the matched points and sweeps only
@@ -143,6 +171,12 @@ class _Sweep:
     load_mode: LoadMode
     points: list[LoadPoint]
     result: ConfigResult | None
+    config: Mapping[str, Any] | None  # the resolved config (provenance["config"])
+
+
+def _config(provenance: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    cfg = (provenance or {}).get("config")
+    return cfg if isinstance(cfg, Mapping) else None
 
 
 def _sweeps(side: Sequence[ConfigResult] | Iterable[BenchRun]) -> list[_Sweep]:
@@ -151,7 +185,15 @@ def _sweeps(side: Sequence[ConfigResult] | Iterable[BenchRun]) -> list[_Sweep]:
         raise ValueError("nothing to compare: empty input")
     if all(isinstance(i, ConfigResult) for i in items):
         return [
-            _Sweep(r.config_hash, r.name, r.workload, r.load_mode, r.points, r)
+            _Sweep(
+                r.config_hash,
+                r.name,
+                r.workload,
+                r.load_mode,
+                r.points,
+                r,
+                _config(r.provenance),
+            )
             for r in items
             if isinstance(r, ConfigResult)
         ]
@@ -159,9 +201,13 @@ def _sweeps(side: Sequence[ConfigResult] | Iterable[BenchRun]) -> list[_Sweep]:
         raise TypeError("compare takes a list of ConfigResult or a list of BenchRun rows")
     runs = [r for r in items if isinstance(r, BenchRun)]
     cells: dict[str, set[str]] = defaultdict(set)
+    configs: dict[str, Mapping[str, Any]] = {}
     for r in runs:
         if r.status == COMPLETED and r.cell_key:
             cells[r.config_hash].add(r.cell_key)
+        cfg = _config(r.provenance)
+        if r.status == COMPLETED and cfg is not None:
+            configs.setdefault(r.config_hash, cfg)
     return [
         _Sweep(
             key.config_hash,
@@ -172,6 +218,7 @@ def _sweeps(side: Sequence[ConfigResult] | Iterable[BenchRun]) -> list[_Sweep]:
             key.load_mode,
             points,
             None,
+            configs.get(key.config_hash),
         )
         for key, points in sorted(load_points(runs).items())
     ]
@@ -193,6 +240,29 @@ def _index(sweeps: list[_Sweep], by: MatchBy, label: str) -> dict[tuple[str, ...
             raise ValueError(f"{label}: more than one sweep matches {k} when matching by {by}")
         out[k] = s
     return out
+
+
+def _flatten(cfg: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for k, v in cfg.items():
+        path = f"{prefix}.{k}" if prefix else str(k)
+        if isinstance(v, Mapping) and v:
+            out.update(_flatten(v, path))
+        else:
+            out[path] = v
+    return out
+
+
+def config_changes(a: Mapping[str, Any] | None, b: Mapping[str, Any] | None) -> list[ConfigChange]:
+    """The leaves of two resolved configs that differ (lists compared whole)."""
+    if a is None or b is None:
+        return []
+    fa, fb = _flatten(a), _flatten(b)
+    return [
+        ConfigChange(path=k, a=fa.get(k), b=fb.get(k))
+        for k in sorted(set(fa) | set(fb))
+        if fa.get(k) != fb.get(k)
+    ]
 
 
 def _welch_moments(
@@ -360,7 +430,6 @@ def compare(
         raise ValueError("need rel_tol >= 0 and 0 < alpha < 1")
     side_a = _index(_sweeps(a), match_by, label_a)
     side_b = _index(_sweeps(b), match_by, label_b)
-    need_hash = match_by != "workload"
     opts: dict[str, Any] = dict(
         rel_tol=rel_tol, abs_tol=abs_tol, alpha=alpha, confidence=confidence
     )
@@ -374,6 +443,7 @@ def compare(
     configs: list[ConfigComparison] = []
     points: list[PointComparison] = []
     tables: list[EqualLoadTable] = []
+    differences: list[ConfigDifference] = []
     for k in sorted(set(side_a) & set(side_b)):
         sa, sb = side_a[k], side_b[k]
         table = equal_load(
@@ -395,6 +465,18 @@ def compare(
         if table is not None:
             tables.append(table)
         hash_match = sa.config_hash == sb.config_hash
+        if not hash_match:
+            differences.append(
+                ConfigDifference(
+                    workload=sa.workload,
+                    load_mode=sa.load_mode,
+                    name_a=sa.name,
+                    name_b=sb.name,
+                    config_hash_a=sa.config_hash,
+                    config_hash_b=sb.config_hash,
+                    changes=config_changes(sa.config, sb.config),
+                )
+            )
         pb = {p.load: p for p in sb.points}
         pa = {p.load: p for p in sa.points}
         unit = "req/s" if sa.load_mode is LoadMode.OPEN_LOOP else "concurrent"
@@ -417,8 +499,7 @@ def compare(
                     config_hash_b=sb.config_hash,
                     config_hash_match=hash_match,
                     metrics=deltas,
-                    within_normal_variance=all(d.within_normal_variance for d in deltas)
-                    and (hash_match or not need_hash),
+                    within_normal_variance=all(d.within_normal_variance for d in deltas),
                 )
             )
         ra, rb = sa.result, sb.result
@@ -456,8 +537,7 @@ def compare(
                     metrics=gmetrics,
                     cost=costs,
                     within_normal_variance=all(m.within_normal_variance for m in gmetrics)
-                    and all(c.within_normal_variance for c in costs)
-                    and (hash_match or not need_hash),
+                    and all(c.within_normal_variance for c in costs),
                 )
             )
 
@@ -480,11 +560,29 @@ def compare(
         configs=configs,
         points=points,
         equal_load=tables,
+        config_differences=differences,
         only_in_a=only_a,
         only_in_b=only_b,
         verdict=verdict,
         within_normal_variance=verdict == "within",
     )
+
+
+def _value(v: Any) -> str:
+    if v is None:
+        return "unset"
+    if isinstance(v, str):
+        return v
+    return json.dumps(v, separators=(",", ":"))
+
+
+def config_note(d: ConfigDifference) -> str:
+    """One line per paired sweep: `bf16 vs bf16 (...): hardware.cloud runpod → aws; ...`."""
+    head = f"{d.name_a} vs {d.name_b} ({d.workload}, {d.load_mode.value}), "
+    head += f"`{d.config_hash_a[:12]}` vs `{d.config_hash_b[:12]}`"
+    if not d.changes:
+        return f"{head}: config hash differs (no stored config to diff)"
+    return f"{head}: " + "; ".join(f"{c.path} {_value(c.a)} → {_value(c.b)}" for c in d.changes)
 
 
 def _verdict(ok: bool) -> str:
@@ -539,6 +637,11 @@ def render_markdown(c: Comparison) -> str:
     )
     n_unmatched = len(c.only_in_a) + len(c.only_in_b)
     unmatched = f"; {n_unmatched} unmatched, not judged" if n_unmatched else ""
+    n_diff = len(c.config_differences)
+    if n_diff:
+        unmatched += (
+            f"; configs differ in {n_diff} matched sweep{'' if n_diff == 1 else 's'}, not judged"
+        )
     matched = f"{len(c.points)} load point{'' if len(c.points) == 1 else 's'} matched" + (
         f", {len(c.configs)} at goodput" if c.configs else ""
     )
@@ -564,14 +667,26 @@ def render_markdown(c: Comparison) -> str:
         f"t-test on the repetitions gives p ≥ {c.alpha:g} (on ln(values), the ratio of "
         "geometric means, for latency and throughput). Cost at SLO uses CI overlap instead "
         f"of the t-test. Intervals are {c.confidence:.0%} CIs."
-        + ("" if c.match_by == "workload" else " Config hashes must match exactly."),
+        + (
+            " Sweeps are paired only when their config hashes are identical."
+            if c.match_by == "config_hash"
+            else " Paired sweeps may run different configs: the differences are listed, "
+            "not judged; the verdict depends on the metrics only."
+        ),
     ]
+    if c.config_differences:
+        parts += [
+            "",
+            "## Config differences (not judged)",
+            "",
+            *(f"- {config_note(d)}" for d in c.config_differences),
+        ]
     for cfg in c.configs:
         parts += [
             "",
             f"## {cfg.name_a} vs {cfg.name_b}: {cfg.workload} ({cfg.load_mode.value}) at goodput",
             "",
-            f"Config hash {'matches' if cfg.config_hash_match else 'differs'}: "
+            f"Config hash {'matches' if cfg.config_hash_match else 'differs (not judged)'}: "
             f"`{cfg.config_hash_a}` vs `{cfg.config_hash_b}`. Goodput load "
             f"{cfg.goodput_bracket_a or 'none'} vs {cfg.goodput_bracket_b or 'none'}"
             + (
@@ -628,7 +743,10 @@ def render_markdown(c: Comparison) -> str:
             "",
         ]
         if not p.config_hash_match:
-            parts += [f"Config hash differs: `{p.config_hash_a}` vs `{p.config_hash_b}`.", ""]
+            parts += [
+                f"Config hash differs (not judged): `{p.config_hash_a}` vs `{p.config_hash_b}`.",
+                "",
+            ]
         parts.append(md_table(METRIC_HEADERS, _metric_rows(p.metrics)))
     for label, missing in ((c.label_a, c.only_in_a), (c.label_b, c.only_in_b)):
         if missing:

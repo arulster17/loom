@@ -393,6 +393,19 @@ def test_reproduce_reports_a_real_difference(ctx, db, tmp_path, replay):
     assert result.exit_code == EXIT_MISMATCH, result.output
 
 
+def test_reproduce_fails_when_the_config_hash_differs(ctx, db, tmp_path, replay):
+    """Reproduce stays strict: unlike `bench compare --match-by cell_key`, where a config
+    difference is informational, a reproduction on another config is no reproduction."""
+    outcome = asyncio.run(run_experiment(mock_experiment(), ctx))
+    run_id = outcome.run_ids[0]
+    with session_scope(db) as s:  # the stored original no longer hashes like its config
+        repo.get_run(s, run_id).config_hash = "f" * 64
+    result = invoke("reproduce", run_id, "--db", db, "--out", tmp_path / "repro")
+    assert result.exit_code == EXIT_MISMATCH, result.output
+    assert "NOT reproduced: the reproduction's config hash differs" in result.output
+    assert "reproduced within normal variance" not in result.output
+
+
 class FlakySpot(MockProvider):
     """Reclaims the first host on its first job."""
 

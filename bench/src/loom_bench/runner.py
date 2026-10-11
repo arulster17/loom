@@ -1692,9 +1692,12 @@ async def reproduce(
         if any(r.status == RUN_COMPLETED for r in new_runs) and any(
             r.status == RUN_COMPLETED for r in orig.point_runs
         ):
+            # By config hash, strictly: a reproduction that hashes differently from
+            # the original matches nothing and so is never "within" (`ok` is False).
             comparison = compare(
                 orig.point_runs,
                 new_runs,
+                match_by="config_hash",
                 rel_tol=tolerance,
                 label_a="original",
                 label_b="reproduction",
