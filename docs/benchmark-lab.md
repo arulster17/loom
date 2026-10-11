@@ -129,7 +129,7 @@ seed: 0
   on_demand), `disk_gb`. Account settings come from `$LOOM_AWS_CONFIG` / `LOOM_AWS_*`.
 - `runpod`: `cloud_type` (secure), `instance_type` (default: the registry's
   `instance_types.runpod`, e.g. `l40s-x1`), `gpu_type_id` (default from the GPU, e.g.
-  `NVIDIA L40S`), `container_disk_gb` (default 80; must hold the weights plus 35 GB),
+  `NVIDIA L40S`; `H100` is the SXM part, `NVIDIA H100 80GB HBM3`), `container_disk_gb` (default 80; must hold the weights plus 35 GB),
   `allowed_cuda_versions` (default `["13.0"]`), `data_center_ids` (default: any). Always
   on-demand. Each engine image gets its own pod, so a vLLM vs SGLang experiment plans
   two hosts, each with a cold start. Settings come from `$LOOM_RUNPOD_CONFIG` /
@@ -138,7 +138,9 @@ seed: 0
 
 **Variants** may set `engine` (name, version, image, args, chat_template_kwargs), `hf` (repo,
 revision, license, gated, size_bytes, quant_method: a pre-quantized checkpoint), `hardware`,
-`parallelism`, `quantization`, `kv_cache_dtype`, `max_context`. The patched entry is
+`parallelism`, `quantization`, `kv_cache_dtype`, `max_context`, `clouds` (replaces the
+entry's list; with `hardware.instance_types` it lets a spec that ran on other hardware than
+today's row restate the row it ran on, as the 70B L40S and H100 specs do). The patched entry is
 re-validated by the registry rules (pinned revision and image digest, GPUs = tp x pp,
 quantization servable from the checkpoint, ...) and the engine launch is rendered by
 `engines.render_launch`, so a bad override fails at `bench plan`. Switching engine needs its
@@ -148,7 +150,9 @@ the registry's.
 **Cells.** `expand()` produces one cell per variant x sweep point, in declaration order. A
 cell's key is `variant[knob=value,...]`; its `config_hash` is the sha256 of the canonical
 JSON of `{model: resolved ModelSpec, launch: EngineLaunch, hardware}` and identifies the
-setup across experiments.
+setup across experiments. The model is recorded with `pricing: null` whatever the registry
+says (`experiment.serving_model_doc`): a price is not serving config, so pricing or
+repricing a row never moves a hash.
 
 **Host groups.** Cells on the same hardware (on RunPod, the same engine image too) share
 one host through warm restarts. A variant's `host_group` puts its cells on a host of

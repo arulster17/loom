@@ -168,8 +168,8 @@ Competitor prices last checked 2026-10-04. Flags leave out aggregators and entri
 
 | Workload | Our config at SLO (basis) | Tokens per request in / out | Our cost $/1M in | Our cost $/1M out | Our cost $/1M blended | Our price $/1M in | Our price $/1M out | Break-even $/1M in | Break-even $/1M out | Margin in | Margin out |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| chat-sharegpt (open loop) | bf16 (leaderboard rank 2) | 1,007 / 322 | $0.0557 [0.0486, 0.0638] | $0.2517 [0.2049, 0.3060] | $0.1032 [0.0967, 0.1099] | no price set | no price set | $0.0557 (CI high $0.0638) | $0.2517 (CI high $0.3060) | n/a | n/a |
-| fixed-1k-1k (open loop) | bf16 (leaderboard rank 2) | 1,024 / 1,024 | $0.0572 [0.0527, 0.0621] | $0.2293 [0.2175, 0.2416] | $0.1432 [0.1372, 0.1495] | no price set | no price set | $0.0572 (CI high $0.0621) | $0.2293 (CI high $0.2416) | n/a | n/a |
+| chat-sharegpt (open loop) | bf16 (leaderboard rank 2) | 1,007 / 322 | $0.0557 [0.0486, 0.0638] | $0.2517 [0.2049, 0.3060] | $0.1032 [0.0967, 0.1099] | $0.0770 | $0.3680 | $0.0557 (CI high $0.0638) | $0.2517 (CI high $0.3060) | $0.0213 (28% of price); $0.0132 at cost CI high | $0.1163 (32% of price); $0.0620 at cost CI high |
+| fixed-1k-1k (open loop) | bf16 (leaderboard rank 2) | 1,024 / 1,024 | $0.0572 [0.0527, 0.0621] | $0.2293 [0.2175, 0.2416] | $0.1432 [0.1372, 0.1495] | $0.0770 | $0.3680 | $0.0572 (CI high $0.0621) | $0.2293 (CI high $0.2416) | $0.0198 (26% of price); $0.0149 at cost CI high | $0.1387 (38% of price); $0.1264 at cost CI high |
 
 **Public list prices** (per 1M tokens)
 
@@ -180,7 +180,6 @@ Competitor prices last checked 2026-10-04. Flags leave out aggregators and entri
 
 **Flags**
 
-- [chat-sharegpt (open loop); fixed-1k-1k (open loop)] `no_price_set`: qwen3-8b: no price set
 - [chat-sharegpt (open loop); fixed-1k-1k (open loop)] `no_public_comparison`: qwen3-8b: no eligible public list price
 
 ### Qwen3 8B FP8 (`qwen3-8b-fp8`), ours fp8

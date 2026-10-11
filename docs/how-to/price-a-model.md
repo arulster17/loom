@@ -4,7 +4,7 @@ After a config sweep (for Qwen3-8B: `qwen3-8b-config-sweep-runpod`, see
 [benchmark-lab.md](../benchmark-lab.md#qwen3-8b-config-sweep-proposed)), the winning
 serving config goes into `config/models.yaml` with a price derived from its measured cost
 at the SLO. The margin is a business decision: this page lays out the options and the
-arithmetic, it does not pick one.
+arithmetic, it does not pick one (the user's 2026-10-11 choice is recorded under option A).
 
 ## 1. Pick the winner from the report
 
@@ -40,9 +40,16 @@ The precision is always in the row name and BF16 stays the reference row
 | `bf16` | `qwen3-8b` itself |
 
 Everything else (checkpoint, revision, image digest, hardware, `max_context`) stays as
-the sweep ran it, so the row is the config the numbers describe. `pricing` and `status`
-are part of the spec dump, so a priced row's config hash differs from the swept cell's;
-reports and the competitiveness view match prices to results by model id.
+the sweep ran it, so the row is the config the numbers describe. A cell records the model
+with `pricing: null`, so setting or changing a price never moves a config hash; `status`
+is still part of it. Reports and the competitiveness view match prices to results by
+model id.
+
+If moving a row to the winner changes fields that older specs relied on as registry
+defaults (hardware, parallelism, engine args, instance types, clouds), restate the old
+values in those specs' variants (`clouds` included) so they still expand to the config
+hashes they recorded; `bench/tests/runner/test_h100_70b.py` pins the 70B specs' hashes
+this way.
 
 ## 3. Choose the price
 
@@ -80,6 +87,21 @@ on fixed-1k-1k (565b8d3f: input $0.0639 [0.0402, 0.1015], output $0.2328 [0.1752
 
 The sweep's FP8 cells are expected to cut these by roughly 2-3x (they read ~half the bytes
 per decode step); use their measured numbers, not this projection.
+
+**What shipped (2026-10-11, user decision): option A**, u = 100%, markup 20%, on the CI
+high bound, each side rounded up to the next $0.001 per 1M (so the markup never drops
+under 20%), cached input equal to input. Only the shipped winners are priced; `status`
+stays `preview`.
+
+| Row | Cost source | CI high in / out ($/1M) | x 1.2 | Price in / out (micros) |
+|---|---|---|---|---|
+| `qwen3-8b` (BF16) | 7a8237d0 bf16, chat-sharegpt ([8b-config-sweep-v1](../../reports/8b-config-sweep-v1/leaderboard.md)) | 0.063798 / 0.305960 | 0.0765576 / 0.367152 | 77_000 / 368_000 |
+| `llama-3.3-70b-instruct-fp8` | 9f0853d7 vllm-tp2-fp8, fixed-1k-1k, gate 9e5f7866 ([70b-h100-v2](../../reports/70b-h100-v2/leaderboard.md)) | 0.475489 / 0.663624 | 0.5705868 / 0.7963488 | 571_000 / 797_000 |
+
+The 70B ran no chat workload; fixed-1k-1k is its leading workload, and shared-prefix's
+input/output split is unresolved (output CI [0, 0.895]). The BF16 70B reference row
+(`llama-3.3-70b-instruct`) and `qwen3-8b-fp8` (not shipped) stay unpriced.
+`bench/tests/config/test_registry.py` recomputes each price from the committed report.
 
 ### Option B: match the market
 

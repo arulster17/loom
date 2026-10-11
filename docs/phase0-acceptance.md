@@ -69,10 +69,10 @@ uv run pytest -q -n auto
 | D8 | Public results page + waitlist | **partly**: site built, not published; no waitlist backend |
 | D9 | Docs | **met** |
 | O1 | Leaderboard report (md + HTML + CSV) | **met** |
-| O2 | Competitiveness view | **partly**: costs and market prices shown; no prices or margins yet |
+| O2 | Competitiveness view | **met**: costs, market prices, our prices and margins shown |
 | O3 | Cloud comparison report | deferred to Phase 2 by the brief |
 | P1 | §7.5 ranked table by $/1M at SLO, subject to the gate | **met** |
-| P2 | §7.5 winner into `config/models.yaml` | **not met** |
+| P2 | §7.5 winner into `config/models.yaml` | **met**: 70B rows on 2x H100 SXM TP=2; Qwen3-8B BF16 and 70B FP8 priced (cost-plus 20%) |
 
 ## Acceptance criteria (§7.8)
 
@@ -850,17 +850,27 @@ Tests: `bench/tests/report/test_leaderboard.py` (e.g.
 
 > "my cost, my planned price and margin, next to public competitor prices"
 
-**Status: partly.** Our cost at SLO is shown next to public list prices
-(`bench/competitors.yaml`, public sources only, with source and date), at each
-workload's input:output mix, with like-for-like precision marked. The break-even price
-is shown too. **Our planned price and margin are not**: every `pricing` in
-`config/models.yaml` is null, so the view says "no price set", and the margin flags
-(`negative_margin`, `price_above_market`) cannot fire yet.
+**Status: met** (2026-10-11, once prices were set; P2). The view shows our cost at SLO
+next to public list prices (`bench/competitors.yaml`, public sources only, with source
+and date), at each workload's input:output mix, with like-for-like precision marked. It
+also shows the break-even price, our price, and the margin per side at the point
+estimate and at the cost's CI high bound. The committed reports were regenerated with
+the prices. `reports/70b-h100-v1`, the as-first-run record, was left as it was.
+
+The flags fire on what the prices imply:
+
+- Qwen3-8B on chat-sharegpt: margin $0.0213 input / $0.1163 output per 1M.
+- `negative_margin` on the 8B where the cost is higher than the RunPod chat basis:
+  - AWS g6e.xlarge (95cde129), whose hourly price is 1.71x RunPod's;
+  - output tokens on the output-light shared-prefix and code-completion workloads
+    (8b-engines-v1).
+- `price_above_market` on the 70B FP8 against DeepInfra's $0.10 / $0.32 fp8 listing.
 
 ```bash
 uv run bench competitiveness -e 7a8237d0-9917-47e7-b93e-8cb0230e0059 --db $REAL --out $ACC/comp
-#   writes competitiveness.{md,html,csv}; our cost per side and blended, "no price set",
-#   public list prices (e.g. Fireworks AI, OpenRouter for Qwen3-8B) and flags
+#   writes competitiveness.{md,html,csv}: our cost per side and blended, our price
+#   ($0.0770 / $0.3680 for qwen3-8b), the margin, public list prices (e.g. Fireworks AI,
+#   OpenRouter for Qwen3-8B) and flags
 ```
 
 Tests: `bench/tests/config/test_competitiveness.py`,
@@ -895,34 +905,40 @@ auto-generated pull request are "later" in the brief.
 
 ### P2. Winner into `config/models.yaml`
 
-**Status: not met.**
+**Status: met** (2026-10-11). Prices are cost-plus 20% per side on the 95% CI high bound
+of the measured RunPod cost at SLO (100% utilisation), rounded up to the next $0.001 per
+1M, with cached input equal to input. The arithmetic is in
+[how-to/price-a-model.md](how-to/price-a-model.md#option-a-cost-plus).
 
-- 8B: no candidate passed the gate, so `qwen3-8b` (BF16, vLLM 0.30.0, 1x L40S) stays as
-  it is, and its `pricing` is null until you choose the margin method (cost-plus,
-  market, or market floored at cost-plus; options computed in
-  [benchmark-lab.md](benchmark-lab.md#qwen3-8b-config-sweep-result-7a8237d0-2026-10-10),
-  method in [how-to/price-a-model.md](how-to/price-a-model.md)). Settling fp8-kv8 needs a
-  quality-only rerun with more passes, which is not approved.
-- 70B: the measured winner is FP8 on 2x H100 SXM at TP=2 (gate pass). The registry rows
-  `llama-3.3-70b-instruct` and `llama-3.3-70b-instruct-fp8` still describe 4x L40S at
-  TP=4, and both prices are null.
+- 8B: no candidate passed the gate, so `qwen3-8b` (BF16, vLLM 0.30.0, 1x L40S) is the
+  winner. Price: $0.077 input / $0.368 output per 1M, from 7a8237d0 bf16 on
+  chat-sharegpt. `qwen3-8b-fp8` stays unpriced: fp8-kv8 is not shipped.
+- 70B: both rows now describe the measured config: 2x H100 SXM at TP=2 (RunPod
+  `h100-sxm-x2`), vLLM 0.30.0, `gpu_memory_utilization` 0.95.
+  - `llama-3.3-70b-instruct-fp8`, the winner (gate pass), is priced at $0.571 / $0.797
+    per 1M, from 9f0853d7 on fixed-1k-1k.
+  - `llama-3.3-70b-instruct`, the BF16 reference, stays unpriced.
+  - The old 70B specs restate the 4x L40S row they ran on, so they keep their recorded
+    config hashes (`test_h100_70b.py::test_every_70b_spec_still_expands_to_its_recorded_config_hashes`).
+- Every row stays `preview` until it is approved for serving.
 
 ```bash
-grep -n "pricing:" config/models.yaml
-#   40:    pricing: null   78:    pricing: null   131:    pricing: null   186:    pricing: null
+grep -n "^    pricing:" config/models.yaml
+#   49: qwen3-8b 77_000 / 368_000   98: null (BF16 70B)   159: 70B FP8 571_000 / 797_000
+#   214: null (qwen3-8b-fp8)
+uv run pytest -q bench/tests/config/test_registry.py -k price
+#   recomputes each price from the committed report's CI high bounds
 ```
 
 ## Open items before approval
 
 These are either not met or wait on a decision from you:
 
-1. **Prices (P2, O2).** Pick the margin method for Qwen3-8B (cost-plus, market, or
-   market floored at cost-plus), and decide whether the 70B FP8 row gets a price now.
-   Until then every `pricing` is null, the competitiveness view has no margin, and
-   Phase 1 billing has no price to charge.
-2. **70B registry row (P2).** Decide whether the 70B rows move to the measured winner
-   (FP8, 2x H100 SXM, TP=2). Today they describe 4x L40S at TP=4, where no load met the
-   SLO.
+1. **Prices (P2, O2).** Resolved 2026-10-11: cost-plus 20% per side on the RunPod cost's
+   CI high bound. Qwen3-8B is $0.077 / $0.368 per 1M and the 70B FP8 row $0.571 / $0.797
+   (P2). The competitiveness view now shows margins and its flags (O2).
+2. **70B registry row (P2).** Resolved 2026-10-11: both 70B rows describe FP8's measured
+   config (2x H100 SXM, TP=2). FP8 is priced and BF16 stays the unpriced reference.
 3. **8B winner (P1/P2).** Accept BF16 as the 8B row, or approve a quality-only rerun to
    settle fp8-kv8's inconclusive gate (it is about 2.2x cheaper on chat if it passes).
 4. **Model A on AWS (D6).** The AWS g6e.xlarge leaderboard ran (95cde129, $6.39): BF16

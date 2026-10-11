@@ -162,9 +162,9 @@ Competitor prices last checked 2026-10-04. Flags leave out aggregators and entri
 
 | Workload | Our config at SLO (basis) | Tokens per request in / out | Our cost $/1M in | Our cost $/1M out | Our cost $/1M blended | Our price $/1M in | Our price $/1M out | Break-even $/1M in | Break-even $/1M out | Margin in | Margin out |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| fixed-1k-1k (open loop) | vllm (leaderboard rank 2; tied with sglang) | 1,024 / 1,024 | $0.0639 [0.0402, 0.1015] | $0.2328 [0.1752, 0.3016] | $0.1483 [0.1218, 0.1806] | no price set | no price set | $0.0639 (CI high $0.1015) | $0.2328 (CI high $0.3016) | n/a | n/a |
-| code-completion (open loop) | vllm (untrusted, not ranked: high run-to-run variance) | 1,537 / 48 | $0.0378 [0.0171, 0.0835] | $3.6321 [2.1004, 5.8063] | $0.1468 [0.1002, 0.2151] | no price set | no price set | $0.0378 (CI high $0.0835) | $3.6321 (CI high $5.8063) | n/a | n/a |
-| shared-prefix (open loop) | sglang (leaderboard rank 1; tied with vllm) | 2,065 / 128 | $0.0286 [0.0180, 0.0455] | $0.7295 [0.4826, 1.0104] | $0.0695 [0.0580, 0.0832] | no price set | no price set | $0.0286 (CI high $0.0455) | $0.7295 (CI high $1.0104) | n/a | n/a |
+| fixed-1k-1k (open loop) | vllm (leaderboard rank 2; tied with sglang) | 1,024 / 1,024 | $0.0639 [0.0402, 0.1015] | $0.2328 [0.1752, 0.3016] | $0.1483 [0.1218, 0.1806] | $0.0770 | $0.3680 | $0.0639 (CI high $0.1015) | $0.2328 (CI high $0.3016) | $0.0131 (17% of price); -$0.0245 at cost CI high | $0.1352 (37% of price); $0.0664 at cost CI high |
+| code-completion (open loop) | vllm (untrusted, not ranked: high run-to-run variance) | 1,537 / 48 | $0.0378 [0.0171, 0.0835] | $3.6321 [2.1004, 5.8063] | $0.1468 [0.1002, 0.2151] | $0.0770 | $0.3680 | $0.0378 (CI high $0.0835) | $3.6321 (CI high $5.8063) | $0.0392 (51% of price); -$0.0065 at cost CI high | -$3.2641 (-887% of price); -$5.4383 at cost CI high |
+| shared-prefix (open loop) | sglang (leaderboard rank 1; tied with vllm) | 2,065 / 128 | $0.0286 [0.0180, 0.0455] | $0.7295 [0.4826, 1.0104] | $0.0695 [0.0580, 0.0832] | $0.0770 | $0.3680 | $0.0286 (CI high $0.0455) | $0.7295 (CI high $1.0104) | $0.0484 (63% of price); $0.0315 at cost CI high | -$0.3615 (-98% of price); -$0.6424 at cost CI high |
 
 **Public list prices** (per 1M tokens)
 
@@ -175,8 +175,9 @@ Competitor prices last checked 2026-10-04. Flags leave out aggregators and entri
 
 **Flags**
 
-- [fixed-1k-1k (open loop); code-completion (open loop); shared-prefix (open loop)] `no_price_set`: qwen3-8b: no price set
 - [fixed-1k-1k (open loop); code-completion (open loop); shared-prefix (open loop)] `no_public_comparison`: qwen3-8b: no eligible public list price
+- [code-completion (open loop)] `negative_margin`: qwen3-8b output: price $0.3680/1M is $3.2641 below measured cost $3.6321/1M
+- [shared-prefix (open loop)] `negative_margin`: qwen3-8b output: price $0.3680/1M is $0.3615 below measured cost $0.7295/1M
 
 ### Providers with no public per-token price
 

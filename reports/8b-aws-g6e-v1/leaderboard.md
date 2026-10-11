@@ -67,7 +67,7 @@ Competitor prices last checked 2026-10-04. Flags leave out aggregators and entri
 
 | Workload | Our config at SLO (basis) | Tokens per request in / out | Our cost $/1M in | Our cost $/1M out | Our cost $/1M blended | Our price $/1M in | Our price $/1M out | Break-even $/1M in | Break-even $/1M out | Margin in | Margin out |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| chat-sharegpt (open loop) | bf16 (leaderboard rank 1) | 1,007 / 322 | $0.0917 [0.0790, 0.1063] | $0.4417 [0.3578, 0.5386] | $0.1765 [0.1654, 0.1880] | no price set | no price set | $0.0917 (CI high $0.1063) | $0.4417 (CI high $0.5386) | n/a | n/a |
+| chat-sharegpt (open loop) | bf16 (leaderboard rank 1) | 1,007 / 322 | $0.0917 [0.0790, 0.1063] | $0.4417 [0.3578, 0.5386] | $0.1765 [0.1654, 0.1880] | $0.0770 | $0.3680 | $0.0917 (CI high $0.1063) | $0.4417 (CI high $0.5386) | -$0.0147 (-19% of price); -$0.0293 at cost CI high | -$0.0737 (-20% of price); -$0.1706 at cost CI high |
 
 **Public list prices** (per 1M tokens)
 
@@ -78,8 +78,9 @@ Competitor prices last checked 2026-10-04. Flags leave out aggregators and entri
 
 **Flags**
 
-- [chat-sharegpt (open loop)] `no_price_set`: qwen3-8b: no price set
 - [chat-sharegpt (open loop)] `no_public_comparison`: qwen3-8b: no eligible public list price
+- [chat-sharegpt (open loop)] `negative_margin`: qwen3-8b input: price $0.0770/1M is $0.0147 below measured cost $0.0917/1M
+- [chat-sharegpt (open loop)] `negative_margin`: qwen3-8b output: price $0.3680/1M is $0.0737 below measured cost $0.4417/1M
 
 ### Qwen3 8B FP8 (`qwen3-8b-fp8`), ours not recorded
 

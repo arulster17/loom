@@ -131,8 +131,8 @@ Competitor prices last checked 2026-10-04. Flags leave out aggregators and entri
 
 | Workload | Our config at SLO (basis) | Tokens per request in / out | Our cost $/1M in | Our cost $/1M out | Our cost $/1M blended | Our price $/1M in | Our price $/1M out | Break-even $/1M in | Break-even $/1M out | Margin in | Margin out |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| fixed-1k-1k (open loop) | vllm-tp2-fp8 (leaderboard rank 1) | 1,025 / 1,024 | $0.4548 [0.4350, 0.4755] | $0.6381 [0.6133, 0.6636] | $0.5464 [0.5320, 0.5612] | no price set | no price set | $0.4548 (CI high $0.4755) | $0.6381 (CI high $0.6636) | n/a | n/a |
-| shared-prefix (open loop) | vllm-tp2-fp8 (leaderboard rank 1) | 2,083 / 128 | $0.2551 [0.2082, 0.3069] | $0.3879 [0.0000, 0.8952] | $0.2628 [0.2390, 0.2891] | no price set | no price set | $0.2551 (CI high $0.3069) | $0.3879 (CI high $0.8952) | n/a | n/a |
+| fixed-1k-1k (open loop) | vllm-tp2-fp8 (leaderboard rank 1) | 1,025 / 1,024 | $0.4548 [0.4350, 0.4755] | $0.6381 [0.6133, 0.6636] | $0.5464 [0.5320, 0.5612] | $0.5710 | $0.7970 | $0.4548 (CI high $0.4755) | $0.6381 (CI high $0.6636) | $0.1162 (20% of price); $0.0955 at cost CI high | $0.1589 (20% of price); $0.1334 at cost CI high |
+| shared-prefix (open loop) | vllm-tp2-fp8 (leaderboard rank 1) | 2,083 / 128 | $0.2551 [0.2082, 0.3069] | $0.3879 [0.0000, 0.8952] | $0.2628 [0.2390, 0.2891] | $0.5710 | $0.7970 | $0.2551 (CI high $0.3069) | $0.3879 (CI high $0.8952) | $0.3159 (55% of price); $0.2641 at cost CI high | $0.4091 (51% of price); -$0.0982 at cost CI high |
 
 **Public list prices** (per 1M tokens)
 
@@ -148,10 +148,11 @@ Public list prices are those of llama-3.3-70b-instruct, the model this entry ser
 
 **Flags**
 
-- [fixed-1k-1k (open loop); shared-prefix (open loop)] `no_price_set`: llama-3.3-70b-instruct-fp8: no price set
 - [fixed-1k-1k (open loop)] `cost_above_market`: llama-3.3-70b-instruct-fp8 input: our cost at SLO $0.4548/1M is $0.3548 (354.8%) above the lowest public list price, $0.1000/1M (DeepInfra); median $0.1350/1M of 3 providers
 - [fixed-1k-1k (open loop)] `cost_above_market`: llama-3.3-70b-instruct-fp8 output: our cost at SLO $0.6381/1M is $0.3181 (99.4%) above the lowest public list price, $0.3200/1M (DeepInfra); median $0.4000/1M of 3 providers
 - [fixed-1k-1k (open loop)] `cost_above_market`: llama-3.3-70b-instruct-fp8 blended: our cost at SLO $0.5464/1M is $0.3364 (160.3%) above the lowest public list price at the workload's token mix, $0.2099/1M (DeepInfra); median $0.2674/1M of 3 providers
+- [fixed-1k-1k (open loop); shared-prefix (open loop)] `price_above_market`: llama-3.3-70b-instruct-fp8 input: $0.5710/1M is $0.4710 (471.0%) above the market minimum $0.1000/1M (DeepInfra); $0.4360 (323.0%) vs the median $0.1350/1M of 3 providers
+- [fixed-1k-1k (open loop); shared-prefix (open loop)] `price_above_market`: llama-3.3-70b-instruct-fp8 output: $0.7970/1M is $0.4770 (149.1%) above the market minimum $0.3200/1M (DeepInfra); $0.3970 (99.2%) vs the median $0.4000/1M of 3 providers
 - [shared-prefix (open loop)] `cost_above_market`: llama-3.3-70b-instruct-fp8 input: our cost at SLO $0.2551/1M is $0.1551 (155.1%) above the lowest public list price, $0.1000/1M (DeepInfra); median $0.1350/1M of 3 providers
 - [shared-prefix (open loop)] `cost_above_market`: llama-3.3-70b-instruct-fp8 output: our cost at SLO $0.3879/1M is $0.0679 (21.2%) above the lowest public list price, $0.3200/1M (DeepInfra); median $0.4000/1M of 3 providers
 - [shared-prefix (open loop)] `cost_above_market`: llama-3.3-70b-instruct-fp8 blended: our cost at SLO $0.2628/1M is $0.1501 (133.1%) above the lowest public list price at the workload's token mix, $0.1127/1M (DeepInfra); median $0.1503/1M of 3 providers
@@ -183,7 +184,7 @@ Public list prices are those of llama-3.3-70b-instruct, the model this entry ser
   - anything else: arithmetic mean, Student-t interval (t)
 - **Cost allocation (ranking):** all_output: all of the replica's hourly cost is charged to output tokens, so input tokens have no separate price ($/1M input is n/a, not $0); $/1M output is the headline number
 - **Input/output split (headline):** Headline $/1M input and $/1M output use the prefill_time split, measured at the goodput point: input tokens pay for the share φ of the replica's time spent prefilling prompts, output tokens for the rest (decode steps, and any idle headroom the SLO needs). φ is the mean number of requests in their prefill phase, request rate × mean TTFT (Little's law), per repetition, combined like a throughput (geometric mean, log-t CI) and capped at 1. Input = φ × hourly price / input tok/s; output = (1 − φ) × hourly price / output tok/s; at the measured mix they bill exactly the replica's hourly price. TTFT includes queueing and the first decode step and concurrent prefills are each counted, so φ tends to overstate prefill time (input high, output low); idle headroom is charged to output (output high). The price CIs combine the φ and throughput CIs at the ends that push each price the same way, an outer bound. Blended $/1M is the hourly price over all tokens at the workload's own input:output mix and needs no split. The ranking still uses the declared cost allocation, shown in its own column.
-- **Price book last checked:** 2026-10-08
+- **Price book last checked:** 2026-10-09
 
 ### vllm-tp2-fp8 · fixed-1k-1k, open loop (`0381825d763025fdf1752037fbd925abe0a992e191215227ccb01e48039e5afd`)
 

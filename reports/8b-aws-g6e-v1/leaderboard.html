@@ -231,12 +231,12 @@ details dl { margin-top: .5rem; }
 <td class="num">$0.0917<span class="ci">$0.0790 – $0.1063</span></td>
 <td class="num">$0.4417<span class="ci">$0.3578 – $0.5386</span></td>
 <td class="num">$0.1765<span class="ci">$0.1654 – $0.1880</span></td>
-<td class="num">no price set</td>
-<td class="num">no price set</td>
+<td class="num">$0.0770</td>
+<td class="num">$0.3680</td>
 <td class="num">$0.0917 (CI high $0.1063)</td>
 <td class="num">$0.4417 (CI high $0.5386)</td>
-<td class="num">n/a</td>
-<td class="num">n/a</td>
+<td class="num">-$0.0147 (-19% of price); -$0.0293 at cost CI high</td>
+<td class="num">-$0.0737 (-20% of price); -$0.1706 at cost CI high</td>
 </tr>
 </tbody>
 </table>
@@ -277,8 +277,9 @@ details dl { margin-top: .5rem; }
 </div>
 <h4>Flags</h4>
 <ul class="flags">
-<li class="no_price_set">[chat-sharegpt (open loop)] <code>no_price_set</code>: qwen3-8b: no price set</li>
 <li class="no_public_comparison">[chat-sharegpt (open loop)] <code>no_public_comparison</code>: qwen3-8b: no eligible public list price</li>
+<li class="negative_margin">[chat-sharegpt (open loop)] <code>negative_margin</code>: qwen3-8b input: price $0.0770/1M is $0.0147 below measured cost $0.0917/1M</li>
+<li class="negative_margin">[chat-sharegpt (open loop)] <code>negative_margin</code>: qwen3-8b output: price $0.3680/1M is $0.0737 below measured cost $0.4417/1M</li>
 </ul>
 <h3>Qwen3 8B FP8 <code>qwen3-8b-fp8</code>, ours not recorded</h3>
 <div class="table-wrap">

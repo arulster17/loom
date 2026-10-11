@@ -447,12 +447,12 @@ details dl { margin-top: .5rem; }
 <td class="num">$0.0639<span class="ci">$0.0402 – $0.1015</span></td>
 <td class="num">$0.2328<span class="ci">$0.1752 – $0.3016</span></td>
 <td class="num">$0.1483<span class="ci">$0.1218 – $0.1806</span></td>
-<td class="num">no price set</td>
-<td class="num">no price set</td>
+<td class="num">$0.0770</td>
+<td class="num">$0.3680</td>
 <td class="num">$0.0639 (CI high $0.1015)</td>
 <td class="num">$0.2328 (CI high $0.3016)</td>
-<td class="num">n/a</td>
-<td class="num">n/a</td>
+<td class="num">$0.0131 (17% of price); -$0.0245 at cost CI high</td>
+<td class="num">$0.1352 (37% of price); $0.0664 at cost CI high</td>
 </tr>
 <tr class="">
 <td>code-completion (open loop)</td>
@@ -461,12 +461,12 @@ details dl { margin-top: .5rem; }
 <td class="num">$0.0378<span class="ci">$0.0171 – $0.0835</span></td>
 <td class="num">$3.6321<span class="ci">$2.1004 – $5.8063</span></td>
 <td class="num">$0.1468<span class="ci">$0.1002 – $0.2151</span></td>
-<td class="num">no price set</td>
-<td class="num">no price set</td>
+<td class="num">$0.0770</td>
+<td class="num">$0.3680</td>
 <td class="num">$0.0378 (CI high $0.0835)</td>
 <td class="num">$3.6321 (CI high $5.8063)</td>
-<td class="num">n/a</td>
-<td class="num">n/a</td>
+<td class="num">$0.0392 (51% of price); -$0.0065 at cost CI high</td>
+<td class="num">-$3.2641 (-887% of price); -$5.4383 at cost CI high</td>
 </tr>
 <tr class="">
 <td>shared-prefix (open loop)</td>
@@ -475,12 +475,12 @@ details dl { margin-top: .5rem; }
 <td class="num">$0.0286<span class="ci">$0.0180 – $0.0455</span></td>
 <td class="num">$0.7295<span class="ci">$0.4826 – $1.0104</span></td>
 <td class="num">$0.0695<span class="ci">$0.0580 – $0.0832</span></td>
-<td class="num">no price set</td>
-<td class="num">no price set</td>
+<td class="num">$0.0770</td>
+<td class="num">$0.3680</td>
 <td class="num">$0.0286 (CI high $0.0455)</td>
 <td class="num">$0.7295 (CI high $1.0104)</td>
-<td class="num">n/a</td>
-<td class="num">n/a</td>
+<td class="num">$0.0484 (63% of price); $0.0315 at cost CI high</td>
+<td class="num">-$0.3615 (-98% of price); -$0.6424 at cost CI high</td>
 </tr>
 </tbody>
 </table>
@@ -525,8 +525,9 @@ details dl { margin-top: .5rem; }
 </div>
 <h4>Flags</h4>
 <ul class="flags">
-<li class="no_price_set">[fixed-1k-1k (open loop); code-completion (open loop); shared-prefix (open loop)] <code>no_price_set</code>: qwen3-8b: no price set</li>
 <li class="no_public_comparison">[fixed-1k-1k (open loop); code-completion (open loop); shared-prefix (open loop)] <code>no_public_comparison</code>: qwen3-8b: no eligible public list price</li>
+<li class="negative_margin">[code-completion (open loop)] <code>negative_margin</code>: qwen3-8b output: price $0.3680/1M is $3.2641 below measured cost $3.6321/1M</li>
+<li class="negative_margin">[shared-prefix (open loop)] <code>negative_margin</code>: qwen3-8b output: price $0.3680/1M is $0.3615 below measured cost $0.7295/1M</li>
 </ul>
 <h3>Providers with no public per-token price</h3>
 <ul>
