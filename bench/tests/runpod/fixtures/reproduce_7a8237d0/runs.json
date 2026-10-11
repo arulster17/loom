@@ -1,0 +1,1040 @@
+[
+ {
+  "cell_key": "bf16",
+  "config_hash": "7a203a3ffaccb1820fd23e6da9fab1d00c4cb51c427ce1572c56b08a8036107a",
+  "finished_at": "2026-10-10 00:24:20.855188",
+  "id": "aa7af8ed1b514b5f86c1e737e63dc513",
+  "load_mode": "open_loop",
+  "load_value": 2.449489742783178,
+  "provenance": {
+   "bench_version": "0.1.0",
+   "cloud": "runpod",
+   "config": {
+    "hardware": {
+     "allowed_cuda_versions": [
+      "13.0"
+     ],
+     "cloud": "runpod",
+     "disk_gb": 80,
+     "gpu": "L40S",
+     "gpu_type_id": "NVIDIA L40S",
+     "gpus": 1,
+     "instance_type": "l40s-x1",
+     "market": "on_demand",
+     "provider": "runpod",
+     "region": "secure"
+    },
+    "launch": {
+     "args": [
+      "Qwen/Qwen3-8B",
+      "--revision",
+      "b968826d9c46dd6066d109eabc6255188de91218",
+      "--tokenizer-revision",
+      "b968826d9c46dd6066d109eabc6255188de91218",
+      "--served-model-name",
+      "qwen3-8b",
+      "--tensor-parallel-size",
+      "1",
+      "--pipeline-parallel-size",
+      "1",
+      "--max-model-len",
+      "32768",
+      "--kv-cache-dtype",
+      "auto",
+      "--enable-auto-tool-choice",
+      "--tool-call-parser",
+      "hermes",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "8000"
+     ],
+     "engine": "vllm",
+     "env": {},
+     "gpus": 1,
+     "image": "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90",
+     "model_repo": "Qwen/Qwen3-8B",
+     "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+     "port": 8000,
+     "ready_timeout_s": 1800.0,
+     "served_model": "qwen3-8b"
+    },
+    "model": {
+     "capabilities": {
+      "json_schema": true,
+      "reasoning": true,
+      "tools": true,
+      "vision": false
+     },
+     "clouds": [
+      "aws",
+      "runpod"
+     ],
+     "display_name": "Qwen3 8B",
+     "engine": {
+      "args": {},
+      "chat_template_kwargs": {
+       "enable_thinking": false
+      },
+      "image": "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90",
+      "name": "vllm",
+      "version": "0.30.0"
+     },
+     "hardware": {
+      "gpu": "L40S",
+      "gpus_per_replica": 1,
+      "instance_types": {
+       "aws": "g6e.xlarge",
+       "gcp": null,
+       "runpod": "l40s-x1"
+      },
+      "nodes_per_replica": 1
+     },
+     "hf": {
+      "gated": false,
+      "license": "apache-2.0",
+      "quant_method": null,
+      "repo": "Qwen/Qwen3-8B",
+      "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+      "size_bytes": 16381516776,
+      "trust_remote_code": false,
+      "trust_remote_code_review": null
+     },
+     "id": "qwen3-8b",
+     "kv_cache_dtype": "auto",
+     "max_context": 32768,
+     "parallelism": {
+      "ep": 1,
+      "pp": 1,
+      "tp": 1
+     },
+     "pricing": null,
+     "quantization": "none",
+     "routing_tier": 1,
+     "scaling": {
+      "max_replicas": 1,
+      "min_replicas": 0
+     },
+     "status": "preview",
+     "tool_call_parsers": {
+      "sglang": "qwen25",
+      "vllm": "hermes"
+     }
+    }
+   },
+   "config_hash": "7a203a3ffaccb1820fd23e6da9fab1d00c4cb51c427ce1572c56b08a8036107a",
+   "created_at": "2026-10-10T00:19:20.090760Z",
+   "cuda_version": "13.0",
+   "dataset": {
+    "license": "HF card: apache-2.0. The conversations were scraped from sharegpt.com and contain ChatGPT outputs, and the card's license does not settle OpenAI's terms of use. Loom uses them only as request shapes for load (prompt text in, lengths out), never ships or trains on them, and publishes only latency and cost. Verify before publishing.",
+    "license_url": "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered",
+    "name": "ShareGPT_Vicuna_unfiltered (ShareGPT_V3_unfiltered_cleaned_split.json)",
+    "revision": "192ab2185289094fc556ec8ce5ce1e8e587154ca",
+    "source": "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered"
+   },
+   "driver_version": "580.126.09",
+   "engine": {
+    "args": {},
+    "image": "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90",
+    "image_digest": "sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90",
+    "name": "vllm",
+    "version": "0.30.0"
+   },
+   "git": {
+    "branch": "worktree-agent-a6d190335c18787b2",
+    "dirty": false,
+    "sha": "8a4bdb150efdf04b651bad069c8bf2b65519aa5c"
+   },
+   "hardware": {
+    "gpu_count": 1,
+    "gpu_type": "L40S",
+    "instance_type": "l40s-x1"
+   },
+   "host": {
+    "platform": "macOS-15.7.9-arm64-arm-64bit",
+    "python": "3.12.13"
+   },
+   "hourly_micros": 1100959,
+   "load": {
+    "mode": "open_loop",
+    "seed": 827133313,
+    "value": 2.449489742783178
+   },
+   "loadgen": {
+    "name": "native",
+    "version": "0.1.0"
+   },
+   "market": "on_demand",
+   "model": {
+    "quantization": "none",
+    "repo": "Qwen/Qwen3-8B",
+    "revision": "b968826d9c46dd6066d109eabc6255188de91218"
+   },
+   "parallelism": {
+    "ep": 1,
+    "pp": 1,
+    "tp": 1
+   },
+   "price_basis": {
+    "availability_zone": "location:SE",
+    "market": "on_demand",
+    "observed_at": "2026-10-09T23:28:33.837501Z",
+    "source": "observed_api",
+    "spot_price_usd": null,
+    "storage_gb": 80
+   },
+   "region": "secure",
+   "repetition": 0,
+   "schema_version": 2,
+   "workload": {
+    "content": "realistic",
+    "name": "chat-sharegpt",
+    "profile_hash": "334a484887e52c9dfe1c416f715a192d7b186c8eec10550b867f82fe4fb457b4"
+   }
+  },
+  "repetition": 0,
+  "started_at": "2026-10-10 00:19:20.090838",
+  "status": "completed",
+  "summary": {
+   "cached_prompt_fraction": null,
+   "client": {
+    "client_saturated_count": 0,
+    "loadgen": "native",
+    "max_inflight": 4096,
+    "requests_prepared": 608,
+    "scheduled": 608,
+    "scrape_errors": 0,
+    "timeline": "measured",
+    "tokenizer": "Qwen/Qwen3-8B@b968826d9c46dd6066d109eabc6255188de91218",
+    "unsent": 0
+   },
+   "counts": {
+    "aborted": 0,
+    "error": 0,
+    "ok": 510,
+    "timeout": 0
+   },
+   "e2e_ms": {
+    "max": 36381.635243073106,
+    "mean": 12139.816577484211,
+    "min": 348.4724834561348,
+    "n": 510,
+    "p50": 11067.776168696582,
+    "p90": 23174.656284041703,
+    "p95": 26212.939316872504,
+    "p99": 30158.486794400957
+   },
+   "error_rate": 0.0,
+   "goodput": {
+    "good_requests": 506,
+    "output_tok_s": 793.9714285714285,
+    "request_rate": 2.4095238095238094,
+    "slo_attainment": 0.9921568627450981
+   },
+   "gpu": {
+    "gpus": [
+     {
+      "index": 0,
+      "memory_peak_mib": 41655.0,
+      "memory_total_mib": 46068.0,
+      "n_samples": 283,
+      "power_mean_w": 301.8445229681979,
+      "utilization_mean_pct": 96.81978798586573,
+      "utilization_p95_pct": 100.0
+     }
+    ],
+    "n_gpus": 1,
+    "overall": {
+     "memory_peak_mib": 41655.0,
+     "memory_total_mib": 46068.0,
+     "n_samples": 283,
+     "power_mean_w": 301.8445229681979,
+     "utilization_mean_pct": 96.81978798586573,
+     "utilization_p95_pct": 100.0
+    }
+   },
+   "gpus": 1,
+   "itl_ms": {
+    "max": 403.80050241947174,
+    "mean": 36.88492379726051,
+    "min": 16.495319083333015,
+    "n": 165308,
+    "p50": 31.410744413733482,
+    "p90": 37.141686677932746,
+    "p95": 72.9302496649324,
+    "p99": 160.34605277702212
+   },
+   "n_total": 510,
+   "n_warmup_excluded": 98,
+   "per_request_output_tok_s": {
+    "max": 37.6855398663103,
+    "mean": 26.79303692876659,
+    "min": 12.90043101404091,
+    "n": 510,
+    "p50": 26.68064325392693,
+    "p90": 31.087353041953275,
+    "p95": 32.76381406448763,
+    "p99": 35.52219785471923
+   },
+   "prefill_in_flight": 0.4468879927393226,
+   "queue_delay_ms": {
+    "max": 6.042390675247589,
+    "mean": 0.8432727665061988,
+    "min": 0.07516655216477375,
+    "n": 510,
+    "p50": 0.7771749685119289,
+    "p90": 1.3462135964715582,
+    "p95": 1.8458629991513922,
+    "p99": 2.4863163580755456
+   },
+   "requests_missing_usage": 0,
+   "server": {
+    "duration_s": 274.58644584938884,
+    "engine": "vllm",
+    "kv_usage_max": 0.33339521069240763,
+    "kv_usage_mean": 0.1873745028562181,
+    "missing": [],
+    "n_scrapes": 273,
+    "preemptions": 0.0,
+    "prefix_cache_hit_rate": 0.0005054484890073729,
+    "queue_time_mean_ms": 0.295868327252959,
+    "running_max": 44.0,
+    "running_mean": 26.32967032967033,
+    "waiting_max": 1.0,
+    "waiting_mean": 0.007326007326007326
+   },
+   "slo": {
+    "e2e_ms": null,
+    "itl_ms": null,
+    "max_error_rate": 0.01,
+    "tpot_ms": {
+     "p95": 50.0
+    },
+    "ttft_ms": {
+     "p95": 1000.0
+    }
+   },
+   "throughput": {
+    "input_tok_s": 2272.2,
+    "output_tok_s": 794.4714285714285,
+    "output_tok_s_per_gpu": 794.4714285714285,
+    "request_rate": 2.4285714285714284,
+    "total_tok_s": 3066.6714285714284
+   },
+   "tpot_ms": {
+    "max": 64.43561810172265,
+    "mean": 36.966684838367634,
+    "min": 26.401964908927177,
+    "n": 510,
+    "p50": 36.89199963418025,
+    "p90": 42.383970014149284,
+    "p95": 43.10769037483631,
+    "p99": 48.55151116271977
+   },
+   "ttft_ms": {
+    "max": 515.1410344988108,
+    "mean": 184.01270289266228,
+    "min": 68.56426037847996,
+    "n": 510,
+    "p50": 182.85329826176167,
+    "p90": 288.84789589792496,
+    "p95": 326.8720431253312,
+    "p99": 431.2062820978454
+   },
+   "window_s": 210.0
+  },
+  "workload": "chat-sharegpt"
+ },
+ {
+  "cell_key": "bf16",
+  "config_hash": "7a203a3ffaccb1820fd23e6da9fab1d00c4cb51c427ce1572c56b08a8036107a",
+  "finished_at": "2026-10-10 00:29:12.172748",
+  "id": "683fbd0f76af4ac389e69c7606b9ea3a",
+  "load_mode": "open_loop",
+  "load_value": 2.449489742783178,
+  "provenance": {
+   "bench_version": "0.1.0",
+   "cloud": "runpod",
+   "config": {
+    "hardware": {
+     "allowed_cuda_versions": [
+      "13.0"
+     ],
+     "cloud": "runpod",
+     "disk_gb": 80,
+     "gpu": "L40S",
+     "gpu_type_id": "NVIDIA L40S",
+     "gpus": 1,
+     "instance_type": "l40s-x1",
+     "market": "on_demand",
+     "provider": "runpod",
+     "region": "secure"
+    },
+    "launch": {
+     "args": [
+      "Qwen/Qwen3-8B",
+      "--revision",
+      "b968826d9c46dd6066d109eabc6255188de91218",
+      "--tokenizer-revision",
+      "b968826d9c46dd6066d109eabc6255188de91218",
+      "--served-model-name",
+      "qwen3-8b",
+      "--tensor-parallel-size",
+      "1",
+      "--pipeline-parallel-size",
+      "1",
+      "--max-model-len",
+      "32768",
+      "--kv-cache-dtype",
+      "auto",
+      "--enable-auto-tool-choice",
+      "--tool-call-parser",
+      "hermes",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "8000"
+     ],
+     "engine": "vllm",
+     "env": {},
+     "gpus": 1,
+     "image": "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90",
+     "model_repo": "Qwen/Qwen3-8B",
+     "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+     "port": 8000,
+     "ready_timeout_s": 1800.0,
+     "served_model": "qwen3-8b"
+    },
+    "model": {
+     "capabilities": {
+      "json_schema": true,
+      "reasoning": true,
+      "tools": true,
+      "vision": false
+     },
+     "clouds": [
+      "aws",
+      "runpod"
+     ],
+     "display_name": "Qwen3 8B",
+     "engine": {
+      "args": {},
+      "chat_template_kwargs": {
+       "enable_thinking": false
+      },
+      "image": "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90",
+      "name": "vllm",
+      "version": "0.30.0"
+     },
+     "hardware": {
+      "gpu": "L40S",
+      "gpus_per_replica": 1,
+      "instance_types": {
+       "aws": "g6e.xlarge",
+       "gcp": null,
+       "runpod": "l40s-x1"
+      },
+      "nodes_per_replica": 1
+     },
+     "hf": {
+      "gated": false,
+      "license": "apache-2.0",
+      "quant_method": null,
+      "repo": "Qwen/Qwen3-8B",
+      "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+      "size_bytes": 16381516776,
+      "trust_remote_code": false,
+      "trust_remote_code_review": null
+     },
+     "id": "qwen3-8b",
+     "kv_cache_dtype": "auto",
+     "max_context": 32768,
+     "parallelism": {
+      "ep": 1,
+      "pp": 1,
+      "tp": 1
+     },
+     "pricing": null,
+     "quantization": "none",
+     "routing_tier": 1,
+     "scaling": {
+      "max_replicas": 1,
+      "min_replicas": 0
+     },
+     "status": "preview",
+     "tool_call_parsers": {
+      "sglang": "qwen25",
+      "vllm": "hermes"
+     }
+    }
+   },
+   "config_hash": "7a203a3ffaccb1820fd23e6da9fab1d00c4cb51c427ce1572c56b08a8036107a",
+   "created_at": "2026-10-10T00:24:20.863480Z",
+   "cuda_version": "13.0",
+   "dataset": {
+    "license": "HF card: apache-2.0. The conversations were scraped from sharegpt.com and contain ChatGPT outputs, and the card's license does not settle OpenAI's terms of use. Loom uses them only as request shapes for load (prompt text in, lengths out), never ships or trains on them, and publishes only latency and cost. Verify before publishing.",
+    "license_url": "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered",
+    "name": "ShareGPT_Vicuna_unfiltered (ShareGPT_V3_unfiltered_cleaned_split.json)",
+    "revision": "192ab2185289094fc556ec8ce5ce1e8e587154ca",
+    "source": "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered"
+   },
+   "driver_version": "580.126.09",
+   "engine": {
+    "args": {},
+    "image": "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90",
+    "image_digest": "sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90",
+    "name": "vllm",
+    "version": "0.30.0"
+   },
+   "git": {
+    "branch": "worktree-agent-a6d190335c18787b2",
+    "dirty": false,
+    "sha": "8a4bdb150efdf04b651bad069c8bf2b65519aa5c"
+   },
+   "hardware": {
+    "gpu_count": 1,
+    "gpu_type": "L40S",
+    "instance_type": "l40s-x1"
+   },
+   "host": {
+    "platform": "macOS-15.7.9-arm64-arm-64bit",
+    "python": "3.12.13"
+   },
+   "hourly_micros": 1100959,
+   "load": {
+    "mode": "open_loop",
+    "seed": 34685957,
+    "value": 2.449489742783178
+   },
+   "loadgen": {
+    "name": "native",
+    "version": "0.1.0"
+   },
+   "market": "on_demand",
+   "model": {
+    "quantization": "none",
+    "repo": "Qwen/Qwen3-8B",
+    "revision": "b968826d9c46dd6066d109eabc6255188de91218"
+   },
+   "parallelism": {
+    "ep": 1,
+    "pp": 1,
+    "tp": 1
+   },
+   "price_basis": {
+    "availability_zone": "location:SE",
+    "market": "on_demand",
+    "observed_at": "2026-10-09T23:28:33.837501Z",
+    "source": "observed_api",
+    "spot_price_usd": null,
+    "storage_gb": 80
+   },
+   "region": "secure",
+   "repetition": 1,
+   "schema_version": 2,
+   "workload": {
+    "content": "realistic",
+    "name": "chat-sharegpt",
+    "profile_hash": "334a484887e52c9dfe1c416f715a192d7b186c8eec10550b867f82fe4fb457b4"
+   }
+  },
+  "repetition": 1,
+  "started_at": "2026-10-10 00:24:20.863559",
+  "status": "completed",
+  "summary": {
+   "cached_prompt_fraction": null,
+   "client": {
+    "client_saturated_count": 0,
+    "loadgen": "native",
+    "max_inflight": 4096,
+    "requests_prepared": 642,
+    "scheduled": 642,
+    "scrape_errors": 0,
+    "timeline": "measured",
+    "tokenizer": "Qwen/Qwen3-8B@b968826d9c46dd6066d109eabc6255188de91218",
+    "unsent": 0
+   },
+   "counts": {
+    "aborted": 0,
+    "error": 0,
+    "ok": 520,
+    "timeout": 0
+   },
+   "e2e_ms": {
+    "max": 40820.149678736925,
+    "mean": 12983.186154866304,
+    "min": 361.7172800004482,
+    "n": 520,
+    "p50": 11436.771094799042,
+    "p90": 25452.62417346239,
+    "p95": 30155.80784510821,
+    "p99": 36512.70891381427
+   },
+   "error_rate": 0.0,
+   "goodput": {
+    "good_requests": 505,
+    "output_tok_s": 803.0809523809523,
+    "request_rate": 2.4047619047619047,
+    "slo_attainment": 0.9711538461538461
+   },
+   "gpu": {
+    "gpus": [
+     {
+      "index": 0,
+      "memory_peak_mib": 41655.0,
+      "memory_total_mib": 46068.0,
+      "n_samples": 276,
+      "power_mean_w": 305.6889855072464,
+      "utilization_mean_pct": 97.10144927536231,
+      "utilization_p95_pct": 100.0
+     }
+    ],
+    "n_gpus": 1,
+    "overall": {
+     "memory_peak_mib": 41655.0,
+     "memory_total_mib": 46068.0,
+     "n_samples": 276,
+     "power_mean_w": 305.6889855072464,
+     "utilization_mean_pct": 97.10144927536231,
+     "utilization_p95_pct": 100.0
+    }
+   },
+   "gpus": 1,
+   "itl_ms": {
+    "max": 463.94720301032066,
+    "mean": 39.421411271472046,
+    "min": 20.097792148590088,
+    "n": 168790,
+    "p50": 32.802341505885124,
+    "p90": 41.63655489683151,
+    "p95": 95.25892836972454,
+    "p99": 166.21471419930455
+   },
+   "n_total": 520,
+   "n_warmup_excluded": 122,
+   "per_request_output_tok_s": {
+    "max": 37.21072344352201,
+    "mean": 25.406720427482377,
+    "min": 11.996084526401436,
+    "n": 520,
+    "p50": 25.72425285346968,
+    "p90": 29.78641157100584,
+    "p95": 30.55392745225486,
+    "p99": 33.64113529902826
+   },
+   "prefill_in_flight": 0.46193689162887286,
+   "queue_delay_ms": {
+    "max": 4.604923063496358,
+    "mean": 0.9152316559571033,
+    "min": 0.11883226957820625,
+    "n": 520,
+    "p50": 0.8258798507512211,
+    "p90": 1.6388884993816077,
+    "p95": 2.0328703125294108,
+    "p99": 2.9184966322529102
+   },
+   "requests_missing_usage": 0,
+   "server": {
+    "duration_s": 268.59097542241216,
+    "engine": "vllm",
+    "kv_usage_max": 0.4441247447558938,
+    "kv_usage_mean": 0.22215570985497754,
+    "missing": [],
+    "n_scrapes": 267,
+    "preemptions": 0.0,
+    "prefix_cache_hit_rate": 2.6090373793524043e-05,
+    "queue_time_mean_ms": 0.009332551414907166,
+    "running_max": 58.0,
+    "running_mean": 29.9812734082397,
+    "waiting_max": 0.0,
+    "waiting_mean": 0.0
+   },
+   "slo": {
+    "e2e_ms": null,
+    "itl_ms": null,
+    "max_error_rate": 0.01,
+    "tpot_ms": {
+     "p95": 50.0
+    },
+    "ttft_ms": {
+     "p95": 1000.0
+    }
+   },
+   "throughput": {
+    "input_tok_s": 2380.8761904761905,
+    "output_tok_s": 811.7476190476191,
+    "output_tok_s_per_gpu": 811.7476190476191,
+    "request_rate": 2.4761904761904763,
+    "total_tok_s": 3192.6238095238095
+   },
+   "tpot_ms": {
+    "max": 55.34870051981314,
+    "mean": 39.03556747682709,
+    "min": 26.628240040585478,
+    "n": 520,
+    "p50": 38.0232884984766,
+    "p90": 47.71160359072817,
+    "p95": 48.954174462383314,
+    "p99": 53.11383399966967
+   },
+   "ttft_ms": {
+    "max": 567.8220186382532,
+    "mean": 186.55143700396786,
+    "min": 68.79631616175175,
+    "n": 520,
+    "p50": 188.74171935021877,
+    "p90": 295.78572157770395,
+    "p95": 333.28607389703393,
+    "p99": 433.7191135063767
+   },
+   "window_s": 210.0
+  },
+  "workload": "chat-sharegpt"
+ },
+ {
+  "cell_key": "bf16",
+  "config_hash": "7a203a3ffaccb1820fd23e6da9fab1d00c4cb51c427ce1572c56b08a8036107a",
+  "finished_at": "2026-10-10 00:34:10.607369",
+  "id": "4c32066dd42e4cdd86f727ea2e4d8c2a",
+  "load_mode": "open_loop",
+  "load_value": 2.449489742783178,
+  "provenance": {
+   "bench_version": "0.1.0",
+   "cloud": "runpod",
+   "config": {
+    "hardware": {
+     "allowed_cuda_versions": [
+      "13.0"
+     ],
+     "cloud": "runpod",
+     "disk_gb": 80,
+     "gpu": "L40S",
+     "gpu_type_id": "NVIDIA L40S",
+     "gpus": 1,
+     "instance_type": "l40s-x1",
+     "market": "on_demand",
+     "provider": "runpod",
+     "region": "secure"
+    },
+    "launch": {
+     "args": [
+      "Qwen/Qwen3-8B",
+      "--revision",
+      "b968826d9c46dd6066d109eabc6255188de91218",
+      "--tokenizer-revision",
+      "b968826d9c46dd6066d109eabc6255188de91218",
+      "--served-model-name",
+      "qwen3-8b",
+      "--tensor-parallel-size",
+      "1",
+      "--pipeline-parallel-size",
+      "1",
+      "--max-model-len",
+      "32768",
+      "--kv-cache-dtype",
+      "auto",
+      "--enable-auto-tool-choice",
+      "--tool-call-parser",
+      "hermes",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "8000"
+     ],
+     "engine": "vllm",
+     "env": {},
+     "gpus": 1,
+     "image": "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90",
+     "model_repo": "Qwen/Qwen3-8B",
+     "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+     "port": 8000,
+     "ready_timeout_s": 1800.0,
+     "served_model": "qwen3-8b"
+    },
+    "model": {
+     "capabilities": {
+      "json_schema": true,
+      "reasoning": true,
+      "tools": true,
+      "vision": false
+     },
+     "clouds": [
+      "aws",
+      "runpod"
+     ],
+     "display_name": "Qwen3 8B",
+     "engine": {
+      "args": {},
+      "chat_template_kwargs": {
+       "enable_thinking": false
+      },
+      "image": "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90",
+      "name": "vllm",
+      "version": "0.30.0"
+     },
+     "hardware": {
+      "gpu": "L40S",
+      "gpus_per_replica": 1,
+      "instance_types": {
+       "aws": "g6e.xlarge",
+       "gcp": null,
+       "runpod": "l40s-x1"
+      },
+      "nodes_per_replica": 1
+     },
+     "hf": {
+      "gated": false,
+      "license": "apache-2.0",
+      "quant_method": null,
+      "repo": "Qwen/Qwen3-8B",
+      "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+      "size_bytes": 16381516776,
+      "trust_remote_code": false,
+      "trust_remote_code_review": null
+     },
+     "id": "qwen3-8b",
+     "kv_cache_dtype": "auto",
+     "max_context": 32768,
+     "parallelism": {
+      "ep": 1,
+      "pp": 1,
+      "tp": 1
+     },
+     "pricing": null,
+     "quantization": "none",
+     "routing_tier": 1,
+     "scaling": {
+      "max_replicas": 1,
+      "min_replicas": 0
+     },
+     "status": "preview",
+     "tool_call_parsers": {
+      "sglang": "qwen25",
+      "vllm": "hermes"
+     }
+    }
+   },
+   "config_hash": "7a203a3ffaccb1820fd23e6da9fab1d00c4cb51c427ce1572c56b08a8036107a",
+   "created_at": "2026-10-10T00:29:12.180573Z",
+   "cuda_version": "13.0",
+   "dataset": {
+    "license": "HF card: apache-2.0. The conversations were scraped from sharegpt.com and contain ChatGPT outputs, and the card's license does not settle OpenAI's terms of use. Loom uses them only as request shapes for load (prompt text in, lengths out), never ships or trains on them, and publishes only latency and cost. Verify before publishing.",
+    "license_url": "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered",
+    "name": "ShareGPT_Vicuna_unfiltered (ShareGPT_V3_unfiltered_cleaned_split.json)",
+    "revision": "192ab2185289094fc556ec8ce5ce1e8e587154ca",
+    "source": "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered"
+   },
+   "driver_version": "580.126.09",
+   "engine": {
+    "args": {},
+    "image": "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90",
+    "image_digest": "sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90",
+    "name": "vllm",
+    "version": "0.30.0"
+   },
+   "git": {
+    "branch": "worktree-agent-a6d190335c18787b2",
+    "dirty": false,
+    "sha": "8a4bdb150efdf04b651bad069c8bf2b65519aa5c"
+   },
+   "hardware": {
+    "gpu_count": 1,
+    "gpu_type": "L40S",
+    "instance_type": "l40s-x1"
+   },
+   "host": {
+    "platform": "macOS-15.7.9-arm64-arm-64bit",
+    "python": "3.12.13"
+   },
+   "hourly_micros": 1100959,
+   "load": {
+    "mode": "open_loop",
+    "seed": 1215350680,
+    "value": 2.449489742783178
+   },
+   "loadgen": {
+    "name": "native",
+    "version": "0.1.0"
+   },
+   "market": "on_demand",
+   "model": {
+    "quantization": "none",
+    "repo": "Qwen/Qwen3-8B",
+    "revision": "b968826d9c46dd6066d109eabc6255188de91218"
+   },
+   "parallelism": {
+    "ep": 1,
+    "pp": 1,
+    "tp": 1
+   },
+   "price_basis": {
+    "availability_zone": "location:SE",
+    "market": "on_demand",
+    "observed_at": "2026-10-09T23:28:33.837501Z",
+    "source": "observed_api",
+    "spot_price_usd": null,
+    "storage_gb": 80
+   },
+   "region": "secure",
+   "repetition": 2,
+   "schema_version": 2,
+   "workload": {
+    "content": "realistic",
+    "name": "chat-sharegpt",
+    "profile_hash": "334a484887e52c9dfe1c416f715a192d7b186c8eec10550b867f82fe4fb457b4"
+   }
+  },
+  "repetition": 2,
+  "started_at": "2026-10-10 00:29:12.180653",
+  "status": "completed",
+  "summary": {
+   "cached_prompt_fraction": null,
+   "client": {
+    "client_saturated_count": 0,
+    "loadgen": "native",
+    "max_inflight": 4096,
+    "requests_prepared": 612,
+    "scheduled": 612,
+    "scrape_errors": 0,
+    "timeline": "measured",
+    "tokenizer": "Qwen/Qwen3-8B@b968826d9c46dd6066d109eabc6255188de91218",
+    "unsent": 0
+   },
+   "counts": {
+    "aborted": 0,
+    "error": 0,
+    "ok": 505,
+    "timeout": 0
+   },
+   "e2e_ms": {
+    "max": 39211.83163113892,
+    "mean": 11134.587447046495,
+    "min": 338.24714459478855,
+    "n": 505,
+    "p50": 10141.683772206306,
+    "p90": 21091.584609076384,
+    "p95": 24875.531321391452,
+    "p99": 29423.233364447948
+   },
+   "error_rate": 0.0,
+   "goodput": {
+    "good_requests": 504,
+    "output_tok_s": 755.3666666666667,
+    "request_rate": 2.4,
+    "slo_attainment": 0.998019801980198
+   },
+   "gpu": {
+    "gpus": [
+     {
+      "index": 0,
+      "memory_peak_mib": 41674.0,
+      "memory_total_mib": 46068.0,
+      "n_samples": 280,
+      "power_mean_w": 302.4944642857143,
+      "utilization_mean_pct": 97.14285714285714,
+      "utilization_p95_pct": 100.0
+     }
+    ],
+    "n_gpus": 1,
+    "overall": {
+     "memory_peak_mib": 41674.0,
+     "memory_total_mib": 46068.0,
+     "n_samples": 280,
+     "power_mean_w": 302.4944642857143,
+     "utilization_mean_pct": 97.14285714285714,
+     "utilization_p95_pct": 100.0
+    }
+   },
+   "gpus": 1,
+   "itl_ms": {
+    "max": 337.93785236775875,
+    "mean": 35.2423628729958,
+    "min": 15.06606675684452,
+    "n": 157045,
+    "p50": 30.186815187335014,
+    "p90": 35.35110056400299,
+    "p95": 59.37968790531156,
+    "p99": 159.01071943342686
+   },
+   "n_total": 505,
+   "n_warmup_excluded": 107,
+   "per_request_output_tok_s": {
+    "max": 39.52862505108469,
+    "mean": 28.06772621261155,
+    "min": 11.521918944472947,
+    "n": 505,
+    "p50": 28.571781926238714,
+    "p90": 30.795297604449473,
+    "p95": 31.72949789971262,
+    "p99": 34.08690174104442
+   },
+   "prefill_in_flight": 0.4193602993019989,
+   "queue_delay_ms": {
+    "max": 4.674583596511184,
+    "mean": 0.9447454155128491,
+    "min": 0.12755465564850965,
+    "n": 505,
+    "p50": 0.8604351071994643,
+    "p90": 1.7302338935394348,
+    "p95": 2.1035595309882633,
+    "p99": 2.9972565105379045
+   },
+   "requests_missing_usage": 0,
+   "server": {
+    "duration_s": 273.0146248508245,
+    "engine": "vllm",
+    "kv_usage_max": 0.3000742528308892,
+    "kv_usage_mean": 0.17472380403804366,
+    "missing": [],
+    "n_scrapes": 272,
+    "preemptions": 0.0,
+    "prefix_cache_hit_rate": 5.746496881627551e-05,
+    "queue_time_mean_ms": 0.20882919175075548,
+    "running_max": 41.0,
+    "running_mean": 25.0,
+    "waiting_max": 1.0,
+    "waiting_mean": 0.003676470588235294
+   },
+   "slo": {
+    "e2e_ms": null,
+    "itl_ms": null,
+    "max_error_rate": 0.01,
+    "tpot_ms": {
+     "p95": 50.0
+    },
+    "ttft_ms": {
+     "p95": 1000.0
+    }
+   },
+   "throughput": {
+    "input_tok_s": 2157.5333333333333,
+    "output_tok_s": 755.4095238095238,
+    "output_tok_s_per_gpu": 755.4095238095238,
+    "request_rate": 2.4047619047619047,
+    "total_tok_s": 2912.942857142857
+   },
+   "tpot_ms": {
+    "max": 59.125224594026804,
+    "mean": 35.12686519539759,
+    "min": 24.976077488324602,
+    "n": 505,
+    "p50": 34.446309414892056,
+    "p90": 39.0672776010821,
+    "p95": 42.103642176468966,
+    "p99": 45.168032941952525
+   },
+   "ttft_ms": {
+    "max": 580.1206789910793,
+    "mean": 174.38745119489064,
+    "min": 66.37036986649036,
+    "n": 505,
+    "p50": 165.7088678330183,
+    "p90": 268.74777488410473,
+    "p95": 334.89862158894533,
+    "p99": 458.0606899410482
+   },
+   "window_s": 210.0
+  },
+  "workload": "chat-sharegpt"
+ }
+]
