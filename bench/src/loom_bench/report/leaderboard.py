@@ -67,6 +67,7 @@ from loom_bench.report.methodology import (
     Methodology,
     methodology,
     methodology_markdown,
+    public_dataset,
 )
 from loom_bench.report.resolution import brackets_overlap, goodput_ties
 
@@ -729,7 +730,7 @@ def _csv_row(b: Leaderboard, row: LeaderboardRow, m: Methodology) -> dict[str, A
     prov = next(c for c in m.configs if c.key == r.key)
     q = r.quality
     worst = q.worst() if q else None
-    dataset = DatasetRef.model_validate(r.provenance.get("dataset") or {})
+    dataset = public_dataset(DatasetRef.model_validate(r.provenance.get("dataset") or {}))
     split_in, split_out, split_blended = split_ranges(r)
     shape = r.tokens_per_request()
     return {

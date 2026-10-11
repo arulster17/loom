@@ -3,7 +3,13 @@ no dataset, and the storage each cloud's replica pays for."""
 
 from loom_bench.cost import CostAllocation
 from loom_bench.report.analyze import analyze_runs, default_price_resolver
-from loom_bench.report.methodology import DatasetRef, methodology, public_dataset, storage_name
+from loom_bench.report.methodology import (
+    DatasetRef,
+    methodology,
+    public_dataset,
+    public_license,
+    storage_name,
+)
 from loom_bench.workloads.profiles import load_profile
 
 from .factories import SLO, make_runs
@@ -11,21 +17,18 @@ from .factories import SLO, make_runs
 SHAREGPT = load_profile("chat-sharegpt").dataset
 
 
-def test_a_recorded_licence_note_is_published_as_the_profile_states_it_now():
+def test_internal_reminders_are_not_published_but_stay_in_the_profile():
+    """The profile keeps its note (its hash is pinned); published text drops the reminder."""
     assert SHAREGPT is not None
-    recorded = DatasetRef(
-        name=SHAREGPT.name,
-        source=SHAREGPT.source,
-        revision=SHAREGPT.revision,
-        license=SHAREGPT.license + " Verify before publishing.",
-        license_url=SHAREGPT.license_url,
-    )
+    assert SHAREGPT.license.endswith("Verify before publishing.")
+    recorded = DatasetRef.model_validate(SHAREGPT.model_dump())
     shown = public_dataset(recorded)
-    assert shown.license == SHAREGPT.license
     assert "Verify before publishing" not in shown.text
-    # another revision of the dataset is not the profile's: shown as recorded
-    other = recorded.model_copy(update={"revision": "0" * 40})
-    assert public_dataset(other) == other
+    assert shown.license is not None
+    assert shown.license.endswith("publishes only latency and cost.")
+    assert "OpenAI's terms of use" in shown.license
+    assert public_license("CC-BY-4.0") == "CC-BY-4.0"
+    assert public_license(None) is None
 
 
 def test_synthetic_runs_name_no_dataset(price_book):

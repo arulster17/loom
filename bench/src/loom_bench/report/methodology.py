@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Mapping, Sequence
-from functools import cache
 from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict
@@ -17,7 +16,6 @@ from loom_bench.records import LoadMode, Market
 from loom_bench.registry import Cloud
 from loom_bench.report.analyze import ConfigResult, SweepKey
 from loom_bench.report.format import describe_slo, load_mode_label, usd
-from loom_bench.workloads.profiles import list_profiles, load_profile
 
 ALLOCATION_TEXT = {
     "all_output": "all of the replica's hourly cost is charged to output tokens, so "
@@ -80,35 +78,30 @@ class DatasetRef(BaseModel):
         return " ".join(parts)
 
 
-@cache
-def _profile_datasets() -> dict[tuple[str, str | None], DatasetRef]:
-    """The dataset of every shipped workload profile, by (source, revision)."""
-    out: dict[tuple[str, str | None], DatasetRef] = {}
-    for name in list_profiles():
-        try:
-            profile = load_profile(name)
-        except (OSError, ValueError):
-            continue
-        d = profile.dataset
-        if d is not None:
-            out[(d.source, d.revision)] = DatasetRef.model_validate(d.model_dump())
-    return out
+# Sentences in a dataset licence note addressed to whoever publishes results, not to
+# readers. They stay in the workload profile (hashed into every run's provenance, so its
+# text must not change) and in stored provenance; published text drops them.
+INTERNAL_LICENSE_NOTES = ("Verify before publishing.",)
+
+
+def public_license(text: str | None) -> str | None:
+    """A licence note as published: internal reminders (`INTERNAL_LICENSE_NOTES`) removed."""
+    if text is None:
+        return None
+    for note in INTERNAL_LICENSE_NOTES:
+        text = text.replace(note, "")
+    return " ".join(text.split()) or None
 
 
 def public_dataset(recorded: DatasetRef) -> DatasetRef:
-    """The dataset as published: its licence note as the workload profile states it now.
+    """The dataset as published: its licence note without internal reminders.
 
-    A run's provenance keeps the note recorded at the time; an older one can carry text
-    meant for review rather than for readers (chat-sharegpt's "Verify before
-    publishing."). The same dataset (source and revision) takes the profile's current
-    note; a dataset no shipped profile names is shown as recorded.
+    chat-sharegpt's note ends "Verify before publishing.", a reminder to check the
+    licence position before results go public. Editing the profile would move its profile
+    hash, which every stored run, compare and reproduce keys on, so the reminder stays
+    there and in provenance and is stripped here, where text is published.
     """
-    current = _profile_datasets().get((recorded.source or "", recorded.revision))
-    if current is None:
-        return recorded
-    return recorded.model_copy(
-        update={"license": current.license, "license_url": current.license_url}
-    )
+    return recorded.model_copy(update={"license": public_license(recorded.license)})
 
 
 class ConfigProvenance(BaseModel):
