@@ -11,7 +11,11 @@
       "best_config_hash": null,
       "cost_input": null,
       "cost_output": null,
-      "price": null,
+      "price": {
+        "input_per_mtok": 77000,
+        "output_per_mtok": 368000,
+        "cached_input_per_mtok": 77000
+      },
       "margin_input": null,
       "margin_output": null,
       "competitors": [
@@ -45,11 +49,6 @@
         }
       ],
       "flags": [
-        {
-          "kind": "no_price_set",
-          "side": null,
-          "message": "qwen3-8b: no price set"
-        },
         {
           "kind": "no_cost_measurement",
           "side": null,
@@ -184,7 +183,11 @@
       "best_config_hash": null,
       "cost_input": null,
       "cost_output": null,
-      "price": null,
+      "price": {
+        "input_per_mtok": 571000,
+        "output_per_mtok": 797000,
+        "cached_input_per_mtok": 571000
+      },
       "margin_input": null,
       "margin_output": null,
       "competitors": [
@@ -261,14 +264,19 @@
       ],
       "flags": [
         {
-          "kind": "no_price_set",
-          "side": null,
-          "message": "llama-3.3-70b-instruct-fp8: no price set"
-        },
-        {
           "kind": "no_cost_measurement",
           "side": null,
           "message": "llama-3.3-70b-instruct-fp8: no measured cost at SLO"
+        },
+        {
+          "kind": "price_above_market",
+          "side": "input",
+          "message": "llama-3.3-70b-instruct-fp8 input: $0.5710/1M is $0.4710 (471.0%) above the market minimum $0.1000/1M (DeepInfra); $0.4360 (323.0%) vs the median $0.1350/1M of 3 providers"
+        },
+        {
+          "kind": "price_above_market",
+          "side": "output",
+          "message": "llama-3.3-70b-instruct-fp8 output: $0.7970/1M is $0.4770 (149.1%) above the market minimum $0.3200/1M (DeepInfra); $0.3970 (99.2%) vs the median $0.4000/1M of 3 providers"
         }
       ],
       "cost_blended": null,
@@ -430,7 +438,7 @@
         "method": "arithmetic mean, Student-t interval (t)"
       }
     ],
-    "price_book_last_checked": "2026-10-08",
+    "price_book_last_checked": "2026-10-09",
     "configs": [],
     "split": "Headline $/1M input and $/1M output use the prefill_time split, measured at the goodput point: input tokens pay for the share φ of the replica's time spent prefilling prompts, output tokens for the rest (decode steps, and any idle headroom the SLO needs). φ is the mean number of requests in their prefill phase, request rate × mean TTFT (Little's law), per repetition, combined like a throughput (geometric mean, log-t CI) and capped at 1. Input = φ × hourly price / input tok/s; output = (1 − φ) × hourly price / output tok/s; at the measured mix they bill exactly the replica's hourly price. TTFT includes queueing and the first decode step and concurrent prefills are each counted, so φ tends to overstate prefill time (input high, output low); idle headroom is charged to output (output high). The price CIs combine the φ and throughput CIs at the ends that push each price the same way, an outer bound. Blended $/1M is the hourly price over all tokens at the workload's own input:output mix and needs no split. The ranking still uses the declared cost allocation, shown in its own column."
   }

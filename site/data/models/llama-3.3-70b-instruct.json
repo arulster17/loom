@@ -19,21 +19,23 @@
       "name": "vllm",
       "version": "0.30.0",
       "image": "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90",
-      "args": {},
+      "args": {
+        "gpu_memory_utilization": 0.95
+      },
       "chat_template_kwargs": {}
     },
     "hardware": {
-      "gpu": "L40S",
-      "gpus_per_replica": 4,
+      "gpu": "H100",
+      "gpus_per_replica": 2,
       "nodes_per_replica": 1,
       "instance_types": {
-        "aws": "g6e.12xlarge",
+        "aws": null,
         "gcp": null,
-        "runpod": "l40s-x4"
+        "runpod": "h100-sxm-x2"
       }
     },
     "parallelism": {
-      "tp": 4,
+      "tp": 2,
       "pp": 1,
       "ep": 1
     },
@@ -46,7 +48,6 @@
       "max_replicas": 1
     },
     "clouds": [
-      "aws",
       "runpod"
     ],
     "capabilities": {

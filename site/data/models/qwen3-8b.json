@@ -42,7 +42,11 @@
     "max_context": 32768,
     "quantization": "none",
     "kv_cache_dtype": "auto",
-    "pricing": null,
+    "pricing": {
+      "input_per_mtok": 77000,
+      "output_per_mtok": 368000,
+      "cached_input_per_mtok": 77000
+    },
     "scaling": {
       "min_replicas": 0,
       "max_replicas": 1

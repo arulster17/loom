@@ -1,5 +1,5 @@
 {
-  "last_checked": "2026-10-08",
+  "last_checked": "2026-10-09",
   "clouds": {
     "aws": {
       "us-east-1": {
@@ -315,6 +315,42 @@
             "memory_gib": 94,
             "local_nvme_gb": 0,
             "on_demand_per_hour": 1090000,
+            "spot_per_hour": null,
+            "committed_1y_per_hour": null
+          },
+          "l40-x1": {
+            "sources": [
+              "https://www.runpod.io/pricing",
+              "https://docs.runpod.io/pods/pricing"
+            ],
+            "last_checked": "2026-10-09",
+            "verified": true,
+            "note": null,
+            "gpu": "L40",
+            "gpu_count": 1,
+            "gpu_memory_gb": 48,
+            "vcpus": 18,
+            "memory_gib": 143,
+            "local_nvme_gb": 0,
+            "on_demand_per_hour": 820000,
+            "spot_per_hour": null,
+            "committed_1y_per_hour": null
+          },
+          "rtx6000ada-x1": {
+            "sources": [
+              "https://www.runpod.io/pricing",
+              "https://docs.runpod.io/pods/pricing"
+            ],
+            "last_checked": "2026-10-09",
+            "verified": true,
+            "note": null,
+            "gpu": "RTX 6000 Ada",
+            "gpu_count": 1,
+            "gpu_memory_gb": 48,
+            "vcpus": 16,
+            "memory_gib": 62,
+            "local_nvme_gb": 0,
+            "on_demand_per_hour": 990000,
             "spot_per_hour": null,
             "committed_1y_per_hour": null
           },
