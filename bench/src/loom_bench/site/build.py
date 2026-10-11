@@ -21,12 +21,12 @@ from typing import Any, cast
 import yaml
 from jinja2 import ChoiceLoader, Environment, PackageLoader
 
-from loom_bench.cost import CostAllocation, cost_at_slo
+from loom_bench.cost import CostAllocation, MicrosRange, cost_at_slo
 from loom_bench.experiment import AwsEc2ProviderSpec
-from loom_bench.money import SECONDS_PER_HOUR, TOKENS_PER_MTOK, Micros
+from loom_bench.money import SECONDS_PER_HOUR, TOKENS_PER_MTOK, Micros, format_usd
 from loom_bench.prices import BlockStorage, InstanceType, PriceBook, UnverifiedPriceError
 from loom_bench.records import LoadMode, Market
-from loom_bench.registry import Cloud, ModelSpec
+from loom_bench.registry import Cloud, ModelSpec, Pricing
 from loom_bench.report.analyze import (
     CLOUD_NAMES,
     ConfigLabel,
@@ -38,9 +38,10 @@ from loom_bench.report.analyze import (
 )
 from loom_bench.report.competitiveness import (
     CompetitivenessRow,
+    CompetitorPrice,
+    FlagView,
+    Margin,
     comparison_scope,
-    margin_text,
-    price_text,
 )
 from loom_bench.report.format import jinja_env, load_mode_label
 from loom_bench.report.leaderboard import (
@@ -57,6 +58,7 @@ from loom_bench.report.leaderboard import (
     ranking_cost,
     split_ranges,
     unranked_reason,
+    untrusted_reasons,
 )
 from loom_bench.report.methodology import (
     ALLOCATION_TEXT,
@@ -86,8 +88,8 @@ class Page:
 
 NAV = (
     Page("results", "index.html", "Results"),
-    Page("methodology", "methodology.html", "Methodology"),
     Page("pricing", "pricing.html", "Pricing"),
+    Page("methodology", "methodology.html", "Methodology"),
     Page("harness", "harness.html", "Harness"),
 )
 
@@ -109,6 +111,119 @@ def short_sha(sha: str | None) -> str:
     return sha[:12] if sha else "not recorded"
 
 
+def price_usd(m: Micros | None) -> str:
+    """A list price as people write one: $0.077, $0.10, $1.04 (trailing zeros dropped,
+    at least two decimals). The value is the same micros `usd` shows to four places."""
+    if m is None:
+        return "n/a"
+    whole, _, frac = format_usd(m, 6).partition(".")
+    return f"{whole}.{frac.rstrip('0').ljust(2, '0')}"
+
+
+def ci_title(rng: MicrosRange | None) -> str:
+    """A cost's 95% CI as plain text, for a tooltip next to the point value."""
+    if rng is None or rng.value is None or rng.na_reason:
+        return ""
+    if rng.lo is None and rng.hi is None:
+        return "no CI"
+    lo = "n/a" if rng.lo is None else format_usd(rng.lo, 4)
+    hi = "unbounded" if rng.hi is None else format_usd(rng.hi, 4)
+    return f"95% CI {lo} – {hi}"
+
+
+def est_title(e: Estimate | None, places: int = 0) -> str:
+    """An estimate's CI as plain text, for a tooltip next to the point value."""
+    if e is None:
+        return ""
+    if e.lo is None or e.hi is None:
+        return f"n={e.n}, no CI"
+    return f"95% CI {e.lo:,.{places}f} – {e.hi:,.{places}f}"
+
+
+def untrusted_short(r: ConfigResult) -> str:
+    """Why a result is untrusted, in a few words: "high run-to-run variance"."""
+    return ", ".join(untrusted_reasons(r))
+
+
+FLAG_LABELS = {
+    "cost_above_market": "Cost above market",
+    "price_above_market": "Price above market",
+    "negative_margin": "Price below cost",
+    "no_price_set": "No price set",
+    "no_public_comparison": "No eligible public list price",
+    "no_cost_measurement": "No measured cost at SLO",
+}
+# Flags that judge a price or cost against the market or each other: shown in red.
+BAD_FLAGS = frozenset({"cost_above_market", "price_above_market", "negative_margin"})
+
+
+@dataclass(frozen=True)
+class FlagLine:
+    kind: str
+    label: str
+    side: str | None
+    detail: str
+    workloads: list[str]
+
+    @property
+    def bad(self) -> bool:
+        return self.kind in BAD_FLAGS
+
+
+def flag_lines(model_id: str, rows: Sequence[CompetitivenessRow]) -> list[FlagLine]:
+    """A model's pricing flags, one line per distinct flag: the model id and side the
+    message starts with are dropped (the table shows them), and a flag every workload
+    raises with the same text is listed once with all its workloads."""
+    lines: dict[tuple[str, str | None, str], list[str]] = {}
+    for r in rows:
+        for f in r.flags:
+            workloads = lines.setdefault((f.kind, f.side, _flag_detail(model_id, f)), [])
+            if r.workload and r.workload not in workloads:
+                workloads.append(r.workload)
+    out = []
+    for (kind, side, detail), workloads in lines.items():
+        label = FLAG_LABELS.get(kind, sentence(kind.replace("_", " ")))
+        same = detail.rstrip(".").lower() == label.lower()
+        out.append(
+            FlagLine(
+                kind=kind,
+                label=label,
+                side=side,
+                detail="" if same else detail,
+                workloads=workloads,
+            )
+        )
+    return out
+
+
+def _flag_detail(model_id: str, f: FlagView) -> str:
+    text = f.message
+    prefixes = [f"{model_id} {f.side}: "] if f.side else []
+    for prefix in (*prefixes, f"{model_id}: "):
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+            break
+    return sentence(text)
+
+
+def margin_parts(m: Margin | None) -> tuple[str, list[str]]:
+    """A margin and its secondary lines: "$0.0213", ["28% of price", "$0.0132 at CI high"]."""
+    if m is None:
+        return "n/a", []
+    extra = []
+    if m.fraction_of_price is not None:
+        extra.append(f"{m.fraction_of_price * 100:.0f}% of price")
+    if m.worst is not None:
+        extra.append(f"{format_usd(m.worst, 4)} at CI high")
+    return format_usd(m.value, 4), extra
+
+
+def source_name(url: str) -> str:
+    """A source link's text: the host, e.g. "docs.fireworks.ai"."""
+    host = re.sub(r"^https?://", "", url).split("/", 1)[0]
+    return host.removeprefix("www.")
+
+
 @cache
 def _env() -> Environment:
     """The report environment (shared filters and globals) plus site-only helpers."""
@@ -120,19 +235,23 @@ def _env() -> Environment:
             ]
         )
     )
-    env.filters.update(yaml=to_yaml, short_sha=short_sha, sentence=sentence)
+    env.filters.update(yaml=to_yaml, short_sha=short_sha, sentence=sentence, price_usd=price_usd)
     env.globals.update(
         cold_text=cold_text,
         gate_label=gate_label,
         quality_text=quality_text,
         unranked_reason=unranked_reason,
         split_ranges=split_ranges,
-        margin_text=margin_text,
-        price_text=price_text,
         price_header=price_header,
         ranking_cost=ranking_cost,
         slug=slug,
         nav=NAV,
+        ci_title=ci_title,
+        est_title=est_title,
+        untrusted_short=untrusted_short,
+        flag_lines=flag_lines,
+        margin_parts=margin_parts,
+        source_name=source_name,
     )
     return env
 
@@ -157,33 +276,37 @@ class PlannedConfig:
     max_context: int
     license: str
     status: str
+    short: str  # precision and GPUs per replica: "FP8 · 2×H100"
 
     @classmethod
     def of(cls, spec: ModelSpec) -> PlannedConfig:
         hw, par = spec.hardware, spec.parallelism
         instances = ", ".join(f"{c} {t}" for c, t in hw.instance_types.model_dump().items() if t)
+        label = ConfigLabel(
+            engine=None,
+            engine_version=None,
+            quantization=spec.quantization,
+            tp=None,
+            gpu_type=None,
+            gpu_count=None,
+            instance_type=None,
+            cloud=None,
+            region=None,
+            market=None,
+            engine_args={},
+            kv_cache_dtype=spec.kv_cache_dtype,
+        )
+        gpus = f"{hw.gpus_per_replica}×{hw.gpu}" if hw.gpus_per_replica > 1 else hw.gpu
         return cls(
             engine=f"{spec.engine.name} {spec.engine.version}",
             image=spec.engine.image,
             hardware=f"{hw.gpus_per_replica}×{hw.gpu} per replica ({instances})",
             parallelism=f"TP{par.tp} · PP{par.pp} · EP{par.ep}",
-            quantization=ConfigLabel(
-                engine=None,
-                engine_version=None,
-                quantization=spec.quantization,
-                tp=None,
-                gpu_type=None,
-                gpu_count=None,
-                instance_type=None,
-                cloud=None,
-                region=None,
-                market=None,
-                engine_args={},
-                kv_cache_dtype=spec.kv_cache_dtype,
-            ).precision_text,
+            quantization=label.precision_text,
             max_context=spec.max_context,
             license=spec.hf.license,
             status=spec.status,
+            short=f"{label.precision} · {gpus}",
         )
 
 
@@ -237,6 +360,39 @@ class BoardView:
         content = f" · {b.content.value} content" if b.content else ""
         return f"{b.workload} · {b.load_mode.value.replace('_', ' ')}{content}"
 
+    @property
+    def kind(self) -> str:
+        """The line under a workload's name: "realistic text, open loop"."""
+        b = self.board
+        content = f"{b.content.value} text, " if b.content else ""
+        return f"{content}{b.load_mode.value.replace('_', ' ')}"
+
+    @property
+    def shape(self) -> str | None:
+        """Mean tokens per request of the quoted (else first) config: "~900 in / 320 out"."""
+        row = self.head or (self.board.rows[0] if self.board.rows else None)
+        tokens = row.result.tokens_per_request() if row is not None else None
+        if tokens is None:
+            return None
+        tin, tout = tokens
+        return f"~{tin:,.0f} in / {tout:,.0f} out tokens per request"
+
+    @property
+    def nothing_ranked(self) -> str:
+        """Why no config is quoted, short: counts of gate outcomes, else the full basis."""
+        blocked: dict[str, set[str]] = defaultdict(set)
+        for row in self.board.rows:
+            if row.status in (RowStatus.GATE_FAILED, RowStatus.QUALITY_UNVERIFIED):
+                gate = row.result.quality.gate if row.result.quality else None
+                verdict = {"fail": "failed", "inconclusive": "inconclusive"}.get(
+                    gate or "", "not gated"
+                )
+                blocked[verdict].add(row.result.name)
+        if not blocked:
+            return sentence(self.basis)
+        counts = ", ".join(f"{len(names)} {verdict}" for verdict, names in blocked.items())
+        return f"No candidate passed the quality gate ({counts})"
+
 
 @dataclass(frozen=True)
 class ModelView:
@@ -249,6 +405,11 @@ class ModelView:
     @property
     def path(self) -> str:
         return f"models/{self.snap.model_id}.html"
+
+    @property
+    def price(self) -> Pricing | None:
+        """The planned price per 1M tokens, from config/models.yaml."""
+        return self.spec.pricing if self.spec is not None else None
 
     @property
     def revision(self) -> str | None:
@@ -271,6 +432,151 @@ class HeadlineRow:
     def best(self) -> LeaderboardRow | None:
         """The best config: only a ranked one is ever called that."""
         return self.quoted if self.quoted is not None and self.quoted.rank is not None else None
+
+
+@dataclass(frozen=True)
+class MarketLow:
+    """The lowest public list price per side for a model, and where it comes from."""
+
+    input_per_mtok: Micros
+    output_per_mtok: Micros
+    note: str  # e.g. "DeepInfra, of 3 providers"
+    listed_for: str | None  # the base model whose list prices these are, if not this one
+
+
+def market_low(competitors: Sequence[CompetitorPrice], market_name: str | None) -> MarketLow | None:
+    """The lowest list price on each side among the providers the flags compare against;
+    when none qualifies, among every listing, and the note says so."""
+    pool = [c for c in competitors if c.in_comparison]
+    compared = bool(pool)
+    pool = pool or list(competitors)
+    if not pool:
+        return None
+    low_in = min(c.input_per_mtok for c in pool)
+    low_out = min(c.output_per_mtok for c in pool)
+    both = [c.provider for c in pool if (c.input_per_mtok, c.output_per_mtok) == (low_in, low_out)]
+    count = f"{len(pool)} provider{'' if len(pool) == 1 else 's'}"
+    if compared:
+        note = f"{both[0]}, of {count}" if len(both) == 1 else f"of {count}"
+    else:
+        note = f"of {count}, aggregator or unverified only"
+    return MarketLow(
+        input_per_mtok=low_in,
+        output_per_mtok=low_out,
+        note=note,
+        listed_for=market_name,
+    )
+
+
+@dataclass(frozen=True)
+class RankedCost:
+    board: BoardView
+    cost_in: MicrosRange | None
+    cost_out: MicrosRange | None
+
+
+@dataclass(frozen=True)
+class ModelSummary:
+    """One row of the index's summary table: what a buyer needs about a model."""
+
+    model: ModelView
+    price: Pricing | None
+    not_offered: str | None  # why there is no price
+    costs: list[RankedCost]  # measured cost on each workload where a config is ranked
+    no_cost: str  # what the cost cell says when `costs` is empty
+    market: MarketLow | None
+    quality: str  # badge text
+    quality_class: str  # badge class
+    quality_note: str | None
+
+
+def _quality_summary(m: ModelView) -> tuple[str, str, str | None]:
+    heads = [b.head for b in m.boards if b.head is not None]
+    if heads:
+        gates = list(
+            dict.fromkeys(h.result.quality.gate if h.result.quality else None for h in heads)
+        )
+        if gates == ["baseline"]:
+            return "BF16 reference", "baseline", None
+        if gates == ["pass"]:
+            return "passed vs BF16", "pass", None
+        if "review" in gates:
+            return "needs review", "review", None
+        if gates == [None]:
+            return "not evaluated", "pending", None
+        return ", ".join(gate_label(g) if g else "not evaluated" for g in gates), "pending", None
+    if m.boards:
+        blocked: dict[str, set[str]] = defaultdict(set)
+        for b in m.boards:
+            for row in b.board.rows:
+                q = row.result.quality
+                if row.status in (RowStatus.GATE_FAILED, RowStatus.QUALITY_UNVERIFIED):
+                    verdict = {"fail": "failed", "inconclusive": "inconclusive"}
+                    blocked[verdict.get(q.gate if q and q.gate else "", "not gated")].add(
+                        row.result.name
+                    )
+        if blocked:
+            counts = ", ".join(f"{len(n)} {v}" for v, n in blocked.items())
+            return "not passed", "fail" if "failed" in blocked else "inconclusive", counts
+        return "not evaluated", "pending", None
+    return "not measured yet", "pending", None
+
+
+def _summaries(models: Sequence[ModelView], snapshot: Snapshot) -> list[ModelSummary]:
+    """Per model, priced models first: planned price, measured cost where ranked, the
+    lowest public list price and quality status."""
+    comp = snapshot.competitiveness
+    comp_rows = comp.rows if comp is not None else []
+    names = {m.snap.model_id: m.snap.display_name for m in models}
+    # A model whose list prices another, priced entry reuses (its quantized variant).
+    served_as = {
+        r.market_model_id: names.get(r.model_id, r.model_id)
+        for r in comp_rows
+        if r.market_model_id and r.price is not None
+    }
+    out = []
+    for m in models:
+        rows = [r for r in comp_rows if r.model_id == m.snap.model_id]
+        price = m.price or next((r.price for r in rows if r.price is not None), None)
+        quality, quality_class, quality_note = _quality_summary(m)
+        not_offered = None
+        if price is None:
+            if m.snap.model_id in served_as:
+                not_offered = f"Reference only; offered as {served_as[m.snap.model_id]}"
+            elif quality == "not passed":
+                not_offered = "Quality gate not passed"
+            else:
+                not_offered = "No price set"
+        costs = []
+        for b in m.boards:
+            head = b.head
+            if head is not None and head.rank is not None:
+                cin, cout, _ = split_ranges(head.result)
+                costs.append(RankedCost(board=b, cost_in=cin, cost_out=cout))
+        if not m.boards:
+            no_cost = "Not measured yet"
+        elif any(b.head is not None for b in m.boards):
+            no_cost = "Untrusted results only"
+        else:
+            no_cost = "No config ranked"
+        market_id = next((r.market_model_id for r in rows if r.market_model_id), None)
+        competitors = rows[0].competitors if rows else []
+        out.append(
+            ModelSummary(
+                model=m,
+                price=price,
+                not_offered=not_offered,
+                costs=costs,
+                no_cost=no_cost,
+                market=market_low(
+                    competitors, names.get(market_id, market_id) if market_id else None
+                ),
+                quality=quality,
+                quality_class=quality_class,
+                quality_note=quality_note,
+            )
+        )
+    return sorted(out, key=lambda s: s.price is None)
 
 
 @dataclass(frozen=True)
@@ -561,7 +867,15 @@ def build_site(
     }
     all_results = snapshot.results
     pages: list[tuple[str, str, dict[str, Any]]] = [
-        ("index.html", "index.html.j2", {"page": "results", "headline": _headline(models)}),
+        (
+            "index.html",
+            "index.html.j2",
+            {
+                "page": "results",
+                "headline": _headline(models),
+                "summaries": _summaries(models, snapshot),
+            },
+        ),
         (
             "methodology.html",
             "methodology.html.j2",

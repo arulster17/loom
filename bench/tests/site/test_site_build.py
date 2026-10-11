@@ -9,7 +9,7 @@ from site_helpers import REPO_URL, REVIEW_DIVERGENCE, export, is_external, parse
 
 from loom_bench.registry import REPO_ROOT, load_registry
 from loom_bench.site import SiteConfig, WaitlistConfig, build_site, load_snapshot
-from loom_bench.site.build import stylesheet
+from loom_bench.site.build import price_usd, stylesheet
 
 MODEL_PAGES = [f"models/{m.id}.html" for m in load_registry().models]  # one per model
 PAGES = {"index.html", "methodology.html", "pricing.html", "harness.html", *MODEL_PAGES}
@@ -43,6 +43,30 @@ def _html(site: Path) -> dict[str, Path]:
 
 def _text(site: Path, page: str) -> str:
     return (site / page).read_text(encoding="utf-8")
+
+
+def _rows(html: str, table_class: str) -> list[str]:
+    table = html.split(f'<table class="{table_class}">', 1)[1].split("</table>", 1)[0]
+    return re.findall(r"<tr[^>]*>.*?</tr>", table, flags=re.S)
+
+
+def _planned_prices() -> set[str]:
+    return {
+        price_usd(getattr(m.pricing, side))
+        for m in load_registry().models
+        if m.pricing is not None
+        for side in ("input_per_mtok", "output_per_mtok")
+    }
+
+
+def _list_prices(data: Path) -> set[str]:
+    comp = json.loads((data / "competitiveness.json").read_text())
+    return {
+        price_usd(c[side])
+        for r in comp["rows"]
+        for c in r["competitors"]
+        for side in ("input_per_mtok", "output_per_mtok")
+    }
 
 
 def _allowed_external(data: Path) -> set[str]:
@@ -83,7 +107,7 @@ def test_empty_snapshot_renders_honest_empty_state(empty_site):
     _check_site(empty_site)
     index = _text(empty_site, "index.html")
     assert PENDING in index
-    assert "not measured yet" in index
+    assert "Not measured yet" in index
     assert "Qwen3 8B" in index and "Llama 3.3 70B Instruct" in index
     model = _text(empty_site, "models/qwen3-8b.html")
     assert PENDING in model
@@ -96,8 +120,11 @@ def test_empty_snapshot_renders_honest_empty_state(empty_site):
     assert "Public list prices only." in pricing
     assert "Not benchmarked yet" in pricing
     assert "https://www.together.ai/pricing" in pricing
+    # No measured money figures: only planned prices (config) and public list prices.
+    allowed = _planned_prices() | _list_prices(empty_site / "data")
     for page in ("index.html", *MODEL_PAGES):
-        assert re.search(r"\$\d", _text(empty_site, page)) is None, page  # no money figures
+        figures = set(re.findall(r"\$[\d.,]+\d", _text(empty_site, page)))
+        assert figures <= allowed, (page, figures - allowed)
 
 
 def test_populated_snapshot_renders_results(full_site, populated):
@@ -110,10 +137,11 @@ def test_populated_snapshot_renders_results(full_site, populated):
     index = _text(full_site, "index.html")
     assert PENDING not in index
     assert "sglang-bf16" in index
-    assert "Best config at SLO" in index and "<strong>sglang-bf16</strong>" in index
+    assert "Results by workload" in index and "<strong>sglang-bf16</strong>" in index
     # the index quotes the measured split; the fixture's overlapping prefills leave none
-    assert "prefills overlapped at goodput" in index
-    assert "No published results for this model yet" in index  # Llama
+    assert "Prefills overlapped at goodput" in index
+    llama = next(r for r in _rows(index, "summary") if "Llama 3.3 70B Instruct" in r)
+    assert "Not measured yet" in llama
 
     model = _text(full_site, "models/qwen3-8b.html")
     assert f"bench reproduce {best.reproduce_run_id()}" in model
@@ -130,7 +158,7 @@ def test_populated_snapshot_renders_results(full_site, populated):
     assert "committed 1y</th>" not in model  # no committed price in the price book
     assert "Price as run" in model and "observed at launch" in model
     assert "$0.8717" in model  # rank key: the cheapest ranked config's $/1M out, all_output
-    assert "Rank key: $/1M out, all_output" in model
+    assert '>Rank key</abbr><span class="unit">$/1M out, all_output</span>' in model
     assert "$0.0000" not in model
     # The strict tool-calling variant (recorded first) is listed right after tool_calling,
     # labelled as the variant.
@@ -152,6 +180,36 @@ def test_populated_snapshot_renders_results(full_site, populated):
     assert "<code>tool_calling_strict</code> sends each tool with <code>strict: true</code>" in (
         methodology
     )
+
+
+@pytest.mark.parametrize("site", ["empty_site", "full_site"])
+def test_home_page_shows_each_priced_models_price(site, request):
+    """A buyer sees every priced model's planned price, input and output, on the home
+    page's summary row for that model, whether or not it has results yet."""
+    out = request.getfixturevalue(site)
+    rows = [r for r in _rows(_text(out, "index.html"), "summary") if 'scope="row"' in r]
+    priced = [m for m in load_registry().models if m.pricing is not None]
+    assert priced
+    for m in priced:
+        row = next(r for r in rows if f">{m.display_name}</a>" in r)
+        pair = f'{price_usd(m.pricing.input_per_mtok)} <span class="sep">/</span> '
+        pair += price_usd(m.pricing.output_per_mtok)
+        assert pair in row, (m.id, row)
+    for m in load_registry().models:
+        if m.pricing is None:
+            row = next(r for r in rows if f">{m.display_name}</a>" in r)
+            assert "Not offered" in row, m.id
+    # priced models come first
+    names = [m.display_name for m in priced]
+    assert all(f">{n}</a>" in r for n, r in zip(names, rows, strict=False))
+
+
+def test_price_usd():
+    assert price_usd(77_000) == "$0.077"
+    assert price_usd(100_000) == "$0.10"
+    assert price_usd(1_040_000) == "$1.04"
+    assert price_usd(368_000) == "$0.368"
+    assert price_usd(None) == "n/a"
 
 
 def test_provenance_files_are_published(full_site):
