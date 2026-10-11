@@ -590,8 +590,9 @@ Evidence, AWS (`qwen3-8b-aws-g6e`, 95cde129, 2026-10-10 22:50 to 2026-10-11 02:1
   inconclusive. So BF16 is the only AWS row, as on RunPod.
 - Cross-check against RunPod 7a8237d0: both searches visited the same loads. At all 10
   matched (cell, load) points every latency metric is within normal variance, and GPU
-  utilisation is the same. `bench compare` exits 6 only because the config hashes
-  differ (the cloud is part of the hash).
+  utilisation is the same. `bench compare` exits 0 and lists the config differences
+  (the cloud is part of the hash) without judging them; before the fix on 2026-10-10 it
+  exited 6 on the hash difference alone.
 - Details: [benchmark-lab.md](benchmark-lab.md#qwen3-8b-on-aws-g6exlarge-result-95cde129-2026-10-11).
   Report: [reports/8b-aws-g6e-v1](../reports/8b-aws-g6e-v1/leaderboard.md), regenerated
   identically by:
@@ -603,9 +604,25 @@ for f in md csv equal_load.csv competitiveness.csv html; do
 done
 #   identical (x5)
 uv run bench compare 7a8237d0 95cde129 --match-by cell_key --db $REAL; echo "exit=$?"
-#   Verdict: outside normal variance (0 metrics outside; 10 load points matched; 8 unmatched)
-#   exit=6: every matched point is flagged only for "Config hash differs"
+#   Verdict: within normal variance (10 load points matched; 8 unmatched, not judged;
+#     configs differ in 2 matched sweeps, not judged)
+#   Config differences (not judged)
+#    • bf16 vs bf16 (chat-sharegpt, open_loop), 7a203a3ffacc vs 48f3d8d1850a:
+#      hardware.allowed_cuda_versions ["13.0"] → unset; hardware.cloud runpod → aws;
+#      hardware.disk_gb 80 → 200; hardware.gpu_type_id NVIDIA L40S → unset;
+#      hardware.instance_type l40s-x1 → g6e.xlarge; hardware.provider runpod → aws_ec2;
+#      hardware.region secure → us-east-1
+#    • fp8-kv8 vs fp8-kv8 (...), c5e726712cab vs b5e45b872bf7: the same keys
+#   exit=0
 ```
+
+A config hash difference is expected under `--match-by cell_key` or `workload` (that is
+why the sweeps were not paired by hash), so it is reported, not judged; the exit code
+follows the metrics. `bench reproduce` still matches by config hash, so a reproduction on
+a different config matches nothing and exits 6. Tests:
+`bench/tests/report/test_compare.py::test_same_cells_on_another_cloud`,
+`bench/tests/runner/test_cli_ids.py::test_compare_across_clouds_by_cell_key`,
+`bench/tests/runner/test_e2e.py::test_reproduce_fails_when_the_config_hash_differs`.
 
 ### D7. Model B leaderboard: one tensor-parallel config
 

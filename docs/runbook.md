@@ -214,8 +214,8 @@ uv run bench reproduce results/<exp id>/runs/<run id>/provenance.json   # or a f
 
 It rebuilds the cell from the stored config, re-runs that load point and repetition as a
 new experiment `<name>--reproduce` on the same provider (so an AWS reproduction provisions
-a host, is planned and capped like any run), and compares: exit 0 within normal variance,
-6 outside. `bench report` prints the command for each result.
+a host, is planned and capped like any run), and compares by config hash: exit 0 within
+normal variance, 6 outside or when the config hash no longer matches the original's. `bench report` prints the command for each result.
 
 ## 6. Publishing results
 

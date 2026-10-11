@@ -105,7 +105,8 @@ Other mock runs:
 uv run bench run bench/experiments/mock-budget-abort.yaml   # budget guard trips: exit 5
 uv run bench reproduce <run id>       # re-run one stored run, compare (exit 0 or 6)
 uv run bench compare <exp A> <exp B>  # per-metric deltas at the cells and loads both ran:
-                                      # exit 0 within variance, 6 outside, 2 nothing matched
+                                      # exit 0 within variance, 6 outside, 2 nothing matched;
+                                      # --match-by cell_key lists config differences, unjudged
 uv run bench export csv --out runs.csv
 uv run bench reap --dry-run           # expired resources (none for finished mock runs)
 ```

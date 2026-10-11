@@ -38,7 +38,7 @@ To benchmark an endpoint you already run (vLLM, SGLang, or `bench mock-server`),
 | `bench reap [--dry-run]` | Terminates resources whose TTL passed (DB-recorded; all Loom-tagged EC2 instances when AWS is configured; all Loom-managed RunPod pods when a RunPod API key is found). |
 | `bench report [-e EXP]... [--alt-slo T=V]` | Leaderboard (md, html, csv): a plain-English summary per model and workload, the boards ranked by $/1M output tokens at SLO with goodput brackets and latency at equal load (also `leaderboard.equal_load.csv`), and a competitiveness section (also `leaderboard.competitiveness.csv`); see "Reading the reports". |
 | `bench competitiveness [-e EXP]...` | Our cost at SLO vs competitors' list prices. |
-| `bench compare EXP_A EXP_B [--match-by]` | Per-metric deltas with variance verdicts, goodput brackets and latency at equal load, judged only on the cells and loads both ran (the rest are listed). Exit 0 within normal variance, 6 outside, 2 if nothing matched. Ids here and elsewhere in the CLI accept a unique prefix (4+ hex). |
+| `bench compare EXP_A EXP_B [--match-by]` | Per-metric deltas with variance verdicts, goodput brackets and latency at equal load, judged only on the cells and loads both ran (the rest are listed). Exit 0 within normal variance, 6 when a matched metric is outside, 2 if nothing matched. With `--match-by cell_key` or `workload`, paired sweeps on different configs (another cloud, instance type, engine args) are listed key by key under "Config differences" and do not affect the verdict. Ids here and elsewhere in the CLI accept a unique prefix (4+ hex). |
 | `bench quality run SUITE --base-url URL --model NAME` | Runs a pinned eval suite against an endpoint. |
 | `bench quality gate --baseline X --candidate Y` | Re-decides the gate from stored per-item samples (X, Y: experiment id or config hash). Exit 7 if blocked. |
 | `bench export csv\|parquet --out FILE` | One row per run with summary and provenance flattened. |
@@ -267,8 +267,9 @@ null (the mock has no CUDA, image or cloud).
 registry), resolves the workload from the experiment's stored spec, checks that the derived
 seed matches, warns loudly when the git sha differs or the tree is dirty, re-runs that load
 point and repetition as a new experiment named `<name>--reproduce`, and compares it with
-`report.compare`: the original point's repetitions against the new run. Exit 0 within normal
-variance, 6 outside. A `provenance.json` path works too; the spec is read from the
+`report.compare`: the original point's repetitions against the new run, matched strictly by
+config hash. Exit 0 within normal variance, 6 outside, or when the reproduction's config
+hash differs from the original's (nothing matches, so it is not a reproduction). A `provenance.json` path works too; the spec is read from the
 experiment's `spec.json` next to it (or `--spec`).
 
 ## Reading the reports
@@ -860,7 +861,8 @@ Model A leaderboard on one GPU type on AWS, and it does three things on one host
    Where AWS has RunPod's knees, the search visits 7a8237d0's loads exactly (bf16 4.5,
    3, 2, 2.449, 2.213; fp8-kv8 4.5, 6.75, 5.511, 4.98, 5.239), so
    `bench compare 7a8237d0 <aws id> --match-by cell_key` compares them at equal load.
-   The config hashes differ (cloud, instance type and market are hardware), and so does
+   The config hashes differ (cloud, instance type and market are hardware; `compare`
+   lists the differences and judges only the metrics), and so does
    the host: a g6e.xlarge has 4 vCPU (2 cores) and 32 GiB against the pod's 16 vCPU and
    94 GiB, with the load client on the same host, so the cross-check measures the AWS SKU
    as a deployment, CPU included.
@@ -1044,8 +1046,12 @@ args, checkpoints, profile, windows and seeded schedule.
   p95 is 4-6% lower on AWS, TPOT within ±1%; fp8-kv8's TPOT is 0.4-3.5% higher, TTFT
   −3% to +4%; none of these is significant. Throughput at equal load is identical by
   construction (same seeded arrivals and output lengths).
-- **Why compare exits 6.** Every matched point is flagged only for "Config hash differs"
-  (cloud, instance type and market are part of the hash).
+- **Compare exits 0.** The config hashes differ (hardware is part of the hash): the
+  provider, cloud, region, instance type, disk and RunPod's GPU type id and CUDA pin.
+  `compare` lists these under "Config differences (not judged)" and its verdict reads
+  "within normal variance (10 load points matched; 8 unmatched, not judged; configs differ
+  in 2 matched sweeps, not judged)". Before the fix on 2026-10-10 it counted a hash
+  difference as "outside" under `--match-by cell_key` and exited 6 with 0 metrics outside.
 - **GPU (from the runs' nvidia-smi samples).** Utilisation is the same: bf16 97.0% on
   both at 2-3 req/s, fp8-kv8 94.5% on both. KV-cache use and preemptions match too (bf16
   at 4.5 req/s: 91 preemptions on both). AWS's board draws 45-70 W less at every load
