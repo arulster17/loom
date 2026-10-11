@@ -30,6 +30,15 @@ output "reaper_function_name" {
   value = aws_lambda_function.reaper.function_name
 }
 
+output "runpod_reaper_function_name" {
+  value = aws_lambda_function.runpod_reaper.function_name
+}
+
+output "runpod_reaper_secret_name" {
+  description = "Put the RunPod API key here (plain string): docs/aws-setup.md, step 8."
+  value       = aws_secretsmanager_secret.runpod_reaper_key.name
+}
+
 output "runner_policy_arn" {
   description = "Attach to the user or role that runs `bench run`."
   value       = aws_iam_policy.runner.arn

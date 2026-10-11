@@ -60,3 +60,26 @@ variable "reaper_dry_run" {
   type        = bool
   default     = false
 }
+
+variable "runpod_reaper_secret_name" {
+  description = "Name of the Secrets Manager secret Terraform creates (empty) for the RunPod reaper's API key."
+  type        = string
+  default     = "loom/runpod-reaper-api-key"
+}
+
+variable "runpod_reaper_dry_run" {
+  description = "Log which Loom RunPod pods and volumes the RunPod reaper would delete, without deleting them. Starts true; set false once a dry-run invoke looks right."
+  type        = bool
+  default     = true
+}
+
+variable "runpod_reaper_max_per_run" {
+  description = "When more Loom RunPod resources than this are expired in one run, the RunPod reaper deletes none and fails (a circuit breaker)."
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.runpod_reaper_max_per_run >= 1 && floor(var.runpod_reaper_max_per_run) == var.runpod_reaper_max_per_run
+    error_message = "runpod_reaper_max_per_run must be a positive whole number."
+  }
+}

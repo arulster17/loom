@@ -12,7 +12,9 @@ Safety rails, in the order they act:
 2. the pod's start command arms a TTL watchdog first, at an absolute epoch (a container
    restart cannot extend it), which terminates the pod with the pod-scoped key RunPod
    injects;
-3. `bench reap` terminates managed pods past their TTL (there is no scheduled reaper).
+3. the scheduled RunPod reaper Lambda (`runpod_reaper_lambda`, every 15 minutes once
+   deployed) and `bench reap` terminate managed pods past their TTL; both read the TTL
+   back from the name `pod_name` builds and the `LOOM_*` env `pod_env` sets.
 Pods are only ever terminated, never stopped: a stopped pod keeps billing for its disk.
 
 Secrets: the pod env carries the HF token only as the RunPod secret reference
