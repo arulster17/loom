@@ -57,7 +57,7 @@ uv run pytest -q -n auto
 | A2 | The quality gate blocks a deliberately broken config, in a test | **met** |
 | A3 | The report states $/1M tokens at SLO with confidence intervals | **met** |
 | A4 | A hard budget abort works | **met** on the mock; never triggered on a paid run |
-| A5 | The TTL reaper removes orphaned resources | **partly**: AWS Lambda live, no scheduled RunPod reaper |
+| A5 | The TTL reaper removes orphaned resources | **partly**: AWS Lambda live; scheduled RunPod reaper built and tested, not yet deployed |
 | D1 | `bench` CLI: run, report, compare | **met** |
 | D2 | Load generators | **met** (only the native one has run on a GPU) |
 | D3 | Workload profiles | **met** as profiles; 4 of 10 have run on a GPU |
@@ -319,8 +319,15 @@ simulated $1/s, within the documented worst case. At real prices that's about a 
 > reaper that tears down leftover benchmark infrastructure automatically")
 
 **Status: partly.** On AWS, the reaper runs automatically and is live. On RunPod, which
-is the provider every real run used, it is a manual command. The automatic backstop there
-is the in-pod TTL watchdog, and a pod stuck before its container starts has no watchdog.
+is the provider every real run used, the scheduled reaper is built and tested but not
+deployed: until you deploy it, the automatic backstop there is the in-pod TTL watchdog,
+and a pod stuck before its container starts has no watchdog.
+
+What remains for you (free apart from $0.40 a month for the secret): apply the Terraform,
+put a RunPod key into the empty secret, check a dry-run invoke, then set
+`runpod_reaper_dry_run = false` and apply again. The commands are in
+[aws-setup.md, step 8](aws-setup.md#8-turn-on-the-runpod-reaper). The plan against the
+applied stack (read-only, 2026-10-10) is 10 to add, 0 to change, 0 to destroy.
 
 Evidence:
 
@@ -342,6 +349,29 @@ Evidence:
   pods were terminated by the runner (`terminated_by: runner` in `bench_resources`). The
   teardown check, a clean `bench reap --dry-run`, is recorded for the smoke runs and the
   70B quality rerun ([runbook-runpod.md](runbook-runpod.md#5-teardown-verification)).
+- RunPod, scheduled (built, not deployed): the `loom-bench-runpod-reaper` Lambda
+  (`infra/aws/bench/runpod_reaper.tf`, code
+  `bench/src/loom_bench/providers/runpod_reaper_lambda.py`) every 15 minutes, a separate
+  function from the EC2 reaper so only its role can read the RunPod key (Secrets Manager
+  `loom/runpod-reaper-api-key`, denied to every other principal by the secret's resource
+  policy). The account is shared with another project, so it terminates a pod only when
+  the name is exactly the runner's `loom-bench-<experiment[:8]>-<ttl epoch>-<nonce>`, the
+  env has `LOOM_MANAGED=true` and a matching `LOOM_TTL`, and the TTL has passed; it
+  deletes network volumes named `loom-bench-vol-…` the same way (Loom creates none
+  today). It deletes nothing when a listing fails or has an unexpected shape, or when more
+  than 10 resources qualify at once. It deploys in dry run.
+  Tests: `bench/tests/runpod/test_runpod_reaper_lambda.py` (fake RunPod API):
+  `::test_expired_loom_pod_is_reaped_and_unexpired_kept`,
+  `::test_pods_that_are_not_loom_managed_are_never_touched`,
+  `::test_a_malformed_pod_listing_reaps_nothing` (11 shapes),
+  `::test_a_malformed_volume_listing_reaps_no_pods_either`,
+  `::test_more_targets_than_the_breaker_allows_reaps_nothing`,
+  `::test_dry_run_lists_what_it_would_reap_and_deletes_nothing`,
+  `::test_a_failed_listing_reaps_nothing`, `::test_one_failed_delete_does_not_stop_the_rest`,
+  `::test_redirects_are_not_followed`, `::test_handler_defaults_to_dry_run`,
+  `::test_pods_the_provider_creates_match_and_expire_at_their_ttl` (the provider's real pod
+  name and env against the reaper's rules), and
+  `bench/tests/aws/test_terraform.py::test_runpod_reaper_secret_has_no_value_and_only_its_role_reads_it`.
 - Any provider, from the DB: `bench/tests/runner/test_e2e.py::test_reaper_removes_expired_resources_of_a_dead_runner`
   (a mock host left by a "dead" runner is listed by `--dry-run`, then killed by `bench
   reap`, and its row is marked `terminated_by: reaper`; an unexpired one is left alone).
@@ -350,8 +380,9 @@ Check it yourself (free):
 
 ```bash
 uv run pytest -v bench/tests/runner/test_e2e.py::test_reaper_removes_expired_resources_of_a_dead_runner \
-  bench/tests/aws/test_reaper.py bench/tests/runpod/test_runpod_reaper.py
-#   18 passed
+  bench/tests/aws/test_reaper.py bench/tests/runpod/test_runpod_reaper.py \
+  bench/tests/runpod/test_runpod_reaper_lambda.py
+#   61 passed
 uv run bench reap --dry-run --db $REAL
 #   AWS not configured: EC2 instances are not reaped     (unless LOOM_AWS_CONFIG is set)
 #   no expired resources
@@ -366,8 +397,8 @@ aws lambda invoke --region us-east-1 --function-name loom-bench-reaper \
 #   {"reaped": [], "dry_run": true} ... "StatusCode": 200
 ```
 
-To see the reaper remove a real orphan, you would have to leave a paid host running past
-its TTL. That has not been done.
+To see a reaper remove a real orphan, you would have to leave a paid host running past
+its TTL. That has not been done on either provider.
 
 ## Deliverables (§7.8)
 
@@ -811,10 +842,11 @@ These are either not met or wait on a decision from you:
 5. **Reproduce on real hardware (A1).** `bench reproduce` has only run on the mock.
    Accept the mock test plus the cross-pod comparison in A1, or approve one paid
    reproduce of a stored GPU run (one cold start plus one load point).
-6. **Scheduled RunPod reaper (A5).** Today the RunPod backstops are the in-pod watchdog
-   and a manual `bench reap`. A pod stuck before its container starts has neither. A
-   sweep in the AWS reaper Lambda with the RunPod key is listed in PLAN.md as a
-   follow-up and is not built.
+6. **Scheduled RunPod reaper (A5).** Built and tested, not deployed. Deploy it with
+   [aws-setup.md, step 8](aws-setup.md#8-turn-on-the-runpod-reaper): apply, put a
+   RunPod key of its own into the empty secret, check a dry-run invoke, then turn dry run
+   off. Until then the RunPod backstops are the in-pod watchdog and a manual
+   `bench reap`, and a pod stuck before its container starts has neither.
 7. **Results site and waitlist (D8).** Choose a waitlist backend (Formspree / Buttondown,
    or a Loom endpoint), choose which experiments to publish (pinned by full id in
    `site/config.yaml`, `publish.experiments`), and say when to enable GitHub Pages. The

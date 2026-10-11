@@ -99,7 +99,7 @@ Step by step (`runner.run_experiment`):
 | `budget.py` | Caps and `BudgetGuard` |
 | `runner.py` | Orchestration, provenance assembly, spot retry, `reproduce`, `reap` |
 | `engines.py` | `ModelSpec` → `EngineLaunch` (vLLM / SGLang argv) → `docker run` |
-| `providers/` | `base.py` contract; `mock.py`, `local.py`, `aws_ec2.py` (+ `aws_ssm.py`, `aws_scripts/*.sh`, `aws_reaper.py`), `runpod.py` (+ `runpod_api.py`, `runpod_ssh.py`, `runpod_layout.py`, `runpod_scripts/*.sh`, `runpod_reaper.py`) |
+| `providers/` | `base.py` contract; `mock.py`, `local.py`, `aws_ec2.py` (+ `aws_ssm.py`, `aws_scripts/*.sh`, `aws_reaper.py`), `runpod.py` (+ `runpod_api.py`, `runpod_ssh.py`, `runpod_layout.py`, `runpod_scripts/*.sh`, `runpod_reaper.py`, `runpod_reaper_lambda.py`) |
 | `jobs.py`, `jobexec.py` | `LoadJob` / `LoadJobResult` and their execution |
 | `loadgen/` | `native` driver, arrivals, wrappers for `vllm bench serve` and `sglang.bench_serving` |
 | `client/openai_stream.py` | Streaming OpenAI client with per-chunk timestamps |

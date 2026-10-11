@@ -59,6 +59,7 @@ Defined in `infra/aws/bench/`:
 | GPU host role | SSM agent (`AmazonSSMManagedInstanceCore`); `s3:GetObject`/`PutObject` on the bench bucket's objects; `GetSecretValue` on the HF token secret |
 | Runner policy (`loom-bench-runner`) | `RunInstances` only with tags `loom:managed=true` plus `loom:ttl`, `loom:experiment`, `loom:owner`, an allowed instance type, IMDSv2 required, hop limit ≤ 1, the bench instance profile, Amazon-owned AMIs and the bench security group; `CreateTags` only at launch; `TerminateInstances`, `DeleteVolume` and `ssm:SendCommand` only on `loom:managed=true` resources; `PassRole` only for the bench role to EC2; the bench bucket; read-only describes |
 | Reaper Lambda | `TerminateInstances` and `DeleteVolume` only on `loom:managed=true`; describes; its own log group |
+| RunPod reaper Lambda | `GetSecretValue` on the RunPod reaper key secret only; its own log group; no EC2, S3 or other secrets ([below](#runpod-pods-runpod)) |
 
 Limits worth knowing: `ssm:SendCommand` with `AWS-RunShellScript` is root on bench hosts,
 so the runner identity can act as the host role (including reading the HF token) on a
@@ -148,9 +149,40 @@ so they are not reopened.
   `RUNPOD_API_KEY` and `RUNPOD_POD_ID` RunPod injects, read from its own environment,
   retrying every 30 s. A pod whose setup fails terminates itself the same way.
   `bench reap` terminates pods both named `{name_prefix}-…` and carrying
-  `LOOM_MANAGED=true` once past their TTL, or `EXITED`. There is no scheduled RunPod
-  reaper yet: if the runner dies, the backstops are the watchdog and a manual
-  `bench reap`, and a pod stuck before its container starts has no watchdog at all.
+  `LOOM_MANAGED=true` once past their TTL, or `EXITED`. The scheduled RunPod reaper
+  (below) covers a dead runner and a pod stuck before its container starts, which has no
+  watchdog.
+- **Scheduled RunPod reaper.** The Lambda `loom-bench-runpod-reaper`
+  (`providers/runpod_reaper_lambda.py`, `infra/aws/bench/runpod_reaper.tf`) runs every 15
+  minutes. The RunPod account is shared with a project that is not Loom's, and RunPod API
+  keys cannot be limited to some pods, so the code is what keeps the reaper off other
+  pods:
+  - it terminates a pod only when its name is exactly the runner's
+    `{name_prefix}-{experiment[:8]}-{ttl_epoch}-{nonce}`, its env has
+    `LOOM_MANAGED=true`, its env `LOOM_TTL` (when present) equals the name's epoch, and
+    that TTL has passed. Unlike `bench reap` there is no age or `EXITED` fallback;
+  - it deletes a network volume only when its name is exactly
+    `{name_prefix}-vol-{experiment[:8]}-{ttl_epoch}-{nonce}` (`volume_name`), the TTL has
+    passed, and no listed pod references it. Loom creates no volumes today;
+  - it fails closed: a failed listing, a response of an unexpected shape, a Loom-named
+    resource without the fields the rules need, or more than `runpod_reaper_max_per_run`
+    (10) expired resources at once, and nothing is deleted and the run errors;
+  - it calls only `GET /pods`, `GET /networkvolumes` and `DELETE` on the ids it chose,
+    with ids checked against `^[a-z0-9]{6,32}$`, never follows a redirect (it would carry
+    the key elsewhere), redacts the key from errors, and logs only the ids and names of
+    Loom resources, never pod env values;
+  - it is deployed in dry run (`runpod_reaper_dry_run = true`), and an invoke can ask
+    for a dry run but never force a live one.
+- **Where the reaper's RunPod key lives.** In Secrets Manager, secret
+  `loom/runpod-reaper-api-key` (`runpod_reaper_secret_name`), a plain string. Terraform
+  creates the secret empty and never sees the value: you put it with the CLI
+  ([aws-setup.md](aws-setup.md#8-turn-on-the-runpod-reaper)). Who can read it: only the
+  role `loom-bench-runpod-reaper`. Its own policy allows `GetSecretValue` on that secret
+  only, and the secret's resource policy denies `GetSecretValue` to every other principal,
+  admins included. An admin can still put a new value or change or delete that resource
+  policy, so account admin remains the trust boundary. The EC2 reaper's role, the GPU
+  host role and the runner policy have no access. Use a key of its own (RunPod console →
+  Settings → API Keys), so it can be revoked without touching your laptop's key.
 - **API key.** The account key comes from `RUNPOD_API_KEY` or the macOS Keychain
   (service `RUNPOD_API_KEY`), is sent only in the `Authorization` header and is redacted
   from error text. `bench/tests/conftest.py` clears it (and `LOOM_RUNPOD_*`) for every

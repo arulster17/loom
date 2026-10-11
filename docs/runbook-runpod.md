@@ -10,8 +10,9 @@ reproducing and publishing apply here unchanged. The security model is in
 Money rails, for reference: $149.75 overall, $50 per experiment (`bench/budget.yaml`), and
 each experiment's own `budget.max_spend`. RunPod is prepaid with auto-pay off, so the
 account balance is the hard ceiling behind them. RunPod has no per-pod spend cap: the
-rails are the runner's budget guard, the pod's own TTL watchdog and `bench reap`. How the
-guard acts is in [benchmark-lab.md](benchmark-lab.md#budget-rails).
+rails are the runner's budget guard, the pod's own TTL watchdog, the scheduled RunPod
+reaper Lambda and `bench reap`. How the guard acts is in
+[benchmark-lab.md](benchmark-lab.md#budget-rails).
 
 Commands below assume the repo root and the default name prefix `loom-bench`. They read
 the API key from `RUNPOD_API_KEY`; never print it.
@@ -253,8 +254,10 @@ records the GPU topology (`gpu_topology` in `engine_started.system`, or in
     -d '{"query":"mutation { podTerminate(input: {podId: \"<pod id>\"}) }"}'
   ```
 
-- A pod stuck before its container starts has no watchdog yet. There is no scheduled
-  RunPod reaper, so check the console or run `bench reap` (below).
+- A pod stuck before its container starts has no watchdog yet. The scheduled RunPod
+  reaper terminates it within 15 minutes of its TTL, once deployed and live
+  ([aws-setup.md](aws-setup.md#8-turn-on-the-runpod-reaper)); before its TTL, or without
+  the reaper, terminate it from the console or the API as above.
 
 ### Orphaned pods
 
@@ -270,12 +273,47 @@ uv run bench reap                # terminate them
 
 Without an API key, `bench reap` prints `No RunPod API key: RunPod pods are not reaped`.
 
+**Scheduled RunPod reaper.** The Lambda `loom-bench-runpod-reaper` runs every 15 minutes
+from AWS with its own RunPod key from Secrets Manager (setup:
+[aws-setup.md](aws-setup.md#8-turn-on-the-runpod-reaper); key and rules:
+[security.md](security.md#runpod-pods-runpod)). It is stricter than `bench reap`, because
+the account is shared with another project:
+
+- a pod is terminated only when its name is exactly
+  `loom-bench-<experiment[:8]>-<ttl epoch>-<6 hex>`, its env has `LOOM_MANAGED=true`, its
+  env `LOOM_TTL` (when present) equals the name's epoch, and that TTL has passed. No age
+  rule and no `EXITED` rule: anything else is `bench reap`'s job;
+- a network volume is deleted only when named exactly
+  `loom-bench-vol-<experiment[:8]>-<ttl epoch>-<6 hex>`, past that TTL and referenced by
+  no pod;
+- when a listing fails or looks wrong, or more than 10 resources are expired at once, it
+  deletes nothing and the run errors.
+
+What it did, or would do in dry run:
+
+```sh
+aws logs tail /aws/lambda/loom-bench-runpod-reaper --region us-east-1 --since 2h
+#   reaped pod <id> (loom-bench-…, ttl …) dry_run=False
+#   kept <id> (loom-bench-…): LOOM_TTL disagrees with the name     <- needs a look
+#   N pods and M volumes listed; K Loom-named resources kept
+aws lambda invoke --region us-east-1 --function-name loom-bench-runpod-reaper \
+  --cli-binary-format raw-in-base64-out --payload '{"dry_run": true}' /tmp/rp-reaper.json
+```
+
+A run whose log ends in a traceback (`UnsafeToReap`, `GET /pods failed (…)`) deleted
+nothing; until the cause is fixed, rely on `bench reap` and the console. A traceback
+ending `failed to reap N` means those deletes failed while the others went through; the
+next run retries them. `max_per_run` tripping means more than 10 Loom
+resources expired at once: check them with `bench reap --dry-run` before raising
+`runpod_reaper_max_per_run`.
+
 ## 5. Teardown verification
 
 After every real run:
 
 1. The preflight query shows `pods: []` and `networkVolumes: []`.
-2. `uv run bench reap --dry-run` lists nothing to terminate.
+2. `uv run bench reap --dry-run` lists nothing to terminate, and the RunPod reaper's
+   latest log line shows no error (the `aws logs tail` above).
 3. The balance drop matches the experiment's `spent_micros` to within a few cents
    (container disk and rounding). Spend made outside the results database lowers
    `overall_cap` by hand (`bench/budget.yaml`).
@@ -283,7 +321,9 @@ After every real run:
 No network volume is created today (`volumeInGb: 0`, weights on the container disk).
 When a sweep needs one (about 250 GB, about $17 a month, billed even when idle), create it
 only when the sweep starts, in a datacenter with L40S stock, and delete it as soon as the
-sweep finishes.
+sweep finishes. Name it with `runpod_reaper_lambda.volume_name` (with a TTL past the
+sweep's end), so the scheduled reaper deletes it if you forget; a volume named anything
+else is never touched by it.
 
 ## Smoke test
 
