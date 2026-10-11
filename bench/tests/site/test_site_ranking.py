@@ -109,11 +109,13 @@ def test_inconclusive_candidate_is_listed_but_never_ranked_or_best(site):
 def test_nothing_ranked_shows_the_untrusted_reference_as_a_flagged_comparison_point(site):
     index = _text(site, "index.html")
     fixed = next(r for r in _rows(index, "headline") if "fixed-1k-1k" in r)
-    assert "No config ranked." in fixed and "Comparison point" in fixed
+    assert '<span class="badge untrusted">untrusted, not ranked</span>' in fixed
+    assert "the best untrusted reference is shown for comparison" in index  # the legend
     assert "<strong>bf16 (AWS g6e.xlarge)</strong>" in fixed
     assert "untrusted, not ranked" in fixed and "single repetition" in fixed
     # its numbers are shown (this fixture's overlapping prefills leave no $ split)
-    assert re.search(r"\d+ ms", fixed) and "prefills overlapped at goodput" in fixed
+    assert re.search(r"\d+ ms", fixed) and "#note-r1" in fixed
+    assert "Prefills overlapped at goodput" in index
     model = _text(site, "models/qwen3-8b.html")
     assert "Shown as a comparison point, not as the best config" in model
 
@@ -124,9 +126,10 @@ def test_pricing_quotes_what_the_leaderboard_quotes_with_its_basis(site):
     rows = _rows(pricing, "pricing")
     chat = next(r for r in rows if "chat" in r)
     fixed = next(r for r in rows if "fixed-1k-1k" in r)
-    assert "<strong>bf16 (RunPod L40S)</strong>" in chat and "Rank 1" in chat
+    assert "<strong>bf16 (RunPod L40S)</strong>" in chat and "rank 1" in chat
     assert "<strong>bf16 (AWS g6e.xlarge)</strong>" in fixed
-    assert "Comparison point only, not ranked: untrusted (single repetition)" in fixed
+    assert '<span class="badge untrusted">untrusted, not ranked</span>' in fixed
+    assert "Single repetition" in fixed
     assert "fp8-kv8" not in pricing
     for name in ("bf16 (RunPod L40S)", "bf16 (AWS g6e.xlarge)"):
         assert f"<strong>{name}</strong>" in index

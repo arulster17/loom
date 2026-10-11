@@ -6,11 +6,12 @@
 {% block content %}
 <header class="page-head">
 <h1>Methodology</h1>
-<p class="lede">How every published number is produced, and what it does and does not cover. The code that implements each rule is in the <a href="{{ config.repo }}">open-source harness</a>.</p>
+<p class="lede">How each published number is produced, and what it leaves out. Every rule below is implemented in the <a href="{{ config.repo }}">open-source harness</a>.</p>
 </header>
 
 <nav class="toc" aria-label="On this page">
 <ul>
+<li><a href="#short-h">In short</a></li>
 <li><a href="#load">Load generation</a></li>
 <li><a href="#metrics">Latency and throughput</a></li>
 <li><a href="#goodput">Goodput at SLO</a></li>
@@ -23,6 +24,19 @@
 <li><a href="#snapshot">This snapshot</a></li>
 </ul>
 </nav>
+
+<section aria-labelledby="short-h">
+<h2 id="short-h">In short</h2>
+<ul class="short">
+<li><strong>Load</strong>: on cloud runs the load generator runs on the GPU host, so latency never includes an internet round trip. Warmup requests are discarded.</li>
+<li><strong>A load meets the SLO</strong> only if the upper end of its 95% confidence interval meets every latency and error target.</li>
+<li><strong>Goodput</strong> is the highest load that meets the SLO below the first load that fails. Cost uses goodput, never raw peak.</li>
+<li><strong>Cost per token</strong> is the replica's on-demand hourly price (instance plus storage) divided by the tokens it serves per hour at goodput, split between input and output by measured prefill time.</li>
+<li><strong>Quality</strong>: a cheaper candidate ranks only if its quality gate passes against the model's BF16 reference.</li>
+<li><strong>Untrusted</strong> results (fewer than two repetitions, run-to-run variance above 10%, unbracketed goodput, missing token counts) are listed but never ranked.</li>
+<li><strong>Competitors</strong> appear as public list prices only. We never benchmark their APIs.</li>
+</ul>
+</section>
 
 <section aria-labelledby="load">
 <h2 id="load">Load generation: open and closed loop</h2>
@@ -79,7 +93,7 @@
 
 <section aria-labelledby="cost">
 <h2 id="cost">Cost per token</h2>
-<p>A replica's hourly price buys the tokens it produces per hour at goodput. A GPU produces input (prefill) and output (decode) tokens at the same time, so how its cost is divided between them is a choice. Every page uses the same two numbers, and this is the one place that defines them:</p>
+<p>A replica's hourly price buys the tokens it produces per hour at goodput. A GPU processes input (prefill) and output (decode) tokens at the same time, so dividing its cost between them is a choice. This section defines the numbers every page uses.</p>
 <dl class="defs">
 <dt>$/1M input and $/1M output (the prices shown)</dt><dd id="split">The <strong>measured prefill-time split</strong>: input tokens pay for the share φ of the replica's time spent prefilling prompts, output tokens for the rest. φ is measured at the goodput load as request rate × mean TTFT (Little's law), per repetition, and capped at 1. These are the per-token costs the results page, the model pages and the pricing page show, and the basis of planned prices, which are set separately for input and output.</dd>
 <dt>Rank key</dt><dd>Leaderboards are ordered by the cost under each experiment's declared allocation{% if manifest.allocation %} (in this snapshot: {{ manifest.allocation }}){% endif %}. Under all_output, {{ allocation_text['all_output'] }}. It needs no φ, so it orders configs on the measured throughput alone; it is shown in its own column and is not a price.</dd>
@@ -142,7 +156,7 @@
 <td class="num">{{ p.entry.spot_per_hour|usd(4) if p.entry.spot_per_hour is not none else 'n/a' }}</td>
 <td class="num">{{ p.entry.committed_1y_per_hour|usd(4) if p.entry.committed_1y_per_hour is not none else 'n/a' }}</td>
 <td class="num">{% if p.storage is not none %}{{ p.storage.per_gb_month|usd(4) }}<span class="sub">{{ p.storage.kind }}{% if not p.storage.verified %}, unverified{% endif %}</span>{% else %}n/a{% endif %}</td>
-<td>{% for u in p.entry.sources %}<a href="{{ u }}">{{ u|string|truncate(64, true, '…') }}</a>{% if not loop.last %}<br>{% endif %}{% endfor %}{% if not p.entry.verified %}<span class="sub">unverified: {{ p.entry.note }}</span>{% endif %}</td>
+<td>{% for u in p.entry.sources %}<a href="{{ u }}">{{ source_name(u|string) }}</a>{% if not loop.last %}<br>{% endif %}{% endfor %}{% if not p.entry.verified %}<span class="sub">unverified: {{ p.entry.note }}</span>{% endif %}</td>
 <td class="nowrap">{{ p.entry.last_checked }}</td>
 </tr>
 {% endfor %}
@@ -157,7 +171,7 @@
 
 <section aria-labelledby="quality">
 <h2 id="quality">Quality gate</h2>
-<p>A cheaper configuration (a quantized checkpoint, a different engine, other engine flags) is only worth ranking if it answers as well as a baseline configuration of the same model. Each candidate is scored on pinned subsets of evaluation tasks, on the same items as its baseline, and the gate compares them per task with a paired bootstrap confidence interval of the score difference (candidate − baseline), so per-item difficulty cancels out.</p>
+<p>A cheaper configuration (a quantized checkpoint, another engine, other engine flags) is only worth ranking if it answers as well as the model's baseline. Each candidate is scored on pinned subsets of evaluation tasks, on the same items as its baseline. The gate compares them per task with a paired bootstrap confidence interval of the score difference (candidate − baseline), so per-item difficulty cancels out.</p>
 <ul>
 <li><strong>pass</strong>: on every task, the lower end of the interval is above the non-inferiority margin, the largest drop accepted.</li>
 <li><strong>fail</strong>: on at least one task, the interval lies entirely below that margin. Failing configs are listed with the reason and never ranked, however cheap.</li>

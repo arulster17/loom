@@ -1,6 +1,6 @@
 {% macro waitlist(config) %}
 {% set w = config.waitlist %}
-<section class="panel waitlist" aria-labelledby="waitlist-h">
+<section class="waitlist" aria-labelledby="waitlist-h">
 <h2 id="waitlist-h">Waitlist</h2>
 {% if w.enabled %}
 <p>Loom's API is not open yet. Leave an email address to hear when it is.</p>
@@ -43,7 +43,7 @@
 })();
 </script>
 {% else %}
-<p><strong>Waitlist opens soon.</strong> Loom's API is not open yet, and there is no signup form until it is. To follow progress, watch the repository: <a href="{{ config.repo }}">{{ config.repo.removeprefix('https://') }}</a>.</p>
+<p><strong>Waitlist opens soon.</strong> The API is not open and there is no signup form yet. Watch <a href="{{ config.repo }}">{{ config.repo.removeprefix('https://') }}</a> for news.</p>
 {% endif %}
 </section>
 {% endmacro %}
@@ -57,3 +57,38 @@
 {{ caller() }}
 </div>
 {% endmacro %}
+
+{# Numbered notes under a table. `notes` is a namespace(list=[], prefix='...'): each
+   distinct note gets one number, and the cell carries its marker. #}
+{% macro note_mark(text, note, notes, title='') -%}
+{% if note not in notes.list %}{% set notes.list = notes.list + [note] %}{% endif %}
+{% set n = notes.list.index(note) + 1 %}<span{% if title %} title="{{ title }}"{% endif %}>{{ text }}</span><sup class="fn"><a href="#note-{{ notes.prefix }}{{ n }}" aria-label="note {{ n }}">{{ n }}</a></sup>
+{%- endmacro %}
+
+{% macro note_list(notes) %}
+{% if notes.list %}
+<ol class="notes">
+{% for note in notes.list %}
+<li id="note-{{ notes.prefix }}{{ loop.index }}">{{ note|sentence }}.</li>
+{% endfor %}
+</ol>
+{% endif %}
+{% endmacro %}
+
+{# A cost's point value; its 95% CI in a tooltip, or (ci=true) on a muted second line. #}
+{% macro cost(rng, notes, ci=false) -%}
+{% if rng is not none and rng.na_reason %}{{ note_mark('n/a', rng.na_reason, notes) }}{% elif rng is none or rng.value is none %}n/a{% else %}{% if rng.lo_note %}{{ note_mark(rng.value|usd, '95% CI ' ~ rng.lo_note, notes, '' if ci else ci_title(rng)) }}{% elif ci %}{{ rng.value|usd }}{% else %}<span title="{{ ci_title(rng) }}">{{ rng.value|usd }}</span>{% endif %}{% if ci %}<span class="ci">{% if rng.lo is none and rng.hi is none %}no CI{% else %}{{ rng.lo|usd if rng.lo is not none else 'n/a' }} – {{ rng.hi|usd if rng.hi is not none else 'unbounded' }}{% endif %}</span>{% endif %}{% endif %}
+{%- endmacro %}
+
+{# An estimate's point value; its 95% CI in a tooltip, or (ci=true) on a muted second line. #}
+{% macro point(e, places=0, unit='', ci=false) -%}
+{% if e is none %}n/a{% else %}{% set p = places_for([e.mean, e.lo, e.hi], places) %}{% if ci %}{{ e.mean|num(p) }}{{ ' ' ~ unit if unit }}<span class="ci">{% if e.lo is none %}n={{ e.n }}, no CI{% else %}{{ e.lo|num(p) }} – {{ e.hi|num(p) }}{% endif %}</span>{% else %}<span title="{{ est_title(e, p) }}">{{ e.mean|num(p) }}{{ ' ' ~ unit if unit }}</span>{% endif %}{% endif %}
+{%- endmacro %}
+
+{% macro price_pair(p) -%}
+{% if p is none %}n/a{% else %}{{ p.input_per_mtok|price_usd }} <span class="sep">/</span> {{ p.output_per_mtok|price_usd }}{% endif %}
+{%- endmacro %}
+
+{% macro gate_badge(r, ref=false) -%}
+{% if r.quality and r.quality.gate %}<span class="badge {{ r.quality.gate }}">{{ 'BF16 reference' if r.quality.gate == 'baseline' else gate_label(r.quality.gate) }}</span>{% if ref and r.quality.gate != 'baseline' %}<span class="sub">vs {{ r.quality.baseline_text }}</span>{% endif %}{% elif r.quality and r.quality.tasks %}<span class="muted">scored, no gate</span>{% else %}<span class="muted">not evaluated</span>{% endif %}
+{%- endmacro %}

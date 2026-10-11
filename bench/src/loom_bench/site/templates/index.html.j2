@@ -1,93 +1,99 @@
 {% extends "base.html.j2" %}
-{% from "_macros.html.j2" import money, estimate %}
-{% from "_site.html.j2" import waitlist, pending, scroll_table %}
+{% from "_site.html.j2" import waitlist, pending, scroll_table, cost, point, price_pair, gate_badge, note_mark, note_list %}
 {% block title %}Loom: measured cost per token for open-weight models{% endblock %}
 {% block content %}
 <header class="page-head">
-<h1>Open-weight model inference, priced from measurements</h1>
-<p class="lede">Loom is an inference service for open-weight models, in development. We publish measured quality, latency, throughput and cost per token — and how prices are derived from them. Every number links to the exact configuration and provenance that produced it, and the harness that measured it is open source.</p>
+<h1>Open-weight models, priced from measured cost</h1>
+<p class="lede">Loom is an inference API for open-weight models. It is not open yet. We benchmark each model on our own GPUs and publish the cost, latency and quality behind every price.</p>
 </header>
 
 {% if manifest.empty %}
-{{ pending("The benchmark harness is built and tested against a simulated GPU; no GPU runs have been published. The table below lists the models and configurations queued for the first runs, and fills in from the results snapshot once they complete.") }}
+{{ pending("No GPU runs have been published yet. Planned prices and configurations are listed below; measurements fill in once the first runs complete.") }}
 {% endif %}
 
 <section aria-labelledby="models-h">
 <h2 id="models-h">Models</h2>
-{% if manifest.empty %}
-<p class="section-note">Configurations come from the model registry, <a href="{{ registry_url }}">config/models.yaml</a>.</p>
+<p class="section-note">Per 1M tokens, input / output. Prices are planned, from <a href="{{ registry_url }}">config/models.yaml</a>.</p>
+{% set snotes = namespace(list=[], prefix='s') %}
 {% call scroll_table("models-h") %}
-<table>
+<table class="summary">
 <thead>
-<tr><th scope="col">Model</th><th scope="col">Engine</th><th scope="col">Hardware</th><th scope="col">Precision</th><th scope="col">$/1M output tokens at SLO</th><th scope="col">Status</th></tr>
+<tr><th scope="col">Model</th><th scope="col" class="num">Our price</th><th scope="col" class="num">Our measured cost</th><th scope="col" class="num">Lowest public list price</th><th scope="col">Quality</th></tr>
 </thead>
 <tbody>
-{% for m in models %}
+{% for s in summaries %}
+{% set m = s.model %}
 <tr>
-<td class="model"><a href="{{ root }}{{ m.path }}"><strong>{{ m.snap.display_name }}</strong></a><span class="sub">{{ m.snap.repo or '' }}</span></td>
-{% if m.planned %}
-<td class="nowrap">{{ m.planned.engine }}</td>
-<td>{{ m.planned.hardware }}</td>
-<td>{{ m.planned.quantization }}</td>
-{% else %}
-<td colspan="3">not in the registry</td>
-{% endif %}
-<td class="muted">not measured yet</td>
-<td><span class="badge pending">first runs pending</span></td>
+<th scope="row" class="model"><a href="{{ root }}{{ m.path }}">{{ m.snap.display_name }}</a>{% if m.planned %}<span class="sub">{{ m.planned.short }}</span>{% endif %}</th>
+<td class="num" data-label="Our price"><div>{% if s.price %}<strong>{{ price_pair(s.price) }}</strong>{% else %}<span class="muted">Not offered</span><span class="sub">{{ s.not_offered }}</span>{% endif %}</div></td>
+<td class="num" data-label="Our measured cost"><div>{% for c in s.costs %}<span class="line">{{ cost(c.cost_in, snotes) }} <span class="sep">/</span> {{ cost(c.cost_out, snotes) }}</span><span class="sub"><a href="{{ root }}{{ m.path }}#{{ c.board.anchor }}">{{ c.board.board.workload }}</a></span>{% else %}<span class="muted">{{ s.no_cost }}</span>{% endfor %}</div></td>
+<td class="num" data-label="Lowest public list price"><div>{% if s.market %}{{ s.market.input_per_mtok|price_usd }} <span class="sep">/</span> {{ s.market.output_per_mtok|price_usd }}<span class="sub">{{ s.market.note }}</span>{% if s.market.listed_for %}<span class="sub">listed for {{ s.market.listed_for }}</span>{% endif %}{% else %}<span class="muted">none listed</span>{% endif %}</div></td>
+<td data-label="Quality"><div><span class="badge {{ s.quality_class }}">{{ s.quality }}</span>{% if s.quality_note %}<span class="sub">{{ s.quality_note }}</span>{% endif %}</div></td>
 </tr>
 {% endfor %}
 </tbody>
 </table>
 {% endcall %}
-{% else %}
-<p class="section-note">Per benchmarked workload, the best configuration: the cheapest at SLO among configs that passed every check. A candidate (another precision, engine or setting) is ranked only once its quality gate passes against the model's BF16 reference; a failed or inconclusive gate keeps it out, however cheap. Where no config is ranked the row says why, and an untrusted reference is shown with its flag as a comparison point, never as the best config. $/1M input and $/1M output split the replica's on-demand cost by measured prefill time (<a href="{{ root }}methodology.html#split">how</a>). Values are point estimates (geometric means for latency and throughput); the line under each is its {{ (manifest.confidence * 100)|round|int }}% confidence interval. SLO: {{ describe_slo(manifest.slo) if manifest.slo else 'not recorded' }}.</p>
-{% call scroll_table("models-h") %}
-<table class="headline">
-<thead>
-<tr><th scope="col">Workload</th><th scope="col">Best config at SLO</th><th scope="col" class="num">$/1M input,<br>on-demand</th><th scope="col" class="num">$/1M output,<br>on-demand</th><th scope="col" class="num">Goodput out tok/s per GPU</th><th scope="col" class="num">p95 TTFT</th><th scope="col" class="num">p95 TPOT</th><th scope="col">Quality gate</th></tr>
-</thead>
-{% for m in models %}
-<tbody>
-<tr class="group"><th scope="rowgroup" colspan="8"><a href="{{ root }}{{ m.path }}">{{ m.snap.display_name }}</a> <span class="repo">{{ m.snap.repo or '' }}</span></th></tr>
-{% for h in headline if h.model is sameas m %}
-<tr class="{{ 'ranked' if h.best else 'unranked' }}">
-{% if h.board is none %}
-<td colspan="8" class="muted">No published results for this model yet — first runs pending.</td>
-{% elif h.quoted is none %}
-<td class="workload"><a href="{{ root }}{{ m.path }}#{{ h.board.anchor }}">{{ h.board.title }}</a></td>
-<td colspan="7" class="muted wrap">No config ranked: {{ h.board.basis }}. Details on the model page.</td>
-{% else %}
-{% set q = h.quoted %}
-{% set r = q.result %}
-{% set split_in, split_out, _ = split_ranges(r) %}
-<td class="workload"><a href="{{ root }}{{ m.path }}#{{ h.board.anchor }}">{{ h.board.title }}</a></td>
-<td class="cfg">{% if h.best %}<strong>{{ r.name }}</strong>{% else %}<span class="muted">No config ranked.</span> Comparison point: <strong>{{ r.name }}</strong> <span class="badge {{ q.status.name|lower }}">{{ q.status.value }}, not ranked</span>{% endif %}<span class="sub">{{ r.label.short }}</span>{% if not h.best %}<span class="sub">{{ unranked_reason(r)|sentence }}</span>{% endif %}</td>
-<td class="num">{{ money(split_in) }}</td>
-<td class="num">{{ money(split_out) }}</td>
-<td class="num">{{ estimate(r.goodput_output_tok_s_per_gpu, 1) }}</td>
-<td class="num">{{ estimate(r.ttft_p95_ms, 0, 'ms') }}</td>
-<td class="num">{{ estimate(r.tpot_p95_ms, 1, 'ms') }}</td>
-<td>{% if r.quality and r.quality.gate %}<span class="badge {{ r.quality.gate }}">{{ gate_label(r.quality.gate) }}</span>{% if r.quality.gate != 'baseline' %}<span class="sub">vs {{ r.quality.baseline_text }}</span>{% else %}<span class="sub">the BF16 reference</span>{% endif %}{% elif r.quality and r.quality.tasks %}<span class="muted">scored, no gate</span>{% else %}<span class="muted">not evaluated</span>{% endif %}</td>
-{% endif %}
-</tr>
-{% endfor %}
-</tbody>
-{% endfor %}
-</table>
-{% endcall %}
-<p class="section-note">{{ manifest.experiment_ids|length }} experiment{{ '' if manifest.experiment_ids|length == 1 else 's' }}, {{ manifest.run_count }} runs. Cost is at the on-demand list price of the replica's instance plus its storage volume; see <a href="{{ root }}methodology.html#cost">how cost is derived</a> and <a href="{{ root }}pricing.html">how it compares with public list prices</a>.</p>
-{% endif %}
+{{ note_list(snotes) }}
+<p class="section-note">Measured cost is shown only for configs that are ranked (see below). Competitor prices are public list prices; we do not benchmark other providers. <a href="{{ root }}pricing.html">Full price comparison and margins</a></p>
 </section>
 
-<section aria-labelledby="read-h">
-<h2 id="read-h">What the numbers mean</h2>
-<dl class="defs">
-<dt>Goodput at SLO</dt>
-<dd>The highest tested load at which latency and errors stay within the service-level objective, judged on the upper end of the confidence interval. Raw peak throughput is reported separately and never used for cost. <a href="{{ root }}methodology.html#goodput">Definition</a></dd>
-<dt>Cost per token</dt>
-<dd>The replica's hourly on-demand list price (instance plus storage volume) divided by the tokens it produces per hour at goodput, split between input and output tokens by the measured share of time spent prefilling prompts. Spot and as-run costs are shown on each model page. Prices come from public price pages, each with its source and check date. <a href="{{ root }}methodology.html#cost">Formula and worked example</a></dd>
-<dt>Quality</dt>
-<dd>Each configuration is scored on pinned evaluation sets against the BF16 reference configuration of the same model. Only a gate pass ranks a candidate; one whose gate failed or is inconclusive is listed with the reason but never ranked. <a href="{{ root }}methodology.html#quality">Gate rule</a></dd>
+{% if not manifest.empty %}
+<section aria-labelledby="results-h">
+<h2 id="results-h">Results by workload</h2>
+<p class="section-note">Best config per workload at the SLO ({{ describe_slo(manifest.slo) if manifest.slo else 'not recorded' }}). Cost per 1M tokens at on-demand GPU prices. Model pages show every config with 95% confidence intervals.</p>
+{% set notes = namespace(list=[], prefix='r') %}
+{% call scroll_table("results-h") %}
+<table class="headline">
+<thead>
+<tr><th scope="col">Workload</th><th scope="col">Config</th><th scope="col" class="num">Cost in</th><th scope="col" class="num">Cost out</th><th scope="col" class="num"><abbr title="Output tokens per second per GPU at the highest load that met the SLO">Throughput</abbr><span class="unit">tok/s per GPU</span></th><th scope="col" class="num"><abbr title="Time to first token, 95th percentile">First token</abbr><span class="unit">p95</span></th><th scope="col" class="num"><abbr title="Time per output token after the first, 95th percentile">Per token</abbr><span class="unit">p95</span></th><th scope="col">Quality</th></tr>
+</thead>
+{% for m in models if m.boards %}
+<tbody>
+<tr class="group"><th scope="rowgroup" colspan="8"><a href="{{ root }}{{ m.path }}">{{ m.snap.display_name }}</a></th></tr>
+{% for h in headline if h.model is sameas m %}
+{% set b = h.board %}
+<tr class="{{ 'ranked' if h.best else 'unranked' }}">
+<td class="workload"><a href="{{ root }}{{ m.path }}#{{ b.anchor }}">{{ b.board.workload }}</a><span class="sub">{{ b.kind }}</span></td>
+{% if h.quoted is none %}
+<td colspan="7" class="muted wrap">No config ranked. {{ b.nothing_ranked }}.</td>
+{% else %}
+{% set r = h.quoted.result %}
+{% set split_in, split_out, _ = split_ranges(r) %}
+<td class="cfg"><strong>{{ r.name }}</strong>{% if not h.best %} <span class="badge untrusted">untrusted, not ranked</span>{% endif %}<span class="sub">{{ r.label.short }}{% if not h.best %}; {{ untrusted_short(r) }}{% endif %}</span></td>
+<td class="num">{{ cost(split_in, notes) }}</td>
+<td class="num">{{ cost(split_out, notes) }}</td>
+<td class="num">{{ point(r.goodput_output_tok_s_per_gpu, 1) }}</td>
+<td class="num">{{ point(r.ttft_p95_ms, 0, 'ms') }}</td>
+<td class="num">{{ point(r.tpot_p95_ms, 1, 'ms') }}</td>
+<td>{{ gate_badge(r) }}</td>
+{% endif %}
+</tr>
+{% endfor %}
+</tbody>
+{% endfor %}
+</table>
+{% endcall %}
+{{ note_list(notes) }}
+<dl class="legend">
+<dt>Ranked</dt><dd>The cheapest config at the SLO that passed every check. A candidate (another precision, engine or setting) ranks only after its quality gate passes against the model's BF16 reference; a failed or inconclusive gate keeps it out, however cheap.</dd>
+<dt><span class="badge untrusted">untrusted, not ranked</span></dt><dd>Nothing on that workload is ranked, so the best untrusted reference is shown for comparison. Rerun before relying on it.</dd>
+<dt>Cost in / out</dt><dd>The replica's on-demand hourly price (GPU plus storage) divided by tokens served per hour at the SLO, split between input and output by measured prefill time (<a href="{{ root }}methodology.html#split">how</a>).</dd>
+</dl>
+<p class="section-note">{{ manifest.experiment_ids|length }} experiment{{ '' if manifest.experiment_ids|length == 1 else 's' }}, {{ manifest.run_count }} runs. <a href="{{ root }}methodology.html">Methodology</a></p>
+</section>
+{% endif %}
+
+<section aria-labelledby="terms-h">
+<h2 id="terms-h">Terms</h2>
+<dl class="defs compact">
+<dt>SLO</dt><dd>Service-level objective: the latency and error limits every result must meet.</dd>
+<dt>First token (TTFT)</dt><dd>Time from sending a request to receiving the first token.</dd>
+<dt>Per token (TPOT)</dt><dd>Time between output tokens after the first.</dd>
+<dt>Throughput at SLO</dt><dd>Output tokens per second at the highest tested load that met the SLO (“goodput”). Cost uses this, never raw peak. <a href="{{ root }}methodology.html#goodput">More</a></dd>
+<dt>p95</dt><dd>95th percentile: 95% of requests were at least this fast.</dd>
+<dt>95% CI</dt><dd>Confidence interval across repeated runs. A load meets the SLO only if the interval's upper end does. <a href="{{ root }}methodology.html#ci">More</a></dd>
+<dt>Quality gate</dt><dd>A candidate is scored against the model's BF16 reference on the same evaluation items. Only a pass ranks it. <a href="{{ root }}methodology.html#quality">More</a></dd>
 </dl>
 </section>
 

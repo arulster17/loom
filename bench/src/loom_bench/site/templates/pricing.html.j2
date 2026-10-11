@@ -1,75 +1,82 @@
 {% extends "base.html.j2" %}
-{% from "_macros.html.j2" import money, link_list %}
-{% from "_site.html.j2" import scroll_table %}
+{% from "_macros.html.j2" import link_list %}
+{% from "_site.html.j2" import scroll_table, cost, price_pair, note_list %}
 {% block title %}Pricing transparency · Loom{% endblock %}
 {% block description %}Loom's measured cost at SLO, planned price and margin per model, next to other providers' public list prices with sources.{% endblock %}
 {% block content %}
 <header class="page-head">
-<h1>Pricing transparency</h1>
-<p class="lede">For each model: what a replica costs us per token at SLO, the price we plan to charge, the margin between them, and what other providers list publicly for the same model.</p>
+<h1>Pricing</h1>
+<p class="lede">Per model: our planned price, what it costs us to serve, the margin between them, and what other providers list for the same model.</p>
 </header>
 
-{% set head, _, rest = (comp.note if comp else '').partition(': ') %}
-<div class="notice" role="note"><p><strong>Public list prices only.</strong> {% if rest %}{{ rest|sentence }}{% else %}Competitor numbers are the per-token prices each provider publishes, with source and check date. No competitor endpoint is called or benchmarked.{% endif %} <a href="{{ legal_url }}">Why</a>.</p></div>
+<div class="notice" role="note"><p><strong>Public list prices only.</strong> We do not call or benchmark other providers' APIs, and a list price says nothing about a provider's latency, quality or quantization unless its page does. <a href="{{ legal_url }}">Why</a></p></div>
 
 {% if comp is none %}
 <p>This snapshot has no pricing data.</p>
 {% else %}
-<p>Competitor prices last checked {{ comp.competitors_last_checked }}. {{ scope }} Our cost is the cost at SLO of the config the leaderboard quotes, the same one the results page and the model page show: the best config (rank 1, among configs that passed every check, a candidate only on a quality gate pass against BF16), or, where nothing is ranked, an untrusted reference shown as a comparison point with its reason. A config whose gate failed or is inconclusive is never quoted. Cost is at the on-demand list price, storage included, split between input and output by measured prefill time (<a href="{{ root }}methodology.html#split">how</a>); blended is the cost over all tokens at the workload's own mix. Margin is our price minus that cost, and its worst case uses the high end of the cost interval. Planned prices are set in <a href="{{ registry_url }}">config/models.yaml</a> and stay unset until the cost is measured.</p>
+<ul class="short">
+<li><strong>Cost</strong> is our measured cost per 1M tokens at the SLO, at on-demand GPU prices with storage, for the config the results page quotes: the top-ranked config, or, where nothing ranks, an untrusted reference shown for comparison. A config whose quality gate failed or is inconclusive is never quoted.</li>
+<li><strong>In / out</strong> split that cost by measured prefill time (<a href="{{ root }}methodology.html#split">how</a>). <strong>Blended</strong> is the cost over all tokens at the workload's own input:output mix.</li>
+<li><strong>Margin</strong> is our price minus our cost. The second line gives it as a share of price, and at the high end of the cost's 95% CI.</li>
+<li><strong>Prices</strong> are planned, set in <a href="{{ registry_url }}">config/models.yaml</a>, and stay unset until the cost is measured. Competitor prices checked {{ comp.competitors_last_checked }}. {{ scope }}</li>
+</ul>
 
 {% for model_id, prows in by_model.items() %}
 {% set rows = prows|map(attribute='comp')|list %}
 {% set first = rows[0] %}
 {% set anchor = slug(model_id) %}
+{% set notes = namespace(list=[], prefix=anchor ~ '-') %}
 <section aria-labelledby="{{ anchor }}">
 <h2 id="{{ anchor }}">{{ first.display_name }}</h2>
-<h3 id="{{ anchor }}-ours">Our cost, price and margin per 1M tokens</h3>
+<p class="price-line">Our price: {% if first.price %}<strong>{{ price_pair(first.price) }}</strong> per 1M tokens, input / output{% else %}<strong>none set</strong>{% endif %} · <a href="{{ root }}models/{{ model_id }}.html">results</a></p>
+<h3 id="{{ anchor }}-ours">Our cost and margin per 1M tokens</h3>
 {% if rows|selectattr('workload')|list %}
 {% call scroll_table(anchor ~ '-ours') %}
 <table class="pricing">
 <thead>
-<tr><th scope="col">Workload</th><th scope="col">Config quoted</th><th scope="col" class="num">Cost in</th><th scope="col" class="num">Cost out</th><th scope="col" class="num">Cost blended</th><th scope="col" class="num">Price in</th><th scope="col" class="num">Price out</th><th scope="col" class="num">Margin in</th><th scope="col" class="num">Margin out</th></tr>
+<tr><th scope="col">Workload</th><th scope="col">Config quoted</th><th scope="col" class="num">Cost in</th><th scope="col" class="num">Cost out</th><th scope="col" class="num">Cost blended</th><th scope="col" class="num">Margin in</th><th scope="col" class="num">Margin out</th></tr>
 </thead>
 <tbody>
 {% for p in prows %}
 {% set r = p.comp %}
-<tr class="{{ 'ranked' if p.board and p.board.head and p.board.head.rank is not none else 'unranked' }}">
+{% set ranked = p.board and p.board.head and p.board.head.rank is not none %}
+<tr class="{{ 'ranked' if ranked else 'unranked' }}">
 <td>{{ r.workload }}<span class="sub">{{ r.load_mode.value.replace('_', ' ') if r.load_mode else '' }}{% if r.alternative_slo %}; alternative SLO, not the declared one{% endif %}</span></td>
-<td class="cfg">{% if r.best_config %}<strong>{{ r.best_config }}</strong>{% else %}<span class="muted">none quoted</span>{% endif %}<span class="sub">{{ p.basis|sentence }}</span></td>
-<td class="num">{{ money(r.cost_input) }}</td>
-<td class="num">{{ money(r.cost_output) }}</td>
-<td class="num">{{ money(r.cost_blended) }}</td>
-<td class="num">{{ price_text(r.price, 'input') }}</td>
-<td class="num">{{ price_text(r.price, 'output') }}</td>
-<td class="num">{{ margin_text(r.margin_input, r.cost_input) }}</td>
-<td class="num">{{ margin_text(r.margin_output, r.cost_output) }}</td>
+{% set head = p.board.head if p.board else none %}
+<td class="cfg">{% if r.best_config %}<strong>{{ r.best_config }}</strong>{% if ranked %} <span class="badge">rank 1</span>{% else %} <span class="badge untrusted">untrusted, not ranked</span>{% endif %}{% if head %}{% set why = [] if ranked else [untrusted_short(head.result)] %}{% set why = why + (['tied with ' ~ head.goodput_ties|join(', ')] if head.goodput_ties else []) %}{% if why %}<span class="sub">{{ why|join('; ')|sentence }}</span>{% endif %}{% else %}<span class="sub">{{ p.basis|sentence }}</span>{% endif %}{% else %}<span class="muted">none quoted</span><span class="sub">{{ p.board.nothing_ranked if p.board else p.basis|sentence }}</span>{% endif %}</td>
+<td class="num">{{ cost(r.cost_input, notes, ci=true) }}</td>
+<td class="num">{{ cost(r.cost_output, notes, ci=true) }}</td>
+<td class="num">{{ cost(r.cost_blended, notes, ci=true) }}</td>
+{% for m, c in ((r.margin_input, r.cost_input), (r.margin_output, r.cost_output)) %}
+{% set value, extra = margin_parts(m) %}
+<td class="num">{% if r.price is none %}<span class="muted">no price</span>{% elif m is none and c is not none and c.na_reason %}n/a{% else %}<span class="{{ 'neg' if m is not none and m.value < 0 else '' }}">{{ value }}</span>{% for line in extra %}<span class="ci">{{ line }}</span>{% endfor %}{% endif %}</td>
+{% endfor %}
 </tr>
 {% endfor %}
 </tbody>
 </table>
 {% endcall %}
+{{ note_list(notes) }}
 {% else %}
 <p class="muted">Not benchmarked yet, so there is no measured cost; the planned price is {{ 'not set' if first.price is none else (first.price.input_per_mtok|usd ~ ' in / ' ~ first.price.output_per_mtok|usd ~ ' out') }}. <a href="{{ root }}models/{{ model_id }}.html">Model page</a></p>
 {% endif %}
 
-<h3 id="{{ anchor }}-list">Public list prices per 1M tokens</h3>
+<h3 id="{{ anchor }}-list">Public list prices per 1M tokens{% if first.market_model_id and first.market_model_id != model_id %} <span class="muted">(for {{ by_model[first.market_model_id][0].comp.display_name if first.market_model_id in by_model else first.market_model_id }})</span>{% endif %}</h3>
 {% if first.competitors %}
 {% call scroll_table(anchor ~ '-list') %}
 <table>
 <thead>
-<tr><th scope="col">Provider</th><th scope="col" class="num">Input</th><th scope="col" class="num">Output</th><th scope="col">Quantization</th><th scope="col">Availability</th><th scope="col">In flag comparison</th><th scope="col">Source</th><th scope="col">Checked</th></tr>
+<tr><th scope="col">Provider</th><th scope="col" class="num">Input</th><th scope="col" class="num">Output</th><th scope="col">Quantization</th><th scope="col"><abbr title="Whether the price flags below compare against this listing. Aggregators and listings whose availability is unverified are left out.">Compared</abbr></th><th scope="col">Source</th></tr>
 </thead>
 <tbody>
 {% for c in first.competitors %}
 <tr class="{{ '' if c.in_comparison else 'unranked' }}">
-<td>{{ c.provider }}{% if c.aggregator %}<span class="sub">aggregator</span>{% endif %}{% if c.provider_model %}<span class="sub"><code>{{ c.provider_model }}</code></span>{% endif %}</td>
-<td class="num">{{ c.input_per_mtok|usd }}</td>
-<td class="num">{{ c.output_per_mtok|usd }}</td>
+<td>{{ c.provider }}{% if c.aggregator %} <span class="badge">aggregator</span>{% endif %}{% if c.provider_model %}<span class="sub"><code>{{ c.provider_model }}</code></span>{% endif %}</td>
+<td class="num">{{ c.input_per_mtok|price_usd }}</td>
+<td class="num">{{ c.output_per_mtok|price_usd }}</td>
 <td>{{ c.quantization or 'not disclosed' }}</td>
-<td>{{ c.availability }}</td>
-<td>{{ 'yes' if c.in_comparison else 'no' }}</td>
-<td>{{ link_list([c.source]) }}{% if c.notes %}<span class="sub">{{ c.notes }}</span>{% endif %}</td>
-<td class="nowrap">{{ c.last_checked }}</td>
+<td>{{ 'yes' if c.in_comparison else 'no' }}{% if c.availability != 'listed' %}<span class="sub">{{ c.availability }}</span>{% endif %}</td>
+<td><a href="{{ c.source }}">{{ source_name(c.source) }}</a><span class="sub">checked {{ c.last_checked }}{% if c.notes %}; {{ c.notes }}{% endif %}</span></td>
 </tr>
 {% endfor %}
 </tbody>
@@ -79,16 +86,19 @@
 <p>No public list price recorded for this model.</p>
 {% endif %}
 
-{% set flagged = rows|map(attribute='flags')|select|list %}
-{% if flagged %}
-<h3>Flags</h3>
-<ul class="flags">
-{% for r in rows %}
-{% for f in r.flags %}
-<li class="{{ f.kind }}">{% if r.workload %}[{{ r.workload }}] {% endif %}<code>{{ f.kind }}</code>: {{ f.message }}</li>
+{% set flags = flag_lines(model_id, rows) %}
+{% if flags %}
+<h3 id="{{ anchor }}-flags">Checks</h3>
+{% call scroll_table(anchor ~ '-flags') %}
+<table class="flags">
+<thead><tr><th scope="col">Check</th><th scope="col">Workload</th><th scope="col">Detail</th></tr></thead>
+<tbody>
+{% for f in flags %}
+<tr class="{{ f.kind }}"><td class="nowrap"><span class="flag {{ 'bad' if f.bad else '' }}">{{ f.label }}</span>{% if f.side %}<span class="sub">{{ f.side }}</span>{% endif %}</td><td>{{ f.workloads|join(', ') if f.workloads else 'all' }}</td><td class="wrap">{{ f.detail }}</td></tr>
 {% endfor %}
-{% endfor %}
-</ul>
+</tbody>
+</table>
+{% endcall %}
 {% endif %}
 </section>
 {% endfor %}
@@ -96,7 +106,7 @@
 {% if comp.not_offered %}
 <section aria-labelledby="not-offered">
 <h2 id="not-offered">Providers with no public per-token price</h2>
-<ul>
+<ul class="short">
 {% for n in comp.not_offered %}
 <li>{{ n.name }}: {{ n.reason }} (checked {{ n.last_checked }}){% if n.url %}; {{ link_list([n.url]) }}{% endif %}</li>
 {% endfor %}
