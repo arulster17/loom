@@ -45,7 +45,8 @@ def usd(m: Micros | None, places: int = 4) -> str:
 def usd_ci(r: MicrosRange | None) -> str:
     """Value with its CI, e.g. `$1.2924 [1.2610, 1.3252]`; a missing high bound is unbounded.
 
-    A price the cost allocation does not apply to reads `n/a (<reason>)`, never $0.
+    A price the cost allocation does not apply to reads `n/a (<reason>)`, never $0. A low
+    bound of 0 that the split explains (`MicrosRange.lo_note`) says so.
     """
     if r is not None and r.na_reason:
         return f"{NA} ({r.na_reason})"
@@ -55,7 +56,8 @@ def usd_ci(r: MicrosRange | None) -> str:
         return f"{usd(r.value)} (no CI)"
     lo = NA if r.lo is None else usd(r.lo).lstrip("$")
     hi = "unbounded" if r.hi is None else usd(r.hi).lstrip("$")
-    return f"{usd(r.value)} [{lo}, {hi}]"
+    note = f" ({r.lo_note})" if r.lo_note else ""
+    return f"{usd(r.value)} [{lo}, {hi}]{note}"
 
 
 def num(x: float | None, places: int = 0) -> str:

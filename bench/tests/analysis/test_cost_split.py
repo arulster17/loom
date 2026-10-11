@@ -6,6 +6,7 @@ from fractions import Fraction
 import pytest
 
 from loom_bench.cost import (
+    LO_PREFILL_SHARE_REACHES_1,
     NA_NO_PREFILL_TIME,
     NA_PREFILL_SATURATED,
     CostAllocation,
@@ -18,6 +19,7 @@ from loom_bench.metrics.aggregate import aggregate_runs, ci_rule
 from loom_bench.metrics.summary import flatten_metrics, summarize_run
 from loom_bench.money import SECONDS_PER_HOUR, TOKENS_PER_MTOK
 from loom_bench.records import LoadMode, RequestRecord, RequestStatus
+from loom_bench.report.format import usd_ci
 from loom_bench.slo import Slo, find_goodput
 from loom_bench.stats import Estimate
 
@@ -128,9 +130,16 @@ def test_share_bound_above_one_is_capped():
     c = split(phi, ci(3000, 2400, 3750), ci(1000, 800, 1250))
     # input high bound: all of the replica's time on input at the low throughput
     assert c.input_per_mtok.hi == 416_667  # 1.0 x 1e9 / 2400
-    # output low bound: nothing left for output
+    # output low bound: nothing left for output. That $0 is the split's (φ's CI reaches
+    # the cap), not a measured price, and the range says so for every reader.
     assert c.output_per_mtok.lo == 0
+    assert c.output_per_mtok.lo_note == LO_PREFILL_SHARE_REACHES_1
+    assert c.input_per_mtok.lo_note is None
     assert c.input_time_share.hi == 1.0
+    assert usd_ci(c.output_per_mtok).endswith(f"[0.0000, 0.3750] ({LO_PREFILL_SHARE_REACHES_1})")
+    # A φ interval below the cap leaves output a positive low bound and no note.
+    below = split(ci(0.9, 0.7, 0.95), ci(3000, 2400, 3750), ci(1000, 800, 1250))
+    assert below.output_per_mtok.lo > 0 and below.output_per_mtok.lo_note is None
 
 
 def test_zero_throughput_bound_is_unbounded():

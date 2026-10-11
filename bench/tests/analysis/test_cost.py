@@ -29,6 +29,7 @@ def test_all_output_headline():
         "lo": None,
         "hi": None,
         "na_reason": "all cost allocated to output",
+        "lo_note": None,
     }
     assert c.total_per_mtok.value == 250_000  # 4000 tok/s blended
     assert c.allocation == "all_output"
@@ -126,6 +127,7 @@ def test_ci_maps_high_throughput_to_low_cost():
         "lo": 800_000,
         "hi": 1_250_000,
         "na_reason": None,
+        "lo_note": None,
     }
     assert (c.total_per_mtok.value, c.total_per_mtok.lo, c.total_per_mtok.hi) == (
         200_000,
