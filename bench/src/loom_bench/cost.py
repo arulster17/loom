@@ -108,13 +108,16 @@ class MicrosRange(BaseModel):
     """A cost in micros with CI bounds. None means unbounded / not computable.
 
     `na_reason` is set when the price is not applicable at all (the allocation
-    assigns that side no cost); value and bounds are then None.
+    assigns that side no cost); value and bounds are then None. `lo_note` explains a low
+    bound of 0 that is a property of the split, not a measured free token
+    (`LO_PREFILL_SHARE_REACHES_1`).
     """
 
     value: Micros | None
     lo: Micros | None
     hi: Micros | None
     na_reason: str | None = None
+    lo_note: str | None = None
 
     @classmethod
     def not_applicable(cls, reason: str) -> MicrosRange:
@@ -128,6 +131,10 @@ NA_PREFILL_SATURATED = (
     "prefills overlapped at goodput (request rate × mean TTFT ≥ 1), so prefill time "
     "cannot be separated from decode time"
 )
+# Output's low bound under prefill_time when φ's CI reaches 1: the data cannot rule out
+# that prefill takes all of the replica's time, which would leave output tokens nothing
+# to pay for. The bound is the split's, not a measured price.
+LO_PREFILL_SHARE_REACHES_1 = "low end $0: the prefill-time share's CI reaches 100%"
 
 
 class CostAtSlo(BaseModel):
@@ -212,10 +219,12 @@ def _split_prices(
         # input cost rises with φ, output cost falls with it; both fall with throughput
         cheap: End = "lo" if side == "in" else "hi"
         dear: End = "hi" if side == "in" else "lo"
+        reaches_1 = side == "out" and share.hi is not None and share.hi >= 1
         return MicrosRange(
             value=price(_at(share, "mean"), _at(tok_s, "mean"), side),
             lo=price(_at(share, cheap), _at(tok_s, "hi"), side),
             hi=price(_at(share, dear), _at(tok_s, "lo"), side),
+            lo_note=LO_PREFILL_SHARE_REACHES_1 if reaches_1 else None,
         )
 
     return side_range(input_tok_s, "in"), side_range(output_tok_s, "out")

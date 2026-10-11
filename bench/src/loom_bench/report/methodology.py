@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Mapping, Sequence
+from functools import cache
 from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict
@@ -16,11 +17,13 @@ from loom_bench.records import LoadMode, Market
 from loom_bench.registry import Cloud
 from loom_bench.report.analyze import ConfigResult, SweepKey
 from loom_bench.report.format import describe_slo, load_mode_label, usd
+from loom_bench.workloads.profiles import list_profiles, load_profile
 
 ALLOCATION_TEXT = {
     "all_output": "all of the replica's hourly cost is charged to output tokens, so "
-    "input tokens have no separate price ($/1M input is n/a, not $0); $/1M output is the "
-    "headline number",
+    "input tokens have no separate price ($/1M input is n/a, not $0); its $/1M output is "
+    "the rank key, while the published $/1M input and output prices use the measured "
+    "prefill-time split",
     "all_input": "all of the replica's hourly cost is charged to input tokens, so output "
     "tokens have no separate price ($/1M output is n/a, not $0)",
     "prefill_time": "input tokens are charged the share of the replica's time spent "
@@ -40,9 +43,13 @@ SPLIT_TEXT = (
     "and concurrent prefills are each counted, so φ tends to overstate prefill time (input "
     "high, output low); idle headroom is charged to output (output high). The price CIs "
     "combine the φ and throughput CIs at the ends that push each price the same way, an "
-    "outer bound. Blended $/1M is the hourly price over all tokens at the workload's own "
-    "input:output mix and needs no split. The ranking still uses the declared cost "
-    "allocation, shown in its own column."
+    "outer bound. When φ is high (prefill-heavy traffic, e.g. long shared prompts or chat "
+    "at high load) its CI can reach 1, the cap: the measurements then cannot rule out that "
+    "prefill takes all of the replica's time, so the output price's low end is $0 and is "
+    "marked as such. That $0 is a property of the split, not a measured free token; the "
+    "point estimate and the high end are unaffected. Blended $/1M is the hourly price over "
+    "all tokens at the workload's own input:output mix and needs no split. The ranking "
+    "still uses the declared cost allocation, shown in its own column."
 )
 
 
@@ -71,6 +78,37 @@ class DatasetRef(BaseModel):
             parts.append(f"@ {self.revision}")
         parts.append(f"(license: {self.license or 'not recorded'})")
         return " ".join(parts)
+
+
+@cache
+def _profile_datasets() -> dict[tuple[str, str | None], DatasetRef]:
+    """The dataset of every shipped workload profile, by (source, revision)."""
+    out: dict[tuple[str, str | None], DatasetRef] = {}
+    for name in list_profiles():
+        try:
+            profile = load_profile(name)
+        except (OSError, ValueError):
+            continue
+        d = profile.dataset
+        if d is not None:
+            out[(d.source, d.revision)] = DatasetRef.model_validate(d.model_dump())
+    return out
+
+
+def public_dataset(recorded: DatasetRef) -> DatasetRef:
+    """The dataset as published: its licence note as the workload profile states it now.
+
+    A run's provenance keeps the note recorded at the time; an older one can carry text
+    meant for review rather than for readers (chat-sharegpt's "Verify before
+    publishing."). The same dataset (source and revision) takes the profile's current
+    note; a dataset no shipped profile names is shown as recorded.
+    """
+    current = _profile_datasets().get((recorded.source or "", recorded.revision))
+    if current is None:
+        return recorded
+    return recorded.model_copy(
+        update={"license": current.license, "license_url": current.license_url}
+    )
 
 
 class ConfigProvenance(BaseModel):
@@ -146,8 +184,16 @@ def per_hour(m: Micros | None) -> str:
     return "n/a" if m is None else f"{usd(m)}/h"
 
 
-def _storage_text(gb: int | None) -> str:
-    return f" + {gb} GB block storage" if gb else ""
+# The storage volume each cloud's replica pays for, as its price book entry prices it.
+STORAGE_NAMES = {"aws": "EBS gp3 volume", "runpod": "container disk"}
+
+
+def storage_name(cloud: str | None) -> str:
+    return STORAGE_NAMES.get(cloud or "", "storage volume")
+
+
+def _storage_text(gb: int | None, cloud: str | None) -> str:
+    return f" + {gb} GB {storage_name(cloud)}" if gb else ""
 
 
 def as_run_text(result: ConfigResult) -> str:
@@ -158,14 +204,15 @@ def as_run_text(result: ConfigResult) -> str:
     b = PriceBasis.model_validate(doc)
     hourly = per_hour(result.prices.as_run)
     host = f"{b.market.value} host"
+    storage = _storage_text(b.storage_gb, result.provenance.get("cloud"))
     if b.source == "observed_spot":
         at = b.observed_at.isoformat() if b.observed_at else "time not recorded"
         return (
             f"{hourly}, {host}: spot ${b.spot_price_usd}/h observed at launch in "
-            f"{b.availability_zone or 'an unrecorded AZ'} ({at}){_storage_text(b.storage_gb)}"
+            f"{b.availability_zone or 'an unrecorded AZ'} ({at}){storage}"
         )
     if b.source == "prices_yaml":
-        return f"{hourly}, {host}: price-book on-demand price{_storage_text(b.storage_gb)}"
+        return f"{hourly}, {host}: price-book on-demand price{storage}"
     if b.source == "experiment":
         return f"{hourly}, {host}: declared by the experiment (provider.hourly_price)"
     if b.source == "observed_api":
@@ -173,7 +220,7 @@ def as_run_text(result: ConfigResult) -> str:
         cloud = result.provenance.get("cloud") or "the provider"
         return (
             f"{hourly}, {host}: {cloud} API price observed at launch in "
-            f"{_zone_text(b.availability_zone)} ({at}){_storage_text(b.storage_gb)}"
+            f"{_zone_text(b.availability_zone)} ({at}){storage}"
         )
     return f"unknown, {host}: no spot price was observed for its availability zone at launch"
 
@@ -216,7 +263,7 @@ def price_source(result: ConfigResult, price_book: PriceBook | None) -> PriceSou
         basis = f"{where}: {p.missing or 'no on-demand price'}"
     else:
         basis = (
-            f"{where}{_storage_text(p.storage_gb)}, from the price book: on-demand "
+            f"{where}{_storage_text(p.storage_gb, cloud)}, from the price book: on-demand "
             f"{per_hour(p.on_demand)}; spot {per_hour(p.spot)}; "
             f"committed 1y {per_hour(p.committed_1y)}"
         )
@@ -304,9 +351,11 @@ def methodology(results: Sequence[ConfigResult], price_book: PriceBook | None) -
     confidences = _distinct([p.aggregate.confidence for r in results for p in r.points])
     datasets = _distinct(
         [
-            DatasetRef.model_validate(dict(_section(r.provenance, "dataset")))
+            public_dataset(DatasetRef.model_validate(dict(_section(r.provenance, "dataset"))))
             for r in results
-            if _section(r.provenance, "dataset")
+            # Synthetic workloads record an empty dataset section: no dataset to name.
+            if _section(r.provenance, "dataset").get("name")
+            or _section(r.provenance, "dataset").get("source")
         ]
     )
     if reps:

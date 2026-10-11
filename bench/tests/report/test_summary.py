@@ -10,7 +10,12 @@ from loom_bench.cost import CostAllocation
 from loom_bench.prices import Competitors
 from loom_bench.registry import load_registry
 from loom_bench.report import render_leaderboard
-from loom_bench.report.analyze import analyze_runs, default_price_resolver, with_quality
+from loom_bench.report.analyze import (
+    Quality,
+    analyze_runs,
+    default_price_resolver,
+    with_quality,
+)
 from loom_bench.report.format import usd_ci
 from loom_bench.report.leaderboard import (
     RowStatus,
@@ -79,14 +84,20 @@ def summary(results, competitors):
     return build_summary(report, competitors=competitors, registry=load_registry())
 
 
-def test_headline_prefers_trusted_then_verified_quality_over_rank(results):
+def test_inconclusive_candidate_is_not_ranked_and_not_quoted(results):
+    """A candidate ranks only on a gate pass: the cheaper inconclusive sglang-bf16 is
+    listed, unranked with its reason, and the BF16 reference is rank 1 and quoted."""
     rows = build_leaderboard(results).boards[0].rows
-    assert [(r.result.name, r.rank) for r in rows] == [("sglang-bf16", 1), ("vllm-bf16", 2)]
+    assert [(r.result.name, r.rank, r.status) for r in rows] == [
+        ("vllm-bf16", 1, RowStatus.RANKED),
+        ("sglang-bf16", None, RowStatus.QUALITY_UNVERIFIED),
+    ]
     head = headline_row(rows)
-    assert head is not None and head.result.name == "vllm-bf16"
-    assert quality_verified(head.result) and not quality_verified(rows[0].result)
-    # ranking itself is untouched
-    assert rows[0].status is RowStatus.RANKED
+    assert head is rows[0] and quality_verified(head.result)
+    assert rows[1].recommendation.startswith(
+        "Not ranked: quality gate inconclusive vs BF16 (AWS g6e.xlarge), so its quality is "
+        "not shown to match; a candidate ranks only on a gate pass; would be "
+    )
 
 
 def test_headline_never_quotes_a_gate_failure_and_prefers_trusted(results, price_book):
@@ -98,7 +109,7 @@ def test_headline_never_quotes_a_gate_failure_and_prefers_trusted(results, price
         make_runs("one-rep", engine="sglang", ttft=TTFT_FAST_SGLANG, reps=(1,)), price_book
     )
     rows = build_leaderboard([*results, *single]).boards[0].rows
-    assert headline_row(rows).result.name != "one-rep"  # untrusted only as a last resort
+    assert headline_row(rows).result.name != "one-rep"  # untrusted only with nothing ranked
     rows = build_leaderboard(single).boards[0].rows
     assert headline_row(rows).result.name == "one-rep"
 
@@ -132,7 +143,7 @@ def test_summary_states_cost_split_quality_and_limit(summary, results):
         f"{usd_ci(split.total_per_mtok)} per 1M tokens blended at this mix, holding the SLO "
         "up to 4 req/s (fails at 6)."
     )
-    assert "sglang-bf16 ranks first but its quality is not verified" in first
+    assert "sglang-bf16 would be cheaper, but their quality is not verified" in first
     limit = next(p for p in chat.points if p.startswith("What limits vllm-bf16"))
     assert limit.startswith("What limits vllm-bf16: at 6 req/s, TTFT p95 is ")
     assert "against the 600 ms target" in limit
@@ -140,11 +151,11 @@ def test_summary_states_cost_split_quality_and_limit(summary, results):
     assert "OpenRouter $0.2297 (aggregator, our cost " in market
     assert "no listed price is eligible for the flags" in market
     assert model.quality == [  # in leaderboard order
-        "sglang-bf16 (unquantized): quality gate vs vllm-bf16 is inconclusive: gsm8k, "
-        "divergence, sanity pass; ifeval inconclusive (delta -0.80 pts [-2.03 pts, "
+        "vllm-bf16 (BF16 weights): the reference the quality gate compares against; gsm8k 0.900.",
+        "sglang-bf16 (BF16 weights): quality gate vs BF16 (AWS g6e.xlarge) is inconclusive: "
+        "gsm8k, divergence, sanity pass; ifeval inconclusive (delta -0.80 pts [-2.03 pts, "
         "+0.37 pts], n=541: CI crosses -2.00 pts). An inconclusive gate blocks the config: "
-        "its quality is not shown to match vllm-bf16.",
-        "vllm-bf16 (unquantized): the reference the quality gate compares against; gsm8k 0.900.",
+        "its quality is not shown to match BF16 (AWS g6e.xlarge), so it is not ranked.",
     ]
 
 
@@ -154,7 +165,10 @@ def test_untrusted_figure_is_quoted_with_its_reason(price_book):
     )
     s = build_summary(build_leaderboard(single))
     points = s.models[0].workloads[0].points
-    assert "No config on this board is trusted, so this figure is indicative only." in points[0]
+    assert (
+        "No config on this board is ranked, so this figure is a comparison point only "
+        "(comparison point only, not ranked: untrusted (single repetition)"
+    ) in points[0]
     caveat = next(p for p in points if p.startswith("Caveat"))
     assert caveat.startswith("Caveat: one-rep is untrusted, so the leaderboard does not rank it")
     assert "load 2 req/s: 1 completed repetition; no confidence interval" in caveat
@@ -202,14 +216,14 @@ def test_env_note_names_disabled_peer_to_peer(results):
 
 def test_quality_sentence_without_gate_or_evals(results):
     bare = results[0].model_copy(update={"quality": None})
-    assert quality_sentence(bare, {}) == f"{bare.name} (unquantized): quality not evaluated."
+    assert quality_sentence(bare, {}) == f"{bare.name} (BF16 weights): quality not evaluated."
 
 
 def test_markdown_and_html(summary):
     md = summary_markdown(summary)
     assert md.startswith("## Summary\n\nWhat one replica costs us to serve at the SLO (TTFT p95")
     assert "| Workload | Config | Standing | Goodput at SLO | $/1M input |" in md
-    assert "| chat | **vllm-bf16** (quoted) | rank 2 | 4 req/s (fails at 6) |" in md
+    assert "| chat | **vllm-bf16** (quoted) | rank 1 | 4 req/s (fails at 6) |" in md
     assert "**chat** (200 input / 100 output tokens per request)" in md
     assert "**Quality**" in md
     html = summary_html(summary)
@@ -248,6 +262,9 @@ def test_quantized_row_market_line_uses_its_base_models_list_prices(price_book):
         ),
         price_book,
     )
+    # a quantized config is quoted only once its gate passed against a BF16 reference
+    passed = Quality(gate="pass", baseline_config_hash="0" * 64, tasks=[], baseline_label="BF16")
+    fp8 = [r.model_copy(update={"quality": passed}) for r in fp8]
     summary = build_summary(build_leaderboard(fp8), competitors=market, registry=load_registry())
     md = summary_markdown(summary)
     assert "no public list price recorded" not in md
@@ -281,7 +298,7 @@ def test_full_leaderboard_has_summary_then_boards_then_competitiveness(
     assert order == sorted(order)
     assert "### Qwen3 8B (`qwen3-8b`), ours unquantized" in md
     assert "Llama 3.3 70B" not in md  # only benchmarked models
-    assert "| chat (open loop) | vllm-bf16 (leaderboard rank 2) | 200 / 100 |" in md
+    assert "| chat (open loop) | vllm-bf16 (rank 1) | 200 / 100 |" in md
     rows = list(csv.DictReader(io.StringIO(rendered["competitiveness.csv"])))
     assert {r["competitor"] for r in rows} == {"Fireworks AI", "OpenRouter"}
     sources = tuple(str(e.source) for p in competitors.providers for e in p.entries)

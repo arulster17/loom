@@ -155,7 +155,15 @@ the ends that push that price the same way: input low = φ_lo × H / in_tok_s_hi
 high = φ_hi × H / in_tok_s_lo, output low = (1 − φ_hi) × H / out_tok_s_hi, output high
 = (1 − φ_lo) × H / out_tok_s_lo (`cost._split_prices`). That is an outer bound, wider
 than a joint 95% interval, since φ and throughput come from the same runs. A φ bound
-above 1 is capped at 1 (so an output low bound can be $0). With one repetition φ has no
+above 1 is capped at 1, so an output low bound can be $0. That is not a propagation bug:
+φ near 1 with a CI reaching the cap means the runs cannot rule out that prefill took all
+of the replica's time, which leaves output nothing to pay for at that end. It happens on
+prefill-heavy cells, e.g. Llama 3.3 70B FP8 shared-prefix (φ 0.915 [0.821, 1.019]:
+output $0.3879 [$0.0000, $0.8952]) and Qwen3-8B fp8-kv8 chat (φ 0.875 [0.695, 1.101]).
+The range then carries `lo_note` (`cost.LO_PREFILL_SHARE_REACHES_1`), and every report,
+CSV-adjacent text and site cell shows "low end $0: the prefill-time share's CI reaches
+100%" next to the bound, so a reader does not take it for a measured free token. The
+point estimate, the high bound and the blended cost are unaffected. With one repetition φ has no
 interval and the prices have no bounds, as everywhere else. Exceptions:
 
 - a repetition measured zero throughput: that metric falls back to an arithmetic

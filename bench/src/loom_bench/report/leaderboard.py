@@ -74,6 +74,7 @@ from loom_bench.report.resolution import brackets_overlap, goodput_ties
 class RowStatus(StrEnum):
     RANKED = "ranked"
     GATE_FAILED = "quality gate failed"
+    QUALITY_UNVERIFIED = "quality not verified"
     UNTRUSTED = "untrusted"
     NO_COST = "no cost at SLO"
 
@@ -161,14 +162,81 @@ def _out_cost(r: ConfigResult) -> int | None:
     return None if rng is None else rng.value
 
 
+def reference_precision(r: ConfigResult) -> bool:
+    """BF16 weights and KV cache at the model's dtype: the precision gates compare against."""
+    return r.label.quantization in (None, "none") and r.label.kv_cache_dtype in (None, "auto")
+
+
+def quality_blocks(r: ConfigResult) -> bool:
+    """Whether quality keeps a config out of the ranking: a candidate ranks only on a gate
+    pass against its reference (docs/PLAN.md, quality standard).
+
+    Ranked: the gate's reference, a pass, and needs review (every task passed; the
+    divergence asks a person to look and does not block, docs/quality-gate.md). Not
+    ranked: fail, inconclusive, and a config at another precision (quantized weights or
+    an FP8 KV cache) that no gate has checked. A reference-precision config with no gate
+    decision has nothing to be checked against and ranks with "not evaluated".
+    """
+    gate = r.quality.gate if r.quality is not None else None
+    if gate in ("baseline", "pass", "review"):
+        return False
+    if gate in ("fail", "inconclusive"):
+        return True
+    return not reference_precision(r)
+
+
 def status_of(r: ConfigResult) -> RowStatus:
     if _out_cost(r) is None:
         return RowStatus.NO_COST
     if r.quality is not None and r.quality.gate == "fail":
         return RowStatus.GATE_FAILED
+    if quality_blocks(r):
+        return RowStatus.QUALITY_UNVERIFIED
     if not r.trusted:
         return RowStatus.UNTRUSTED
     return RowStatus.RANKED
+
+
+def baseline_name(r: ConfigResult, names: Mapping[str, str] | None = None) -> str:
+    """The gate reference of `r` for a reader, e.g. "BF16 (RunPod L40S)"; a bare hash
+    only when the reference is not among the analysed results."""
+    q = r.quality
+    if q is None:
+        return "the reference"
+    if q.baseline_label:
+        return q.baseline_label
+    if names and q.baseline_config_hash is not None and q.baseline_config_hash in names:
+        return names[q.baseline_config_hash]
+    return q.baseline_text
+
+
+def untrusted_reasons(r: ConfigResult) -> list[str]:
+    return sorted({w.label for w in r.warnings if w.kind in UNTRUSTING})
+
+
+def unranked_reason(r: ConfigResult, names: Mapping[str, str] | None = None) -> str:
+    """Why a config with a cost at SLO is not ranked, in one clause."""
+    status = status_of(r)
+    if status is RowStatus.GATE_FAILED:
+        return f"failed the quality gate vs {baseline_name(r, names)}"
+    if status is RowStatus.QUALITY_UNVERIFIED:
+        q = r.quality
+        if q is not None and q.gate == "inconclusive":
+            text = (
+                f"quality gate inconclusive vs {baseline_name(r, names)}, so its quality is "
+                "not shown to match; a candidate ranks only on a gate pass"
+            )
+        else:
+            text = (
+                f"{r.label.precision} not gated against a BF16 reference; a candidate ranks "
+                "only on a gate pass"
+            )
+        if not r.trusted:
+            text += f"; also untrusted ({', '.join(untrusted_reasons(r))})"
+        return text
+    if status is RowStatus.UNTRUSTED:
+        return f"untrusted ({', '.join(untrusted_reasons(r))}); rerun before relying on it"
+    return status.value
 
 
 def _rel(a: int, b: int) -> Fraction:
@@ -195,7 +263,7 @@ def _quality_clause(r: ConfigResult, names: Mapping[str, str]) -> str:
         return "quality not evaluated"
     if q.gate == "baseline":
         return "quality baseline"
-    base = names.get(q.baseline_config_hash or "", (q.baseline_config_hash or "?")[:12])
+    base = baseline_name(r, names)
     if q.gate == "pass":
         return f"passed the quality gate vs {base}"
     if q.gate == "review":
@@ -229,12 +297,11 @@ def recommend(
         if r.hourly_micros is None:
             return f"No cost at SLO: {r.prices.missing or 'no on-demand price for this replica'}"
         return "No cost at SLO: no token throughput measured at the goodput load"
-    if status in (RowStatus.GATE_FAILED, RowStatus.UNTRUSTED):
+    if status in (RowStatus.GATE_FAILED, RowStatus.QUALITY_UNVERIFIED, RowStatus.UNTRUSTED):
         if status is RowStatus.GATE_FAILED:
             text = f"Not ranked: {quality}"
         else:
-            reasons = sorted({w.label for w in r.warnings if w.kind in UNTRUSTING})
-            text = f"Not ranked: untrusted ({', '.join(reasons)}); rerun before relying on it"
+            text = f"Not ranked: {unranked_reason(r, names)}"
         if leader is not None and lead_cost is not None and cost is not None and cost < lead_cost:
             text += f"; would be {pct(-_rel(cost, lead_cost))} cheaper than {leader.name}"
         return text
@@ -303,31 +370,52 @@ def quality_verified(r: ConfigResult) -> bool:
 
 
 def headline_row(rows: Sequence[LeaderboardRow]) -> LeaderboardRow | None:
-    """The config whose cost a summary or competitiveness view quotes for one board.
+    """The config whose cost is quoted for one board, by the site's index and pricing
+    pages, the summary and the competitiveness view alike: one rule everywhere.
 
-    Among configs with a cost at SLO that did not fail the quality gate: trusted first,
-    then quality verified (`quality_verified`), then leaderboard order. Untrusted
-    configs are eligible only when no trusted one is, and are quoted with their reason.
-    This picks what to quote; it does not change the ranking.
+    Rank 1 when any config is ranked. Otherwise the cheapest untrusted config whose
+    quality is not in question (the gate's reference, or a pass): quoted as a comparison
+    point with its untrusted reason, never as the best config. A config whose quality
+    gate failed or is inconclusive is never quoted.
     """
-    candidates = [row for row in rows if row.status in (RowStatus.RANKED, RowStatus.UNTRUSTED)]
-    if not candidates:
-        return None
-    return min(
-        candidates,
-        key=lambda row: (
-            not row.result.trusted,
-            not quality_verified(row.result),
-            rows.index(row),
-        ),
-    )
+    for status in (RowStatus.RANKED, RowStatus.UNTRUSTED):
+        found = next((row for row in rows if row.status is status), None)
+        if found is not None:
+            return found
+    return None
+
+
+def headline_basis(row: LeaderboardRow, names: Mapping[str, str] | None = None) -> str:
+    """Why the quoted config is quoted: its rank, or why it is only a comparison point."""
+    if row.rank is not None:
+        text = f"rank {row.rank}"
+    else:
+        text = f"comparison point only, not ranked: {unranked_reason(row.result, names)}"
+    if row.goodput_ties:
+        text += f"; tied with {', '.join(row.goodput_ties)}"
+    return text
 
 
 def no_headline_reason(rows: Sequence[LeaderboardRow]) -> str:
     """Why `headline_row` found nothing to quote on a board."""
-    statuses = {row.status for row in rows}
-    if RowStatus.GATE_FAILED in statuses:
-        return "every config with a cost at SLO failed the quality gate"
+    blocked = [r for r in rows if r.status in (RowStatus.GATE_FAILED, RowStatus.QUALITY_UNVERIFIED)]
+    if blocked:
+        groups: dict[str, list[str]] = defaultdict(list)
+        for row in blocked:
+            r = row.result
+            gate = r.quality.gate if r.quality is not None else None
+            if gate == "fail":
+                verdict = f"failed the quality gate vs {baseline_name(r)}"
+            elif gate == "inconclusive":
+                verdict = f"quality gate inconclusive vs {baseline_name(r)}"
+            else:
+                verdict = "not gated against a BF16 reference"
+            groups[verdict].append(r.name)
+        parts = "; ".join(f"{', '.join(names)}: {verdict}" for verdict, names in groups.items())
+        return (
+            f"no config with a cost at SLO has verified quality ({parts}); a candidate ranks "
+            "only on a gate pass"
+        )
     if all(row.result.goodput.max_load is None for row in rows):
         return "no tested load met the SLO"
     missing = next((row.result.prices.missing for row in rows if row.result.prices.missing), None)
@@ -478,10 +566,12 @@ LEDE = (
     "key, the cost under the experiments' declared allocation (all_output charges the whole "
     "replica to output tokens), at the on-demand list price, cheapest first; spot, "
     "committed-1y and as-run costs of the rank key are shown where available. Every price "
-    "includes the replica's block storage. Values are point estimates (geometric means for "
+    "includes the replica's storage volume. Values are point estimates (geometric means for "
     "latency and throughput) with 95% confidence intervals in brackets. Goodput is the "
     "highest tested load that met the SLO; raw peak throughput ignores the SLO and is not "
-    "goodput. Unranked rows (quality gate failed, untrusted, or no cost) are listed last."
+    "goodput. Only configs that passed every check are ranked: a candidate needs a quality "
+    "gate pass against its reference. Unranked rows (quality gate failed or not verified, "
+    "untrusted, or no cost) are listed last with the reason."
 )
 
 

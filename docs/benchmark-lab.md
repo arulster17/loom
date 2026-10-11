@@ -301,10 +301,14 @@ on every workload ($/1M input, $/1M output, $/1M blended, goodput bracket, stand
 quality), then a few sentences per workload, all generated from the numbers
 (`report/summary.py`):
 
-- the cost at SLO of the quoted config, with 95% CIs. The quoted config is the first of:
-  trusted, then quality verified (the gate's reference or a gate pass), then leaderboard
-  rank; a config that failed the gate is never quoted. When it is not rank 1 the text
-  says why (e.g. rank 1's gate is inconclusive);
+- the cost at SLO of the quoted config, with 95% CIs. The quoted config is rank 1, and
+  only configs that passed every check rank: a candidate needs a quality gate pass
+  against its BF16 reference, so an inconclusive or failed gate keeps it unranked
+  (status "quality not verified" / "quality gate failed") and never quoted. With nothing
+  ranked, an untrusted config of verified quality is quoted as a comparison point with
+  its reason. The site's index and pricing pages use the same rule
+  (`leaderboard.headline_row`; table in [quality-gate.md](quality-gate.md#how-verdicts-rank-reports-and-the-site));
+  cheaper configs left out for quality are named;
 - ties within the search resolution;
 - what limits it: each SLO target missed at the first failing load, with its value and
   CI (the verdict uses the CI upper bound, and the text says so when the mean is inside

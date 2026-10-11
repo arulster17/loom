@@ -480,6 +480,26 @@ used, the resulting limits and the ceiling). Reports and the site rank a REVIEW 
 normally and badge it "needs review", with the divergence against its limits and the
 noise floor in its recommendation and on its model page.
 
+### How verdicts rank (reports and the site)
+
+`report.leaderboard.status_of` applies the quality standard (PLAN.md): a candidate ranks
+only on a gate pass against its BF16 reference, and the reference itself ranks.
+
+| Gate | Leaderboard status | Ranked | Quoted (index, pricing, summary) |
+|---|---|---|---|
+| baseline (the reference) | ranked, or untrusted | yes when trusted | rank 1; untrusted only as a flagged comparison point when nothing ranks |
+| PASS, REVIEW | ranked, or untrusted | yes when trusted | as above |
+| INCONCLUSIVE | quality not verified | never | never |
+| FAIL | quality gate failed | never | never |
+| none, quantized weights or FP8 KV cache | quality not verified | never | never |
+| none, BF16 with auto KV | ranked ("not evaluated") | yes when trusted | as above |
+
+Unranked rows stay on the page with the reason ("quality gate inconclusive vs BF16
+(RunPod L40S)"). `leaderboard.headline_row` is the one selection rule every view uses:
+rank 1, else the cheapest untrusted config of verified quality, labelled as a comparison
+point and never as the best config. Gate references are named by precision and where
+they ran (`analyze.reference_label`), not by config hash.
+
 ## Sample sizes
 
 For a pass/fail task, let d be the share of items whose outcome flips between baseline and

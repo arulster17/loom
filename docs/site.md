@@ -20,10 +20,20 @@ Code: `bench/src/loom_bench/site/`. Public functions: `export_snapshot`, `build_
 
 | Page | Shows |
 |---|---|
-| `index.html` | What Loom is, the headline table (best ranked config per model and workload), the waitlist |
-| `models/<id>.html` | Leaderboard per workload with CIs, ranked by on-demand cost with spot, committed-1y and as-run costs where present, quality gate, cold start, per-config details: config YAML, load sweep, price source and as-run price basis, `bench reproduce` command, links to every run's provenance JSON |
-| `methodology.html` | Open and closed loop, metric definitions, goodput at SLO, repetitions and CIs, cost formula, the four price columns and which one ranks, a worked example, price sources, quality gate rule, synthetic vs realistic content, what we don't do |
-| `pricing.html` | Our cost at SLO, planned price and margin per model, next to public list prices with sources |
+| `index.html` | What Loom is, the headline table (per model and workload: the best config, i.e. rank 1, at the measured $/1M input and output split; with nothing ranked, the reason, and an untrusted reference shown as a flagged comparison point), the waitlist |
+| `models/<id>.html` | Leaderboard per workload with CIs: $/1M input and output (measured split), the rank key (on-demand cost under the declared allocation), goodput, latency, quality gate and its named reference; a second table with load at goodput, blended cost, spot, committed-1y and as-run costs, cold start; per-config details: precision (weights and KV cache), config YAML, load sweep, price source and as-run price basis, `bench reproduce` command, links to every run's provenance JSON |
+| `methodology.html` | Open and closed loop, metric definitions, goodput at SLO, repetitions and CIs, the cost split and rank key (defined once, `#split`), the price columns and which one ranks, a worked example, price sources, quality gate rule, synthetic vs realistic content, what we don't do |
+| `pricing.html` | Our cost at SLO (split and blended) for the config the leaderboard quotes, with its basis, planned price and margin per model, next to public list prices with sources |
+
+One selection rule everywhere: the index, the model pages and the pricing page quote
+`report.leaderboard.headline_row` (rank 1; a candidate ranks only on a quality gate pass
+against its BF16 reference; see [quality-gate.md](quality-gate.md#how-verdicts-rank-reports-and-the-site)).
+The build checks that the snapshot's pricing rows quote the same config as the
+leaderboard and refuses a snapshot exported under another rule. Config names are one per
+config hash across the snapshot (`analyze.name_configs`): the cell key of the config's
+latest experiment, with where it ran added when two configs share a key, e.g.
+"bf16 (RunPod L40S)" and "bf16 (AWS g6e.xlarge)". Tables fit a desktop viewport; on a
+phone a wide table scrolls inside its own frame, never the page.
 | `harness.html` | Repository link, license, quickstart with the mock backend |
 
 Every registry model gets a page. Until a model has published results its pages say

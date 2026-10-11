@@ -261,9 +261,35 @@ def test_label_from_provenance():
     assert label.tp == 2
     assert label.engine_args == {"enable_prefix_caching": True}
     assert label.text == (
-        "vllm 0.30.0 · unquantized · TP2 · 1×L40S · g6e.xlarge (on_demand) · "
+        "vllm 0.30.0 · BF16 weights · TP2 · 1×L40S · AWS g6e.xlarge (on-demand) · "
         "enable_prefix_caching=true"
     )
+
+
+def test_label_describes_weights_and_kv_cache():
+    """A BF16 config with an FP8 KV cache is not "unquantized": the label says both."""
+    prov = {
+        "engine": {"name": "vllm", "version": "0.30.0", "args": {}},
+        "model": {"quantization": "none"},
+        "hardware": {"gpu_type": "L40S", "gpu_count": 1, "instance_type": "l40s-x1"},
+        "cloud": "runpod",
+        "market": "on_demand",
+        "config": {"model": {"kv_cache_dtype": "fp8"}},
+    }
+    label = label_from_provenance(prov)
+    assert label.kv_cache_dtype == "fp8"
+    assert label.precision == "BF16 + FP8 KV"
+    assert label.precision_text == "BF16 weights, KV cache FP8"
+    assert label.hardware == "RunPod L40S"
+    assert "unquantized" not in label.text
+    assert label.text.startswith("vllm 0.30.0 · BF16 weights, KV cache FP8 · ")
+    auto = label_from_provenance({**prov, "config": {"model": {"kv_cache_dtype": "auto"}}})
+    assert auto.precision == "BF16"
+    assert auto.precision_text == "BF16 weights, KV cache auto (model dtype)"
+    fp8 = label_from_provenance(
+        {**prov, "model": {"quantization": "fp8"}, "hardware": {"gpu_type": "H100", "gpu_count": 2}}
+    )
+    assert fp8.precision == "FP8 + FP8 KV" and fp8.hardware == "RunPod 2×H100"
 
 
 def test_provenance_digest_matches_record_hash(results):
@@ -362,3 +388,81 @@ def test_label_prefers_recorded_parallelism():
 
     label = label_from_provenance({"parallelism": {"tp": 4}, "engine": {"args": {}}, "config": {}})
     assert label.tp == 4
+
+
+def _runpod_runs(cell_key: str, **kwargs):
+    """A RunPod L40S sweep: same factory config, its own hardware and price basis."""
+    from loom_bench.provenance import PriceBasis
+
+    runs = make_runs(
+        cell_key,
+        cloud="runpod",
+        instance_type="l40s-x1",
+        hourly_micros=1_100_959,
+        price_basis=PriceBasis(market=Market.ON_DEMAND, source="observed_api", storage_gb=80),
+        hardware={"cloud": "runpod"},
+        **kwargs,
+    )
+    for run in runs:  # RunPod's price-book region (the factory prices an AWS region)
+        run.provenance = {**run.provenance, "region": "secure"}
+    return runs
+
+
+def test_a_config_keeps_one_name_on_every_workload(price_book):
+    """One config hash ran as "bf16" in one experiment and "vllm" in another, and one
+    board mixes both. It gets one name everywhere: the key most of its runs carry."""
+    chat = make_runs("bf16")
+    fixed = make_runs("bf16", workload="fixed-1k-1k")
+    code = make_runs("bf16", workload="code-completion", experiment_id=uuid.UUID(int=3))
+    for run in [*code, *fixed[:6]]:
+        run.cell_key = "vllm"
+    results = analyze([*chat, *fixed, *code], price_book)
+    assert len({r.config_hash for r in results}) == 1
+    assert {r.workload: r.name for r in results} == {
+        "chat": "bf16",
+        "fixed-1k-1k": "bf16",
+        "code-completion": "bf16",
+    }
+    fixed_result = next(r for r in results if r.workload == "fixed-1k-1k")
+    assert fixed_result.cell_key is None  # the board itself carries two keys
+    assert fixed_result.cell_keys == {"bf16": 6, "vllm": 6}
+
+
+def test_the_latest_experiments_cell_key_names_the_config(price_book):
+    """Run counts decide only when start times do not: a newer experiment's key wins."""
+    from datetime import UTC, datetime
+
+    older = make_runs("vllm", workload="code-completion")
+    newer = make_runs("vllm", workload="chat", experiment_id=uuid.UUID(int=3))
+    for run in older:
+        run.started_at = datetime(2026, 10, 1, tzinfo=UTC)
+    for run in newer[:6]:  # fewer runs, but later
+        run.cell_key = "bf16"
+        run.started_at = datetime(2026, 10, 9, tzinfo=UTC)
+    results = analyze([*older, *newer], price_book)
+    assert {r.name for r in results} == {"bf16"}
+
+
+def test_configs_sharing_a_cell_key_are_told_apart_by_where_they_ran(price_book):
+    results = analyze([*make_runs("bf16"), *_runpod_runs("bf16")], price_book)
+    assert len({r.config_hash for r in results}) == 2
+    assert sorted(r.name for r in results) == ["bf16 (AWS g6e.xlarge)", "bf16 (RunPod L40S)"]
+    # a name without a collision stays as it is
+    (alone,) = analyze(make_runs("fp8-kv8"), price_book)
+    assert alone.name == "fp8-kv8"
+
+
+def test_gate_reference_is_named_by_precision_and_hardware(price_book):
+    results = analyze(
+        [*_runpod_runs("bf16"), *make_runs("fp8-kv8", quantization="fp8")], price_book
+    )
+    h = {r.name: r.config_hash for r in results}
+    gates = [gate_row(h["bf16"], h["fp8-kv8"], "inconclusive")]
+    gated = {r.name: r for r in with_quality(results, [], gates)}
+    q = gated["fp8-kv8"].quality
+    assert q.baseline_label == "BF16 (RunPod L40S)"
+    assert q.baseline_text == "BF16 (RunPod L40S)"
+    # a reference outside the analysed results falls back to a labelled short hash
+    outside = [gate_row("a" * 64, h["fp8-kv8"], "inconclusive")]
+    (alone,) = with_quality([gated["fp8-kv8"]], [], outside)
+    assert alone.quality.baseline_text == "reference config aaaaaaaaaaaa"

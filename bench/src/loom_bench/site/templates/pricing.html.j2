@@ -15,9 +15,10 @@
 {% if comp is none %}
 <p>This snapshot has no pricing data.</p>
 {% else %}
-<p>Competitor prices last checked {{ comp.competitors_last_checked }}. {{ scope }} Our cost is the cheapest ranked configuration's cost at SLO at the on-demand list price, storage included (<a href="{{ root }}methodology.html#cost">how it is derived</a>); margin is our price minus that cost, and its worst case uses the high end of the cost interval. Planned prices are set in <a href="{{ registry_url }}">config/models.yaml</a> and stay unset until the cost is measured.</p>
+<p>Competitor prices last checked {{ comp.competitors_last_checked }}. {{ scope }} Our cost is the cost at SLO of the config the leaderboard quotes, the same one the results page and the model page show: the best config (rank 1, among configs that passed every check, a candidate only on a quality gate pass against BF16), or, where nothing is ranked, an untrusted reference shown as a comparison point with its reason. A config whose gate failed or is inconclusive is never quoted. Cost is at the on-demand list price, storage included, split between input and output by measured prefill time (<a href="{{ root }}methodology.html#split">how</a>); blended is the cost over all tokens at the workload's own mix. Margin is our price minus that cost, and its worst case uses the high end of the cost interval. Planned prices are set in <a href="{{ registry_url }}">config/models.yaml</a> and stay unset until the cost is measured.</p>
 
-{% for model_id, rows in by_model.items() %}
+{% for model_id, prows in by_model.items() %}
+{% set rows = prows|map(attribute='comp')|list %}
 {% set first = rows[0] %}
 {% set anchor = slug(model_id) %}
 <section aria-labelledby="{{ anchor }}">
@@ -25,17 +26,19 @@
 <h3 id="{{ anchor }}-ours">Our cost, price and margin per 1M tokens</h3>
 {% if rows|selectattr('workload')|list %}
 {% call scroll_table(anchor ~ '-ours') %}
-<table>
+<table class="pricing">
 <thead>
-<tr><th scope="col">Workload</th><th scope="col">Best config at SLO</th><th scope="col" class="num">Cost in</th><th scope="col" class="num">Cost out</th><th scope="col" class="num">Price in</th><th scope="col" class="num">Price out</th><th scope="col" class="num">Margin in</th><th scope="col" class="num">Margin out</th></tr>
+<tr><th scope="col">Workload</th><th scope="col">Config quoted</th><th scope="col" class="num">Cost in</th><th scope="col" class="num">Cost out</th><th scope="col" class="num">Cost blended</th><th scope="col" class="num">Price in</th><th scope="col" class="num">Price out</th><th scope="col" class="num">Margin in</th><th scope="col" class="num">Margin out</th></tr>
 </thead>
 <tbody>
-{% for r in rows %}
-<tr>
-<td>{{ r.workload }}<span class="sub">{{ r.load_mode.value.replace('_', ' ') if r.load_mode else '' }}</span></td>
-<td>{{ r.best_config or 'none ranked' }}</td>
+{% for p in prows %}
+{% set r = p.comp %}
+<tr class="{{ 'ranked' if p.board and p.board.head and p.board.head.rank is not none else 'unranked' }}">
+<td>{{ r.workload }}<span class="sub">{{ r.load_mode.value.replace('_', ' ') if r.load_mode else '' }}{% if r.alternative_slo %}; alternative SLO, not the declared one{% endif %}</span></td>
+<td class="cfg">{% if r.best_config %}<strong>{{ r.best_config }}</strong>{% else %}<span class="muted">none quoted</span>{% endif %}<span class="sub">{{ p.basis|sentence }}</span></td>
 <td class="num">{{ money(r.cost_input) }}</td>
 <td class="num">{{ money(r.cost_output) }}</td>
+<td class="num">{{ money(r.cost_blended) }}</td>
 <td class="num">{{ price_text(r.price, 'input') }}</td>
 <td class="num">{{ price_text(r.price, 'output') }}</td>
 <td class="num">{{ margin_text(r.margin_input, r.cost_input) }}</td>

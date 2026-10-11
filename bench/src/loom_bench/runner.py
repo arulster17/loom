@@ -1524,6 +1524,24 @@ class ReproduceOutcome:
         )
 
 
+def same_profile(profile: WorkloadProfile, prov: Provenance) -> bool:
+    """Whether `profile` resolves to the workload a run recorded (its profile hash).
+
+    The dataset's licence note is documentation: it does not change a request. A profile
+    whose only difference is that note, which the run recorded in full in its dataset
+    section, still counts as the same workload.
+    """
+    if config_hash(profile) == prov.workload.profile_hash:
+        return True
+    if profile.dataset is None or prov.dataset.license is None:
+        return False
+    recorded = profile.dataset.model_copy(
+        update={"license": prov.dataset.license, "license_url": prov.dataset.license_url}
+    )
+    as_recorded = profile.model_copy(update={"dataset": recorded})
+    return config_hash(as_recorded) == prov.workload.profile_hash
+
+
 def cell_from_provenance(exp: Experiment, prov: Provenance, key: str) -> Cell:
     """The exact cell a run used, rebuilt from its stored resolved config."""
     cfg = prov.config
@@ -1645,7 +1663,7 @@ async def reproduce(
     if entry is None:
         raise LookupError(f"workload {prov.workload.name!r} is not in the experiment spec")
     profile = entry.resolve()
-    if config_hash(profile) != prov.workload.profile_hash:
+    if not same_profile(profile, prov):
         warnings.append(
             f"workload {entry.name} resolves differently now (profile hash changed); "
             "requests will not match the original"

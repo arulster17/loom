@@ -93,14 +93,15 @@ def test_ranking_cheapest_first_then_gate_failed_then_untrusted(report):
 def test_recommendations_are_generated_from_numbers(report):
     recs = {r.result.name: r.recommendation for r in report.boards[0].rows}
     assert recs["sglang-bf16"] == (
-        "Cheapest at SLO; 33% cheaper than vllm-bf16; passed the quality gate vs vllm-bf16"
+        "Cheapest at SLO; 33% cheaper than vllm-bf16; passed the quality gate vs "
+        "BF16 (AWS g6e.xlarge)"
     )
     assert recs["vllm-bf16"] == (
         "50% more expensive than sglang-bf16 at SLO; 14% lower p95 TTFT at goodput; "
         "quality baseline"
     )
     assert recs["vllm-awq"] == (
-        "Not ranked: failed the quality gate vs vllm-bf16 (worst: gsm8k -0.100); "
+        "Not ranked: failed the quality gate vs BF16 (AWS g6e.xlarge) (worst: gsm8k -0.100); "
         "would be 25% cheaper than sglang-bf16"
     )
     assert recs["sglang-1rep"] == (
@@ -188,7 +189,7 @@ def test_markdown_table_and_footer(report, price_book):
     ) in md
     row = next(line for line in md.splitlines() if line.startswith("| 1 |"))
     cells = [c.strip() for c in row.strip("|").split(" | ")]
-    assert cells[1].startswith("**sglang-bf16**<br>sglang 0.5.21 · unquantized · 1×L40S")
+    assert cells[1].startswith("**sglang-bf16**<br>sglang 0.5.21 · BF16 weights · 1×L40S")
     # this fixture's ~0.35 s TTFT at 6 req/s puts two requests in prefill: no split
     assert cells[2] == cells[3] == f"n/a ({NA_PREFILL_SATURATED})"
     assert cells[4] == "$0.2906 [0.2834, 0.2979]"  # blended: 1 / (600 + 1200 tok/s)
@@ -219,12 +220,12 @@ def test_markdown_table_and_footer(report, price_book):
         "- **Input/output split (headline):** Headline $/1M input and $/1M output use the "
         "prefill_time split",
         f"- **Price book last checked:** {price_book.last_checked.isoformat()}",
-        "aws/us-east-1 g6e.xlarge + 200 GB block storage, from the price book: on-demand "
+        "aws/us-east-1 g6e.xlarge + 200 GB EBS gp3 volume, from the price book: on-demand "
         "$1.8829/h; spot $1.8605/h; committed 1y n/a",
         "the spot price is an indicative average and moves hourly",
         "As run: $1.7219/h, spot host: spot $1.700000/h observed at launch in us-east-1a "
-        "(2026-10-01T00:00:00+00:00) + 200 GB block storage",
-        "As run: $1.8829/h, on_demand host: price-book on-demand price + 200 GB block storage",
+        "(2026-10-01T00:00:00+00:00) + 200 GB EBS gp3 volume",
+        "As run: $1.8829/h, on_demand host: price-book on-demand price + 200 GB EBS gp3 volume",
         "commit `0123456789abcdef0123456789abcdef01234567`",
         "digest `sha256:8a8a",
         "Qwen/Qwen3-8B @ b968826d9c46dd6066d109eabc6255188de91218",
@@ -313,7 +314,8 @@ def test_review_is_ranked_and_flagged(results, price_book):
     assert (sglang.rank, sglang.status) == (1, RowStatus.RANKED)
     divergence = REVIEW_DIVERGENCE
     assert sglang.recommendation.endswith(
-        f"quality needs review vs vllm-bf16: tasks pass but logprob divergence ({divergence})"
+        "quality needs review vs BF16 (AWS g6e.xlarge): tasks pass but logprob divergence "
+        f"({divergence})"
     )
     assert "+0.000 (gsm8k) · needs review" in render_markdown(report)
     html = render_html(report)
@@ -325,7 +327,7 @@ def test_review_is_ranked_and_flagged(results, price_book):
 
 
 def test_html_escapes_untrusted_text(results, price_book):
-    hostile = results[0].model_copy(update={"cell_key": "<script>x</script>"})
+    hostile = results[0].model_copy(update={"display_name": "<script>x</script>"})
     html = render_html(build_leaderboard([hostile], price_book=price_book))
     assert "<script>" not in html
     assert "&lt;script&gt;x&lt;/script&gt;" in html
@@ -355,7 +357,10 @@ def test_all_input_ranks_by_input_cost(all_runs, price_book):
     )
     rows = build_leaderboard(results).boards[0].rows
     ranked = [r for r in rows if r.status is RowStatus.RANKED]
-    assert [r.result.name for r in ranked] == ["vllm-awq", "sglang-bf16", "vllm-bf16"]
+    # vllm-awq is cheapest, but AWQ weights no gate has checked are not ranked
+    assert [r.result.name for r in ranked] == ["sglang-bf16", "vllm-bf16"]
+    awq = next(r for r in rows if r.result.name == "vllm-awq")
+    assert awq.status is RowStatus.QUALITY_UNVERIFIED
     assert all(r.result.cost.output_per_mtok.na_reason for r in rows)
     costs = [r.result.cost.input_per_mtok.value for r in ranked]
     assert costs == sorted(costs)

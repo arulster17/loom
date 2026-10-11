@@ -27,7 +27,7 @@
 <dt>Image</dt><dd><code>{{ model.planned.image }}</code></dd>
 <dt>Hardware</dt><dd>{{ model.planned.hardware }}</dd>
 <dt>Parallelism</dt><dd>{{ model.planned.parallelism }}</dd>
-<dt>Weights</dt><dd>{{ model.planned.quantization }}</dd>
+<dt>Precision</dt><dd>{{ model.planned.quantization }}</dd>
 <dt>Max context</dt><dd>{{ model.planned.max_context|num }} tokens</dd>
 </dl>
 <h3 id="registry-h">Registry entry</h3>
@@ -49,30 +49,49 @@
 <section aria-labelledby="{{ b.anchor }}">
 <h2 id="{{ b.anchor }}">{{ b.title }}</h2>
 {% set first = b.configs[0].result %}
-{% set show_input = b.input_priced %}
-<p class="section-note">Ranked by $/1M output tokens at SLO at the on-demand list price, cheapest first; spot, committed-1y and as-run costs are shown where available. Every price includes the replica's block storage (<a href="{{ root }}methodology.html#cost">price columns</a>).{% if not show_input %} Cost allocation all_output: the replica's whole cost is charged to output tokens, so input tokens have no separate price.{% endif %} Load generation: {{ load_mode_label(b.board.load_mode) }}. SLO: {{ describe_slo(first.goodput.slo) }}. Values are point estimates (geometric means for latency and throughput); the line under each is its confidence interval (<a href="{{ root }}methodology.html#ci">how it is computed</a>). Unranked configs (quality gate failed, untrusted, or no cost at SLO) are listed last.{% if any_unbracketed(b.configs|map(attribute='result.goodput')) %} {{ unbracketed_note }}{% endif %}</p>
+<p class="section-note">Ranked cheapest first by the rank key, $/1M {{ b.board.side }} at SLO at the on-demand list price under the {{ b.rank_allocation }} allocation, among configs that passed every check: trusted, with a cost at SLO, and, for a candidate, a quality gate pass against the BF16 reference. Configs whose gate failed or is inconclusive, untrusted configs and configs with no cost are listed after the ranked ones, with the reason. $/1M input and $/1M output split the same on-demand cost by measured prefill time (<a href="{{ root }}methodology.html#split">the split</a>); every price includes the replica's storage volume. Load generation: {{ load_mode_label(b.board.load_mode) }}. SLO: {{ describe_slo(first.goodput.slo) }}. Values are point estimates (geometric means for latency and throughput); the line under each is its confidence interval (<a href="{{ root }}methodology.html#ci">how it is computed</a>).{% if any_unbracketed(b.configs|map(attribute='result.goodput')) %} {{ unbracketed_note }}{% endif %}</p>
+<p class="quoted">{% if b.head and b.head.rank is not none %}Best config at SLO: <strong>{{ b.head.result.name }}</strong>.{% elif b.head %}No config on this board is ranked. Shown as a comparison point, not as the best config: <strong>{{ b.head.result.name }}</strong>, not ranked: {{ unranked_reason(b.head.result) }}.{% else %}No config on this board is ranked. {{ b.basis|sentence }}.{% endif %}</p>
 {% call scroll_table(b.anchor) %}
-<table>
+<table class="leaderboard">
 <thead>
-<tr><th scope="col" class="num">#</th><th scope="col">Config</th><th scope="col" class="num">$/1M out at SLO,<br>on-demand</th>{% if show_input %}<th scope="col" class="num">$/1M in at SLO,<br>on-demand</th>{% endif %}{% for col in b.board.price_columns %}<th scope="col" class="num">{{ price_header(col, b.board.side) }}</th>{% endfor %}<th scope="col" class="num">Goodput out tok/s<br>per GPU</th><th scope="col" class="num">Load at goodput</th><th scope="col" class="num">p95 TTFT<br>at goodput</th><th scope="col" class="num">p95 TPOT<br>at goodput</th><th scope="col">Quality gate</th><th scope="col" class="num">Cold start</th><th scope="col">Status</th></tr>
+<tr><th scope="col" class="num">#</th><th scope="col">Config</th><th scope="col" class="num">$/1M in<br>(split)</th><th scope="col" class="num">$/1M out<br>(split)</th><th scope="col" class="num">Rank key: $/1M {{ b.board.side }}, {{ b.rank_allocation }}</th><th scope="col" class="num">Goodput out tok/s per GPU</th><th scope="col" class="num">p95 TTFT at goodput</th><th scope="col" class="num">p95 TPOT at goodput</th><th scope="col">Quality gate</th></tr>
 </thead>
 <tbody>
 {% for c in b.configs %}
 {% set row = c.row %}
 {% set r = c.result %}
+{% set split_in, split_out, _ = split_ranges(r) %}
 <tr class="{{ 'ranked' if row.rank is not none else 'unranked' }}">
 <td class="num">{{ row.rank if row.rank is not none else '–' }}</td>
-<td class="cfg"><a href="#{{ c.anchor }}"><strong>{{ r.name }}</strong></a><span class="sub">{{ r.label.text }}</span></td>
-<td class="num">{{ money(r.cost.output_per_mtok if r.cost else none) }}</td>
-{% if show_input %}<td class="num">{{ money(r.cost.input_per_mtok if r.cost else none) }}</td>{% endif %}
-{% for col in b.board.price_columns %}<td class="num">{{ money(ranking_cost(r, col)) }}</td>{% endfor %}
+<td class="cfg"><a href="#{{ c.anchor }}"><strong>{{ r.name }}</strong></a> <span class="badge {{ row.status.name|lower }}">{{ row.status.value }}</span><span class="sub">{{ r.label.short }}</span></td>
+<td class="num">{{ money(split_in) }}</td>
+<td class="num">{{ money(split_out) }}</td>
+<td class="num">{{ money(ranking_cost(r)) }}</td>
 <td class="num">{{ estimate(r.goodput_output_tok_s_per_gpu, 1) }}</td>
-<td class="num">{{ goodput_load(r.goodput) }}</td>
 <td class="num">{{ estimate(r.ttft_p95_ms, 0, 'ms') }}</td>
 <td class="num">{{ estimate(r.tpot_p95_ms, 1, 'ms') }}</td>
-<td>{% if r.quality and r.quality.gate %}<span class="badge {{ r.quality.gate }}">{{ gate_label(r.quality.gate) }}</span>{% if r.quality.gate == 'review' %}<span class="sub">logprob divergence above the noise floor; <a href="#{{ c.anchor }}-quality">details</a></span>{% endif %}{% set worst = r.quality.worst() %}{% if worst %}<span class="sub">worst Δ {{ '%+.3f'|format(worst.delta) }} ({{ worst.task }})</span>{% endif %}{% elif r.quality and r.quality.tasks %}<span class="muted">scored, no gate</span><span class="sub">{% for t in r.quality.tasks %}{{ t.task }} {{ '%.3f'|format(t.score) }}{% if not loop.last %}, {% endif %}{% endfor %}</span>{% else %}<span class="muted">not evaluated</span>{% endif %}</td>
-<td class="num">{{ cold_text(row.cold_start) }}</td>
-<td><span class="badge {{ row.status.name|lower }}">{{ row.status.value }}</span></td>
+<td class="gate">{% if r.quality and r.quality.gate %}<span class="badge {{ r.quality.gate }}">{{ gate_label(r.quality.gate) }}</span>{% if r.quality.gate == 'baseline' %}<span class="sub">the reference</span>{% else %}<span class="sub">vs {{ r.quality.baseline_text }}</span>{% endif %}{% if r.quality.gate == 'review' %}<span class="sub">logprob divergence above the noise floor; <a href="#{{ c.anchor }}-quality">details</a></span>{% endif %}{% set worst = r.quality.worst() %}{% if worst %}<span class="sub">worst Δ {{ '%+.3f'|format(worst.delta) }} ({{ worst.task }})</span>{% endif %}{% elif r.quality and r.quality.tasks %}<span class="muted">scored, no gate</span><span class="sub">{% for t in r.quality.tasks %}{{ t.task }} {{ '%.3f'|format(t.score) }}{% if not loop.last %}, {% endif %}{% endfor %}</span>{% else %}<span class="muted">not evaluated</span>{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% endcall %}
+<h3 id="{{ b.anchor }}-more">Load, blended cost, other price columns and cold start</h3>
+{% call scroll_table(b.anchor ~ '-more') %}
+<table class="more">
+<thead>
+<tr><th scope="col">Config</th><th scope="col" class="num">Load at goodput</th><th scope="col" class="num">$/1M blended at this mix</th>{% for col in b.board.price_columns %}<th scope="col" class="num">{{ price_header(col, b.board.side) }}</th>{% endfor %}<th scope="col" class="num">Cold start</th></tr>
+</thead>
+<tbody>
+{% for c in b.configs %}
+{% set r = c.result %}
+{% set _, _, blended = split_ranges(r) %}
+<tr class="{{ 'ranked' if c.row.rank is not none else 'unranked' }}">
+<td class="cfg"><a href="#{{ c.anchor }}">{{ r.name }}</a></td>
+<td class="num">{{ goodput_load(r.goodput) }}</td>
+<td class="num">{{ money(blended) }}</td>
+{% for col in b.board.price_columns %}<td class="num">{{ money(ranking_cost(r, col)) }}</td>{% endfor %}
+<td class="num">{{ cold_text(c.row.cold_start) }}</td>
 </tr>
 {% endfor %}
 </tbody>
@@ -87,6 +106,8 @@
 <p>{{ c.row.recommendation }}.</p>
 <dl class="defs compact">
 <dt>Config</dt><dd>{{ r.label.text }}<span class="sub">config hash <code>{{ r.config_hash }}</code></span></dd>
+<dt>Precision</dt><dd>{{ r.label.precision_text }}</dd>
+{% if r.quality and r.quality.gate and r.quality.gate != 'baseline' %}<dt>Quality reference</dt><dd>{{ r.quality.baseline_text }}<span class="sub">config hash <code>{{ r.quality.baseline_config_hash }}</code></span></dd>{% endif %}
 <dt>Engine</dt><dd>{{ p.engine }}; image <code>{{ p.image or 'not recorded' }}</code></dd>
 <dt>Model</dt><dd>{{ p.model }}</dd>
 <dt>Hardware</dt><dd>{{ p.gpu }} · {{ p.location }}; CUDA {{ p.cuda_version or 'not recorded' }}, driver {{ p.driver_version or 'not recorded' }}</dd>
@@ -95,7 +116,8 @@
 <dt>Raw peak</dt><dd>{{ r.peak_output_tok_s|est(1) }} output tok/s at {{ load_value(r.peak_load, r.load_mode) }} (SLO ignored; not used for cost)</dd>
 <dt>Hourly price</dt><dd>{{ p.price.basis }}{% if p.price.urls %}; source: {{ link_list(p.price.urls) }}{% endif %}{% if p.price.last_checked %}; last checked {{ p.price.last_checked }}{% endif %}{% if p.price.note %}; {{ p.price.note }}{% endif %}</dd>
 <dt>Price as run</dt><dd>{{ p.price.as_run }}</dd>
-<dt>Cost allocation</dt><dd>{{ r.allocation }}</dd>
+<dt>Cost allocation</dt><dd>ranked under {{ r.allocation }}; $/1M input and output split by measured prefill time{% if r.split_cost and r.split_cost.input_time_share %} (φ = {{ r.split_cost.input_time_share|est(3) }} of the replica's time on input){% endif %} (<a href="{{ root }}methodology.html#split">methodology</a>)</dd>
+<dt>Cold start</dt><dd>{{ cold_text(c.row.cold_start) }}</dd>
 <dt>Code</dt><dd>commit {% for s in p.git_shas %}<code>{{ s }}</code>{{ ', ' if not loop.last }}{% else %}not recorded{% endfor %}; loom-bench {{ p.bench_version or 'not recorded' }}</dd>
 </dl>
 {% if r.warnings %}

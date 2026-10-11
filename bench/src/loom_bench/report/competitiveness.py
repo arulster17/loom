@@ -1,8 +1,9 @@
 """Competitiveness view: our cost at SLO and planned price against public list prices.
 
 Per registry model and workload, "our cost" is the cost at SLO of the board's headline
-config (`leaderboard.headline_row`: trusted first, then quality verified, then rank;
-never one that failed the quality gate) at the on-demand price, split between input
+config (`leaderboard.headline_row`: rank 1, else an untrusted config of verified quality
+as a labelled comparison point; never one whose gate failed or is inconclusive) at the
+on-demand price, split between input
 and output by measured prefill time (`cost.py`, prefill_time), plus the blended cost
 of the workload's own token mix. Margins and break-even prices are therefore
 reproducible from the price book. When no config has a cost at the declared SLO and
@@ -45,6 +46,7 @@ from loom_bench.report.format import (
 )
 from loom_bench.report.leaderboard import (
     LeaderboardRow,
+    headline_basis,
     headline_row,
     no_headline_reason,
     rank,
@@ -60,7 +62,8 @@ PUBLIC_PRICES_NOTE = (
 )
 
 OUR_COST_NOTE = (
-    "Our cost is the headline config's cost at SLO (see the summary) at the on-demand list "
+    "Our cost is the quoted config's cost at SLO (rank 1; with nothing ranked, an untrusted "
+    "config of verified quality as a comparison point, with its reason) at the on-demand list "
     "price, storage included: $/1M input and $/1M output split the replica's cost by "
     "measured prefill time, and $/1M blended is its cost over all tokens at the workload's "
     "own input:output mix. Each public price is also shown at every workload's mix, so "
@@ -196,16 +199,9 @@ def quantization_text(q: str | None) -> str:
 
 
 def basis_text(row: LeaderboardRow) -> str:
-    """Why the quoted config: its leaderboard standing and, if untrusted, why."""
-    r = row.result
-    if row.rank is not None:
-        text = f"leaderboard rank {row.rank}"
-    else:
-        reasons = sorted({w.label for w in r.warnings if w.kind.value != "no_goodput"})
-        text = f"{row.status.value}, not ranked" + (f": {', '.join(reasons)}" if reasons else "")
-    if row.goodput_ties:
-        text += f"; tied with {', '.join(row.goodput_ties)}"
-    return text
+    """Why the quoted config: its leaderboard standing, or why it is only a comparison
+    point (`leaderboard.headline_basis`, the same text as the site's)."""
+    return headline_basis(row)
 
 
 def _row(
