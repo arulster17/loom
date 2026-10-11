@@ -215,8 +215,6 @@ class ModelSpec(StrictModel):
                 f"{self.hf.quant_method or 'unquantized'} weights "
                 f"(hf.quant_method {self.hf.quant_method!r} allows {sorted(allowed)})"
             )
-        if self.status == "enabled" and self.pricing is None:
-            raise ValueError("status: enabled requires pricing")
         return self
 
 
@@ -229,6 +227,11 @@ class Registry(StrictModel):
         dupes = sorted({i for i in ids if ids.count(i) > 1})
         if dupes:
             raise ValueError(f"duplicate model ids: {dupes}")
+        # Checked here, not on ModelSpec: a cell's stored model snapshot records `pricing`
+        # as null (experiment.serving_model_doc), so an enabled row's snapshot must load.
+        for m in self.models:
+            if m.status == "enabled" and m.pricing is None:
+                raise ValueError(f"{m.id}: status: enabled requires pricing")
         # Checked here, not on ModelSpec, so model snapshots stored before the field
         # existed still load; rendering a launch checks it again for variants.
         for m in self.models:

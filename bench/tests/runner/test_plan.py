@@ -224,8 +224,14 @@ def test_the_llama_sweep_runs_no_eval_path_or_load_shape_the_qwen_smoke_misses()
     eagle3 = "RedHatAI/Llama-3.3-70B-Instruct-speculator.eagle3"
     eagle3_rev = "42864f78d503693ae5fd317419f099ab3b7c13e4"
     assert draft_weights(cell.launch.engine, cell.launch.args) == [(eagle3, eagle3_rev)]
-    extra = {v.name: set((v.engine.args or {}) if v.engine else {}) for v in llama.variants}
+    # (A null arg removes the registry's: gpu_memory_utilization: null restores vLLM's
+    # default on 4x L40S under today's H100 row.)
+    extra = {
+        v.name: {k for k, a in ((v.engine.args or {}) if v.engine else {}).items() if a is not None}
+        for v in llama.variants
+    }
     assert extra == {"vllm-tp4-eagle3": {"speculative_config"}}
+    assert "--gpu-memory-utilization" not in cell.launch.args
 
 
 def test_runpod_specs_match_their_aws_counterparts_apart_from_the_provider():

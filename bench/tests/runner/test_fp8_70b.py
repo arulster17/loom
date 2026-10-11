@@ -5,7 +5,13 @@ import pytest
 
 from loom_bench.budget import caps_for, load_budget
 from loom_bench.engines import draft_weights, quantization_flag, render_launch
-from loom_bench.experiment import ExpansionError, Experiment, expand, load_experiment
+from loom_bench.experiment import (
+    EnginePatch,
+    ExpansionError,
+    Experiment,
+    expand,
+    load_experiment,
+)
 from loom_bench.money import parse_usd
 from loom_bench.plan import build_plan
 from loom_bench.prices import load_prices
@@ -49,17 +55,21 @@ def test_the_fp8_row_carries_its_precision_and_a_pinned_checkpoint():
     assert (hf.license, hf.gated, hf.size_bytes) == ("llama3.3", False, 72_669_954_704)
     assert hf.quant_method == "compressed-tensors" and FP8.quantization == "fp8"
     assert not hf.trust_remote_code
-    assert FP8.status == "preview" and FP8.pricing is None
-    # BF16 stays the reference row, unchanged.
+    # The shipped winner: priced (cost-plus 20% on 9f0853d7's fixed-1k-1k CI high bound),
+    # still preview until approved for serving.
+    assert FP8.status == "preview" and FP8.pricing is not None
+    # BF16 stays the reference row, unpriced.
     assert (BF16.display_name, BF16.quantization, BF16.hf.quant_method) == (
         "Llama 3.3 70B Instruct",
         "none",
         None,
     )
+    assert BF16.pricing is None
 
 
 def test_the_fp8_row_is_the_bf16_row_with_another_checkpoint():
-    differs = {"id", "display_name", "hf", "quantization"}
+    # The price is not serving config: only the shipped FP8 row carries one.
+    differs = {"id", "display_name", "hf", "quantization", "pricing"}
     assert FP8.model_dump(exclude=differs) == BF16.model_dump(exclude=differs)
     assert FP8.hf.model_dump(
         exclude={"repo", "revision", "gated", "size_bytes", "quant_method"}
@@ -85,7 +95,8 @@ def test_the_fp8_launch_passes_no_quantization_flag():
         "--tokenizer-revision",
         FP8.hf.revision,
     ]
-    assert fp8[fp8.index("--tensor-parallel-size") + 1] == "4"
+    assert fp8[fp8.index("--tensor-parallel-size") + 1] == "2"
+    assert fp8[fp8.index("--gpu-memory-utilization") + 1] == "0.95"
     assert fp8[fp8.index("--tool-call-parser") + 1] == "llama3_json"
     assert draft_weights("vllm", fp8) == []
 
@@ -93,12 +104,14 @@ def test_the_fp8_launch_passes_no_quantization_flag():
 def test_the_fp8_cell_differs_from_its_stored_bf16_baseline_only_in_the_checkpoint():
     exp = load_experiment(LLAMA_FP8_RUNPOD)
     (cell,) = expand(exp, REGISTRY)
-    # cf4d1614's cell, rebuilt: today's BF16 RunPod spec at defaults (no EAGLE3).
+    # cf4d1614's cell, rebuilt: today's BF16 RunPod spec at defaults (no EAGLE3), on the
+    # 4x L40S it restates (the registry row is 2x H100 now).
     bf16_exp = load_experiment(LLAMA_RUNPOD)
+    at_defaults = EnginePatch(args={"gpu_memory_utilization": None})
     bf16_exp = bf16_exp.model_copy(
         update={
             "variants": [
-                bf16_exp.variants[0].model_copy(update={"name": "vllm-tp4", "engine": None})
+                bf16_exp.variants[0].model_copy(update={"name": "vllm-tp4", "engine": at_defaults})
             ]
         }
     )
@@ -132,7 +145,10 @@ def test_the_fp8_twins_match_apart_from_provider_and_budget():
     assert runpod.quality.suite == bf16.quality.suite and runpod.quality.subset == "phase0-strict"
     # FP8 at defaults: no speculation in this run.
     assert [v.name for v in runpod.variants] == ["vllm-tp4-fp8"]
-    assert all(v.engine is None and v.hf is None for v in runpod.variants)
+    # The only engine arg removes the H100 row's gpu_memory_utilization (vLLM's default).
+    for v in runpod.variants:
+        assert v.hf is None and v.engine is not None
+        assert v.engine.model_dump(exclude_none=True) == {"args": {"gpu_memory_utilization": None}}
 
 
 def test_the_fp8_runpod_run_fits_the_fifteen_dollar_cap_to_ttl():
@@ -242,7 +258,7 @@ def test_the_qwen_fp8_row_carries_its_precision_and_a_pinned_checkpoint():
 
 
 def test_the_qwen_fp8_row_is_the_bf16_row_with_another_checkpoint():
-    differs = {"id", "display_name", "hf", "quantization"}
+    differs = {"id", "display_name", "hf", "quantization", "pricing"}  # BF16 ships priced
     assert QWEN_FP8.model_dump(exclude=differs) == QWEN.model_dump(exclude=differs)
     keep = {"repo", "revision", "size_bytes", "quant_method"}
     assert QWEN_FP8.hf.model_dump(exclude=keep) == QWEN.hf.model_dump(exclude=keep)

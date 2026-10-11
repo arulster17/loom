@@ -40,8 +40,17 @@ variants:
   # activations, CUDA graphs and NCCL buffers ~3-4 GiB of KV cache (~160 KiB per token per
   # GPU), under the 32768 tokens one max-length request needs, so vLLM would refuse to
   # start. 0.95 leaves ~7-8 GiB (~45-50k tokens, ~20-25 concurrent 1k+1k requests).
+  #
+  # As run (both variants): the registry row then described 4x L40S, and its instance
+  # types and clouds stayed in the cells' config (the provider named the pod). The row
+  # moved to this config on 2026-10-11; the old instance types and clouds are restated so
+  # the spec still expands to 9f0853d7's config hashes, which 9e5f7866's evals pair with.
   - name: vllm-tp2
-    hardware: {gpu: H100, gpus_per_replica: 2}
+    hardware:
+      gpu: H100
+      gpus_per_replica: 2
+      instance_types: {aws: g6e.12xlarge, runpod: l40s-x4}
+    clouds: [aws, runpod]
     parallelism: {tp: 2}
     engine:
       args: {gpu_memory_utilization: 0.95}
@@ -50,7 +59,11 @@ variants:
   # CompressedTensorsW8A8Fp8 runs CUTLASS FP8 GEMMs on sm_90 as on sm_89.
   - name: vllm-tp2-fp8
     model: llama-3.3-70b-instruct-fp8
-    hardware: {gpu: H100, gpus_per_replica: 2}
+    hardware:
+      gpu: H100
+      gpus_per_replica: 2
+      instance_types: {aws: g6e.12xlarge, runpod: l40s-x4}
+    clouds: [aws, runpod]
     parallelism: {tp: 2}
     engine:
       args: {gpu_memory_utilization: 0.95}

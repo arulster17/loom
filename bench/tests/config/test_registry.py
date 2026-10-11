@@ -1,4 +1,5 @@
 import copy
+import csv
 from pathlib import Path
 from typing import Any
 
@@ -7,7 +8,13 @@ import yaml
 from pydantic import ValidationError
 
 from loom_bench.engines import render_launch
-from loom_bench.registry import DEFAULT_MODELS_YAML, Registry, load_registry, read_yaml
+from loom_bench.registry import (
+    DEFAULT_MODELS_YAML,
+    ModelSpec,
+    Registry,
+    load_registry,
+    read_yaml,
+)
 
 DIGEST = "sha256:" + "a" * 64
 SHA = "0" * 40
@@ -194,3 +201,82 @@ def test_base_model_is_left_out_of_dumps_so_config_hashes_do_not_move():
 def test_rejects_bad_base_model(models: list[dict[str, Any]], message: str):
     with pytest.raises(ValidationError, match=message):
         validate(*models)
+
+
+def test_an_enabled_snapshot_without_a_price_loads_but_the_registry_refuses_it():
+    # A cell's stored model snapshot records pricing as null (serving_model_doc), so the
+    # rule lives on Registry: the snapshot of an enabled row must still load.
+    snap = ModelSpec.model_validate(model(status="enabled"))
+    assert snap.status == "enabled" and snap.pricing is None
+    with pytest.raises(ValidationError, match="m-1: status: enabled requires pricing"):
+        validate(model(status="enabled"))
+
+
+# --- prices (user decision 2026-10-11) ----------------------------------------------
+
+REPORTS = DEFAULT_MODELS_YAML.parents[1] / "reports"
+# (model id, report the cost comes from, its workload, its config): the shipped winners.
+PRICED = [
+    ("qwen3-8b", "8b-config-sweep-v1", "chat-sharegpt", "bf16"),
+    ("llama-3.3-70b-instruct-fp8", "70b-h100-v2", "fixed-1k-1k", "vllm-tp2-fp8"),
+]
+
+
+def _cost_ci_high(report: str, model_id: str, workload: str, config: str) -> dict[str, int]:
+    with (REPORTS / report / "leaderboard.competitiveness.csv").open() as f:
+        rows = [
+            r
+            for r in csv.DictReader(f)
+            if (r["model_id"], r["workload"], r["best_config"]) == (model_id, workload, config)
+        ]
+    sides = {s: {int(r[f"cost_{s}_per_mtok_hi_micros"]) for r in rows} for s in ("input", "output")}
+    assert rows and all(len(v) == 1 for v in sides.values()), (report, model_id)
+    return {s: v.pop() for s, v in sides.items()}
+
+
+@pytest.mark.parametrize(("model_id", "report", "workload", "config"), PRICED)
+def test_shipped_prices_are_cost_plus_20_percent_on_the_ci_high_bound(
+    model_id: str, report: str, workload: str, config: str
+):
+    # docs/how-to/price-a-model.md option A at u = 100%, markup 20%, per side, each
+    # rounded up to the next $0.001 per 1M; cached input not discounted.
+    price = load_registry().get(model_id).pricing
+    assert price is not None
+    hi = _cost_ci_high(report, model_id, workload, config)
+    for side, value in (("input", price.input_per_mtok), ("output", price.output_per_mtok)):
+        assert value == -(-hi[side] * 12 // 10_000) * 1_000, side
+        assert value >= hi[side] * 1.2  # rounding never takes the markup under 20%
+    assert price.cached_input_per_mtok == price.input_per_mtok
+
+
+def test_shipped_prices_and_the_rows_left_unpriced():
+    reg = load_registry()
+    prices = {
+        m.id: None if m.pricing is None else (m.pricing.input_per_mtok, m.pricing.output_per_mtok)
+        for m in reg.models
+    }
+    assert prices == {
+        "qwen3-8b": (77_000, 368_000),
+        "llama-3.3-70b-instruct": None,  # the BF16 reference row, not the shipped winner
+        "llama-3.3-70b-instruct-fp8": (571_000, 797_000),
+        "qwen3-8b-fp8": None,  # fp8-kv8 not shipped (gate inconclusive)
+    }
+    assert {m.status for m in reg.models} == {"preview"}  # not yet approved for serving
+
+
+def test_the_70b_rows_serve_the_measured_h100_config():
+    # 9f0853d7 / 9e5f7866 (reports/70b-h100-v2): 2x H100 SXM, TP=2, vLLM v0.30.0 with
+    # gpu_memory_utilization 0.95, BF16 and its FP8 row on the same pod.
+    reg = load_registry()
+    for model_id in ("llama-3.3-70b-instruct", "llama-3.3-70b-instruct-fp8"):
+        m = reg.get(model_id)
+        assert (m.hardware.gpu, m.hardware.gpus_per_replica, m.parallelism.tp) == ("H100", 2, 2)
+        assert m.hardware.instance_types.model_dump() == {
+            "aws": None,
+            "gcp": None,
+            "runpod": "h100-sxm-x2",
+        }
+        assert m.clouds == ["runpod"]
+        assert m.engine.args == {"gpu_memory_utilization": 0.95}
+        assert (m.engine.name, m.engine.version) == ("vllm", "0.30.0")
+        assert m.max_context == 32768

@@ -106,6 +106,10 @@ class AwsEc2ProviderSpec(_Strict):
 
 # RunPod GPU type ids by registry GPU name; `provider.gpu_type_id` covers the others.
 RUNPOD_GPU_TYPE_IDS: dict[str, str] = {
+    # The SXM part: "H100" alone also names RunPod's PCIe and NVL cards. Every H100 in
+    # bench/prices.yaml is SXM (loom_bench.plan, HBM bandwidth); a PCIe or NVL H100 needs
+    # its own GPU name.
+    "H100": "NVIDIA H100 80GB HBM3",
     "L40S": "NVIDIA L40S",
     "L40": "NVIDIA L40",
     "RTX 6000 Ada": "NVIDIA RTX 6000 Ada Generation",
@@ -197,6 +201,10 @@ class Variant(_Strict):
     quantization: str | None = None
     kv_cache_dtype: str | None = None
     max_context: int | None = None
+    # Replaces the entry's clouds. With `hardware.instance_types`, it lets a spec that ran
+    # on other hardware than today's registry row restate the row it ran on, so it still
+    # expands to the config hashes it recorded (the 70B L40S and H100 specs).
+    clouds: list[str] | None = None
     mock: dict[str, Any] = Field(default_factory=dict)  # MockConfig overrides, mock provider
     # Cells on the same hardware (and on runpod, the same engine image) share one host
     # through warm restarts. Variants naming different host groups get separate hosts,
@@ -758,6 +766,15 @@ def tokenizer_for(exp: Experiment, spec: ModelSpec) -> TokenizerSpec:
     return TokenizerSpec(kind="hf", repo=spec.hf.repo, revision=spec.hf.revision)
 
 
+def serving_model_doc(spec: ModelSpec) -> dict[str, Any]:
+    """The registry entry as a cell's config records it: the spec dump with `pricing`
+    null. A price says nothing about how the model is served, and it changes for business
+    reasons; every config hash stored before prices existed has `pricing: null` in it, so
+    pricing a row (or repricing it) never moves its cells' config hashes. Reports and the
+    competitiveness view read prices from the registry by model id."""
+    return {**spec.model_dump(mode="json"), "pricing": None}
+
+
 def build_cell(
     exp: Experiment,
     *,
@@ -772,7 +789,7 @@ def build_cell(
     if host_group is not None:
         host_key = f"{host_key}/group={host_group}"
     config: dict[str, Any] = {
-        "model": spec.model_dump(mode="json"),
+        "model": serving_model_doc(spec),
         "launch": launch.model_dump(mode="json"),
         "hardware": hardware,
     }

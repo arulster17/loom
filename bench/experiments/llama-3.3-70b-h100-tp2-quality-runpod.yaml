@@ -33,14 +33,24 @@ provider:
   container_disk_gb: 260
   engine_env: {NCCL_P2P_LEVEL: NVL}
 variants:
+  # As in llama-3.3-70b-h100-tp2-runpod.yaml: the instance types and clouds the registry
+  # row had when 9f0853d7 ran are restated, so these cells keep that run's config hashes.
   - name: vllm-tp2
-    hardware: {gpu: H100, gpus_per_replica: 2}
+    hardware:
+      gpu: H100
+      gpus_per_replica: 2
+      instance_types: {aws: g6e.12xlarge, runpod: l40s-x4}
+    clouds: [aws, runpod]
     parallelism: {tp: 2}
     engine:
       args: {gpu_memory_utilization: 0.95}
   - name: vllm-tp2-fp8
     model: llama-3.3-70b-instruct-fp8
-    hardware: {gpu: H100, gpus_per_replica: 2}
+    hardware:
+      gpu: H100
+      gpus_per_replica: 2
+      instance_types: {aws: g6e.12xlarge, runpod: l40s-x4}
+    clouds: [aws, runpod]
     parallelism: {tp: 2}
     engine:
       args: {gpu_memory_utilization: 0.95}

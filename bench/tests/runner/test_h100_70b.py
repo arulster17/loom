@@ -366,3 +366,97 @@ def test_a_checkpoint_already_on_the_pod_is_not_planned_again():
     # Back onto BF16 after FP8: both are on the pod, nothing is downloaded.
     assert est.warm_start_s([base, cand], base) == pytest.approx(load_only)
     assert est.warm_start_s([base], cand) > est.warm_start_s([base, cand], cand)
+
+
+# --- the registry rows moved to 2x H100 (2026-10-11); old specs keep their configs -------
+
+# Every 70B spec's cells, by spec and variant: the config hashes recorded (cf4d1614,
+# 55102ddb, 9f0853d7, 9e5f7866) or planned when the registry rows still described 4x L40S.
+# Each spec restates the hardware it ran on, so moving (or pricing) the rows moves none.
+RECORDED_HASHES = {
+    ("llama-3.3-70b-tp4-runpod", "vllm-tp4-eagle3"): "dcbdb1ea2a897898",
+    ("llama-3.3-70b-tp4", "vllm-tp4-eagle3"): "bff7feb158afcfbc",
+    ("llama-3.3-70b-fp8-tp4-runpod", "vllm-tp4-fp8"): "3fd835003bd3cddb",
+    ("llama-3.3-70b-fp8-tp4", "vllm-tp4-fp8"): "9e05f94f851dc3a8",
+    ("llama-3.3-70b-h100-tp2-runpod", "vllm-tp2"): "2f7fb3f9372ba095",
+    ("llama-3.3-70b-h100-tp2-runpod", "vllm-tp2-fp8"): "0381825d763025fd",
+    ("llama-3.3-70b-h100-tp2-quality-runpod", "vllm-tp2"): "2f7fb3f9372ba095",
+    ("llama-3.3-70b-h100-tp2-quality-runpod", "vllm-tp2-fp8"): "0381825d763025fd",
+}
+
+
+def test_every_70b_spec_still_expands_to_its_recorded_config_hashes():
+    got = {}
+    for path in sorted(EXPERIMENTS_DIR.glob("llama-3.3-70b-*.yaml")):
+        for c in expand(load_experiment(path), REGISTRY):
+            got[(path.stem, c.variant)] = c.config_hash[:16]
+    assert got == RECORDED_HASHES
+
+
+def test_the_l40s_specs_restate_the_hardware_they_ran_on():
+    for path in sorted(EXPERIMENTS_DIR.glob("llama-3.3-70b-*tp4*.yaml")):
+        (cell,) = expand(load_experiment(path), REGISTRY)
+        spec = cell.spec
+        assert (spec.hardware.gpu, spec.hardware.gpus_per_replica, spec.parallelism.tp) == (
+            "L40S",
+            4,
+            4,
+        )
+        assert spec.clouds == ["aws", "runpod"]
+        assert "--gpu-memory-utilization" not in cell.launch.args  # vLLM's default
+        assert cell.hardware["instance_type"] in ("g6e.12xlarge", "l40s-x4")
+
+
+def test_the_registry_row_at_defaults_is_the_h100_cell_on_its_own_pod():
+    # A RunPod spec of the 70B rows with no hardware patches: the SXM GPU type id comes
+    # from RUNPOD_GPU_TYPE_IDS["H100"] and the pod from the row's instance type, so the
+    # launch is 9f0853d7's (argv, image, env); only the model snapshot differs (instance
+    # types and clouds), so the config hash is the row's own.
+    real = load_experiment(LLAMA_H100_RUNPOD)
+    doc = real.model_dump(mode="json")
+    doc["provider"]["gpu_type_id"] = None
+    doc["variants"] = [{"name": "vllm-tp2"}, {"name": "vllm-tp2-fp8", "model": FP8.id}]
+    plain = Experiment.model_validate(doc)
+    for row, ran in zip(expand(plain, REGISTRY), expand(real, REGISTRY), strict=True):
+        assert row.hardware == ran.hardware
+        assert row.hardware["gpu_type_id"] == SXM
+        assert row.launch == ran.launch
+        assert row.config_hash != ran.config_hash
+        assert row.spec.clouds == ["runpod"]
+    assert _plan(plain).ok
+
+
+def test_a_variant_can_restate_the_clouds_and_they_are_validated():
+    doc = mock_doc(model="llama-3.3-70b-instruct")
+    # The row is RunPod-only; restating AWS needs an AWS instance type too.
+    bad = {"name": "a", "clouds": ["aws", "runpod"]}
+    with pytest.raises(ExpansionError, match=r"instance_types missing for clouds \['aws'\]"):
+        expand(Experiment.model_validate({**doc, "variants": [bad]}), REGISTRY)
+    with pytest.raises(ExpansionError, match="clouds"):
+        expand(
+            Experiment.model_validate({**doc, "variants": [{"name": "a", "clouds": ["azure"]}]}),
+            REGISTRY,
+        )
+    ok = {
+        "name": "a",
+        "clouds": ["aws", "runpod"],
+        "hardware": {"instance_types": {"aws": "p5.48xlarge"}},
+    }
+    (cell,) = expand(Experiment.model_validate({**doc, "variants": [ok]}), REGISTRY)
+    assert cell.spec.clouds == ["aws", "runpod"]
+    assert cell.spec.hardware.instance_types.aws == "p5.48xlarge"
+
+
+def test_a_price_never_moves_a_cell_config_hash():
+    # Cells record the model with pricing null (experiment.serving_model_doc): every hash
+    # stored before prices existed has it so, and a price is not serving config.
+    from loom_bench.registry import Registry
+
+    exp = Experiment.model_validate(mock_doc(model=FP8.id))
+    priced = expand(exp, REGISTRY)[0]
+    assert priced.spec.pricing is not None and priced.config["model"]["pricing"] is None
+    doc = REGISTRY.model_dump(mode="json")
+    for m in doc["models"]:
+        m["pricing"] = None
+    unpriced = expand(exp, Registry.model_validate(doc))[0]
+    assert unpriced.config_hash == priced.config_hash

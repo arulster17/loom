@@ -97,7 +97,7 @@ MEASURED: list[tuple[str, ModelSpec, dict[str, tuple[float, int]]]] = [
     ),
     (
         "cf4d1614 Llama 3.3 70B BF16 TP=4, 4x L40S",
-        _spec("llama-3.3-70b-instruct"),
+        _spec("llama-3.3-70b-instruct", "L40S", 4),
         {
             "gsm8k": (428.5, 1319),
             "ifeval": (459.9, 541),
@@ -130,7 +130,7 @@ MEASURED: list[tuple[str, ModelSpec, dict[str, tuple[float, int]]]] = [
 ]
 # EAGLE3 speculative decoding (55102ddb, 70B on 4x L40S) only makes items faster.
 EAGLE3 = (
-    _spec("llama-3.3-70b-instruct"),
+    _spec("llama-3.3-70b-instruct", "L40S", 4),
     {"gsm8k": (267.2, 1319), "ifeval": (314.7, 541), "json_schema": (64.1, 300)},
 )
 
@@ -168,8 +168,11 @@ def test_calibrated_keys_name_tasks_the_shipped_suites_run():
 def test_decode_step_floor_reads_each_gpus_share_of_the_weights():
     assert decode_step_ms(_spec("qwen3-8b")) == pytest.approx(16381516776 / 864e9 * 1000)
     assert decode_step_ms(_spec("qwen3-8b-fp8")) < 0.6 * decode_step_ms(_spec("qwen3-8b"))
-    four = decode_step_ms(_spec("llama-3.3-70b-instruct"))
+    four = decode_step_ms(_spec("llama-3.3-70b-instruct", "L40S", 4))
     assert four == pytest.approx(141107497872 / 4 / 864e9 * 1000)  # ~40.8 ms
+    # The registry row (2x H100 SXM): each GPU reads half the BF16 weights at 3.35 TB/s.
+    two = decode_step_ms(_spec("llama-3.3-70b-instruct"))
+    assert two == pytest.approx(141107497872 / 2 / 3350e9 * 1000)  # ~21.1 ms
     # An unlisted GPU is planned at the slowest listed bandwidth; tiny shares hit the floor.
     slow = min(GPU_MEMORY_BANDWIDTH_GB_S.values())
     assert decode_step_ms(_spec("qwen3-8b", "B200")) == pytest.approx(16381516776 / slow / 1e6)

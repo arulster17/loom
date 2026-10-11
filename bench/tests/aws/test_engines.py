@@ -92,12 +92,14 @@ def test_vllm_qwen_exact_argv(qwen: ModelSpec) -> None:
     ]
 
 
-def test_vllm_llama_tp4(llama: ModelSpec) -> None:
+def test_vllm_llama_tp2(llama: ModelSpec) -> None:
+    # The registry row as measured in 9f0853d7: 2x H100 SXM, TP=2, 0.95 of GPU memory.
     launch = render_launch(llama)
-    assert launch.gpus == 4
+    assert launch.gpus == 2
     assert launch.args[:2] == ["meta-llama/Llama-3.3-70B-Instruct", "--revision"]
     i = launch.args.index("--tensor-parallel-size")
-    assert launch.args[i + 1] == "4"
+    assert launch.args[i + 1] == "2"
+    assert launch.args[launch.args.index("--gpu-memory-utilization") + 1] == "0.95"
     assert "--trust-remote-code" not in launch.args
 
 
@@ -127,7 +129,13 @@ def test_sglang_qwen_exact_argv(qwen: ModelSpec) -> None:
 
 
 def test_sglang_llama_tp2_pp2_fp8_kv(llama: ModelSpec) -> None:
-    spec = on_sglang(llama, parallelism__tp=2, parallelism__pp=2, kv_cache_dtype="fp8")
+    spec = on_sglang(
+        llama,
+        hardware__gpus_per_replica=4,
+        parallelism__tp=2,
+        parallelism__pp=2,
+        kv_cache_dtype="fp8",
+    )
     launch = render_launch(spec)
     a = launch.args
     assert a[a.index("--tp-size") + 1] == "2"

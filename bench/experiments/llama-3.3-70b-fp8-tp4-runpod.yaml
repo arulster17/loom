@@ -30,6 +30,14 @@ variants:
   # time past the $15 cap; run it as a follow-up if FP8 passes the gate and still misses
   # the TPOT SLO.
   - name: vllm-tp4-fp8
+    # As planned: the registry row then served 4x L40S at TP=4 (it moved to 2x H100 SXM,
+    # TP=2, on 2026-10-11). Restated in full so this spec still expands to the config it
+    # describes, next to cf4d1614's stored BF16 baseline (eff0371d...).
+    hardware: {gpu: L40S, gpus_per_replica: 4, instance_types: {aws: g6e.12xlarge, runpod: l40s-x4}}
+    parallelism: {tp: 4}
+    clouds: [aws, runpod]
+    engine:
+      args: {gpu_memory_utilization: null}  # the H100 row's 0.95; vLLM's default here
 workloads:
   - profile: fixed-1k-1k
     load:

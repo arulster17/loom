@@ -37,8 +37,15 @@ variants:
   # TPOT p95 is 50-84 ms, and shared-prefix TTFT p95 is ~1.0-1.05 s at any load (prefill
   # all-reduce over host memory). docs/benchmark-lab.md "70B tuning".
   - name: vllm-tp4-eagle3
+    # As run: the registry row then served 4x L40S at TP=4 (it moved to 2x H100 SXM, TP=2,
+    # on 2026-10-11). Restated in full so this spec still expands to the configs it ran
+    # (55102ddb; cf4d1614 at defaults, eff0371d...).
+    hardware: {gpu: L40S, gpus_per_replica: 4, instance_types: {aws: g6e.12xlarge, runpod: l40s-x4}}
+    parallelism: {tp: 4}
+    clouds: [aws, runpod]
     engine:
       args:
+        gpu_memory_utilization: null  # the H100 row's 0.95; vLLM's default here
         speculative_config:
           method: eagle3
           model: RedHatAI/Llama-3.3-70B-Instruct-speculator.eagle3

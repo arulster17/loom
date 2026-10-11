@@ -388,6 +388,8 @@ def test_runpod_spec_defaults_and_rejects_bad_fields():
 
 def registry_without_runpod_instance() -> Registry:
     doc = REGISTRY.model_dump(mode="json")
+    # The rows that also run on AWS (the 70B rows are RunPod-only: 2x H100 SXM).
+    doc["models"] = [m for m in doc["models"] if m["hardware"]["instance_types"]["aws"]]
     for m in doc["models"]:
         m["hardware"]["instance_types"].pop("runpod")
         m["clouds"] = ["aws"]

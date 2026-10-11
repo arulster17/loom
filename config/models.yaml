@@ -2,8 +2,14 @@
 # The Benchmark Lab reads models from here (the gateway and billing will too), so
 # adding or changing a model is a config change, validated by loom_bench.registry.
 #
-# Prices stay null until the Benchmark Lab measures cost at SLO; only `enabled`
-# models must carry a price.
+# A row's price comes from its measured cost at the SLO (docs/how-to/price-a-model.md);
+# only `enabled` models must carry a price. Prices set 2026-10-11 (user decision): cost-plus
+# 20% per side on the 95% CI high bound of the measured RunPod cost at SLO, assuming 100%
+# utilization, each side rounded up to the next $0.001 per 1M (1,000 micros), so the
+# markup is never under 20%. Cached input is not discounted (no workload isolates its cost
+# yet). Only shipped winners are priced: the BF16 70B reference row and the unshipped
+# Qwen3 8B FP8 row stay null. A cell's config hash treats the price as null, so pricing a
+# row never moves it (loom_bench.experiment.build_cell).
 
 models:
   - id: qwen3-8b
@@ -37,7 +43,10 @@ models:
     max_context: 32768
     quantization: none
     kv_cache_dtype: auto
-    pricing: null
+    # 7a8237d0 (reports/8b-config-sweep-v1), bf16 on chat-sharegpt (the realistic workload),
+    # RunPod Secure 1x L40S: cost per 1M input $0.0557 [0.0486, 0.0638], output $0.2517
+    # [0.2049, 0.3060]. 63,798 x 1.2 = 76,557.6 -> 77,000; 305,960 x 1.2 = 367,152 -> 368,000.
+    pricing: {input_per_mtok: 77_000, output_per_mtok: 368_000, cached_input_per_mtok: 77_000}
     scaling: {min_replicas: 0, max_replicas: 1}
     clouds: [aws, runpod]
     capabilities: {tools: true, json_schema: true, vision: false, reasoning: true}
@@ -62,32 +71,45 @@ models:
       version: "0.30.0"
       # vllm/vllm-openai:v0.30.0 multi-arch index digest (CUDA 13.0, needs driver >= 580).
       image: vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
-      args: {}
+      # At TP=2 each GPU holds ~65.7 GiB of BF16 weights; at vLLM's default 0.90 of
+      # 79.6 GiB the KV cache would not hold one 32768-token request, so vLLM would refuse
+      # to start. 0.95 leaves an estimated ~45-50k tokens of KV cache, as run in 9f0853d7.
+      args: {gpu_memory_utilization: 0.95}
       chat_template_kwargs: {}
+    # As measured in 9f0853d7 / 9e5f7866 (reports/70b-h100-v2): one RunPod Secure 2x H100
+    # SXM pod ("NVIDIA H100 80GB HBM3"), TP=2 over NVLink. BF16 met the SLO there at
+    # 0.5 req/s on fixed-1k-1k; on 4x L40S at TP=4 (cf4d1614, 55102ddb) no load did. The
+    # pod's NCCL setting (NCCL_P2P_LEVEL=NVL, P2P over NVLink only) is provider-level:
+    # every multi-GPU RunPod spec sets one in provider.engine_env. AWS sells H100 only as
+    # 1x (p5.4xlarge) or 8x (p5.48xlarge), so this row is RunPod-only.
     hardware:
-      gpu: L40S
-      gpus_per_replica: 4
+      gpu: H100
+      gpus_per_replica: 2
       nodes_per_replica: 1
-      instance_types: {aws: g6e.12xlarge, runpod: l40s-x4}
-    parallelism: {tp: 4, pp: 1, ep: 1}
-    # The model supports 131072. After ~141 GB of BF16 weights, 4 x 48 GB leaves too
+      instance_types: {runpod: h100-sxm-x2}
+    parallelism: {tp: 2, pp: 1, ep: 1}
+    # The model supports 131072. After ~141 GB of BF16 weights, 2 x 80 GB leaves too
     # little KV-cache memory for useful concurrency at that length, so serving is capped.
     max_context: 32768
     quantization: none
     kv_cache_dtype: auto
+    # Unpriced: the reference row, not the shipped winner (FP8 below). Its 9f0853d7
+    # figure is also untrusted (TTFT p95 CV 21.8%).
     pricing: null
     scaling: {min_replicas: 0, max_replicas: 1}
-    clouds: [aws, runpod]
+    clouds: [runpod]
     capabilities: {tools: true, json_schema: true, vision: false, reasoning: false}
     # Llama 3.x JSON tool calls: vLLM 0.30.0 `llama3_json`, SGLang 0.5.21 `llama3`.
     tool_call_parsers: {vllm: llama3_json, sglang: llama3}
     routing_tier: 1
     status: preview
 
-  # The 70B served in FP8 on the same 4x L40S: its own labeled row, gated against the
-  # BF16 entry above, which stays the reference and headline row (docs/PLAN.md, quality
-  # standard). Everything but the checkpoint and its precision matches the BF16 entry, so
-  # the gate measures the precision alone.
+  # The 70B served in FP8 on the same 2x H100 SXM pod: its own labeled row, gated against
+  # the BF16 entry above, which stays the reference and headline row (docs/PLAN.md,
+  # quality standard). Everything but the checkpoint and its precision matches the BF16
+  # entry, so the gate measures the precision alone. The measured winner: gate PASS on
+  # every phase0-strict task (9e5f7866), 2 req/s on fixed-1k-1k and 4 req/s on
+  # shared-prefix at the SLO (9f0853d7, trusted), 4x BF16's goodput on the same pod.
   - id: llama-3.3-70b-instruct-fp8
     display_name: Llama 3.3 70B FP8
     hf:
@@ -111,26 +133,32 @@ models:
       name: vllm
       version: "0.30.0"
       # vllm/vllm-openai:v0.30.0 multi-arch index digest (CUDA 13.0, needs driver >= 580).
-      # Its CompressedTensorsW8A8Fp8 scheme needs compute capability 8.9: the L40S (Ada,
-      # sm_89) runs FP8 GEMMs natively. No --quantization flag: vLLM reads the method from
+      # Its CompressedTensorsW8A8Fp8 scheme needs compute capability 8.9: the H100 (sm_90)
+      # runs CUTLASS FP8 GEMMs natively. No --quantization flag: vLLM reads the method from
       # config.json (registry pair table: compressed-tensors + fp8).
       image: vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
-      args: {}
+      # As BF16, so the gate measured precision alone: ~34 GiB of FP8 weights per GPU
+      # leave ~38 GiB of KV cache per GPU.
+      args: {gpu_memory_utilization: 0.95}
       chat_template_kwargs: {}
     hardware:
-      gpu: L40S
-      gpus_per_replica: 4
+      gpu: H100
+      gpus_per_replica: 2
       nodes_per_replica: 1
-      instance_types: {aws: g6e.12xlarge, runpod: l40s-x4}
-    parallelism: {tp: 4, pp: 1, ep: 1}
+      instance_types: {runpod: h100-sxm-x2}
+    parallelism: {tp: 2, pp: 1, ep: 1}
     # Same cap as BF16 so both rows serve the same window. FP8 weights (~73 GB) leave far
-    # more KV-cache room on 4 x 48 GB; raising the cap is a separate change.
+    # more KV-cache room on 2 x 80 GB; raising the cap is a separate change.
     max_context: 32768
     quantization: fp8
     kv_cache_dtype: auto
-    pricing: null
+    # 9f0853d7 + 9e5f7866 (reports/70b-h100-v2), fixed-1k-1k: cost per 1M input $0.4548
+    # [0.4350, 0.4755], output $0.6381 [0.6133, 0.6636]. No chat workload ran on the 70B,
+    # and shared-prefix's split is unresolved (output CI [0, 0.895]).
+    # 475,489 x 1.2 = 570,586.8 -> 571,000; 663,624 x 1.2 = 796,348.8 -> 797,000.
+    pricing: {input_per_mtok: 571_000, output_per_mtok: 797_000, cached_input_per_mtok: 571_000}
     scaling: {min_replicas: 0, max_replicas: 1}
-    clouds: [aws, runpod]
+    clouds: [runpod]
     capabilities: {tools: true, json_schema: true, vision: false, reasoning: false}
     tool_call_parsers: {vllm: llama3_json, sglang: llama3}
     routing_tier: 1
@@ -183,7 +211,7 @@ models:
     max_context: 32768
     quantization: fp8
     kv_cache_dtype: auto
-    pricing: null
+    pricing: null  # not shipped: fp8-kv8's gate is inconclusive (7a8237d0)
     scaling: {min_replicas: 0, max_replicas: 1}
     clouds: [aws, runpod]
     capabilities: {tools: true, json_schema: true, vision: false, reasoning: true}
