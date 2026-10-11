@@ -1,39 +1,37 @@
 # AWS smoke test for qwen3-8b-sglang-aws-g6e.yaml: every code path the real run uses, at the
-# smallest scale that still runs it, on the same host type. The EC2 path itself ran for
-# real (aws-smoke-g6e 80ff5648, qwen3-8b-aws-g6e 95cde129); SGLang never ran on it, so this
-# is the first time the EC2 path meets the SGLang image: its 15.2 GB pull onto the root
-# volume, the weight download through the image's python3 (/opt/sglang/bin, first on the
-# image's PATH), `python3 -m sglang.launch_server` in the engine container (offline, HF
-# cache mounted at /root/.cache/huggingface, `--enable-metrics`, the qwen25 tool parser),
-# its /health and first completion, its Prometheus names (sglang:token_usage,
+# smallest scale that still runs it, on the same host type. The EC2 path ran for real with
+# vLLM (aws-smoke-g6e 80ff5648, qwen3-8b-aws-g6e 95cde129); SGLang never ran on it, and no
+# AWS host has switched engine image. New here: the warm restart from vLLM to SGLang (the
+# vLLM container stopped, SGLang's 15.2 GB image pulled onto the root volume, the cached
+# checkpoint checked offline with the image's python3, /opt/sglang/bin first on its PATH),
+# `python3 -m sglang.launch_server` in the engine container (offline, HF cache mounted at
+# /root/.cache/huggingface, `--enable-metrics`, the qwen25 tool parser), its /health and
+# first completion, its Prometheus names (sglang:token_usage,
 # num_retracted_requests_total) scraped from the client container, chat-sharegpt on SGLang
 # (multi-turn messages, ignore_eos, enable_thinking false), the eval harness against
 # SGLang's OpenAI server (lm-eval chat tasks, tool_calling_strict through the qwen25
-# legacy structural tag, json_schema), the divergence score on SGLang's completions
-# logprobs, and the gate against a stored baseline on a real host.
+# legacy structural tag, json_schema), and the divergence score on SGLang's completions
+# logprobs against vLLM's in-run reference.
 #
-# Same as the real run: model, provider block (g6e.xlarge, on_demand, 200 GB), the one
-# variant (same image, launch args and config hash), the chat-sharegpt profile unchanged
-# (the pinned 673 MB ShareGPT download onto the host, full-length chat requests), open
-# loop with a geometric search that can descend, 3 repetitions, the SLO, and the quality
-# section (phase0-strict, 3 replicated passes, gated against a stored vLLM BF16 baseline of
-# the same config hash 48f3d8d1...) with every task capped at 4 items (`quality.limit`).
-# bench/tests/aws/test_aws_g6e_sglang.py fails if the two drift apart.
+# Same as the real run: model, provider block (g6e.xlarge, on_demand, 200 GB), the two
+# variants (bf16 = vLLM, 95cde129's cell; sglang), so the same images, launch args, config
+# hashes and engine switch, the chat-sharegpt profile unchanged (the pinned 673 MB
+# ShareGPT download onto the host, full-length chat requests), open loop with a geometric
+# search that can descend, 3 repetitions, the SLO, and the quality section (phase0-strict,
+# 3 replicated passes, sglang gated against bf16 in-run) with every task capped at 4 items
+# (`quality.limit`). bench/tests/aws/test_aws_g6e_sglang.py fails if the two drift apart.
 #
 # Different, on purpose:
-# - the stored baseline is aws-smoke-g6e 80ff5648's bf16 cell (vLLM BF16, the same config
-#   hash as 95cde129's), evaluated at the same 4-item limit and 3 passes: a smoke's capped
-#   items pair only with a capped baseline (`bench plan` refuses any other pairing);
-# - `lo: 12`, a certain overload for SGLang on one L40S (RunPod 565b8d3f had it at vLLM's
-#   knees): the first point fails and drains an overload (stragglers cancelled at the 60 s
-#   drain timeout, so SGLang must abort them), the search descends by `step: 3` (to 4,
-#   then 1.33), passes, and bisects;
+# - `lo: 12`, a certain overload for both engines on one L40S (vLLM's chat knee is 2.2
+#   req/s): the first point fails and drains an overload (stragglers cancelled at the 60 s
+#   drain timeout, so each engine must abort them), the search descends by `step: 3` (to
+#   4, then 1.33), passes, and bisects;
 # - 45 s windows after 15 s of warmup, 4 points.
 #
 # Its scores and goodput measure nothing (4 items per task); `smoke: true` keeps it out
 # of default reports and the results site.
 name: aws-smoke-g6e-sglang
-description: The Qwen3-8B SGLang AWS g6e.xlarge run at smoke scale on one on-demand host, every code path once.
+description: The Qwen3-8B vLLM vs SGLang AWS g6e.xlarge run at smoke scale on one on-demand host, every code path once.
 model: qwen3-8b
 smoke: true
 provider:
@@ -43,6 +41,7 @@ provider:
   market: on_demand
   disk_gb: 200
 variants:
+  - name: bf16
   - name: sglang
     engine:
       name: sglang
@@ -64,16 +63,13 @@ slo:
 quality:
   suite: qwen3-8b
   subset: phase0-strict
-  # aws-smoke-g6e 80ff5648's bf16 cell, evaluated at quality.limit 4 with 3 passes.
-  baseline:
-    experiment: 80ff5648-50a1-49af-9fbe-97f8fa3dd1cb
-    config_hash: 48f3d8d1850a0b1bfc6f454ee35a29902d4dc858ed984252defa8ffe5f621375
+  baseline_variant: bf16
   replicates: 3
   limit: 4
 # The TTL holds `bench plan`'s estimate with margin; max_spend holds the worst case of
 # the host living to its TTL.
 budget:
-  max_spend: "$2.50"
-  ttl_minutes: 75
+  max_spend: "$4.00"
+  ttl_minutes: 125
   accrual_interval_s: 15
 seed: 0

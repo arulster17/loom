@@ -432,8 +432,7 @@ divergence and sanity decide. `bench quality gate` does the same for two configs
 different experiments. A smoke can use a stored baseline only if an earlier smoke evaluated
 it at the same `quality.limit`: `bench plan` refuses any task whose stored item count
 differs from the planned one, so capped items never pair with a full run, nor full items
-with a smoke's (`aws-smoke-g6e-sglang` gates against aws-smoke-g6e 80ff5648's bf16 cell,
-as its real run gates against 95cde129's). A suite gates other checkpoints of its model listed in `also_models`
+with a smoke's. A suite gates other checkpoints of its model listed in `also_models`
 (the FP8 registry rows `llama-3.3-70b-instruct-fp8` and `qwen3-8b-fp8` run their BF16
 suites; the FP8 smokes serve `qwen3-8b-fp8` by `Variant.model`, as the 70B runs do).
 
@@ -493,8 +492,8 @@ The AWS specs stay as the secondary path:
 | `llama-3.3-70b-fp8-tp4` | 1x g6e.12xlarge spot, 2.6 h of a 3.25 h TTL | $26.48 | $33.25 | $45 |
 | `qwen3-8b-aws-g6e` (ran 2026-10-10/11 as 95cde129: $6.39, fp8-kv8's gate fails on ifeval; [results below](#qwen3-8b-on-aws-g6exlarge-result-95cde129-2026-10-11)) | 1x g6e.xlarge **on-demand**, bf16 + fp8-kv8 on chat, 3 passes each, 4.7 h of a 6.5 h TTL | $8.90 | $12.24 | $12.50 |
 | `aws-smoke-g6e` (passed 2026-10-10 as 80ff5648, $1.67, after a7bc3123 found the mount bug, $0.58) | the same host and cells at smoke scale, 1.85 h of a 2.5 h TTL | $3.48 | $4.71 | $5 |
-| `qwen3-8b-sglang-aws-g6e` (proposed 2026-10-11, [section below](#qwen3-8b-on-sglang-on-aws-g6exlarge-proposed)) | 1x g6e.xlarge **on-demand**, SGLang v0.5.21 BF16 on chat at 95cde129's windows and search, 3 passes gated against 95cde129's stored vLLM BF16; 2.60 h of a 2.92 h TTL | $4.90 | $5.49 | $5.50 |
-| `aws-smoke-g6e-sglang` (proposed) | the same host and cell at smoke scale, gated against 80ff5648's stored bf16; 1.06 h of a 1.25 h TTL | $1.99 | $2.35 | $2.50 |
+| `qwen3-8b-sglang-aws-g6e` (proposed 2026-10-11, [section below](#qwen3-8b-vllm-vs-sglang-on-aws-g6exlarge-proposed)) | 1x g6e.xlarge **on-demand**, vLLM v0.30.0 BF16 (95cde129's bf16 cell) then SGLang v0.5.21 BF16 on the same host, chat at 95cde129's windows and search, SGLang gated vs vLLM in-run on 3 passes; 5.03 h of a 5.17 h TTL | $9.46 | $9.73 | $9.75 |
+| `aws-smoke-g6e-sglang` (proposed) | the same host and cells at smoke scale; 1.92 h of a 2.08 h TTL | $3.62 | $3.92 | $4.00 |
 
 Rates are searched geometrically, with ranges sized for one L40S from the first RunPod
 sweep (058128e9): Qwen3-8B fixed-1k-1k passed 1.22 req/s and failed 1.94; shared-prefix
@@ -1102,79 +1101,66 @@ args, checkpoints, profile, windows and seeded schedule.
 
 The planner's eval estimate is again about 1.6x the measured one.
 
-### Qwen3-8B on SGLang on AWS g6e.xlarge (proposed)
+### Qwen3-8B vLLM vs SGLang on AWS g6e.xlarge (proposed)
 
 `qwen3-8b-sglang-aws-g6e` (proposed 2026-10-11, not run) completes D6, the brief's §7.8
-"first leaderboard for Model A (vLLM vs SGLang, one GPU type, AWS)". The vLLM half ran
-as 95cde129's bf16 cell. This run adds SGLang v0.5.21 BF16 (the image RunPod 565b8d3f
-used) on the same instance type, market and AMI. It is the bf16 cell with the engine
-switched: the same chat-sharegpt profile, windows (255 s with 45 s warmup, 60 s drain),
-search (lo 4.5, step 1.5, descend 3, 5 points), seed, repetitions and SLO. Then
-`bench report -e 95cde129 -e <id>` puts both engines on one board, ranked at the SLO,
-with latency at equal load. At a knee near vLLM's (the engines tied on two of three
-workloads in 565b8d3f), the search visits vLLM's loads exactly (4.5, 3, 2, 2.449, 2.213
-req/s). `bench compare 95cde129 <id> --match-by workload --cell-a bf16` gives the
-per-metric deltas.
+"first leaderboard for Model A (vLLM vs SGLang, one GPU type, AWS)". Both engines run on
+one g6e.xlarge on-demand host, one after the other:
 
-**vLLM is not served again.** Same-SKU host-to-host variation is below what the
-comparison resolves:
+- `bf16`: vLLM v0.30.0 BF16, exactly 95cde129's bf16 cell (same variant, config hash
+  `48f3d8d1…`), measured again on this host;
+- `sglang`: SGLang v0.5.21 BF16 (RunPod 565b8d3f's image and launch), reached by a warm
+  restart that switches image: the vLLM container is stopped, SGLang's image pulled, and
+  the checkpoint vLLM's start downloaded is checked offline with SGLang's own python3 and
+  loaded from the same cache.
 
-- RunPod 7a8237d0 and AWS 95cde129 differ in cloud, host, driver (580 vs 595) and vCPUs
-  (16 vs 4). Yet they visited the same search points and found the same knees. Every
-  latency metric was within normal variance at all 10 matched (cell, load) points.
-- BF16 on RunPod 565b8d3f and 7a8237d0, two days apart, agreed at their shared point.
-- Throughput at equal load is the seeded arrivals', identical by construction.
-- On AWS, every eval pass repeated exactly (0 unstable items on gsm8k and ifeval).
+Everything else is 95cde129's: instance type, market, AMI (pinned), the chat-sharegpt
+profile, windows (255 s with 45 s warmup, 60 s drain), search (lo 4.5, step 1.5, descend
+3, 5 points), seed, repetitions and SLO. At a knee near vLLM's (the engines tied on two of
+three workloads in 565b8d3f), SGLang's search visits vLLM's loads exactly (4.5, 3, 2,
+2.449, 2.213 req/s), so `bench report -e <id>` ranks both at the SLO with latency at
+equal load at every point. `bench compare 95cde129 <id>` matches the two bf16 sweeps by
+config hash: an AWS-to-AWS reproduction of vLLM.
 
-Serving vLLM again in the same run would add about 1.75 h ($3.30) to re-measure a number
-that already reproduced across clouds, and would push the smoke plus the run past the
-approved ~$8. Residual risk: if SGLang lands within the search's 5% resolution of vLLM,
-host variance could decide the order. The report then names a tie, which is the honest
-reading.
+**Why serve vLLM again.** The earlier plan reused 95cde129's vLLM numbers, arguing that
+host-to-host variation was below the comparison's resolution (RunPod 7a8237d0 and AWS
+95cde129 matched at all 10 points). The user chose, on 2026-10-11, to pay about $3.30 more
+to measure both engines on the same host and session, which removes that question.
 
-**Quality** follows the RunPod engine comparison: SGLang gated against vLLM BF16 as the
-divergence reference (565b8d3f, b1b904dc, b03b3c52). Here, every SGLang pass is gated
-against 95cde129's stored bf16 evaluation (`quality.baseline`, the same config hash
-`48f3d8d1…` that the vLLM spec serves), with the same suite, subset (phase0-strict) and
-3 passes a side, scored on its stored reference and noise floor. The baseline ran on the
-same AMI and SKU. On RunPod (b03b3c52, phase0) the gate was inconclusive on IFEval
-(−0.80 pts [−2.03, +0.37] against 2); expect the same or a pass here.
+**Quality** follows the RunPod engine comparison (565b8d3f, b1b904dc, b03b3c52): SGLang
+gated against vLLM BF16 in-run, which captures the divergence reference and its noise
+floor; phase0-strict, 3 passes a side. On RunPod (b03b3c52, phase0) the gate was
+inconclusive on IFEval (−0.80 pts [−2.03, +0.37] against 2).
 
-**Plans** (`bench plan` against a copy of the results DB, 2026-10-11; $87.38 billable
+**Plans** (`bench plan` against a copy of the results DB, 2026-10-11; $87.61 billable
 spent):
 
 | Spec | Plan | Estimate | Worst case (TTL) | Cap | Expected |
 |---|---|---|---|---|---|
-| `aws-smoke-g6e-sglang` | 1.06 h of a 1.25 h TTL | $1.99 | $2.35 | $2.50 | ~0.65 h, ~$1.20 |
-| `qwen3-8b-sglang-aws-g6e` | 2.60 h of a 2.92 h TTL | $4.90 | $5.49 | $5.50 | ~2.0 h, ~$3.70 |
+| `aws-smoke-g6e-sglang` | 1.92 h of a 2.08 h TTL | $3.62 | $3.92 | $4.00 | ~1.0 h, ~$1.85 |
+| `qwen3-8b-sglang-aws-g6e` | 5.03 h of a 5.17 h TTL | $9.46 | $9.73 | $9.75 | ~3.5 h, ~$6.60 |
 
-Together: about $4.90 expected and at most $7.84 if both hosts live to their TTLs. The
-caps add up to $8.
+"Expected" scales 80ff5648 and 95cde129, which ran the same two-cell shape (cold start,
+search, evals, warm restart, search, evals), plus about 5 min for SGLang's larger image
+(15.2 GB compressed against vLLM's 8.7 GB). On 95cde129 the planner was 1.4x the
+measured time. Together the worst cases are $13.65, above the $11.50 the user approved;
+the minimum smoke that still runs both engines plans at about $2.1, so the two cannot fit
+$11.50 under this planner.
 
-"Expected" uses 95cde129's and 80ff5648's measured times:
-
-- the cold start plus about 3 min for SGLang's larger image (15.2 GB compressed, against
-  vLLM's 8.7 GB, which pulled in about 4 min);
-- a chat search like bf16's (75 min);
-- 3 passes like bf16's (26 min), without the noise-floor pass.
-
-**The smoke** gates against aws-smoke-g6e 80ff5648's bf16 cell, stored at the same
-`quality.limit` (4) and 3 passes. `bench plan` checks the pairing: each spec's baseline
-is refused against the other's item counts. Its search starts at 12 req/s with step 3,
-so it fails, drains an overload, descends, passes and bisects. Offline,
-`bench/tests/aws/test_aws_g6e_sglang.py` runs both specs end to end on HostSim against a
-stored vLLM baseline, and fails if the specs drift from 95cde129's cell or from each
-other.
+**The smoke** has the same two cells, gate and passes, tasks capped at 4 items, and a
+search from 12 req/s with step 3 that fails, drains an overload, descends, passes and
+bisects. Offline, `bench/tests/aws/test_aws_g6e_sglang.py` runs both specs end to end on
+HostSim, engine switch included, and fails if they drift from 95cde129's cell or from
+each other.
 
 Paths the smoke runs on AWS for the first time, all SGLang's:
 
-- the image pull;
-- the weight download through the image's python3 (`/opt/sglang/bin`, first on the
-  image's PATH);
+- a warm restart that switches engine image, with the offline weight check in the new
+  image;
+- SGLang's image pull, and its python3 (`/opt/sglang/bin`, first on the image's PATH);
 - `python3 -m sglang.launch_server` offline in the engine container, then its `/health`
   and first completion;
 - its Prometheus names, scraped from the client container;
 - chat-sharegpt on SGLang (never run on any provider; RunPod ran shared-prefix chat);
 - tool_calling_strict through SGLang's qwen25 legacy structural tag;
-- the divergence score on SGLang's completions logprobs;
-- a stored-baseline gate on a real host.
+- the divergence score on SGLang's completions logprobs.
