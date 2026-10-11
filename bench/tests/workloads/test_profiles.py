@@ -25,7 +25,9 @@ def test_every_shipped_profile_loads_and_validates():
 def test_dataset_backed_profiles_carry_provenance_and_license():
     chat = load_profile("chat-sharegpt")
     assert isinstance(chat, ChatDatasetProfile) and chat.content == "realistic"
-    assert "verify before publishing" in chat.dataset.license.lower()
+    assert "openai" in chat.dataset.license.lower()  # the terms caveat is published
+    # the internal "verify before publishing" reminder is a YAML comment, not published
+    assert "verify before publishing" not in chat.dataset.license.lower()
     trace = load_profile("trace-azure-code")
     assert isinstance(trace, TraceProfile) and trace.dataset.license == "CC-BY-4.0"
     assert load_profile("fixed-1k-1k").dataset is None

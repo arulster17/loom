@@ -8,7 +8,7 @@ from loom_bench.competitiveness import price_at_mix
 from loom_bench.cost import NA_PREFILL_SATURATED, CostAllocation
 from loom_bench.prices import Competitors
 from loom_bench.registry import Pricing, Registry, load_registry
-from loom_bench.report.analyze import analyze_runs, default_price_resolver
+from loom_bench.report.analyze import Quality, analyze_runs, default_price_resolver
 from loom_bench.report.competitiveness import (
     CSV_COLUMNS,
     build_competitiveness,
@@ -34,6 +34,12 @@ def _analyze(runs, price_book, slo=SLO):
         allocation=CostAllocation.all_output(),
         price_resolver=default_price_resolver(price_book),
     )
+
+
+def _gate_passed(results):
+    """As if each candidate passed the quality gate against a BF16 reference."""
+    q = Quality(gate="pass", baseline_config_hash="0" * 64, tasks=[], baseline_label="BF16")
+    return [r.model_copy(update={"quality": q}) for r in results]
 
 
 @pytest.fixture(scope="module")
@@ -80,7 +86,7 @@ def test_rows_quote_the_headline_config_at_the_measured_split(report, results):
     assert qwen.margin_input.value == 50_000 - qwen.cost_input.value
     assert qwen.margin_output.value == 500_000 - qwen.cost_output.value
     assert qwen.margin_output.worst == 500_000 - qwen.cost_output.hi
-    assert qwen.basis == "leaderboard rank 1"
+    assert qwen.basis == "rank 1"
     assert (llama.model_id, llama.workload, llama.best_config, llama.price) == (
         "llama-3.3-70b-instruct",
         None,
@@ -128,7 +134,7 @@ def test_markdown_states_public_list_prices_only(report):
     md = render_markdown(report)
     qwen = report.rows[0]
     assert "> Public list prices only" in md
-    assert "| chat (open loop) | sglang-bf16 (leaderboard rank 1) | 200 / 100 |" in md
+    assert "| chat (open loop) | sglang-bf16 (rank 1) | 200 / 100 |" in md
     assert "At chat mix (200 / 100)" in md
     assert "| $0.0500 | $0.5000 |" in md
     assert f"${qwen.cost_input.value / 1e6:.4f} (CI high ${qwen.cost_input.hi / 1e6:.4f})" in md
@@ -162,7 +168,7 @@ def test_csv_long_format(report):
     ratio = report.rows[0].cost_blended.value / 229_667
     assert float(openrouter["our_blended_cost_vs_competitor"]) == pytest.approx(ratio, abs=1e-4)
     assert first["price_basis"] == (
-        "aws/us-east-1 g6e.xlarge + 200 GB block storage, from the price book: "
+        "aws/us-east-1 g6e.xlarge + 200 GB EBS gp3 volume, from the price book: "
         "on-demand $1.8829/h; spot $1.8605/h; committed 1y n/a"
     )
     llama = [r for r in rows if r["model_id"] == "llama-3.3-70b-instruct"]
@@ -196,7 +202,7 @@ def test_untrusted_config_is_quoted_with_its_reason(price_book, registry, compet
     single = make_runs("sglang-1rep", engine="sglang", ttft=TTFT_FAST_SGLANG, reps=(1,))
     (row, _) = build_competitiveness(_analyze(single, price_book), registry, competitors).rows
     assert row.best_config == "sglang-1rep"
-    assert row.basis.startswith("untrusted, not ranked: ")
+    assert row.basis.startswith("comparison point only, not ranked: untrusted (")
     assert "single repetition" in row.basis
     assert row.cost_blended is not None
 
@@ -247,7 +253,7 @@ def test_quantized_entry_is_compared_with_its_base_models_list_prices(price_book
     registry = Registry(models=[base.get("qwen3-8b"), base.get("qwen3-8b-fp8")])
     fp8 = make_runs("vllm-fp8", quantization="fp8", ttft=TTFT_FAST_VLLM, repo=FP8_REPO)
     report = build_competitiveness(
-        _analyze(fp8, price_book), registry, QWEN_MARKET, benchmarked_only=True
+        _gate_passed(_analyze(fp8, price_book)), registry, QWEN_MARKET, benchmarked_only=True
     )
     (row,) = report.rows
     assert row.model_id == "qwen3-8b-fp8" and row.market_model_id == "qwen3-8b"

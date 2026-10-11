@@ -114,6 +114,25 @@ class ResultWarning(BaseModel):
         return WARNING_LABELS[self.kind]
 
 
+CLOUD_NAMES = {"aws": "AWS", "gcp": "GCP", "runpod": "RunPod", "local": "local", "mock": "mock"}
+
+
+def weights_text(quantization: str | None) -> str | None:
+    """Serving weight precision: "none" (unquantized) is the BF16 checkpoint."""
+    if not quantization:
+        return None
+    return "BF16" if quantization == "none" else quantization.upper()
+
+
+def kv_cache_text(kv_cache_dtype: str | None) -> str | None:
+    """KV-cache dtype; "auto" stores it at the model's dtype."""
+    if not kv_cache_dtype:
+        return None
+    if kv_cache_dtype == "auto":
+        return "auto (model dtype)"
+    return "FP8" if kv_cache_dtype.startswith("fp8") else kv_cache_dtype.upper()
+
+
 class ConfigLabel(BaseModel):
     engine: str | None
     engine_version: str | None
@@ -126,20 +145,58 @@ class ConfigLabel(BaseModel):
     region: str | None
     market: str | None
     engine_args: dict[str, Any]
+    kv_cache_dtype: str | None = None  # "auto", "fp8", ...; None: not recorded
+
+    @property
+    def precision(self) -> str:
+        """Weights and KV cache, short: "BF16", "BF16 + FP8 KV", "FP8 + FP8 KV"."""
+        weights = weights_text(self.quantization) or "weights not recorded"
+        kv = self.kv_cache_dtype
+        if kv and kv != "auto":
+            return f"{weights} + {kv_cache_text(kv)} KV"
+        return weights
+
+    @property
+    def precision_text(self) -> str:
+        """Weights and KV cache, spelled out for a details line."""
+        weights = weights_text(self.quantization)
+        parts = [f"{weights} weights" if weights else "weight precision not recorded"]
+        kv = kv_cache_text(self.kv_cache_dtype)
+        if kv:
+            parts.append(f"KV cache {kv}")
+        return ", ".join(parts)
+
+    @property
+    def hardware(self) -> str:
+        """Where it ran, short: "RunPod L40S", "RunPod 2×H100", "AWS g6e.xlarge"."""
+        cloud = CLOUD_NAMES.get(self.cloud or "", self.cloud or "")
+        if self.cloud == "aws" and self.instance_type:
+            return f"{cloud} {self.instance_type}"
+        gpus = ""
+        if self.gpu_type:
+            count = "" if self.gpu_count == 1 else f"{self.gpu_count or '?'}×"
+            gpus = f"{count}{self.gpu_type}"
+        return " ".join(p for p in (cloud, gpus or self.instance_type) if p) or "unknown hardware"
+
+    @property
+    def short(self) -> str:
+        """Engine, precision and hardware: the line under a config's name in a table."""
+        engine = self.engine or "unknown engine"
+        return f"{engine} · {self.precision} · {self.hardware}"
 
     @property
     def text(self) -> str:
         parts = [" ".join(p for p in (self.engine, self.engine_version) if p) or "unknown engine"]
-        if self.quantization:
-            parts.append("unquantized" if self.quantization == "none" else self.quantization)
+        parts.append(self.precision_text)
         if self.tp is not None:
             parts.append(f"TP{self.tp}")
         if self.gpu_type:
             parts.append(f"{self.gpu_count or '?'}×{self.gpu_type}")
         if self.instance_type:
-            parts.append(
-                f"{self.instance_type} ({self.market})" if self.market else self.instance_type
-            )
+            cloud = CLOUD_NAMES.get(self.cloud or "")
+            where = " ".join(p for p in (cloud, self.instance_type) if p)
+            market = self.market.replace("_", "-") if self.market else None
+            parts.append(f"{where} ({market})" if market else where)
         if self.engine_args:
             parts.append(", ".join(f"{k}={_arg(v)}" for k, v in sorted(self.engine_args.items())))
         return " · ".join(parts)
@@ -250,6 +307,17 @@ class Quality(BaseModel):
     tasks: list[TaskQuality]
     divergence: GateDivergence | None = None  # of the latest gate decision on this config
     checks: list[GateCheck] = []  # per-check verdicts of that decision
+    # The reference by what it is, e.g. "BF16 (RunPod L40S)" (`reference_label`); None
+    # when the reference config is not among the analysed results.
+    baseline_label: str | None = None
+
+    @property
+    def baseline_text(self) -> str:
+        """The gate's reference for a reader: its label, else its config hash."""
+        if self.baseline_label:
+            return self.baseline_label
+        h = self.baseline_config_hash
+        return f"reference config {h[:12]}" if h else "the reference"
 
     def worst(self) -> TaskQuality | None:
         """The task with the most negative delta vs baseline."""
@@ -294,10 +362,17 @@ class ConfigResult(BaseModel):
     # The headline split at the on-demand price: prefill_time (docs/cost-model.md,
     # section 2), whatever allocation `cost` (the ranking) uses.
     split_cost: CostAtSlo | None = None
+    # Completed runs per experiment cell key: one config hash can carry different keys
+    # in different experiments ("bf16" in one, "vllm" in another).
+    cell_keys: dict[str, int] = {}
+    # When each cell key last started a run (ISO time; "" when not recorded).
+    cell_key_latest: dict[str, str] = {}
+    # Set by `name_configs`: one name per config hash, unique among the analysed results.
+    display_name: str | None = None
 
     @property
     def name(self) -> str:
-        return self.cell_key or self.config_hash[:12]
+        return self.display_name or self.cell_key or self.config_hash[:12]
 
     @property
     def hourly_micros(self) -> Micros | None:
@@ -381,11 +456,27 @@ def _tp(
     return None if tp is None else int(tp)
 
 
+KV_ARG_KEYS = ("kv_cache_dtype", "kv-cache-dtype")
+
+
+def _kv_cache_dtype(prov: Mapping[str, Any], args: Mapping[str, Any]) -> str | None:
+    """The KV-cache dtype: recorded in the model section, else the registry entry in the
+    config, else an engine arg."""
+    recorded = _section(prov, "model").get("kv_cache_dtype")
+    if recorded:
+        return str(recorded)
+    configured = _section(_section(prov, "config"), "model").get("kv_cache_dtype")
+    if configured:
+        return str(configured)
+    return next((str(args[k]) for k in KV_ARG_KEYS if args.get(k)), None)
+
+
 def label_from_provenance(prov: Mapping[str, Any]) -> ConfigLabel:
     engine = _section(prov, "engine")
     hardware = _section(prov, "hardware")
     args = dict(engine.get("args") or {})
     return ConfigLabel(
+        kv_cache_dtype=_kv_cache_dtype(prov, args),
         engine=engine.get("name"),
         engine_version=engine.get("version"),
         quantization=_section(prov, "model").get("quantization"),
@@ -396,7 +487,7 @@ def label_from_provenance(prov: Mapping[str, Any]) -> ConfigLabel:
         cloud=prov.get("cloud"),
         region=prov.get("region"),
         market=prov.get("market"),
-        engine_args={k: v for k, v in args.items() if k not in TP_ARG_KEYS},
+        engine_args={k: v for k, v in args.items() if k not in (*TP_ARG_KEYS, *KV_ARG_KEYS)},
     )
 
 
@@ -582,6 +673,13 @@ def _analyze_sweep(
     model = _section(prov, "model")
     content = _section(prov, "workload").get("content")
     cell_keys = sorted({r.cell_key for r in ordered if r.cell_key})
+    key_runs: dict[str, int] = defaultdict(int)
+    key_latest: dict[str, str] = defaultdict(str)
+    for run in ordered:
+        if run.cell_key:
+            key_runs[run.cell_key] += 1
+            started = run.started_at.isoformat() if run.started_at else ""
+            key_latest[run.cell_key] = max(key_latest[run.cell_key], started)
     return ConfigResult(
         config_hash=key.config_hash,
         workload=key.workload,
@@ -611,6 +709,8 @@ def _analyze_sweep(
         git_shas=sorted({g for r in ordered if (g := _git_label(r.provenance))}),
         provenance=dict(prov),
         split_cost=split,
+        cell_keys=dict(sorted(key_runs.items())),
+        cell_key_latest=dict(sorted(key_latest.items())),
     )
 
 
@@ -625,7 +725,7 @@ def analyze_runs(
 ) -> list[ConfigResult]:
     """One ConfigResult per (config_hash, workload, load_mode), sorted by those keys."""
     completed, excluded = _group(runs)
-    return [
+    results = [
         _analyze_sweep(
             key,
             completed[key],
@@ -638,6 +738,74 @@ def analyze_runs(
         )
         for key in sorted(completed)
     ]
+    return name_configs(results)
+
+
+def _base_name(members: Sequence[ConfigResult]) -> str:
+    """The cell key of the config's latest experiment (the one that last started a run
+    under it), then the key most of its runs carry, then alphabetical; else its short
+    hash."""
+    counts: dict[str, int] = defaultdict(int)
+    latest: dict[str, str] = defaultdict(str)
+    for r in members:
+        for key, n in r.cell_keys.items():
+            counts[key] += n
+        for key, at in r.cell_key_latest.items():
+            latest[key] = max(latest[key], at)
+        if not r.cell_keys and r.cell_key:
+            counts[r.cell_key] += 1
+    if not counts:
+        return members[0].config_hash[:12]
+    return min(counts, key=lambda k: (_desc(latest[k]), -counts[k], k))
+
+
+def _desc(text: str) -> tuple[int, ...]:
+    """Sorts strings descending under `min`."""
+    return (*(-ord(c) for c in text), 1)
+
+
+def _qualifiers(r: ConfigResult) -> list[str]:
+    """What can tell two configs with the same name apart, most readable first."""
+    lab = r.label
+    engine = " ".join(p for p in (lab.engine, lab.engine_version) if p)
+    return [lab.hardware, engine, lab.precision]
+
+
+def name_configs(results: Sequence[ConfigResult]) -> list[ConfigResult]:
+    """Give every config hash one name, the same on every workload and unique among
+    `results`.
+
+    The name is the experiment cell key most of the config's runs carry. When two
+    configs would share a name, each gets the first qualifier that tells them apart
+    (where it ran, then engine, then precision), e.g. "bf16 (RunPod L40S)" and
+    "bf16 (AWS g6e.xlarge)"; failing that, its short hash.
+    """
+    by_hash: dict[str, list[ConfigResult]] = defaultdict(list)
+    for r in results:
+        by_hash[r.config_hash].append(r)
+    base = {h: _base_name(members) for h, members in by_hash.items()}
+    groups: dict[str, list[str]] = defaultdict(list)
+    for h, name in base.items():
+        groups[name].append(h)
+    names: dict[str, str] = {}
+    for name, hashes in groups.items():
+        if len(hashes) == 1:
+            names[hashes[0]] = name
+            continue
+        firsts = {h: by_hash[h][0] for h in hashes}
+        for i in range(len(_qualifiers(next(iter(firsts.values()))))):
+            quals = {h: _qualifiers(r)[i] for h, r in firsts.items()}
+            if len(set(quals.values())) == len(hashes):
+                names.update({h: f"{name} ({q})" for h, q in quals.items()})
+                break
+        else:
+            names.update({h: f"{name} ({h[:8]})" for h in hashes})
+    return [r.model_copy(update={"display_name": names[r.config_hash]}) for r in results]
+
+
+def reference_label(r: ConfigResult) -> str:
+    """A gate reference by what it is: precision and where it ran, "BF16 (RunPod L40S)"."""
+    return f"{r.label.precision} ({r.label.hardware})"
 
 
 _EPOCH = dt.datetime.min.replace(tzinfo=dt.UTC)
@@ -713,9 +881,15 @@ def with_quality(
     gate_decisions: Iterable[BenchGateDecision],
 ) -> list[ConfigResult]:
     evals, gates = list(eval_runs), list(gate_decisions)
-    return [
-        r.model_copy(update={"quality": quality_for(r.config_hash, evals, gates)}) for r in results
-    ]
+    results = list(results)
+    labels = {r.config_hash: reference_label(r) for r in results}
+    out = []
+    for r in results:
+        q = quality_for(r.config_hash, evals, gates)
+        if q is not None and q.baseline_config_hash in labels:
+            q = q.model_copy(update={"baseline_label": labels[q.baseline_config_hash]})
+        out.append(r.model_copy(update={"quality": q}))
+    return out
 
 
 def cold_starts_by_config(

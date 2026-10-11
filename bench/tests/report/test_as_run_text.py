@@ -32,7 +32,7 @@ def test_an_api_observed_price_is_shown_with_its_datacenter_and_time():
     text = as_run_text(_result(_observed("US-MO-1"), 1_100_959))
     assert text == (
         "$1.1010/h, on_demand host: runpod API price observed at launch in US-MO-1 "
-        "(2026-10-07T05:40:00+00:00) + 80 GB block storage"
+        "(2026-10-07T05:40:00+00:00) + 80 GB container disk"
     )
 
 

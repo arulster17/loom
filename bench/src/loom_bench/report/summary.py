@@ -39,11 +39,13 @@ from loom_bench.report.leaderboard import (
     LeaderboardReport,
     LeaderboardRow,
     RowStatus,
+    baseline_name,
     board_title,
+    headline_basis,
     headline_row,
     no_headline_reason,
     quality_text,
-    quality_verified,
+    ranking_cost,
     split_ranges,
 )
 from loom_bench.slo import slo_met
@@ -94,8 +96,8 @@ class Summary(BaseModel):
 def standing(row: LeaderboardRow) -> str:
     if row.rank is not None:
         return f"rank {row.rank}"
-    if row.status is RowStatus.UNTRUSTED:
-        return "untrusted, not ranked"
+    if row.status in (RowStatus.UNTRUSTED, RowStatus.QUALITY_UNVERIFIED):
+        return f"{row.status.value}, not ranked"
     return row.status.value
 
 
@@ -200,8 +202,7 @@ def _scores(r: ConfigResult) -> str:
 
 def quality_sentence(r: ConfigResult, names: Mapping[str, str]) -> str:
     q = r.quality
-    quant = r.label.quantization
-    precision = "unquantized" if quant in (None, "none") else quant
+    precision = r.label.precision_text
     if q is None or (q.gate is None and not q.tasks):
         return f"{r.name} ({precision}): quality not evaluated."
     if q.gate is None:
@@ -214,7 +215,7 @@ def quality_sentence(r: ConfigResult, names: Mapping[str, str]) -> str:
             f"{r.name} ({precision}): the reference the quality gate compares against; "
             f"{_scores(r)}."
         )
-    base = names.get(q.baseline_config_hash or "", (q.baseline_config_hash or "?")[:12])
+    base = baseline_name(r, names)
     passed = [c.name for c in q.checks if c.verdict == "pass"]
     others = [f"{c.name} {c.verdict} ({c.reason})" for c in q.checks if c.verdict != "pass"]
     detail = []
@@ -225,11 +226,17 @@ def quality_sentence(r: ConfigResult, names: Mapping[str, str]) -> str:
     text += f": {'; '.join(detail)}." if detail else "."
     if q.gate == "inconclusive":
         text += (
-            f" An inconclusive gate blocks the config: its quality is not shown to match {base}."
+            f" An inconclusive gate blocks the config: its quality is not shown to match {base},"
+            " so it is not ranked."
         )
     elif q.gate == "fail":
         text += " It is not ranked."
     return text
+
+
+def _ranking_value(row: LeaderboardRow) -> int | None:
+    cost = ranking_cost(row.result)
+    return None if cost is None else cost.value
 
 
 def _model_id(registry: Registry | None, repo: str) -> str | None:
@@ -334,22 +341,24 @@ def _workload(
     if head is not None:
         r = head.result
         text = f"{r.name}: {cost_sentence(r)}."
-        leader = b.rows[0]
-        if leader is not head and leader.rank is not None:
+        if head.rank is None:
             text += (
-                f" {leader.result.name} ranks first but its quality is not verified "
-                f"({quality_text(leader.result)}), so the figure quoted is {r.name}'s "
-                f"({quality_text(r)}, {standing(head)})."
+                f" No config on this board is ranked, so this figure is a comparison point "
+                f"only ({headline_basis(head)})."
             )
-        elif head.rank is None:
-            text += " No config on this board is trusted, so this figure is indicative only."
-        unquantized_ungated = (r.quality is None or r.quality.gate is None) and (
-            r.label.quantization in (None, "none")
-        )
-        if not quality_verified(r) and not unquantized_ungated:
+        head_cost = _ranking_value(head)
+        cheaper = [
+            row.result.name
+            for row in b.rows
+            if row.status is RowStatus.QUALITY_UNVERIFIED
+            and head_cost is not None
+            and (cost := _ranking_value(row)) is not None
+            and cost < head_cost
+        ]
+        if cheaper:
             text += (
-                f" Its quality is not verified against the reference ({quality_text(r)}); "
-                "see Quality below."
+                f" {', '.join(cheaper)} would be cheaper, but their quality is not verified "
+                "against the reference, so they are not ranked (see Quality below)."
             )
         points.append(text)
         if head.goodput_ties:
@@ -426,10 +435,11 @@ INTRO = (
     "intervals in brackets. $/1M input and $/1M output split the replica's cost by measured "
     "prefill time (methodology at the end); $/1M blended is the replica's cost over all "
     "tokens at that workload's own input:output mix and needs no split. Each workload quotes "
-    "one config: trusted first, then quality verified (the gate's reference or a gate pass), "
-    "then leaderboard rank; a config that failed the quality gate is never quoted. Nothing "
-    "here relaxes a check: untrusted figures are quoted only with their reason, and the "
-    "ranking is the leaderboard's."
+    "one config: rank 1, ranked among configs that passed every check (a candidate ranks "
+    "only on a quality gate pass against its reference). With nothing ranked, an untrusted "
+    "config of verified quality is quoted as a comparison point with its reason; a config "
+    "whose gate failed or is inconclusive is never quoted. Nothing here relaxes a check, "
+    "and the ranking is the leaderboard's."
 )
 
 

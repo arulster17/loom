@@ -24,6 +24,11 @@ min_output_len: 4
 max_output_len: 1024
 ignore_eos: true
 seed: 0
+# `license` is published as written (reports, the results site). Internal reminder, not
+# for readers: confirm the licence position before the results site goes public
+# (docs/phase0-acceptance.md, D3). Runs before 2026-10-11 recorded this note with a
+# trailing "Verify before publishing."; reports show the current text for the same
+# dataset revision, and `bench reproduce` ignores a licence-only change.
 dataset:
   name: ShareGPT_Vicuna_unfiltered (ShareGPT_V3_unfiltered_cleaned_split.json)
   source: https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered
@@ -32,5 +37,5 @@ dataset:
     HF card: apache-2.0. The conversations were scraped from sharegpt.com and contain
     ChatGPT outputs, and the card's license does not settle OpenAI's terms of use. Loom
     uses them only as request shapes for load (prompt text in, lengths out), never ships
-    or trains on them, and publishes only latency and cost. Verify before publishing.
+    or trains on them, and publishes only latency and cost.
   license_url: https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered
