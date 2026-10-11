@@ -31,7 +31,8 @@ def create_response_fixture() -> dict[str, Any]:
 class FakeRunpod:
     """In-memory RunPod behind `httpx.MockTransport`.
 
-    REST: POST/GET /pods, GET/DELETE /pods/{id}. GraphQL: `podTerminate`. Any
+    REST: POST/GET /pods, GET/DELETE /pods/{id}, GET /networkvolumes, DELETE
+    /networkvolumes/{id}. GraphQL: `podTerminate`. Any
     `/stop` route fails the test: Loom must never stop a pod (stopped pods bill for
     disk). `fail` maps (method, path) to queued status codes served before the real
     handler; `rest_delete_status` makes REST DELETE refuse, as for a pod-scoped key.
@@ -39,6 +40,7 @@ class FakeRunpod:
 
     def __init__(self, *, cost_per_hr: float = 1.09, gets_before_ssh: int | None = None) -> None:
         self.pods: dict[str, dict[str, Any]] = {}
+        self.volumes: dict[str, dict[str, Any]] = {}
         self.requests: list[httpx.Request] = []
         # Each entry is a status, or (status, error message) to imitate a specific refusal.
         self.fail: dict[tuple[str, str], list[int | tuple[int, str]]] = {}
@@ -50,6 +52,7 @@ class FakeRunpod:
         self.gets_before_ssh = gets_before_ssh
         self._gets: dict[str, int] = {}
         self._ids = (f"fakepod{n:06d}" for n in itertools.count(1))
+        self._volume_ids = (f"fakevol{n:06d}" for n in itertools.count(1))
 
     def api(self, **kw: Any) -> RunpodApi:
         return RunpodApi(
@@ -72,6 +75,18 @@ class FakeRunpod:
         pod.update(fields)
         self.pods[pod["id"]] = pod
         return pod
+
+    def add_volume(self, **fields: Any) -> dict[str, Any]:
+        """A network volume shaped like REST `GET /networkvolumes` items."""
+        vol: dict[str, Any] = {
+            "id": next(self._volume_ids),
+            "name": "volume",
+            "size": 250,
+            "dataCenterId": "US-MO-1",
+        }
+        vol.update(fields)
+        self.volumes[vol["id"]] = vol
+        return vol
 
     def bodies(self, method: str, path: str) -> list[Any]:
         return [
@@ -117,6 +132,12 @@ class FakeRunpod:
                 if self.pods.pop(pod_id, None) is None:
                     return httpx.Response(404, json={"error": "pod not found"})
                 return httpx.Response(200)
+        if rest == "/networkvolumes" and request.method == "GET":
+            return httpx.Response(200, json=list(self.volumes.values()))
+        if rest.startswith("/networkvolumes/") and request.method == "DELETE":
+            if self.volumes.pop(rest.removeprefix("/networkvolumes/"), None) is None:
+                return httpx.Response(404, json={"error": "network volume not found"})
+            return httpx.Response(204)
         return httpx.Response(404, json={"error": f"no route {request.method} {path}"})
 
     def _assign_ssh(self, pod: dict[str, Any]) -> None:

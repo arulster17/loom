@@ -92,6 +92,9 @@ This creates:
 - a security group with no inbound rules, in the default VPC;
 - the TTL reaper Lambda on a 15-minute EventBridge schedule. It can only terminate
   instances and delete volumes tagged `loom:managed=true`;
+- the RunPod reaper Lambda, also every 15 minutes, its role, and the empty Secrets
+  Manager secret `loom/runpod-reaper-api-key` it reads its RunPod key from. It starts in
+  dry run and does nothing useful until step 8;
 - the managed policy `loom-bench-runner` for the identity that runs `bench`.
 
 The state is local (`terraform.tfstate`, gitignored). Keep it somewhere safe.
@@ -182,6 +185,70 @@ aws ec2 describe-instances --region us-east-1 \
 To see what a host did, open the SSM command output under `s3://<bucket>/ssm/`, or
 look at `/var/log/loom/` on the host through Session Manager.
 
+## 8. Turn on the RunPod reaper
+
+The RunPod reaper Lambda terminates Loom's RunPod pods whose TTL has passed, so a pod
+stuck before its container starts (no in-pod watchdog yet) or left by a dead runner is
+removed without your laptop. What it will and will not touch is in
+[security.md](security.md#runpod-pods-runpod); in short, only pods in the runner's exact
+`loom-bench-<experiment>-<ttl epoch>-<nonce>` name format with `LOOM_MANAGED=true`, once
+that TTL has passed, and it deletes nothing when anything in RunPod's answer looks wrong.
+
+1. **Apply** (from `infra/aws/bench`, as in step 4). On a stack applied before the RunPod
+   reaper existed, the plan should read `10 to add, 0 to change, 0 to destroy`:
+
+   ```sh
+   terraform plan  -var owner=<your-name>
+   terraform apply -var owner=<your-name>
+   ```
+
+   Until step 2 the secret is empty, so each scheduled run fails with
+   `ResourceNotFoundException` and touches nothing.
+
+2. **Put the RunPod key.** Create a key used only by the reaper (RunPod console →
+   Settings → API Keys, read/write, named e.g. `loom-reaper`), so you can revoke it on its
+   own. Store it as a plain string, without echoing it:
+
+   ```sh
+   read -rs RUNPOD_REAPER_KEY   # paste the key, press Enter
+   printf %s "$RUNPOD_REAPER_KEY" | aws secretsmanager put-secret-value --region us-east-1 \
+     --secret-id loom/runpod-reaper-api-key --secret-string file:///dev/stdin
+   unset RUNPOD_REAPER_KEY
+   ```
+
+   Afterwards you cannot read it back (`get-secret-value` is denied to everyone but the
+   reaper's role); to change it, put a new value.
+
+3. **Verify with a dry-run invoke:**
+
+   ```sh
+   aws lambda invoke --region us-east-1 --function-name loom-bench-runpod-reaper \
+     --cli-binary-format raw-in-base64-out --payload '{"dry_run": true}' /tmp/rp-reaper.json
+   cat /tmp/rp-reaper.json
+   aws logs tail /aws/lambda/loom-bench-runpod-reaper --region us-east-1 --since 15m
+   ```
+
+   With no Loom pods running, expect `{"dry_run": true, "reaped": [], "failed": [],
+   "kept": 0}` and the log line `N pods and M volumes listed; 0 Loom-named resources
+   kept`, where N and M count the whole account, your other project included.
+   `"FunctionError"` in the invoke output means the run failed, and a dry run deletes
+   nothing either way; the log says why (a wrong key gives `GET /pods failed (401)`).
+
+4. **Go live.** Keep the setting in `terraform.tfvars` (gitignored) so a later apply does
+   not put the reaper back into dry run:
+
+   ```sh
+   echo 'runpod_reaper_dry_run = false' >> terraform.tfvars
+   terraform apply -var owner=<your-name>
+   aws lambda get-function-configuration --region us-east-1 \
+     --function-name loom-bench-runpod-reaper \
+     --query 'Environment.Variables.LOOM_RUNPOD_REAPER_DRY_RUN'   # "false"
+   ```
+
+   A scheduled run logs `dry_run=False` next to anything it reaps. To pause it, set
+   `runpod_reaper_dry_run = true` again and apply, or disable the EventBridge rule
+   `loom-bench-runpod-reaper`.
+
 ## How the four safety layers work
 
 Each layer covers the failure of the one before it.
@@ -205,7 +272,8 @@ Each layer covers the failure of the one before it.
    instance whose `loom:ttl` has passed, and deletes unattached managed volumes.
    Managed resources with a missing or garbled TTL are reaped once they are older
    than 24 h. It covers a host whose OS hung before the shutdown fired. It only
-   watches the Terraform region.
+   watches the Terraform region. A second Lambda, the RunPod reaper (step 8), does the
+   same for RunPod pods.
 4. **`bench reap`.** It runs the same `aws_reaper.reap` function from your machine
    with your runner credentials. Use it after an aborted run, or if the Lambda is
    disabled.
@@ -264,7 +332,8 @@ a full-suite run on a large model.
 
 ## What it costs besides GPU time
 
-The S3 bucket and the Lambda cost cents. Secrets Manager is $0.40 per secret per
-month. CloudWatch Logs for the reaper are kept 30 days. The root gp3 volume
+The S3 bucket and the two Lambdas cost cents. Secrets Manager is $0.40 per secret per
+month (two secrets: the HF token and the RunPod reaper key). CloudWatch Logs for the
+reapers are kept 30 days. The root gp3 volume
 (200 GB, about $0.022/h) is part of each host's accrued `hourly_micros` and of every
 reported cost ([cost-model.md](cost-model.md#4-the-hourly-price-h)).

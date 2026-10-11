@@ -8,8 +8,8 @@ it is `EXITED` (an exited pod still bills for its disk). The TTL comes from env
 (`{prefix}-{experiment}-{ttl_epoch}-{nonce}`); with neither, a pod older than
 `max_age` is reaped, and one with no readable creation time is reaped outright.
 
-Runs from `bench reap`. There is no scheduled RunPod reaper: the backstops are the
-in-pod TTL watchdog and this.
+Runs from `bench reap`. The scheduled backstop is the `runpod_reaper_lambda` Lambda,
+whose rules are stricter (exact runner name format and an expired TTL only).
 """
 
 from __future__ import annotations

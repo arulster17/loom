@@ -210,7 +210,7 @@ Needed later (will stop and ask when reached):
 5. ~~Approval to build the RunPod provider~~ → approved and built (2026-10-06).
 
 Later (RunPod hardening and follow-ups):
-- A scheduled RunPod reaper, e.g. a sweep in the AWS reaper Lambda with the RunPod key in Secrets Manager. Today the backstops are the in-pod TTL watchdog and a manual `bench reap`; a pod stuck before its container starts has no watchdog.
+- Scheduled RunPod reaper: built (2026-10-10) as its own Lambda, `loom-bench-runpod-reaper` (`infra/aws/bench/runpod_reaper.tf`), with its RunPod key in Secrets Manager; to deploy, follow [aws-setup.md, step 8](aws-setup.md#8-turn-on-the-runpod-reaper). Until it is live, the backstops are the in-pod TTL watchdog and a manual `bench reap`, and a pod stuck before its container starts has no watchdog.
 - Codify the `loom-runpod-bench` IAM user (created with the CLI) in Terraform.
 - Run the engine as a non-root user in the pod; today it runs as root and can read the HF token and the pod-scoped key ([security.md](security.md#runpod-pods-runpod)).
 - Before every paid sweep: the RunPod smoke (`runpod-smoke`, about $1) runs every code

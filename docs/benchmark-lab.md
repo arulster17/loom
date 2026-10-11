@@ -240,9 +240,11 @@ it there.
 5. **Reaper.** `bench reap` terminates expired resources recorded in `bench_resources`
    (marking them `terminated_by: reaper`, or `self-ttl` for EC2 instances that already ended)
    and, with AWS configured, every Loom-tagged instance past its TTL tag; with a RunPod API
-   key, every pod named `loom-bench-…` with `LOOM_MANAGED=true` past its TTL or exited. The
-   AWS reaper also runs as a scheduled Lambda (`infra/aws/bench`); there is no scheduled
-   RunPod reaper yet.
+   key, every pod named `loom-bench-…` with `LOOM_MANAGED=true` past its TTL or exited.
+   Both also run as scheduled Lambdas (`infra/aws/bench`), every 15 minutes: the EC2
+   reaper, and the RunPod reaper, which only terminates pods in the runner's exact name
+   format, with `LOOM_MANAGED=true`, whose TTL has passed
+   ([runbook-runpod.md](runbook-runpod.md#orphaned-pods)).
 
 Spot interruptions (`SpotInterrupted` from the provider) are recorded (the in-flight run as
 `interrupted`, an event in `events.jsonl`) and the cell is retried once on a new host if the
