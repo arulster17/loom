@@ -135,6 +135,17 @@ table.summary td.num strong { font-size: 1rem; }
   table.summary td > div { grid-column: 2; }
 }
 
+/* Pricing checks: one short block per flag on a phone. */
+@media (max-width: 40rem) {
+  table.flags thead { display: none; }
+  table.flags, table.flags tbody, table.flags tr, table.flags td { display: block; width: 100%; }
+  table.flags tr { padding: .5rem .25rem; border-bottom: 1px solid var(--border); }
+  table.flags tbody tr:last-child { border-bottom: 0; }
+  table.flags td { border: 0; padding: .1rem .5rem; white-space: normal; }
+  table.flags td:nth-child(2) { color: var(--muted); }
+  table.flags td .sub { display: inline; margin-left: .4rem; }
+}
+
 pre.code { background: var(--stripe); border: 1px solid var(--border); border-radius: 6px; padding: .75rem 1rem; overflow-x: auto; margin: .5rem 0 1rem; max-width: 100%; }
 pre.code code { font-size: 13px; line-height: 1.5; overflow-wrap: normal; white-space: pre; }
 
@@ -144,7 +155,11 @@ pre.code code { font-size: 13px; line-height: 1.5; overflow-wrap: normal; white-
 /* Per-config details on a model page: collapsed, one line each. */
 details.config { border: 0; border-top: 1px solid var(--border); border-radius: 0; padding: .6rem 0; margin: 0; }
 details.config:last-of-type { border-bottom: 1px solid var(--border); }
-details.config > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: .25rem .6rem; font-weight: 400; }
+details.config > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: .25rem .6rem; font-weight: 400; list-style: none; }
+details.config > summary::-webkit-details-marker { display: none; }
+details.config > summary::before { content: "▸"; color: var(--muted); width: .8rem; }
+details.config[open] > summary::before { content: "▾"; }
+details.config > summary .rec { padding-left: 1.4rem; }
 details.config > summary h3 { display: inline; font-size: 1rem; margin: 0; }
 details.config > summary .rec { flex-basis: 100%; font-size: .875rem; color: var(--muted); }
 details.config[open] > summary { margin-bottom: .75rem; }

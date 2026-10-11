@@ -156,7 +156,7 @@
 <td class="num">{{ p.entry.spot_per_hour|usd(4) if p.entry.spot_per_hour is not none else 'n/a' }}</td>
 <td class="num">{{ p.entry.committed_1y_per_hour|usd(4) if p.entry.committed_1y_per_hour is not none else 'n/a' }}</td>
 <td class="num">{% if p.storage is not none %}{{ p.storage.per_gb_month|usd(4) }}<span class="sub">{{ p.storage.kind }}{% if not p.storage.verified %}, unverified{% endif %}</span>{% else %}n/a{% endif %}</td>
-<td>{% for u in p.entry.sources %}<a href="{{ u }}">{{ u|string|truncate(64, true, '…') }}</a>{% if not loop.last %}<br>{% endif %}{% endfor %}{% if not p.entry.verified %}<span class="sub">unverified: {{ p.entry.note }}</span>{% endif %}</td>
+<td>{% for u in p.entry.sources %}<a href="{{ u }}">{{ source_name(u|string) }}</a>{% if not loop.last %}<br>{% endif %}{% endfor %}{% if not p.entry.verified %}<span class="sub">unverified: {{ p.entry.note }}</span>{% endif %}</td>
 <td class="nowrap">{{ p.entry.last_checked }}</td>
 </tr>
 {% endfor %}

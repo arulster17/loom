@@ -54,7 +54,7 @@
 <section aria-labelledby="{{ b.anchor }}">
 <h2 id="{{ b.anchor }}">{{ b.board.workload }}</h2>
 <p class="section-note">{% if b.board.content %}{{ b.board.content.value|sentence }} text{% if b.shape %}, {% endif %}{% endif %}{{ b.shape or '' }}{% if b.board.content or b.shape %}. {% endif %}Load: {{ load_mode_label(b.board.load_mode) }}. SLO: {{ describe_slo(first.goodput.slo) }}.</p>
-<p class="quoted">{% if b.head and b.head.rank is not none %}Best config at SLO: <strong>{{ b.head.result.name }}</strong>.{% elif b.head %}No config ranked. Shown as a comparison point, not as the best config: <strong>{{ b.head.result.name }}</strong>, not ranked: {{ unranked_reason(b.head.result) }}.{% else %}No config ranked. {{ b.basis|sentence }}.{% endif %}</p>
+<p class="quoted">{% if b.head and b.head.rank is not none %}Best config at SLO: <strong>{{ b.head.result.name }}</strong>.{% elif b.head %}No config ranked. Shown as a comparison point, not as the best config: <strong>{{ b.head.result.name }}</strong>, {{ unranked_reason(b.head.result) }}.{% else %}No config ranked. {{ b.basis|sentence }}.{% endif %}</p>
 {% call scroll_table(b.anchor) %}
 <table class="leaderboard">
 <thead>
