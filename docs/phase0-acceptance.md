@@ -669,7 +669,8 @@ GPU spot quota is 0). The vLLM-vs-SGLang comparison ran on RunPod Secure 1x L40S
 in AWS g6e.xlarge. A Model A leaderboard on AWS itself ran on 2026-10-10/11 on one
 g6e.xlarge on-demand host, with vLLM only (BF16 and fp8-kv8; SGLang was not re-run on
 AWS). The spot quota is still 0; the on-demand G/VT quota (4 vCPU) fits that one host.
-The user decides whether this meets D6 (open item 4).
+On 2026-10-11 the user asked for vLLM vs SGLang on AWS too; that run has not happened
+yet (open item 4).
 
 Evidence, RunPod (engines):
 
@@ -941,12 +942,15 @@ These are either not met or wait on a decision from you:
    (P2). The competitiveness view now shows margins and its flags (O2).
 2. **70B registry row (P2).** Resolved 2026-10-11: both 70B rows describe FP8's measured
    config (2x H100 SXM, TP=2). FP8 is priced and BF16 stays the unpriced reference.
-3. **8B winner (P1/P2).** Accept BF16 as the 8B row, or approve a quality-only rerun to
-   settle fp8-kv8's inconclusive gate (it is about 2.2x cheaper on chat if it passes).
+3. **8B winner (P1/P2).** Resolved 2026-10-10: Qwen3-8B ships on BF16. fp8-kv8 stays
+   unshipped: its gsm8k gate can't resolve on 1,319 items, and on AWS (95cde129) its
+   gate failed on ifeval.
 4. **Model A on AWS (D6).** The AWS g6e.xlarge leaderboard ran (95cde129, $6.39): BF16
    on vLLM. It matches RunPod's latency at equal load, and fp8-kv8's gate failed on
-   ifeval. The engine comparison (vLLM vs SGLang) is RunPod-only. Accept that as D6, or
-   ask for SGLang on AWS too.
+   ifeval. On 2026-10-11 you asked for vLLM vs SGLang on AWS, with a vLLM re-run on the
+   same host. The specs are `aws-smoke-g6e-sglang` and `qwen3-8b-sglang-aws-g6e`, capped
+   at $4.00 and $9.75, approved 2026-10-11. Not run yet: the launch waits on a
+   permission rule for the paid launch.
 5. **Reproduce on real hardware (A1).** Done 2026-10-11: one paid reproduce of 7a8237d0's
    bf16 chat-sharegpt goodput point on RunPod (940b437e, $0.23) came out within normal
    variance. Nothing to decide.
@@ -955,18 +959,15 @@ These are either not met or wait on a decision from you:
    RunPod key of its own into the empty secret, check a dry-run invoke, then turn dry run
    off. Until then the RunPod backstops are the in-pod watchdog and a manual
    `bench reap`, and a pod stuck before its container starts has neither.
-7. **Results site and waitlist (D8).** Choose a waitlist backend (Formspree / Buttondown,
-   or a Loom endpoint), choose which experiments to publish (pinned by full id in
-   `site/config.yaml`, `publish.experiments`), and say when to enable GitHub Pages. The
-   committed snapshot and the pinned list are empty.
-8. **Results store (D5).** The real results are in SQLite. If you want them in Postgres
-   for Phase 1, they need loading into it; the code already supports Postgres.
-9. **Coverage not exercised on a GPU (D2-D4).** These are built and tested on the mock
-   but have never run on real hardware:
+7. **Results site and waitlist (D8).** Deferred by you 2026-10-11: no waitlist backend
+   is chosen and nothing is published. The committed snapshot and the pinned list
+   (`site/config.yaml`, `publish.experiments`) stay empty, and GitHub Pages stays off.
+8. **Results store (D5).** Accepted as-is 2026-10-11: the real results stay in SQLite
+   until Phase 1. The code already supports Postgres.
+9. **Coverage not exercised on a GPU (D2-D4).** Accepted as-is 2026-10-11. These are
+   built and tested on the mock but have never run on real hardware:
    - the `vllm bench` / `sglang` wrappers;
    - closed-loop runs;
    - non-Poisson arrivals;
    - the 8k/1k, 32k/1k, needle, long-generation and trace profiles;
    - the MMLU-Pro, long-context and code eval tasks.
-
-   Say whether any of these must run before approval.
