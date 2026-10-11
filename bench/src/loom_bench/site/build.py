@@ -27,7 +27,15 @@ from loom_bench.money import SECONDS_PER_HOUR, TOKENS_PER_MTOK, Micros
 from loom_bench.prices import BlockStorage, InstanceType, PriceBook, UnverifiedPriceError
 from loom_bench.records import LoadMode, Market
 from loom_bench.registry import Cloud, ModelSpec
-from loom_bench.report.analyze import ConfigResult, LoadPoint, gate_label
+from loom_bench.report.analyze import (
+    CLOUD_NAMES,
+    ConfigLabel,
+    ConfigResult,
+    LoadPoint,
+    gate_label,
+    name_configs,
+    reference_label,
+)
 from loom_bench.report.competitiveness import (
     CompetitivenessRow,
     comparison_scope,
@@ -41,14 +49,22 @@ from loom_bench.report.leaderboard import (
     RowStatus,
     build_leaderboard,
     cold_text,
+    headline_basis,
+    headline_row,
+    no_headline_reason,
     price_header,
+    quality_text,
     ranking_cost,
+    split_ranges,
+    unranked_reason,
 )
 from loom_bench.report.methodology import (
     ALLOCATION_TEXT,
+    SPLIT_TEXT,
     ConfigProvenance,
     Methodology,
     methodology,
+    storage_name,
 )
 from loom_bench.site.config import SiteConfig, load_site_config
 from loom_bench.site.snapshot import ModelSnapshot, Snapshot, load_snapshot
@@ -108,6 +124,9 @@ def _env() -> Environment:
     env.globals.update(
         cold_text=cold_text,
         gate_label=gate_label,
+        quality_text=quality_text,
+        unranked_reason=unranked_reason,
+        split_ranges=split_ranges,
         margin_text=margin_text,
         price_text=price_text,
         price_header=price_header,
@@ -148,7 +167,20 @@ class PlannedConfig:
             image=spec.engine.image,
             hardware=f"{hw.gpus_per_replica}×{hw.gpu} per replica ({instances})",
             parallelism=f"TP{par.tp} · PP{par.pp} · EP{par.ep}",
-            quantization="unquantized" if spec.quantization == "none" else spec.quantization,
+            quantization=ConfigLabel(
+                engine=None,
+                engine_version=None,
+                quantization=spec.quantization,
+                tp=None,
+                gpu_type=None,
+                gpu_count=None,
+                instance_type=None,
+                cloud=None,
+                region=None,
+                market=None,
+                engine_args={},
+                kv_cache_dtype=spec.kv_cache_dtype,
+            ).precision_text,
             max_context=spec.max_context,
             license=spec.hf.license,
             status=spec.status,
@@ -182,9 +214,22 @@ class BoardView:
     configs: list[ConfigView]
 
     @property
-    def input_priced(self) -> bool:
-        """Whether any config charges for input tokens (none do under all_output)."""
-        return any(c.result.allocation != "all_output" for c in self.configs)
+    def head(self) -> LeaderboardRow | None:
+        """The quoted config (`leaderboard.headline_row`): the same on the index, this
+        model page and the pricing page."""
+        return headline_row(self.board.rows)
+
+    @property
+    def basis(self) -> str:
+        """Why the quoted config is quoted, or why nothing is."""
+        head = self.head
+        if head is None:
+            return no_headline_reason(self.board.rows)
+        return headline_basis(head)
+
+    @property
+    def rank_allocation(self) -> str:
+        return self.board.allocation
 
     @property
     def title(self) -> str:
@@ -217,7 +262,15 @@ class ModelView:
 class HeadlineRow:
     model: ModelView
     board: BoardView | None
-    best: LeaderboardRow | None
+    # The quoted config: rank 1, or (nothing ranked) an untrusted config of verified
+    # quality shown as a comparison point. Never a config whose gate failed or is
+    # inconclusive.
+    quoted: LeaderboardRow | None
+
+    @property
+    def best(self) -> LeaderboardRow | None:
+        """The best config: only a ranked one is ever called that."""
+        return self.quoted if self.quoted is not None and self.quoted.rank is not None else None
 
 
 @dataclass(frozen=True)
@@ -228,6 +281,20 @@ class WorkedExample:
     output_tok_s: float
     output_per_mtok: Micros | None
     instance: str
+    # The measured prefill-time split of the same result (absent when not measured).
+    share: float | None = None  # φ, the share of replica time charged to input
+    input_tok_s: float | None = None
+    split_input_per_mtok: Micros | None = None
+    split_output_per_mtok: Micros | None = None
+
+    @property
+    def has_split(self) -> bool:
+        return (
+            self.share is not None
+            and self.input_tok_s is not None
+            and self.split_input_per_mtok is not None
+            and self.split_output_per_mtok is not None
+        )
 
 
 @dataclass(frozen=True)
@@ -270,10 +337,9 @@ def _headline(models: Sequence[ModelView]) -> list[HeadlineRow]:
     rows = []
     for m in models:
         if not m.boards:
-            rows.append(HeadlineRow(model=m, board=None, best=None))
+            rows.append(HeadlineRow(model=m, board=None, quoted=None))
         for b in m.boards:
-            ranked = [c.row for c in b.configs if c.row.status is RowStatus.RANKED]
-            rows.append(HeadlineRow(model=m, board=b, best=ranked[0] if ranked else None))
+            rows.append(HeadlineRow(model=m, board=b, quoted=b.head))
     return rows
 
 
@@ -291,6 +357,9 @@ def _worked_example(
                     and r.allocation == "all_output"
                     and tok_s is not None
                 ):
+                    split = r.split_cost
+                    tin = r.goodput.input_tok_s
+                    share = split.input_time_share if split else None
                     return WorkedExample(
                         measured=True,
                         source=f"{m.snap.display_name}, {b.title}, config {r.name}",
@@ -298,6 +367,10 @@ def _worked_example(
                         output_tok_s=tok_s.mean,
                         output_per_mtok=r.cost.output_per_mtok.value,
                         instance=c.provenance.location,
+                        share=share.mean if share else None,
+                        input_tok_s=tin.mean if tin else None,
+                        split_input_per_mtok=split.input_per_mtok.value if split else None,
+                        split_output_per_mtok=split.output_per_mtok.value if split else None,
                     )
     if price_book is None:
         return None
@@ -364,11 +437,61 @@ def _price_rows(snapshot: Snapshot, models: Sequence[ModelView]) -> list[PriceRo
     return rows
 
 
-def _competitiveness_by_model(snapshot: Snapshot) -> dict[str, list[CompetitivenessRow]]:
-    by_model: dict[str, list[CompetitivenessRow]] = defaultdict(list)
-    if snapshot.competitiveness is not None:
-        for r in snapshot.competitiveness.rows:
-            by_model[r.model_id].append(r)
+def _storage_text(price_rows: Sequence[PriceRow]) -> str:
+    """Which storage volume each cloud's replicas pay for, e.g. "an EBS gp3 volume on AWS,
+    a container disk on RunPod"."""
+    clouds = dict.fromkeys(p.cloud for p in price_rows if p.storage is not None)
+    return ", ".join(f"{storage_name(c)} on {CLOUD_NAMES.get(c, c)}" for c in clouds)
+
+
+@dataclass(frozen=True)
+class PricingRow:
+    """One pricing-page row: the snapshot's competitiveness row and the board it quotes."""
+
+    comp: CompetitivenessRow
+    board: BoardView | None
+
+    @property
+    def quoted(self) -> str | None:
+        return self.comp.best_config
+
+    @property
+    def basis(self) -> str:
+        if self.board is not None:
+            return self.board.basis
+        return self.comp.basis or ""
+
+
+def _pricing_by_model(
+    snapshot: Snapshot, models: Sequence[ModelView]
+) -> dict[str, list[PricingRow]]:
+    """Competitiveness rows per model, each checked against its leaderboard board: the
+    pricing page quotes the same config as the index and the model page (one selection
+    rule, `leaderboard.headline_row`), or the build refuses the snapshot."""
+    boards = {
+        (m.snap.model_id, b.board.workload, b.board.load_mode): b for m in models for b in m.boards
+    }
+    by_model: dict[str, list[PricingRow]] = defaultdict(list)
+    if snapshot.competitiveness is None:
+        return {}
+    for r in snapshot.competitiveness.rows:
+        board = (
+            boards.get((r.model_id, r.workload, r.load_mode))
+            if r.workload is not None and r.load_mode is not None
+            else None
+        )
+        if board is not None and not r.alternative_slo:
+            head = board.head
+            want = head.result.config_hash if head is not None else None
+            if r.best_config_hash != want:
+                raise ValueError(
+                    f"pricing data for {r.model_id} {r.workload} quotes "
+                    f"{r.best_config or 'no config'}, but the leaderboard quotes "
+                    f"{head.result.name if head else 'no config'}; the snapshot was exported "
+                    "with another selection rule: re-export it with `bench site export`"
+                )
+            r = r.model_copy(update={"best_config": head.result.name if head else None})
+        by_model[r.model_id].append(PricingRow(comp=r, board=board))
     return dict(by_model)
 
 
@@ -387,6 +510,27 @@ def _prepare_out(out: Path, snapshot_dir: Path) -> None:
     out.mkdir(parents=True)
 
 
+def _named(snapshot: Snapshot) -> Snapshot:
+    """Name every config once across the snapshot (`analyze.name_configs`) and the gate
+    references by what they are, so every page uses the same, unique labels. A snapshot
+    exported by this version already carries them; an older one gets them here."""
+    results = name_configs(snapshot.results)
+    labels = {r.config_hash: reference_label(r) for r in results}
+    fixed = []
+    for r in results:
+        q = r.quality
+        if q is not None and q.baseline_label is None and q.baseline_config_hash in labels:
+            label = labels[q.baseline_config_hash]
+            r = r.model_copy(update={"quality": q.model_copy(update={"baseline_label": label})})
+        fixed.append(r)
+    models, start = [], 0  # `snapshot.results` is every model's results in order
+    for m in snapshot.models:
+        end = start + len(m.results)
+        models.append(m.model_copy(update={"results": fixed[start:end]}))
+        start = end
+    return snapshot.model_copy(update={"models": models})
+
+
 def build_site(
     snapshot_dir: str | Path,
     out_dir: str | Path,
@@ -399,13 +543,14 @@ def build_site(
     """
     snapshot_path, out = Path(snapshot_dir), Path(out_dir)
     cfg = config if isinstance(config, SiteConfig) else load_site_config(config)
-    snapshot = load_snapshot(snapshot_path)
+    snapshot = _named(load_snapshot(snapshot_path))
     _prepare_out(out, snapshot_path)
     shutil.copytree(snapshot_path, out / DATA_DIR)
     (out / STYLESHEET).write_text(stylesheet(), encoding="utf-8")
 
     models = [_model_view(m, snapshot.price_book) for m in snapshot.models]
     manifest = snapshot.manifest
+    price_rows = _price_rows(snapshot, models)
     common: dict[str, Any] = {
         "config": cfg,
         "manifest": manifest,
@@ -424,8 +569,10 @@ def build_site(
                 "page": "methodology",
                 "method": methodology(all_results, snapshot.price_book),
                 "example": _worked_example(models, snapshot.price_book),
-                "price_rows": _price_rows(snapshot, models),
+                "price_rows": price_rows,
+                "storage_text": _storage_text(price_rows),
                 "allocation_text": ALLOCATION_TEXT,
+                "split_text": SPLIT_TEXT,
                 "seconds_per_hour": SECONDS_PER_HOUR,
                 "tokens_per_mtok": TOKENS_PER_MTOK,
                 "open_loop": load_mode_label(LoadMode.OPEN_LOOP),
@@ -438,7 +585,7 @@ def build_site(
             {
                 "page": "pricing",
                 "comp": snapshot.competitiveness,
-                "by_model": _competitiveness_by_model(snapshot),
+                "by_model": _pricing_by_model(snapshot, models),
                 "scope": (
                     comparison_scope(snapshot.competitiveness) if snapshot.competitiveness else ""
                 ),

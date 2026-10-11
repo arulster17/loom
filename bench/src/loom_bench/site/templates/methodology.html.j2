@@ -79,17 +79,21 @@
 
 <section aria-labelledby="cost">
 <h2 id="cost">Cost per token</h2>
-<p>A replica's hourly price buys the tokens it produces per hour at goodput. A GPU produces input (prefill) and output (decode) tokens at the same time, so splitting its cost between them is a choice, and every result states which:</p>
+<p>A replica's hourly price buys the tokens it produces per hour at goodput. A GPU produces input (prefill) and output (decode) tokens at the same time, so how its cost is divided between them is a choice. Every page uses the same two numbers, and this is the one place that defines them:</p>
 <dl class="defs">
-<dt>all_output</dt><dd>{{ allocation_text['all_output']|sentence }}.</dd>
-<dt>all_input</dt><dd>{{ allocation_text['all_input']|sentence }}.</dd>
-<dt>weighted(r)</dt><dd>One output token costs as much as r input tokens. With effective throughput E = input tok/s + r × output tok/s, the input price is hourly price ÷ (E × 3,600) per token and the output price is r times that; at the measured token mix these prices bill exactly the replica's hourly cost.</dd>
+<dt>$/1M input and $/1M output (the prices shown)</dt><dd id="split">The <strong>measured prefill-time split</strong>: input tokens pay for the share φ of the replica's time spent prefilling prompts, output tokens for the rest. φ is measured at the goodput load as request rate × mean TTFT (Little's law), per repetition, and capped at 1. These are the per-token costs the results page, the model pages and the pricing page show, and the basis of planned prices, which are set separately for input and output.</dd>
+<dt>Rank key</dt><dd>Leaderboards are ordered by the cost under each experiment's declared allocation{% if manifest.allocation %} (in this snapshot: {{ manifest.allocation }}){% endif %}. Under all_output, {{ allocation_text['all_output'] }}. It needs no φ, so it orders configs on the measured throughput alone; it is shown in its own column and is not a price.</dd>
+<dt>$/1M blended</dt><dd>The hourly price over all tokens at the workload's own input:output mix. It needs no split and compares directly with a public price list taken at the same mix.</dd>
 </dl>
-<div class="formula" role="group" aria-label="Cost formula">
-<p>$/1M output tokens at SLO = hourly price ÷ (goodput output tok/s × {{ seconds_per_hour|num }} s/h) × {{ tokens_per_mtok|num }}</p>
+<div class="formula" role="group" aria-label="Cost formulas">
+<p>$/1M input = φ × hourly price ÷ (goodput input tok/s × {{ seconds_per_hour|num }} s/h) × {{ tokens_per_mtok|num }}</p>
+<p>$/1M output = (1 − φ) × hourly price ÷ (goodput output tok/s × {{ seconds_per_hour|num }} s/h) × {{ tokens_per_mtok|num }}</p>
+<p>Rank key under all_output = hourly price ÷ (goodput output tok/s × {{ seconds_per_hour|num }} s/h) × {{ tokens_per_mtok|num }}</p>
 </div>
+<p>{{ split_text }}</p>
+<p>Other allocations an experiment can declare: all_input ({{ allocation_text['all_input'] }}) and weighted(r), where one output token costs as much as r input tokens.</p>
 <h3 id="price-columns">Which hourly price</h3>
-<p>Every hourly price is the replica's instance price plus its block storage volume (EBS gp3) amortised per hour at 730 hours per month, computed the same way in every table, file and report. Network egress and fixed account costs (bucket, secrets, the reaper) are not included.</p>
+<p>Every hourly price is the replica's instance price plus its storage volume{% if storage_text %} ({{ storage_text }}){% endif %} amortised per hour at 730 hours per month, computed the same way in every table, file and report. Network egress and fixed account costs (bucket, secrets, the reaper) are not included.</p>
 <dl class="defs">
 <dt>On-demand (ranked)</dt><dd>The public on-demand list price from the <a href="#prices">price book</a>. It does not depend on when or where a run launched, so anyone can recompute it: leaderboards, the headline table and margins use it. A mock or local host has no list price and uses the price its experiment declares; without one it has no cost at SLO and is not ranked.</dd>
 <dt>Spot</dt><dd>The price book's indicative spot price, an average across availability zones that moves hourly.</dd>
@@ -111,7 +115,12 @@
 <dt>Hourly price</dt><dd class="num-text">{{ example.hourly_micros|usd(4) }} per hour (on-demand, storage included)</dd>
 <dt>Goodput output throughput</dt><dd class="num-text">{{ example.output_tok_s|num(1) }} tok/s{% if not example.measured %} (illustrative){% endif %}</dd>
 <dt>Output tokens per hour</dt><dd class="num-text">{{ example.output_tok_s|num(1) }} × {{ seconds_per_hour|num }} = {{ (example.output_tok_s * seconds_per_hour)|num }}</dd>
-<dt>$/1M output tokens</dt><dd class="num-text">{{ example.hourly_micros|usd(4) }} ÷ {{ (example.output_tok_s * seconds_per_hour)|num }} × {{ tokens_per_mtok|num }} = <strong>{{ example.output_per_mtok|usd(4) }}</strong></dd>
+<dt>Rank key, all_output</dt><dd class="num-text">{{ example.hourly_micros|usd(4) }} ÷ {{ (example.output_tok_s * seconds_per_hour)|num }} × {{ tokens_per_mtok|num }} = <strong>{{ example.output_per_mtok|usd(4) }}</strong> per 1M output tokens</dd>
+{% if example.has_split %}
+<dt>Prefill share φ</dt><dd class="num-text">{{ example.share|num(4) }} of the replica's time (request rate × mean TTFT at goodput)</dd>
+<dt>$/1M input</dt><dd class="num-text">{{ example.share|num(4) }} × {{ example.hourly_micros|usd(4) }} ÷ ({{ example.input_tok_s|num(1) }} × {{ seconds_per_hour|num }}) × {{ tokens_per_mtok|num }} = <strong>{{ example.split_input_per_mtok|usd(4) }}</strong></dd>
+<dt>$/1M output</dt><dd class="num-text">(1 − {{ example.share|num(4) }}) × {{ example.hourly_micros|usd(4) }} ÷ ({{ example.output_tok_s|num(1) }} × {{ seconds_per_hour|num }}) × {{ tokens_per_mtok|num }} = <strong>{{ example.split_output_per_mtok|usd(4) }}</strong></dd>
+{% endif %}
 </dl>
 {% endif %}
 <p>This is the cost of a replica kept busy at goodput. Idle capacity, autoscaling headroom, cold starts and Loom's own overhead are not in it; the margin on the <a href="{{ root }}pricing.html">pricing page</a> has to cover them.</p>
@@ -152,7 +161,7 @@
 <ul>
 <li><strong>pass</strong>: on every task, the lower end of the interval is above the non-inferiority margin, the largest drop accepted.</li>
 <li><strong>fail</strong>: on at least one task, the interval lies entirely below that margin. Failing configs are listed with the reason and never ranked, however cheap.</li>
-<li><strong>inconclusive</strong>: otherwise; the interval is too wide to decide. The config is shown with that status.</li>
+<li><strong>inconclusive</strong>: otherwise; the interval is too wide to decide. The config's quality is not shown to match the reference, so it is listed with that status and the reason but not ranked and never quoted as a cost: a candidate ranks only on a pass. The BF16 reference itself ranks.</li>
 </ul>
 <p>The gate also compares next-token probabilities: the baseline and the candidate score the same text token by token, and we measure how far apart their distributions are (mean KL divergence, and how often their most likely next token agrees). Two healthy engines running the same weights never agree exactly, because their GPU kernels add numbers in a different order. So in every run the baseline also scores its own reference a second time with requests batched differently, which measures that numerical noise for this model on this hardware. The candidate's divergence may be up to five times that noise floor; the limit is never stricter than 0.05 nats KL and 95% top-1 agreement.</p>
 <ul>
@@ -182,7 +191,7 @@
 <ul>
 <li>We do not benchmark other providers' APIs. Several providers' terms restrict benchmarking their services, so the harness ships no tooling, credentials or presets for third-party endpoints. Competitor numbers are public list prices only, entered by hand with their source and check date. See the <a href="{{ legal_url }}">competitor benchmarking note</a>.</li>
 <li>We do not publish raw peak throughput as capacity. Cost is always computed at goodput under the stated SLO.</li>
-<li>We do not rank a result that is untrusted or failed the quality gate. It stays on the page with the reason. A result whose gate needs review is ranked and carries that flag.</li>
+<li>We do not rank a result that is untrusted, failed the quality gate, or whose gate is inconclusive, nor a quantized or FP8-KV config no gate has checked. It stays on the page with the reason. A result whose gate needs review (every task passed; only the divergence asks a person to look) is ranked and carries that flag. Where nothing on a board is ranked, an untrusted reference may be shown with its flag as a comparison point, never as the best config.</li>
 </ul>
 </section>
 
@@ -192,7 +201,7 @@
 <dt>Generated</dt><dd>{{ manifest.generated_at.strftime('%Y-%m-%d %H:%M UTC') }} from commit <code>{{ manifest.git.sha or 'not recorded' }}</code></dd>
 <dt>Experiments</dt><dd>{% for e in snapshot.experiments %}<a href="{{ root }}data/experiments/{{ e.id }}.json">{{ e.name }}</a> <code>{{ e.id }}</code>{{ '; ' if not loop.last }}{% else %}none yet: first runs pending{% endfor %}</dd>
 <dt>SLO</dt><dd>{{ describe_slo(manifest.slo) if manifest.slo else 'none yet: no results published' }}</dd>
-<dt>Cost allocation</dt><dd>{{ manifest.allocation or 'none yet: no results published' }}</dd>
+<dt>Cost allocation</dt><dd>{% if manifest.allocation %}{{ manifest.allocation }} orders the leaderboards (rank key); $/1M input and output use the <a href="#split">measured prefill-time split</a>{% else %}none yet: no results published{% endif %}</dd>
 <dt>Runs</dt><dd>{{ manifest.run_count }}</dd>
 {% if method.content_kinds %}<dt>Content</dt><dd>{{ method.content_kinds|join(', ') }}</dd>{% endif %}
 </dl>

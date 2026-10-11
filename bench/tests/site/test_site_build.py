@@ -110,7 +110,9 @@ def test_populated_snapshot_renders_results(full_site, populated):
     index = _text(full_site, "index.html")
     assert PENDING not in index
     assert "sglang-bf16" in index
-    assert "$0.8717" in index  # cheapest ranked config's $/1M out at SLO
+    assert "Best config at SLO" in index and "<strong>sglang-bf16</strong>" in index
+    # the index quotes the measured split; the fixture's overlapping prefills leave none
+    assert "prefills overlapped at goodput" in index
     assert "No published results for this model yet" in index  # Llama
 
     model = _text(full_site, "models/qwen3-8b.html")
@@ -127,7 +129,8 @@ def test_populated_snapshot_renders_results(full_site, populated):
     assert "$/1M out at SLO, spot" in model and "$/1M out at SLO, as run" in model
     assert "committed 1y</th>" not in model  # no committed price in the price book
     assert "Price as run" in model and "observed at launch" in model
-    assert "$/1M in at SLO" not in model  # all_output: input has no separate price
+    assert "$0.8717" in model  # rank key: the cheapest ranked config's $/1M out, all_output
+    assert "Rank key: $/1M out, all_output" in model
     assert "$0.0000" not in model
     # The strict tool-calling variant (recorded first) is listed right after tool_calling,
     # labelled as the variant.
