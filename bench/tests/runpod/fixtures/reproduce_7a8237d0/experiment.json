@@ -1,0 +1,191 @@
+{
+ "created_at": "2026-10-09 23:28:33.116539",
+ "git_dirty": false,
+ "git_sha": "8a4bdb150efdf04b651bad069c8bf2b65519aa5c",
+ "id": "7a8237d0991747e7b93e8cb0230e0059",
+ "name": "qwen3-8b-config-sweep-runpod",
+ "spec": {
+  "allow_single_run": false,
+  "budget": {
+   "accrual_interval_s": 15.0,
+   "max_spend": 25000000,
+   "ttl_minutes": 450.0
+  },
+  "cost_allocation": {
+   "method": "all_output",
+   "output_input_ratio": null
+  },
+  "description": "Qwen3-8B on RunPod Secure 1x L40S, vLLM v0.30.0, BF16 vs FP8 weights x FP8 KV cache plus one engine knob, chat and 1k/1k at SLO, gated vs BF16.",
+  "loadgen": "native",
+  "model": "qwen3-8b",
+  "name": "qwen3-8b-config-sweep-runpod",
+  "provider": {
+   "allowed_cuda_versions": [
+    "13.0"
+   ],
+   "cloud_type": "secure",
+   "container_disk_gb": 80,
+   "data_center_ids": null,
+   "engine_env": {},
+   "gpu_type_id": null,
+   "instance_type": null,
+   "kind": "runpod"
+  },
+  "quality": {
+   "allow_code_exec": false,
+   "baseline": null,
+   "baseline_variant": "bf16",
+   "limit": null,
+   "replicates": 3,
+   "subset": "phase0-strict",
+   "suite": "qwen3-8b"
+  },
+  "repetitions": 3,
+  "sample": null,
+  "seed": 0,
+  "slo": {
+   "e2e_ms": null,
+   "itl_ms": null,
+   "max_error_rate": 0.01,
+   "tpot_ms": {
+    "p95": 50.0
+   },
+   "ttft_ms": {
+    "p95": 1000.0
+   }
+  },
+  "smoke": false,
+  "sweep": {},
+  "variants": [
+   {
+    "engine": null,
+    "hardware": null,
+    "hf": null,
+    "host_group": "a",
+    "kv_cache_dtype": null,
+    "max_context": null,
+    "mock": {},
+    "model": null,
+    "name": "bf16",
+    "parallelism": null,
+    "quantization": null
+   },
+   {
+    "engine": null,
+    "hardware": null,
+    "hf": null,
+    "host_group": "a",
+    "kv_cache_dtype": "fp8",
+    "max_context": null,
+    "mock": {},
+    "model": null,
+    "name": "bf16-kv8",
+    "parallelism": null,
+    "quantization": null
+   },
+   {
+    "engine": null,
+    "hardware": null,
+    "hf": null,
+    "host_group": "b",
+    "kv_cache_dtype": null,
+    "max_context": null,
+    "mock": {},
+    "model": "qwen3-8b-fp8",
+    "name": "fp8",
+    "parallelism": null,
+    "quantization": null
+   },
+   {
+    "engine": null,
+    "hardware": null,
+    "hf": null,
+    "host_group": "b",
+    "kv_cache_dtype": "fp8",
+    "max_context": null,
+    "mock": {},
+    "model": "qwen3-8b-fp8",
+    "name": "fp8-kv8",
+    "parallelism": null,
+    "quantization": null
+   },
+   {
+    "engine": {
+     "args": {
+      "max_num_batched_tokens": 1024
+     },
+     "chat_template_kwargs": null,
+     "image": null,
+     "name": null,
+     "version": null
+    },
+    "hardware": null,
+    "hf": null,
+    "host_group": "c",
+    "kv_cache_dtype": "fp8",
+    "max_context": null,
+    "mock": {},
+    "model": "qwen3-8b-fp8",
+    "name": "fp8-kv8-mbt1024",
+    "parallelism": null,
+    "quantization": null
+   }
+  ],
+  "workloads": [
+   {
+    "label": null,
+    "load": {
+     "arrival": null,
+     "drain_timeout_s": 60.0,
+     "duration_s": 255.0,
+     "max_inflight": 4096,
+     "mode": "open_loop",
+     "num_requests": null,
+     "request_timeout_s": 600.0,
+     "scrape_interval_s": 1.0,
+     "search": {
+      "descend": 3,
+      "hi": 16.0,
+      "lo": 4.5,
+      "max_points": 5,
+      "rel_tol": 0.05,
+      "scale": "geometric",
+      "step": 1.5
+     },
+     "values": null,
+     "warmup_requests": null,
+     "warmup_s": 45.0
+    },
+    "overrides": {},
+    "profile": "chat-sharegpt"
+   },
+   {
+    "label": null,
+    "load": {
+     "arrival": null,
+     "drain_timeout_s": 60.0,
+     "duration_s": 240.0,
+     "max_inflight": 4096,
+     "mode": "open_loop",
+     "num_requests": null,
+     "request_timeout_s": 600.0,
+     "scrape_interval_s": 1.0,
+     "search": {
+      "descend": 2,
+      "hi": 6.0,
+      "lo": 1.5,
+      "max_points": 4,
+      "rel_tol": 0.05,
+      "scale": "geometric",
+      "step": 1.5
+     },
+     "values": null,
+     "warmup_requests": null,
+     "warmup_s": 60.0
+    },
+    "overrides": {},
+    "profile": "fixed-1k-1k"
+   }
+  ]
+ }
+}
