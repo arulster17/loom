@@ -22,6 +22,7 @@ import asyncio
 import hashlib
 import json
 import math
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -281,7 +282,16 @@ def at_test_scale(path: Path, tmp: Path, body: bytes) -> Experiment:
     return Experiment.model_validate(doc)
 
 
-def run_on_host_sim(path: Path, tmp: Path):
+def run_on_host_sim(
+    path: Path,
+    tmp: Path,
+    *,
+    build: Callable[[Path, Path, bytes], Experiment] = at_test_scale,
+    db: Path | None = None,
+):
+    """`path` built at test scale by `build` and run on HostSim, recorded in the SQLite DB
+    at `db` (default: a new one in `tmp`; another run's, to gate against a baseline it
+    stored)."""
     mp = pytest.MonkeyPatch()
     for k, v in {
         "AWS_ACCESS_KEY_ID": "testing",
@@ -305,13 +315,17 @@ def run_on_host_sim(path: Path, tmp: Path):
         subnets = sorted(ec2.describe_subnets()["Subnets"], key=lambda s: s["AvailabilityZone"])
         ssm.put_parameter(Name=DLAMI_PARAM, Value=amazon_ami(ec2), Type="String")
         s3.create_bucket(Bucket=BUCKET)
-        db = f"sqlite:///{tmp / 'loom.db'}"
-        upgrade(db)
+        db_url = f"sqlite:///{db or tmp / 'loom.db'}"
+        upgrade(db_url)
         ctx = RunnerContext(
-            db_url=db, out_dir=tmp / "results", registry=REGISTRY, prices=PRICES, budget=BUDGET
+            db_url=db_url,
+            out_dir=tmp / "results",
+            registry=REGISTRY,
+            prices=PRICES,
+            budget=BUDGET,
         )
         body = _sharegpt()
-        exp = at_test_scale(path, tmp, body)
+        exp = build(path, tmp, body)
         cells = expand(exp, REGISTRY)
         url = load_profile("chat-sharegpt").download.url  # type: ignore[union-attr]
         sim = HostSim(ec2, s3, tmp / "hosts", served={url: body})

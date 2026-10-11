@@ -317,6 +317,54 @@ uv run bench report -e <aws id>
 - **Never edit the checkout a run is using:** the host scripts are read from disk at
   each step. An edit mid-run broke a7bc3123's last eval.
 
+### 7a. SGLang on the same host type (proposed 2026-10-11)
+
+`aws-smoke-g6e-sglang`, then `qwen3-8b-sglang-aws-g6e`: one g6e.xlarge on-demand host
+each, SGLang v0.5.21 BF16. The real run is gated against 95cde129's stored vLLM BF16
+evaluation, and the smoke against 80ff5648's, so both stored evaluations must still be
+in the results DB and under `results/<id>/evals/` (`bench plan` refuses otherwise). The
+design is in [benchmark-lab.md](benchmark-lab.md#qwen3-8b-on-sglang-on-aws-g6exlarge-proposed).
+Preflight as in section 7, free read-only calls (2026-10-11):
+
+- AMI ami-028357be7d5b15c53 is `available` (deprecation 2028-10-07).
+- The on-demand G/VT quota is 4 vCPU.
+- No managed instances.
+
+Same AMI as 95cde129, so the engines share driver 595.91.07 and CUDA 13.2:
+
+```sh
+export LOOM_AWS_CONFIG=~/.config/loom/aws.yaml LOOM_AWS_AMI_ID=ami-028357be7d5b15c53
+export LOOM_DATABASE_URL=sqlite:///$PWD/results/loom.db     # the main checkout's DB
+uv run bench plan bench/experiments/aws-smoke-g6e-sglang.yaml     # $1.99, worst $2.35, cap $2.50
+caffeinate -i uv run bench run bench/experiments/aws-smoke-g6e-sglang.yaml --out results/
+```
+
+After the smoke, before the real run:
+
+- exit 0, one `provisioned` event at `hourly_micros` 1882918;
+- one `engine_started` event (cold) with `image_digest` `lmsysorg/sglang@sha256:b1259f3e…`,
+  driver 595.91.07, `ttl_shutdown_lead_s` 0-60; from its stages, the image pull time
+  (planned within the 14.5 min cold start);
+- a `stored_baseline` event naming 80ff5648/48f3d8d1850a;
+- chat-sharegpt: 12 req/s fails with stragglers aborted at the drain, then 4, then a pass
+  and a bisection point; no failed runs; the runs' `server` metrics have `missing: []`
+  (SGLang's names scraped);
+- three `quality` passes, no `quality_failed` or `divergence_failed`, one `gate` event for
+  sglang against 80ff5648/48f3d8d1850a (its verdict means nothing at 4 items), and
+  tool_calling_strict scored;
+- the instance `terminated`, and `bench reap --dry-run` clean.
+
+Then:
+
+```sh
+uv run bench plan bench/experiments/qwen3-8b-sglang-aws-g6e.yaml  # $4.90, worst $5.49, cap $5.50
+caffeinate -i uv run bench run bench/experiments/qwen3-8b-sglang-aws-g6e.yaml --out results/
+uv run bench report -e 95cde129 -e <sglang id> --out reports/8b-aws-engines-v1
+uv run bench compare 95cde129 <sglang id> --match-by workload --cell-a bf16
+```
+
+Retry `InsufficientInstanceCapacity` (no host, $0) every 10 min as in section 7.
+
 ## 8. Tearing down the whole stack
 
 1. Make sure no managed instance or volume is left (section 4).
