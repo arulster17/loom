@@ -1,38 +1,36 @@
-# Qwen3-8B on SGLang on AWS (build prompt 7.8, D6: "first leaderboard for Model A, vLLM vs
-# SGLang, one GPU type, AWS"). The vLLM side already ran on AWS: qwen3-8b-aws-g6e,
-# 95cde129 (2026-10-10/11), whose bf16 cell is vLLM v0.30.0 BF16 on one g6e.xlarge
-# on-demand. This adds SGLang v0.5.21 BF16 on the same instance type, market, AMI (pin
-# it: LOOM_AWS_AMI_ID), chat profile, windows, search, repetitions and SLO, so
-# `bench report -e 95cde129 -e <this>` puts both engines on one board, ranked at the SLO
-# with latency at equal load.
+# Qwen3-8B, vLLM vs SGLang on AWS (build prompt 7.8, D6: "first leaderboard for Model A,
+# vLLM vs SGLang, one GPU type, AWS"), both engines on one g6e.xlarge on-demand host
+# (1x L40S, 4 vCPU, 32 GiB; $1.861/h + 200 GB gp3), one after the other:
 #
-# vLLM is not served again. Same-SKU host-to-host variation is below what this comparison
-# can resolve: RunPod 7a8237d0 and AWS 95cde129 (other cloud, other host, other driver,
-# 4 vCPU against 16) visited the same search points, found the same knees and were within
-# normal variance at all 10 matched (cell, load) points (`bench compare` exit 0), and
-# BF16 on RunPod 565b8d3f and 7a8237d0, two days apart, agreed at their shared point.
-# Re-serving vLLM would double the host time (~1.75 h more, ~$3.30) to re-measure a
-# number that already reproduced across clouds.
+# - bf16: vLLM v0.30.0 BF16, exactly 95cde129's bf16 cell (qwen3-8b-aws-g6e: same
+#   variant, so the same config hash 48f3d8d1...), measured again on this host;
+# - sglang: SGLang v0.5.21 BF16 (RunPod 565b8d3f's image and launch), a warm restart onto
+#   another image: the host pulls SGLang's image and its engine loads the checkpoint the
+#   vLLM start downloaded, offline.
 #
-# Quality, as the RunPod engine comparison did it (565b8d3f, b1b904dc, b03b3c52: SGLang
-# gated against vLLM BF16, which is the divergence reference): every SGLang pass is gated
-# against 95cde129's stored vLLM BF16 evaluation (`quality.baseline`), the same suite and
-# subset (phase0-strict) and 3 replicated passes a side, scored on its stored divergence
-# reference and noise floor. That baseline ran on the same AMI (driver 595.91.07, CUDA
-# 13.2) and SKU, where its passes repeated exactly (0 unstable items on gsm8k and ifeval).
+# Serving vLLM again on the same host and session (the user's choice, 2026-10-11, for
+# about $3.30 more) removes host-to-host variation from the engine comparison. The stored
+# 95cde129 cell stays the cross-check: same config hash, so `bench compare 95cde129 <this>
+# --match-by cell_key --cell-a bf16 --cell-b bf16` shows how well an AWS run reproduces
+# (RunPod 7a8237d0 vs AWS 95cde129 matched at all 10 points).
 #
-# The search is 95cde129's: lo 4.5, step 1.5, descend 3, 5 points, 255 s windows with
-# 45 s warmup and a 60 s drain. If SGLang's knee is near vLLM's (RunPod 565b8d3f: the
-# engines tied on fixed-1k-1k and shared-prefix), it visits exactly vLLM's loads (4.5, 3,
-# 2, 2.449, 2.213 req/s) and every point is compared at equal load.
+# Same as 95cde129: instance type, market, AMI (pin it: LOOM_AWS_AMI_ID), the chat profile,
+# windows (255 s, 45 s warmup, 60 s drain), search (lo 4.5, step 1.5, descend 3, 5 points),
+# seed, repetitions and SLO. If SGLang's knee is near vLLM's (RunPod 565b8d3f: tied on
+# fixed-1k-1k and shared-prefix), its search visits vLLM's loads exactly (4.5, 3, 2,
+# 2.449, 2.213 req/s) and every point is compared at equal load.
+#
+# Quality, as the RunPod engine comparison did it (565b8d3f, b1b904dc, b03b3c52): SGLang
+# gated against vLLM BF16 in-run, which captures the divergence reference and its noise
+# floor; phase0-strict, 3 replicated passes a side (as 95cde129).
 #
 # New on AWS (the smoke, aws-smoke-g6e-sglang.yaml, runs each first): the SGLang image
-# (15.2 GB compressed, against vLLM's 8.7 GB) and its python3 for the weight download, its
-# launch, health and metrics on the DLAMI's driver, chat-sharegpt on SGLang (never run on
-# any provider; shared-prefix chat did run on RunPod), tool_calling_strict on SGLang, and a
-# stored-baseline gate on a real host.
+# (15.2 GB compressed, against vLLM's 8.7 GB) and its python3 for the offline weight
+# check, a warm restart that switches engine image, SGLang's launch, health and metrics on
+# the DLAMI's driver, chat-sharegpt on SGLang (never run on any provider; shared-prefix
+# chat did run on RunPod), and tool_calling_strict on SGLang.
 name: qwen3-8b-sglang-aws-g6e
-description: Qwen3-8B BF16 on SGLang v0.5.21 on one AWS g6e.xlarge on-demand (1x L40S), chat at SLO, gated vs the stored vLLM BF16 of 95cde129 on 3 passes; the vLLM vs SGLang board on AWS.
+description: Qwen3-8B BF16 on one AWS g6e.xlarge on-demand (1x L40S), vLLM v0.30.0 vs SGLang v0.5.21 on chat at SLO on the same host, SGLang gated vs vLLM on 3 passes; the vLLM vs SGLang board on AWS.
 model: qwen3-8b
 provider:
   kind: aws_ec2
@@ -41,6 +39,7 @@ provider:
   market: on_demand
   disk_gb: 200
 variants:
+  - name: bf16
   - name: sglang
     engine:
       name: sglang
@@ -62,16 +61,12 @@ slo:
 quality:
   suite: qwen3-8b
   subset: phase0-strict
-  # 95cde129's bf16 cell: vLLM v0.30.0 BF16, g6e.xlarge on-demand (its eval runs, samples,
-  # reference and noise floor are in the results DB and results/95cde129-.../evals/).
-  baseline:
-    experiment: 95cde129-e626-4eda-bad6-1421ed4d8a7b
-    config_hash: 48f3d8d1850a0b1bfc6f454ee35a29902d4dc858ed984252defa8ffe5f621375
+  baseline_variant: bf16
   replicates: 3
 # The TTL holds `bench plan`'s estimate with margin; max_spend holds the worst case of the
 # host living to its TTL.
 budget:
-  max_spend: "$5.50"
-  ttl_minutes: 175
+  max_spend: "$9.75"
+  ttl_minutes: 310
   accrual_interval_s: 15
 seed: 0

@@ -1,0 +1,11 @@
+model,workload,load_mode,load,config,metric,value,value_lo,value_hi,value_ci_method,slo_met,significantly_lower,verdict
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16,ttft_ms.p50,1308.2927,21.5028,79600.3869,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16,ttft_ms.p95,21811.7671,11193.1531,42503.947,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16,tpot_ms.p50,96.5492,81.6506,114.1663,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16,tpot_ms.p95,113.4512,110.0637,116.9429,log_t,False,False,sglang lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16,e2e_ms.p95,74509.7037,60887.8852,91178.991,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,sglang,ttft_ms.p50,4045.732,710.1501,23048.5755,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,sglang,ttft_ms.p95,17336.1598,10323.5746,29112.2454,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,sglang,tpot_ms.p50,89.3058,85.2567,93.5471,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,sglang,tpot_ms.p95,97.5493,91.6203,103.8619,log_t,False,True,sglang lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,sglang,e2e_ms.p95,68619.0783,59878.8676,78635.0527,log_t,False,False,no significant difference
