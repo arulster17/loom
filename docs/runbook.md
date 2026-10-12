@@ -317,7 +317,7 @@ uv run bench report -e <aws id>
 - **Never edit the checkout a run is using:** the host scripts are read from disk at
   each step. An edit mid-run broke a7bc3123's last eval.
 
-### 7a. vLLM vs SGLang on one host (proposed 2026-10-11)
+### 7a. vLLM vs SGLang on one host (ran 2026-10-11/12)
 
 `aws-smoke-g6e-sglang`, then `qwen3-8b-sglang-aws-g6e`: one g6e.xlarge on-demand host
 each, vLLM v0.30.0 BF16 (95cde129's bf16 cell) and then SGLang v0.5.21 BF16 through a warm
@@ -366,6 +366,21 @@ uv run bench compare 95cde129 <id>                                # vLLM bf16 vs
 ```
 
 Retry `InsufficientInstanceCapacity` (no host, $0) every 10 min as in section 7.
+
+**As run.**
+
+- **Launcher:** a script ran `bench run` under `caffeinate` with the AMI pinned and
+  retried only the no-host capacity failure every 10 min (cap 4 h). The smoke got a host
+  on the fourth attempt (9700c9cb, e5387f30, 26d4453e: `InsufficientInstanceCapacity` in
+  1a, 1c, 1d; $0 each), the real run on its first.
+- **Smoke:** deb3ba58, $1.96, passed every item above with no code change (SGLang's image
+  pull 6.9 min inside a 10.5 min warm restart).
+- **Real run:** fccf9ed3, $7.00, exit 0
+  ([result](benchmark-lab.md#qwen3-8b-vllm-vs-sglang-on-aws-g6exlarge-result-fccf9ed3-2026-10-12)).
+  Wait until the previous host is `terminated` (`aws ec2 wait instance-terminated`)
+  before the next launch: the quota fits one g6e.xlarge.
+- **SGLang's retraction counter** is absent until SGLang first retracts a request, so a
+  run's server metrics list `preemptions` as missing; read it as zero.
 
 ## 8. Tearing down the whole stack
 

@@ -492,8 +492,8 @@ The AWS specs stay as the secondary path:
 | `llama-3.3-70b-fp8-tp4` | 1x g6e.12xlarge spot, 2.6 h of a 3.25 h TTL | $26.48 | $33.25 | $45 |
 | `qwen3-8b-aws-g6e` (ran 2026-10-10/11 as 95cde129: $6.39, fp8-kv8's gate fails on ifeval; [results below](#qwen3-8b-on-aws-g6exlarge-result-95cde129-2026-10-11)) | 1x g6e.xlarge **on-demand**, bf16 + fp8-kv8 on chat, 3 passes each, 4.7 h of a 6.5 h TTL | $8.90 | $12.24 | $12.50 |
 | `aws-smoke-g6e` (passed 2026-10-10 as 80ff5648, $1.67, after a7bc3123 found the mount bug, $0.58) | the same host and cells at smoke scale, 1.85 h of a 2.5 h TTL | $3.48 | $4.71 | $5 |
-| `qwen3-8b-sglang-aws-g6e` (proposed 2026-10-11, [section below](#qwen3-8b-vllm-vs-sglang-on-aws-g6exlarge-proposed)) | 1x g6e.xlarge **on-demand**, vLLM v0.30.0 BF16 (95cde129's bf16 cell) then SGLang v0.5.21 BF16 on the same host, chat at 95cde129's windows and search, SGLang gated vs vLLM in-run on 3 passes; 5.03 h of a 5.17 h TTL | $9.46 | $9.73 | $9.75 |
-| `aws-smoke-g6e-sglang` (proposed) | the same host and cells at smoke scale; 1.92 h of a 2.08 h TTL | $3.62 | $3.92 | $4.00 |
+| `qwen3-8b-sglang-aws-g6e` (ran 2026-10-11/12 as fccf9ed3: $7.00, SGLang's gate fails on tool_calling_strict; [results below](#qwen3-8b-vllm-vs-sglang-on-aws-g6exlarge-result-fccf9ed3-2026-10-12)) | 1x g6e.xlarge **on-demand**, vLLM v0.30.0 BF16 (95cde129's bf16 cell) then SGLang v0.5.21 BF16 on the same host, chat at 95cde129's windows and search, SGLang gated vs vLLM in-run on 3 passes; 5.03 h of a 5.17 h TTL | $9.46 | $9.73 | $9.75 |
+| `aws-smoke-g6e-sglang` (passed 2026-10-11 as deb3ba58, $1.96) | the same host and cells at smoke scale; 1.92 h of a 2.08 h TTL | $3.62 | $3.92 | $4.00 |
 
 Rates are searched geometrically, with ranges sized for one L40S from the first RunPod
 sweep (058128e9): Qwen3-8B fixed-1k-1k passed 1.22 req/s and failed 1.94; shared-prefix
@@ -1103,7 +1103,8 @@ The planner's eval estimate is again about 1.6x the measured one.
 
 ### Qwen3-8B vLLM vs SGLang on AWS g6e.xlarge (proposed)
 
-`qwen3-8b-sglang-aws-g6e` (proposed 2026-10-11, not run) completes D6, the brief's §7.8
+`qwen3-8b-sglang-aws-g6e` (proposed 2026-10-11, ran 2026-10-11/12:
+[result](#qwen3-8b-vllm-vs-sglang-on-aws-g6exlarge-result-fccf9ed3-2026-10-12)) completes D6, the brief's §7.8
 "first leaderboard for Model A (vLLM vs SGLang, one GPU type, AWS)". Both engines run on
 one g6e.xlarge on-demand host, one after the other:
 
@@ -1164,3 +1165,121 @@ Paths the smoke runs on AWS for the first time, all SGLang's:
 - chat-sharegpt on SGLang (never run on any provider; RunPod ran shared-prefix chat);
 - tool_calling_strict through SGLang's qwen25 legacy structural tag;
 - the divergence score on SGLang's completions logprobs.
+
+### Qwen3-8B vLLM vs SGLang on AWS g6e.xlarge result (fccf9ed3, 2026-10-12)
+
+`qwen3-8b-sglang-aws-g6e` ran from 2026-10-11 21:34 to 2026-10-12 01:17 UTC:
+
+- **Outcome:** exit 0, **$6.9989** recorded (planned $9.46, cap $9.75), 3.71 h of a
+  5.17 h TTL, 30 of 30 load runs completed, 3 phase0-strict passes per engine, one gate.
+  No `quality_failed` or `divergence_failed` event.
+- **Host:** one g6e.xlarge on-demand in us-east-1a, AMI ami-028357be7d5b15c53 (pinned;
+  driver 595.91.07, CUDA 13.2), on the first launch attempt.
+- **Engine switch:** vLLM cold start 9.8 min, then the warm restart onto SGLang in
+  10.2 min: SGLang's image pull 6.9 min, the offline check of the cached checkpoint with
+  SGLang's python3 41 s, engine start to first token 2.5 min.
+- **Teardown:** the runner terminated the host (EC2: `terminated`, launched 21:34:08,
+  shutdown initiated 01:16:58); no Loom-managed instance or volume remained, and
+  `bench reap --dry-run` (AWS configured) reported no expired resources.
+- **Report:** [reports/8b-aws-engines-v1](../reports/8b-aws-engines-v1/leaderboard.md)
+  (`bench report -e fccf9ed3`).
+
+**The smoke** (`aws-smoke-g6e-sglang`, deb3ba58, $1.9554, 62 min of host time, us-east-1a)
+passed every check before the real run, with no code change:
+
+- exit 0, 24 of 24 load runs, both engines' searches failed 12 req/s (stragglers aborted
+  at the drain), descended to 4 and 1.333, passed and bisected at 2.309;
+- the engine switch: vLLM cold, then SGLang warm with its own image digest (pull 6.9
+  min, offline weight check 40 s, first token at 10.5 min);
+- no client saturation (`client_saturated_count` 0 on all 24 runs), no engine exit or
+  out-of-memory on the 32 GiB host, SGLang's server metrics scraped (`missing: []`);
+- 3 passes per engine with every task scored, tool_calling_strict included; the
+  divergence reference captured on vLLM and scored on SGLang; one gate (inconclusive at
+  4 items, as expected);
+- profile hash `334a4848…` on every run, as on 95cde129.
+
+Three earlier launch attempts (9700c9cb, e5387f30, 26d4453e) got
+`InsufficientInstanceCapacity` in us-east-1a, c and d (1e and 1f answer `Unsupported`)
+before any host existed: `failed`, 0 runs, $0. The launcher retried 10 min later each
+time; the fourth attempt got a host.
+
+Cost at the SLO (TTFT p95 1 s, TPOT p95 50 ms), on-demand $1.8829/h with storage, both
+goodputs trusted; $/1M in and out under the prefill-time split, with 95% CIs in the report:
+
+| Cell | chat goodput (fails at) | $/1M in / out / blended | Gate vs bf16 |
+|---|---|---|---|
+| bf16 (vLLM 0.30.0) | 2.213 (2.449) | 0.0950 / 0.4313 / 0.1765 | reference |
+| sglang (SGLang 0.5.21) | 1.633 (2) | 0.0838 / 0.7299 / 0.2453 | **FAIL** (tool_calling_strict) |
+
+**vLLM holds 36% more load at the SLO on this host** (2.213 against 1.633 req/s), and
+costs 28% less per 1M blended tokens ($0.1765 against $0.2453). The searches show why
+(`bench compare fccf9ed3 fccf9ed3 --match-by workload --cell-a bf16 --cell-b sglang`, at
+the three loads both ran, the same seeded arrivals):
+
+| Load | TTFT p95 vLLM / SGLang | TPOT p95 vLLM / SGLang | Verdict |
+|---|---|---|---|
+| 2 req/s | 285 / 282 ms | 38.3 [33.5, 43.9] / 43.5 [34.8, 54.4] ms | within variance; SGLang's CI upper bound crosses 50 ms, so 2 fails for SGLang |
+| 3 req/s | 389 / 366 ms | 55.3 / 67.9 ms (+23%, p = 0.008) | SGLang's TPOT and E2E p95 significantly higher |
+| 4.5 req/s (overload) | 21.8 / 17.3 s | 113.5 / 97.5 ms (−14%, p = 0.003) | both fail; SGLang's TPOT lower in overload |
+
+Below saturation SGLang decodes more slowly per token on chat (TPOT p95 +14% at 2 req/s,
++23% at 3), so its running batch is larger at the same load (50 against 42 requests at
+3 req/s) and its knee comes earlier; TTFT is the same. GPU utilisation is the same
+(95-97%), and SGLang draws 5-26 W less at equal load. Whether SGLang's per-token slowdown
+comes from the 4 vCPU host (its scheduler, tokenizer and detokenizer are separate busy
+processes next to the load client) or from its kernels on this chat shape is not
+settled by this run: on RunPod's 16-vCPU pods the engines tied on fixed-1k-1k and
+shared-prefix (565b8d3f), but chat-sharegpt never ran there on SGLang.
+
+**SGLang's gate fails, on strict tool calling only** (3 passes a side; margins gsm8k 1,
+ifeval 2, json_schema 3, tool tasks 6 pts):
+
+| gsm8k | ifeval | tool_calling | tool_calling_strict | json_schema | KL / top-1 | sanity (trunc / rep / drift) |
+|---|---|---|---|---|---|---|
+| −0.05 [−0.33, +0.23] | +0.06 [−1.23, +1.36] | 0.00 [−2.22, +2.22] | **−11.11** [−16.30, −5.93] | +0.44 [−0.56, +1.44] | 0.0007 / 99.28% (limits 0.05 / 94.63%) | 0.99 / 1.47 / 0.86% |
+
+Everything else passes: on this host SGLang matches vLLM on gsm8k and ifeval (RunPod's
+b03b3c52 left ifeval inconclusive at −0.80 [−2.03, +0.37]), and its logprobs are as close
+to vLLM's as vLLM's own noise floor. With strict tools, SGLang scored 0.867 against
+vLLM's 0.978 (and its own 0.978 on plain tool calling): 18 of 135 items failed, 14 of
+them by calling the **wrong function** (a thermostat request answered with
+`get_weather {"city": "house"}`), 3 with a wrong value and 1 missing an argument; 15 of
+the 18 pass under plain tools. SGLang 0.5.21's qwen25 strict mode forces its legacy
+structural tag (`<tool_call>\n{"name":"<tool>", "arguments":`, quality-gate.md, "Strict
+tool calling"), and in these replies the constrained call no longer follows the request.
+(The stored `unconstrained_text` cannot show the model's own reply here: SGLang drops the
+tools under `tool_choice: "none"`.)
+
+So SGLang is blocked on this config and vLLM stays the 8B engine. The SGLang row is
+unranked by the gate; on cost alone it would also rank second.
+
+**Cross-check against 95cde129** (`bench compare 95cde129 fccf9ed3`, exit 0): the vLLM
+bf16 cell, the same config hash `48f3d8d1…`, measured again on another g6e.xlarge one day
+later, followed the same search path (4.5, 3, 2, 2.449, 2.213 req/s), found the same knee
+(2.213, fails at 2.449, $0.1765 per 1M blended), and every metric at all 5 matched loads
+is within normal variance. Its eval scores repeat too (gsm8k 0.904 against 0.902, ifeval
+0.826 both, json_schema 0.909 against 0.911, tool tasks 0.978 both). That is the
+evidence the stored-baseline plan relied on; the user paid for the same-host rerun
+instead, and it agrees.
+
+**SGLang retraction metric.** On every SGLang run of fccf9ed3 the server metrics list
+`preemptions` as missing (in the smoke it read 0): SGLang 0.5.21 exposes
+`sglang:num_retracted_requests_total` only after its first retraction, which never
+happened here (KV use peaked at 0.98-0.99 in overload). Read it as zero; reporting an
+absent SGLang counter as 0 is a small follow-up, not done.
+
+**Plan against measured.**
+
+| Step | Planned | Measured |
+|---|---|---|
+| Cold start (vLLM) | 14.5 min | 9.8 min |
+| bf16 chat search | 1.56 h | 74.7 min |
+| bf16 eval (3 passes) | 42.1 min | 25.9 min |
+| Warm restart onto SGLang | 9.7 min | 10.2 min |
+| sglang chat search | 1.56 h | 74.2 min |
+| sglang eval (3 passes) | 41.3 min | 28.0 min |
+| Total | 5.03 h, $9.46 | 3.71 h, $7.00 |
+
+Spend, both experiments: **$8.9543** recorded (smoke $1.9554, real run $6.9989; the three
+no-capacity attempts $0), against $13.75 of caps. AWS-side, from the instances' launch
+and shutdown times at $1.861/h plus the 200 GB gp3 volume, about $1.95 and $6.99.

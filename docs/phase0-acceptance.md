@@ -64,7 +64,7 @@ uv run pytest -q -n auto
 | D3 | Workload profiles | **met** as profiles; 4 of 10 have run on a GPU |
 | D4 | Quality gate with pinned eval subsets per model | **met**; the long-context, MMLU-Pro and code tasks have never run on a GPU |
 | D5 | Provenance in Postgres + CSV export | **met**; the real results live in SQLite, not Postgres |
-| D6 | Model A leaderboard: vLLM vs SGLang, one GPU type, AWS | **changed**: engines compared on RunPod 1x L40S (`reports/8b-engines-v1`); the AWS g6e.xlarge leaderboard ran 2026-10-11 (95cde129, `reports/8b-aws-g6e-v1`), vLLM only |
+| D6 | Model A leaderboard: vLLM vs SGLang, one GPU type, AWS | **met** (2026-10-12): vLLM vs SGLang on one AWS g6e.xlarge, same host (fccf9ed3, `reports/8b-aws-engines-v1`); also on RunPod 1x L40S (`reports/8b-engines-v1`) and vLLM BF16 + fp8-kv8 on AWS (95cde129, `reports/8b-aws-g6e-v1`) |
 | D7 | Model B leaderboard: one tensor-parallel config | **changed**: RunPod 2x H100 SXM, TP=2 |
 | D8 | Public results page + waitlist | **partly**: site built, not published; no waitlist backend |
 | D9 | Docs | **met** |
@@ -664,12 +664,47 @@ LOOM_TEST_DATABASE_URL=postgresql+psycopg://loom:loom@localhost:5432/loom uv run
 
 ### D6. Model A leaderboard: vLLM vs SGLang, one GPU type, AWS
 
-**Status: changed** (PLAN.md decision, 2026-10-05: RunPod Secure Cloud, because the AWS
-GPU spot quota is 0). The vLLM-vs-SGLang comparison ran on RunPod Secure 1x L40S, the GPU
-in AWS g6e.xlarge. A Model A leaderboard on AWS itself ran on 2026-10-10/11 on one
-g6e.xlarge on-demand host, with vLLM only (BF16 and fp8-kv8; SGLang was not re-run on
-AWS). The spot quota is still 0; the on-demand G/VT quota (4 vCPU) fits that one host.
-The user decides whether this meets D6 (open item 4).
+**Status: met** (2026-10-12). vLLM v0.30.0 and SGLang v0.5.21, both BF16, ran on one
+AWS g6e.xlarge on-demand host (1x L40S) in one experiment, fccf9ed3, on chat-sharegpt at
+the SLO, with SGLang gated against vLLM. The spot quota is still 0; the on-demand G/VT
+quota (4 vCPU) fits that one host. The engines were compared earlier on RunPod Secure
+1x L40S, and vLLM alone (BF16 and fp8-kv8) on AWS in 95cde129; both stay as evidence
+below.
+
+Evidence, AWS engines (`qwen3-8b-sglang-aws-g6e`, fccf9ed3, 2026-10-11 21:34 to
+2026-10-12 01:17 UTC):
+
+- Smoke first: `aws-smoke-g6e-sglang` deb3ba58 passed ($1.96): both engines, the warm
+  restart that switches image (vLLM to SGLang), SGLang's metrics, tool_calling_strict on
+  SGLang, no client saturation on 4 vCPU. Three earlier attempts found no on-demand
+  capacity and launched nothing ($0).
+- Run: exit 0, $7.00 (DB), 3.71 h of a 5.17 h TTL, 30 of 30 load runs, 3 phase0-strict
+  passes per engine, one gate. The runner terminated the host (EC2 `terminated`); no
+  Loom-managed instance or volume remained, and `bench reap --dry-run` reported no
+  expired resources. AMI ami-028357be7d5b15c53 (driver 595.91.07, CUDA 13.2), us-east-1a.
+- Leaderboard at the SLO, $1.8829/h, both trusted: vLLM 2.213 req/s (fails at 2.449),
+  $0.1765 per 1M blended; SGLang 1.633 req/s (fails at 2), $0.2453. At equal load SGLang's
+  TPOT p95 is 14% higher at 2 req/s and 23% higher at 3 req/s (significant), with the
+  same TTFT.
+- Gate: SGLang **fails** on tool_calling_strict only (−11.11 pts [−16.30, −5.93] against
+  a 6-pt margin: under strict tools it calls the wrong function on 14 of 135 items).
+  gsm8k, ifeval, tool_calling, json_schema, divergence (KL 0.0007) and sanity pass. So
+  vLLM stays the 8B engine on AWS as on RunPod.
+- Cross-check: vLLM's bf16 cell is 95cde129's config hash; measured again on another
+  host a day later it followed the same search path, found the same knee and was within
+  normal variance at all 5 matched loads (`bench compare 95cde129 fccf9ed3`, exit 0).
+- Details: [benchmark-lab.md](benchmark-lab.md#qwen3-8b-vllm-vs-sglang-on-aws-g6exlarge-result-fccf9ed3-2026-10-12).
+  Report: [reports/8b-aws-engines-v1](../reports/8b-aws-engines-v1/leaderboard.md):
+
+```bash
+uv run bench report --db $REAL --out $ACC/8b-aws-engines -e fccf9ed3
+uv run bench compare fccf9ed3 fccf9ed3 --match-by workload --cell-a bf16 --cell-b sglang --db $REAL
+#   Verdict: outside normal variance (4 metrics outside; 3 load points matched; ...)
+#   (TPOT p95 +23% and E2E p95 +20% at 3 req/s; TPOT p95 -14% at 4.5 req/s)
+uv run bench compare 95cde129 fccf9ed3 --db $REAL; echo "exit=$?"
+#   Verdict: within normal variance (5 load points matched; 2 unmatched, not judged)
+#   exit=0
+```
 
 Evidence, RunPod (engines):
 
@@ -941,10 +976,10 @@ These are either not met or wait on a decision from you:
    config (2x H100 SXM, TP=2). FP8 is priced and BF16 stays the unpriced reference.
 3. **8B winner (P1/P2).** Accept BF16 as the 8B row, or approve a quality-only rerun to
    settle fp8-kv8's inconclusive gate (it is about 2.2x cheaper on chat if it passes).
-4. **Model A on AWS (D6).** The AWS g6e.xlarge leaderboard ran (95cde129, $6.39): BF16
-   on vLLM. It matches RunPod's latency at equal load, and fp8-kv8's gate failed on
-   ifeval. The engine comparison (vLLM vs SGLang) is RunPod-only. Accept that as D6, or
-   ask for SGLang on AWS too.
+4. **Model A on AWS (D6).** Done 2026-10-12, as the user asked: vLLM vs SGLang on one
+   AWS g6e.xlarge host (fccf9ed3, $7.00; smoke deb3ba58, $1.96). vLLM holds 2.213 req/s at
+   the SLO against SGLang's 1.633 ($0.1765 against $0.2453 per 1M blended), and SGLang's
+   gate fails on strict tool calling, so vLLM stays the 8B engine. Nothing to decide.
 5. **Reproduce on real hardware (A1).** Done 2026-10-11: one paid reproduce of 7a8237d0's
    bf16 chat-sharegpt goodput point on RunPod (940b437e, $0.23) came out within normal
    variance. Nothing to decide.
