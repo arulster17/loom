@@ -18,7 +18,12 @@ RunPod pod or an EC2 instance, except the paid A1 reproduce (marked paid; it ran
 `bench compare` counted unmatched cells against its verdict (A1), ids had to be given in
 full (A3), and `bench site export` defaulted to the newest experiment of each name (D8).
 The D6 report is now committed. The commands in A1, A3, D6 and D8 were re-run after
-those fixes.
+those fixes. On 2026-10-30 the five committed reports (`8b-config-sweep-v1`,
+`70b-h100-v2`, `8b-aws-g6e-v1`, `8b-engines-v1`, `8b-aws-engines-v1`) were regenerated
+from the real DB with the current code: they had been rendered before the rule that ranks
+a candidate only on a gate pass, so the 8B sweep still showed fp8-kv8 as quoted. No
+measured value changed; ranks, labels, the quoted config and the competitiveness rows
+that follow from it did.
 
 ## Setup
 
@@ -353,11 +358,9 @@ diff -q reports/8b-config-sweep-v1/leaderboard.csv $ACC/8b-sweep/leaderboard.csv
 #   identical / identical
 uv run bench report -e 9f0853d7-e708-43b2-a16f-a4e9e48cf473 -e 9e5f7866-f2f3-4672-bc05-925fe270271c \
   --db $REAL --out $ACC/70b-h100
-diff reports/70b-h100-v2/leaderboard.md $ACC/70b-h100/leaderboard.md
-#   one line differs: "Price book last checked: 2026-10-08" -> "2026-10-09"
-#   (bench/prices.yaml was re-checked after the report was committed; no number changes)
+diff -q reports/70b-h100-v2/leaderboard.md $ACC/70b-h100/leaderboard.md && echo identical
 diff -q reports/70b-h100-v2/leaderboard.csv $ACC/70b-h100/leaderboard.csv && echo identical
-#   identical
+#   identical / identical
 ```
 
 Experiment and run ids can be given in full or as a unique prefix of at least 4 hex

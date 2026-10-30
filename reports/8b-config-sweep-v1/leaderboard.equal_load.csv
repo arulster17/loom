@@ -1,24 +1,24 @@
 model,workload,load_mode,load,config,metric,value,value_lo,value_hi,value_ci_method,slo_met,significantly_lower,verdict
-Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16-kv8,ttft_ms.p50,224.3004,213.425,235.73,log_t,False,False,no significant difference
-Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16-kv8,ttft_ms.p95,446.4447,415.0941,480.1632,log_t,False,True,bf16-kv8 lower
-Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16-kv8,tpot_ms.p50,50.2471,48.2544,52.322,log_t,False,True,bf16-kv8 lower
-Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16-kv8,tpot_ms.p95,58.8531,52.9095,65.4644,log_t,False,True,bf16-kv8 lower
-Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16-kv8,e2e_ms.p95,36274.1428,32969.9454,39909.4818,log_t,False,True,bf16-kv8 lower
 Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16,ttft_ms.p50,1141.6065,31.4897,41387.0976,log_t,False,False,no significant difference
 Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16,ttft_ms.p95,19698.2552,9076.1958,42751.5299,log_t,False,False,bf16-kv8 lower
 Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16,tpot_ms.p50,93.6958,77.405,113.4153,log_t,False,False,bf16-kv8 lower
 Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16,tpot_ms.p95,112.5489,107.9934,117.2966,log_t,False,False,bf16-kv8 lower
 Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16,e2e_ms.p95,72294.6081,58608.4533,89176.7324,log_t,False,False,bf16-kv8 lower
-Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16-kv8,ttft_ms.p50,183.7351,181.081,186.4281,log_t,True,True,bf16-kv8 lower
-Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16-kv8,ttft_ms.p95,268.6819,255.8642,282.1417,log_t,True,True,bf16-kv8 lower
-Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16-kv8,tpot_ms.p50,41.1316,38.9754,43.4071,log_t,True,True,bf16-kv8 lower
-Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16-kv8,tpot_ms.p95,43.3654,42.7506,43.9891,log_t,True,True,bf16-kv8 lower
-Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16-kv8,e2e_ms.p95,44573.2051,43974.1141,45180.458,log_t,True,True,bf16-kv8 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16-kv8,ttft_ms.p50,224.3004,213.425,235.73,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16-kv8,ttft_ms.p95,446.4447,415.0941,480.1632,log_t,False,True,bf16-kv8 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16-kv8,tpot_ms.p50,50.2471,48.2544,52.322,log_t,False,True,bf16-kv8 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16-kv8,tpot_ms.p95,58.8531,52.9095,65.4644,log_t,False,True,bf16-kv8 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,4.5,bf16-kv8,e2e_ms.p95,36274.1428,32969.9454,39909.4818,log_t,False,True,bf16-kv8 lower
 Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16,ttft_ms.p50,325.4877,189.9057,557.8676,log_t,False,False,bf16-kv8 lower
 Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16,ttft_ms.p95,10738.4689,9382.2403,12290.7441,log_t,False,False,bf16-kv8 lower
 Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16,tpot_ms.p50,67.2248,54.0517,83.6082,log_t,False,False,bf16-kv8 lower
 Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16,tpot_ms.p95,75.1464,63.6745,88.6852,log_t,False,False,bf16-kv8 lower
 Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16,e2e_ms.p95,80541.2193,62233.7593,104234.2305,log_t,False,False,bf16-kv8 lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16-kv8,ttft_ms.p50,183.7351,181.081,186.4281,log_t,True,True,bf16-kv8 lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16-kv8,ttft_ms.p95,268.6819,255.8642,282.1417,log_t,True,True,bf16-kv8 lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16-kv8,tpot_ms.p50,41.1316,38.9754,43.4071,log_t,True,True,bf16-kv8 lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16-kv8,tpot_ms.p95,43.3654,42.7506,43.9891,log_t,True,True,bf16-kv8 lower
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.5,bf16-kv8,e2e_ms.p95,44573.2051,43974.1141,45180.458,log_t,True,True,bf16-kv8 lower
 RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8-kv8,ttft_ms.p50,143.9956,133.4262,155.4024,log_t,True,True,fp8-kv8 lower
 RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8-kv8,ttft_ms.p95,295.1081,276.4875,314.9827,log_t,True,True,fp8-kv8 lower
 RedHatAI/Qwen3-8B-FP8-dynamic,chat-sharegpt,open_loop,4.5,fp8-kv8,tpot_ms.p50,29.1325,27.9193,30.3983,log_t,True,False,no significant difference
