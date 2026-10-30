@@ -58,7 +58,7 @@ uv run pytest -q -n auto
 | A2 | The quality gate blocks a deliberately broken config, in a test | **met** |
 | A3 | The report states $/1M tokens at SLO with confidence intervals | **met** |
 | A4 | A hard budget abort works | **met** on the mock; never triggered on a paid run |
-| A5 | The TTL reaper removes orphaned resources | **partly**: AWS Lambda live; scheduled RunPod reaper built and tested, not yet deployed |
+| A5 | The TTL reaper removes orphaned resources | **met**: AWS Lambda and scheduled RunPod reaper both live (RunPod since 2026-10-30) |
 | D1 | `bench` CLI: run, report, compare | **met** |
 | D2 | Load generators | **met** (only the native one has run on a GPU) |
 | D3 | Workload profiles | **met** as profiles; 4 of 10 have run on a GPU |
@@ -408,16 +408,11 @@ simulated $1/s, within the documented worst case. At real prices that's about a 
 > "the TTL reaper removes orphaned resources" (§7.6: "tag every cloud resource; TTL
 > reaper that tears down leftover benchmark infrastructure automatically")
 
-**Status: partly.** On AWS, the reaper runs automatically and is live. On RunPod, which
-is the provider every real run used, the scheduled reaper is built and tested but not
-deployed: until you deploy it, the automatic backstop there is the in-pod TTL watchdog,
-and a pod stuck before its container starts has no watchdog.
-
-What remains for you (free apart from $0.40 a month for the secret): apply the Terraform,
-put a RunPod key into the empty secret, check a dry-run invoke, then set
-`runpod_reaper_dry_run = false` and apply again. The commands are in
-[aws-setup.md, step 8](aws-setup.md#8-turn-on-the-runpod-reaper). The plan against the
-applied stack (read-only, 2026-10-10) is 10 to add, 0 to change, 0 to destroy.
+**Status: met.** On AWS, the reaper runs automatically and is live. On RunPod, which is
+the provider every real run used, the scheduled reaper was deployed and turned live on
+2026-10-30 following [aws-setup.md, step 8](aws-setup.md#8-turn-on-the-runpod-reaper), so
+a pod stuck before its container starts (no in-pod watchdog yet) is removed too. It costs
+about $0.40 a month for the secret.
 
 Evidence:
 
@@ -439,7 +434,7 @@ Evidence:
   pods were terminated by the runner (`terminated_by: runner` in `bench_resources`). The
   teardown check, a clean `bench reap --dry-run`, is recorded for the smoke runs and the
   70B quality rerun ([runbook-runpod.md](runbook-runpod.md#5-teardown-verification)).
-- RunPod, scheduled (built, not deployed): the `loom-bench-runpod-reaper` Lambda
+- RunPod, scheduled (live since 2026-10-30): the `loom-bench-runpod-reaper` Lambda
   (`infra/aws/bench/runpod_reaper.tf`, code
   `bench/src/loom_bench/providers/runpod_reaper_lambda.py`) every 15 minutes, a separate
   function from the EC2 reaper so only its role can read the RunPod key (Secrets Manager
@@ -449,7 +444,12 @@ Evidence:
   env has `LOOM_MANAGED=true` and a matching `LOOM_TTL`, and the TTL has passed; it
   deletes network volumes named `loom-bench-vol-…` the same way (Loom creates none
   today). It deletes nothing when a listing fails or has an unexpected shape, or when more
-  than 10 resources qualify at once. It deploys in dry run.
+  than 10 resources qualify at once. It deploys in dry run. Deployed 2026-10-30: apply
+  was 10 to add, 0 to change, 0 to destroy; a dry-run invoke with its own RunPod key
+  returned `{"dry_run": true, "reaped": [], "failed": [], "kept": 0}` and logged
+  `0 pods and 0 volumes listed; 0 Loom-named resources kept`; then
+  `runpod_reaper_dry_run = false` was applied (1 to change). Checked 2026-10-30:
+  `LOOM_RUNPOD_REAPER_DRY_RUN=false`, schedule `ENABLED`, `rate(15 minutes)`.
   Tests: `bench/tests/runpod/test_runpod_reaper_lambda.py` (fake RunPod API):
   `::test_expired_loom_pod_is_reaped_and_unexpired_kept`,
   `::test_pods_that_are_not_loom_managed_are_never_touched`,
@@ -986,11 +986,9 @@ These are either not met or wait on a decision from you:
 5. **Reproduce on real hardware (A1).** Done 2026-10-11: one paid reproduce of 7a8237d0's
    bf16 chat-sharegpt goodput point on RunPod (940b437e, $0.23) came out within normal
    variance. Nothing to decide.
-6. **Scheduled RunPod reaper (A5).** Built and tested, not deployed. Deploy it with
-   [aws-setup.md, step 8](aws-setup.md#8-turn-on-the-runpod-reaper): apply, put a
-   RunPod key of its own into the empty secret, check a dry-run invoke, then turn dry run
-   off. Until then the RunPod backstops are the in-pod watchdog and a manual
-   `bench reap`, and a pod stuck before its container starts has neither.
+6. **Scheduled RunPod reaper (A5).** Done 2026-10-30: deployed with its own RunPod key,
+   checked with a dry-run invoke, and live (dry run off, every 15 minutes). Nothing to
+   decide.
 7. **Results site and waitlist (D8).** Deferred by you 2026-10-11: no waitlist backend
    is chosen and nothing is published. The committed snapshot and the pinned list
    (`site/config.yaml`, `publish.experiments`) stay empty, and GitHub Pages stays off.
