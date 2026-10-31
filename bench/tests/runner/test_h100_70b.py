@@ -171,13 +171,15 @@ def test_the_quality_rerun_fits_its_cap_to_ttl_and_runs_no_load():
     assert host.seconds < 0.8 * host.ttl_s
 
 
-# --- the FP8 capacity search (proposed 2026-10-31, not approved) ---------------------
+# --- the FP8 capacity search (approved 2026-10-31: fixed-1k-1k only, $14.70 cap) -----
 
 
-def test_the_capacity_search_is_marked_proposed_not_approved():
+def test_the_capacity_search_is_marked_approved_at_its_cap():
     text = LLAMA_H100_FP8_CAPACITY_RUNPOD.read_text()
-    assert text.startswith("# PROPOSED 2026-10-31, NOT APPROVED")
-    assert "APPROVED 20" not in text.split("\nname:")[0].replace("NOT APPROVED", "")
+    assert text.startswith(
+        "# APPROVED 2026-10-31 (user): fixed-1k-1k only, no smoke, $14.70 cap\n"
+    )
+    assert "NOT APPROVED" not in text
 
 
 def test_the_capacity_search_is_9f0853d7s_fp8_cell_load_only():
@@ -193,10 +195,13 @@ def test_the_capacity_search_is_9f0853d7s_fp8_cell_load_only():
     assert (cell.launch, cell.host_key, cell.hardware) == (ran.launch, ran.host_key, ran.hardware)
     # Load only: no eval job, no gate (the FP8 gate passed in 9e5f7866).
     assert cap.quality is None
-    # Same profiles, durations, warmup, drain, repetitions and SLO as 9f0853d7.
+    # fixed-1k-1k only (shared-prefix dropped at approval), with 9f0853d7's profile,
+    # duration, warmup, drain, repetitions and SLO.
+    assert [w.profile for w in cap.workloads] == ["fixed-1k-1k"]
     assert cap.slo == real.slo and cap.repetitions == real.repetitions
-    assert _load_shape(cap) == _load_shape(real)
-    for a, b in zip(cap.workloads, real.workloads, strict=True):
+    assert set(_load_shape(cap).items()) <= set(_load_shape(real).items())
+    same = [w for w in real.workloads if w.profile == "fixed-1k-1k"]
+    for a, b in zip(cap.workloads, same, strict=True):
         assert a.profile == b.profile and a.overrides == b.overrides
         assert (a.load.duration_s, a.load.warmup_s, a.load.drain_timeout_s) == (
             b.load.duration_s,
@@ -266,9 +271,11 @@ def test_the_capacity_search_resolves_goodput_within_10_percent_inside_the_old_b
 def test_the_capacity_search_fits_its_cap_to_ttl():
     plan = _plan(load_experiment(LLAMA_H100_FP8_CAPACITY_RUNPOD))
     assert plan.ok, plan.refusals
-    assert plan.caps.effective == parse_usd("$22.50")
+    assert plan.caps.effective == parse_usd("$14.70")
     assert plan.total_micros < plan.ttl_worst_micros <= plan.caps.effective
-    assert plan.n_runs_max == 2 * 5 * 3
+    # The smallest cap the planner accepts: a cent less is under the TTL worst case.
+    assert plan.ttl_worst_micros > parse_usd("$14.69")
+    assert plan.n_runs_max == 1 * 5 * 3
     (host,) = plan.hosts
     kinds = [s.kind for s in host.steps]
     assert kinds.count("cold_start") == 1 and "warm_start" not in kinds and "eval" not in kinds

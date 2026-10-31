@@ -236,10 +236,11 @@ def test_the_h200_smoke_fits_its_cap_to_ttl():
 
 def test_option_b_fits_the_overall_cap_left_on_2026_10_31():
     # $149.75 overall, $96.57 billable spend in the results DB on 2026-10-31: $53.18 left.
-    # The three caps together fit it, so each can be approved without raising the cap.
+    # The three caps together fit it, so each can be approved without raising the cap
+    # (the capacity search's at its approved, cut-down $14.70).
     left = parse_usd("$149.75") - parse_usd("$96.57")
     caps = [
         load_experiment(p).budget.max_spend
         for p in (RUNPOD_SMOKE_H200, LLAMA_H200_FP8_RUNPOD, LLAMA_H100_FP8_CAPACITY_RUNPOD)
     ]
-    assert sum(caps) == parse_usd("$48.50") <= left
+    assert sum(caps) == parse_usd("$40.70") <= left
