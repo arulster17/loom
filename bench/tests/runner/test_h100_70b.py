@@ -27,6 +27,7 @@ from loom_bench.runner import run_experiment
 
 from .conftest import (
     LLAMA_FP8_RUNPOD,
+    LLAMA_H100_FP8_CAPACITY_RUNPOD,
     LLAMA_H100_QUALITY_RUNPOD,
     LLAMA_H100_RUNPOD,
     RUNPOD_SMOKE_FP8,
@@ -168,6 +169,110 @@ def test_the_quality_rerun_fits_its_cap_to_ttl_and_runs_no_load():
     assert kinds.count("cold_start") == 1 and kinds.count("warm_start") == 1
     assert kinds.count("eval") == 2 and "workload" not in kinds
     assert host.seconds < 0.8 * host.ttl_s
+
+
+# --- the FP8 capacity search (proposed 2026-10-31, not approved) ---------------------
+
+
+def test_the_capacity_search_is_marked_proposed_not_approved():
+    text = LLAMA_H100_FP8_CAPACITY_RUNPOD.read_text()
+    assert text.startswith("# PROPOSED 2026-10-31, NOT APPROVED")
+    assert "APPROVED 20" not in text.split("\nname:")[0].replace("NOT APPROVED", "")
+
+
+def test_the_capacity_search_is_9f0853d7s_fp8_cell_load_only():
+    # The FP8 cell alone, verbatim: the same config hash, launch and pod, so 9e5f7866's
+    # evals and gate (by config hash) apply to it in a report that selects both.
+    cap, real = load_experiment(LLAMA_H100_FP8_CAPACITY_RUNPOD), load_experiment(LLAMA_H100_RUNPOD)
+    assert cap.model == real.model and cap.provider == real.provider and not cap.smoke
+    assert cap.variants == [v for v in real.variants if v.name == "vllm-tp2-fp8"]
+    (cell,) = expand(cap, REGISTRY)
+    ran = expand(real, REGISTRY)[1]
+    assert cell.config_hash == ran.config_hash
+    assert cell.config_hash.startswith("0381825d763025fd")
+    assert (cell.launch, cell.host_key, cell.hardware) == (ran.launch, ran.host_key, ran.hardware)
+    # Load only: no eval job, no gate (the FP8 gate passed in 9e5f7866).
+    assert cap.quality is None
+    # Same profiles, durations, warmup, drain, repetitions and SLO as 9f0853d7.
+    assert cap.slo == real.slo and cap.repetitions == real.repetitions
+    assert _load_shape(cap) == _load_shape(real)
+    for a, b in zip(cap.workloads, real.workloads, strict=True):
+        assert a.profile == b.profile and a.overrides == b.overrides
+        assert (a.load.duration_s, a.load.warmup_s, a.load.drain_timeout_s) == (
+            b.load.duration_s,
+            b.load.warmup_s,
+            b.load.drain_timeout_s,
+        )
+
+
+# 9f0853d7's FP8 brackets: the highest passing and the first failing load per workload.
+BRACKETS_9F0853D7 = {"fixed-1k-1k": (2.0, 4.0), "shared-prefix": (4.0, 8.0)}
+
+
+def _search(search, threshold: float) -> list[tuple[float, bool]]:
+    """The runner's search (`runner._next_search_load`) against a server that meets the
+    SLO up to `threshold`."""
+    from loom_bench.slo import bisect_next_load
+
+    history: list[tuple[float, bool]] = []
+    while len(history) < search.max_points:
+        nxt = bisect_next_load(
+            history,
+            search.lo,
+            search.hi,
+            search.rel_tol,
+            scale=search.scale,
+            step=search.step,
+            descend=search.descend,
+        )
+        if nxt is None:
+            break
+        history.append((nxt, nxt <= threshold))
+    return history
+
+
+def test_the_capacity_search_resolves_goodput_within_10_percent_inside_the_old_bracket():
+    exp = load_experiment(LLAMA_H100_FP8_CAPACITY_RUNPOD)
+    for w in exp.workloads:
+        s = w.load.search
+        assert s is not None and s.scale == "geometric" and s.rel_tol <= 0.10
+        passed, failed = BRACKETS_9F0853D7[w.profile]
+        # Starts just above the old pass, never above the old failure, and a failing
+        # first point descends to the old pass.
+        assert passed < s.lo < failed == s.hi
+        assert s.lo / s.step == pytest.approx(passed) and s.descend >= 1
+        floor = s.lo / s.step**s.descend
+        # Any true limit from the descent floor to the old failure: the search stops on
+        # rel_tol, not on max_points, with the bracket within 10% of the passing load.
+        n = 400
+        for i in range(n):
+            t = floor + (failed - floor) * i / n
+            hist = _search(s, t)
+            assert all(floor * (1 - 1e-9) <= load <= s.hi for load, _ in hist)
+            fails = [load for load, ok in hist if not ok]
+            passes = [load for load, ok in hist if ok and load < min(fails, default=1e9)]
+            assert fails and passes, (w.profile, t, hist)
+            lo, hi = max(passes), min(fails)
+            assert lo <= t < hi and hi - lo <= s.rel_tol * lo, (w.profile, t, hist)
+            assert len(hist) <= s.max_points
+            # max_points is never what ends it (the search would have stopped anyway).
+            assert _search(s.model_copy(update={"max_points": 99}), t) == hist
+        # The climb's first overloaded point is at most one step past the limit: the
+        # 9f0853d7 load that queued ~62 s TTFT (4 req/s on fixed-1k-1k) is only retested
+        # when the limit is above lo * step**3.
+        assert max(load for load, _ in _search(s, passed * 1.3)) < failed
+
+
+def test_the_capacity_search_fits_its_cap_to_ttl():
+    plan = _plan(load_experiment(LLAMA_H100_FP8_CAPACITY_RUNPOD))
+    assert plan.ok, plan.refusals
+    assert plan.caps.effective == parse_usd("$22.50")
+    assert plan.total_micros < plan.ttl_worst_micros <= plan.caps.effective
+    assert plan.n_runs_max == 2 * 5 * 3
+    (host,) = plan.hosts
+    kinds = [s.kind for s in host.steps]
+    assert kinds.count("cold_start") == 1 and "warm_start" not in kinds and "eval" not in kinds
+    assert host.seconds < 0.9 * host.ttl_s
 
 
 def test_the_h100_smoke_runs_the_h100_paths():
@@ -382,6 +487,7 @@ RECORDED_HASHES = {
     ("llama-3.3-70b-h100-tp2-runpod", "vllm-tp2-fp8"): "0381825d763025fd",
     ("llama-3.3-70b-h100-tp2-quality-runpod", "vllm-tp2"): "2f7fb3f9372ba095",
     ("llama-3.3-70b-h100-tp2-quality-runpod", "vllm-tp2-fp8"): "0381825d763025fd",
+    ("llama-3.3-70b-h100-tp2-fp8-capacity-runpod", "vllm-tp2-fp8"): "0381825d763025fd",
 }
 
 

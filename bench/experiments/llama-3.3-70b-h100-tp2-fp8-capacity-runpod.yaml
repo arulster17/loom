@@ -1,0 +1,90 @@
+# PROPOSED 2026-10-31, NOT APPROVED: do not run without the user's approval of the cap.
+#
+# Pins down the capacity of the shipped Llama 3.3 70B FP8 row (9f0853d7's vllm-tp2-fp8
+# cell) on one RunPod Secure 2x H100 SXM pod, TP=2, vLLM v0.30.0. 9f0853d7's geometric
+# search climbed by 2x and stopped at max_points 4: fixed-1k-1k passed 2 req/s with room
+# (TTFT p95 304 ms, TPOT p95 29.4 ms) and failed 4 (TTFT p95 ~62 s); shared-prefix passed
+# 4 and failed 8. The quoted cost ($0.546/1M blended at 1k/1k, priced in
+# config/models.yaml) is taken at the bracket's low end, so it can be overstated by up to
+# a third. This run searches inside those brackets only.
+#
+# Search: climb from just above the known pass by step 1.2 (2.4, 2.88, 3.456, 4 req/s;
+# shared-prefix 4.8, 5.76, 6.912, 8), then one geometric bisection. rel_tol 0.1 stops
+# once the bracket is within 10% of the passing load, so the quoted goodput lands within
+# 10% of the true limit. Climbing in small steps keeps the overloaded points (the slowest
+# kind: queues drain to the timeout) to one or two, mildly overloaded, where 9f0853d7's
+# 4 req/s ran ~62 s TTFT. At most 5 points per workload: 4 climbs to `hi`, then one
+# bisection (the bracket is then 7.6%). descend 2: if the first point fails, step down to
+# 2 (shared-prefix 4), 9f0853d7's pass, and below. Same profiles, durations, warmup,
+# drain, repetitions and SLO as 9f0853d7.
+#
+# Config hash: the variant, model, provider and hardware patches are 9f0853d7's FP8 cell
+# verbatim (old instance types and clouds restated, as in llama-3.3-70b-h100-tp2-runpod
+# .yaml), so this cell is config 0381825d763025fd and 9e5f7866's evals and gate (PASS vs
+# BF16 2f7fb3f9372ba095) apply to it; bench/tests/runner/test_h100_70b.py fails if it
+# drifts. The provider block is unchanged too (260 GB disk, more than one checkpoint
+# needs), so the pod's storage price, $8.0156/h, is the one the existing quote uses.
+#
+# Quality: none in this run (no `quality:` section, no eval job, no gate). Reports pair
+# evals and gates by config hash among the experiments selected, so the FP8 row ranks on
+# 9e5f7866's gate when reported together, as reports/70b-h100-v2 does:
+#   bench report -e 9f0853d7 -e <this run> -e 9e5f7866
+# A sweep is every completed run of one (config hash, workload), so 9f0853d7's points
+# (0.5, 1, 2 pass, 4 fail) and this run's merge into one search grid per workload; a
+# load both ran (2 or 4, on the descent or at `hi`) pools six repetitions from two pods.
+# To keep this pod's points apart, report it with the gate alone:
+#   bench report -e <this run> -e 9e5f7866
+#
+# Budget (proposed, not approved): `bench plan` puts the pod at 2.34 h, $18.78 at
+# $8.0156/h (cold start 20 min, every one of the 30 runs waiting out its drain); the
+# 165-minute TTL holds that with margin and the worst case (the pod living to its TTL) is
+# $22.04, under a $22.50 cap. At 9f0853d7's timings (passing points do not wait out the
+# drain, ~4 points per workload) the likely cost is ~1.5 h, $12-13. H100 SXM Secure stock
+# was "Low" on 2026-10-08: check it and run with LOOM_RUNPOD_CAPACITY_WAIT_S=7200.
+name: llama-3.3-70b-h100-tp2-fp8-capacity-runpod
+description: "Llama 3.3 70B FP8, TP=2 on RunPod Secure 2x H100 SXM, vLLM v0.30.0: fine load search inside 9f0853d7's brackets, load only (gate from 9e5f7866)."
+model: llama-3.3-70b-instruct
+provider:
+  kind: runpod
+  instance_type: h100-sxm-x2
+  gpu_type_id: NVIDIA H100 80GB HBM3
+  container_disk_gb: 260
+  engine_env: {NCCL_P2P_LEVEL: NVL}
+variants:
+  # 9f0853d7's FP8 cell, verbatim (see llama-3.3-70b-h100-tp2-runpod.yaml for why each
+  # patch is there and why the old instance types and clouds are restated).
+  - name: vllm-tp2-fp8
+    model: llama-3.3-70b-instruct-fp8
+    hardware:
+      gpu: H100
+      gpus_per_replica: 2
+      instance_types: {aws: g6e.12xlarge, runpod: l40s-x4}
+    clouds: [aws, runpod]
+    parallelism: {tp: 2}
+    engine:
+      args: {gpu_memory_utilization: 0.95}
+workloads:
+  - profile: fixed-1k-1k
+    load:
+      mode: open_loop
+      search: {lo: 2.4, hi: 4, step: 1.2, rel_tol: 0.1, max_points: 5, scale: geometric, descend: 2}
+      duration_s: 180
+      warmup_s: 30
+      drain_timeout_s: 90
+  - profile: shared-prefix
+    load:
+      mode: open_loop
+      search: {lo: 4.8, hi: 8, step: 1.2, rel_tol: 0.1, max_points: 5, scale: geometric, descend: 2}
+      duration_s: 120
+      warmup_s: 20
+      drain_timeout_s: 30
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+budget:
+  max_spend: "$22.50"
+  ttl_minutes: 165
+  accrual_interval_s: 15
+seed: 0
