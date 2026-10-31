@@ -120,3 +120,39 @@ def test_reproduce_unknown_reference(db, tmp_path):
     assert_invalid(
         invoke("reproduce", NOT_AN_ID, "--db", db, "--out", tmp_path), "cannot reproduce"
     )
+
+
+# Nothing listens on port 1, so the connection is refused at once.
+UNREACHABLE = "postgresql+psycopg://loom:s3cret@127.0.0.1:1/loom"
+EXPERIMENT = "<experiment yaml>"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("plan", EXPERIMENT),
+        ("run", EXPERIMENT),
+        ("reproduce", NOT_AN_ID),
+        ("report", "-e", NOT_AN_ID),
+        ("competitiveness", "-e", NOT_AN_ID),
+        ("compare", NOT_AN_ID, NOT_AN_ID),
+        ("export", "csv", "--out", "x.csv"),
+        ("reap", "--dry-run"),
+        ("db", "upgrade"),
+        ("quality", "gate", "--baseline", "a", "--candidate", "b"),
+        ("site", "export", "-e", NOT_AN_ID),
+        ("waitlist", "count", "--no-record"),
+    ],
+)
+def test_unreachable_database_is_one_clean_line(tmp_path, monkeypatch, args):
+    experiment = write_yaml(tmp_path / "exp.yaml", mock_doc())
+    args = tuple(experiment if a == EXPERIMENT else a for a in args)
+    monkeypatch.chdir(tmp_path)  # relative --out paths land in the scratch dir
+    monkeypatch.setenv("LOOM_DATABASE_URL", UNREACHABLE)  # no --db: the env fallback
+    for result in (invoke(*args), invoke(*args, "--db", UNREACHABLE)):
+        assert_invalid(
+            result,
+            "cannot reach the database postgresql+psycopg://loom:***@127.0.0.1:1/loom",
+            "pass --db URL or set LOOM_DATABASE_URL",
+        )
+        assert "s3cret" not in result.output

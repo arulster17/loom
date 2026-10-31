@@ -145,10 +145,37 @@ def _load(path: Path) -> Experiment:
         return load_experiment(path)
 
 
+def _db(db: str | None) -> str | None:
+    """`db` once the database it names (--db, else $LOOM_DATABASE_URL, else local
+    Postgres) accepts a connection. Every command calls this before it touches the
+    database, so an unreachable one is a one-line message and exit 2, not a traceback."""
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.exc import ArgumentError, DBAPIError
+
+    from loom_bench.store.db import database_url, get_engine
+
+    url = database_url(db)
+    try:
+        with get_engine(url).connect():
+            pass
+    except ArgumentError as e:  # not a URL, or no driver for it
+        err.print(f"[red]invalid database URL:[/red] {escape(str(e))}")
+        raise typer.Exit(EXIT_INVALID) from None
+    except DBAPIError:
+        shown = make_url(url).render_as_string(hide_password=True)
+        err.print(
+            f"[red]cannot reach the database {escape(shown)}:[/red] "
+            "pass --db URL or set LOOM_DATABASE_URL",
+            soft_wrap=True,
+        )
+        raise typer.Exit(EXIT_INVALID) from None
+    return db
+
+
 def _context(db: str | None, out: Path) -> RunnerContext:
     from loom_bench.store.db import upgrade
 
-    upgrade(db)
+    upgrade(_db(db))
     with _invalid_input("invalid configuration (config/models.yaml, bench/*.yaml)"):
         return RunnerContext(
             db_url=db,
@@ -441,7 +468,7 @@ def reap_cmd(
     """
     from loom_bench.store.db import upgrade
 
-    upgrade(db)
+    upgrade(_db(db))
     ec2 = _ec2_client()
     if ec2 is None:
         console.print("[yellow]AWS not configured: EC2 instances are not reaped")
@@ -476,7 +503,7 @@ def db_upgrade(db: DbOpt = None) -> None:
     """Apply schema migrations up to head."""
     from loom_bench.store.db import database_url, upgrade
 
-    upgrade(db)
+    upgrade(_db(db))
     console.print(f"database at head: {database_url(db).split('@')[-1]}")
 
 
@@ -494,7 +521,7 @@ def export(
     from loom_bench.store.db import session_scope
     from loom_bench.store.export import export_runs_csv, export_runs_parquet
 
-    with session_scope(db) as s:
+    with session_scope(_db(db)) as s:
         exp_id = _experiment_ids(s, [experiment])[0] if experiment else None
         runs = repo.list_runs(s, experiment_id=exp_id)
         path = (export_runs_csv if fmt == "csv" else export_runs_parquet)(runs, out)
@@ -563,7 +590,7 @@ def _analyze(
     from loom_bench.store.db import session_scope, upgrade
     from loom_bench.store.models import BenchExperiment
 
-    upgrade(db)
+    upgrade(_db(db))
     with session_scope(db) as s:
         stmt = select(BenchExperiment)
         if experiments:
@@ -723,7 +750,7 @@ def compare_cmd(
     from loom_bench.store import repo
     from loom_bench.store.db import session_scope
 
-    with session_scope(db) as s:
+    with session_scope(_db(db)) as s:
         id_a, id_b = (_experiment_ids(s, [ref])[0] for ref in (a, b))
         runs_a = repo.list_runs(s, experiment_id=id_a)
         runs_b = repo.list_runs(s, experiment_id=id_b)
@@ -847,7 +874,7 @@ def quality_gate(
     from loom_bench.runner import gate_stored
 
     with _invalid_input("cannot re-decide the gate"):
-        decision, base_hash, cand_hash = gate_stored(db, baseline, candidate, suite=suite)
+        decision, base_hash, cand_hash = gate_stored(_db(db), baseline, candidate, suite=suite)
     console.print(f"baseline {base_hash[:12]} -> candidate {cand_hash[:12]}")
     console.print(decision.summary())
     raise typer.Exit(EXIT_GATE_BLOCKED if decision.blocked else EXIT_OK)
@@ -896,7 +923,7 @@ def site_export(
     with _invalid_input(f"invalid site config {config}"):
         pinned = load_site_config(config).publish.experiments
     chosen: Sequence[str | uuid.UUID] = experiment or pinned
-    with session_scope(db) as s, _invalid_input("cannot export the snapshot"):
+    with session_scope(_db(db)) as s, _invalid_input("cannot export the snapshot"):
         manifest = export_snapshot(s, out, chosen, slo=target)
         table = Table(
             title="Experiments chosen with -e" if experiment else f"Experiments pinned in {config}"
@@ -973,7 +1000,7 @@ def waitlist_count_cmd(
     from loom_bench.site import record_count, waitlist_count
     from loom_bench.store.db import session_scope
 
-    with session_scope(db) as s:
+    with session_scope(_db(db)) as s:
         count = waitlist_count(s)
     console.print(f"{count} signups")
     if record:

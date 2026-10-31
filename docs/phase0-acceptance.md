@@ -23,7 +23,13 @@ those fixes. On 2026-10-30 the five committed reports (`8b-config-sweep-v1`,
 from the real DB with the current code: they had been rendered before the rule that ranks
 a candidate only on a gate pass, so the 8B sweep still showed fp8-kv8 as quoted. No
 measured value changed; ranks, labels, the quoted config and the competitiveness rows
-that follow from it did.
+that follow from it did. On 2026-10-31 every free command on this page was re-run at
+commit `ebf804b`. All matched except three counts, now updated: the full suite (1622
+passed, 20 skipped), the D3 workload tests (32 passed) and the D5 CSV export (728 runs;
+six experiments were added since). The D1 `bench plan` command had no `--db`, so it fell back
+to local Postgres and crashed with a traceback when none was running. It now takes
+`--db $MOCK`, and any command that cannot reach its database prints one line naming it
+and exits 2.
 
 ## Setup
 
@@ -52,7 +58,7 @@ The whole test suite (about 3.5 minutes):
 
 ```bash
 uv run pytest -q -n auto
-# 1466 passed, 20 skipped   (19 of the 20 skips are the Postgres tests; see D5)
+# 1622 passed, 20 skipped   (19 of the 20 skips are the Postgres tests; see D5)
 ```
 
 ## Summary
@@ -505,7 +511,7 @@ Error paths: `bench/tests/runner/test_cli_errors.py`.
 
 ```bash
 uv run bench --help                 # lists the commands above
-uv run bench plan bench/experiments/mock-smoke.yaml
+uv run bench plan bench/experiments/mock-smoke.yaml --db $MOCK
 #   plan table; estimated spend $0.01; effective cap $1.00
 # run, report, compare: see A1 and A3.
 ```
@@ -587,7 +593,7 @@ latency and cost; the profile says "Verify before publishing". Tests:
 
 ```bash
 uv run pytest -q bench/tests/workloads
-#   20 passed
+#   32 passed
 ```
 
 ### D4. Quality gate with pinned eval subsets per model
@@ -647,7 +653,7 @@ Check it yourself (free):
 
 ```bash
 uv run bench export csv --db $REAL --out $ACC/runs.csv
-#   wrote 595 runs to .../runs.csv   (columns provenance.git.sha, provenance.engine.image_digest, ...)
+#   wrote 728 runs to .../runs.csv   (columns provenance.git.sha, provenance.engine.image_digest, ...)
 
 # Postgres (needs Docker): the compose Postgres, a throwaway database
 docker compose up -d postgres
@@ -937,7 +943,6 @@ applies:
 - Reading note: the FP8 rows sit under their own model, "RedHatAI/Qwen3-8B-FP8-dynamic".
   None is verified there, so that section ranks and quotes nothing and says why
   (`test_site_ranking.py`, `test_summary.py::test_inconclusive_candidate_is_not_ranked_and_not_quoted`).
-  The committed reports in `reports/` predate this rule; regenerate them to see it.
 
 Sweep and random search over a declared grid: `sweep:` and `sample:` in the experiment
 YAML ([benchmark-lab.md](benchmark-lab.md#experiment-yaml)). Bayesian optimization and the
