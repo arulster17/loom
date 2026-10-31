@@ -1,4 +1,6 @@
 # PROPOSED 2026-10-31, NOT APPROVED: do not run without the user's approval of the cap.
+# Lever 1 of "option B" with llama-3.3-70b-h200-fp8-runpod.yaml and runpod-smoke-h200.yaml
+# (docs/benchmark-lab.md, "70B cost levers"); it runs on its own pod and needs no smoke.
 #
 # Pins down the capacity of the shipped Llama 3.3 70B FP8 row (9f0853d7's vllm-tp2-fp8
 # cell) on one RunPod Secure 2x H100 SXM pod, TP=2, vLLM v0.30.0. 9f0853d7's geometric

@@ -473,6 +473,8 @@ The real runs are on RunPod Secure Cloud on-demand, since the AWS GPU spot quota
 | `runpod-smoke-h100` (ran three times: 4e50b5a5, e929eb0c, 4680fa3e, $6.15) | 1x RunPod 2x H100 SXM, the H100 run's paths at smoke scale (Qwen3-8B BF16 vs FP8, TP=2, NVLink P2P), 51 min of a 65 min TTL | $6.78 | $8.66 | $9 |
 | `llama-3.3-70b-h100-tp2-quality-runpod` (ran 2026-10-09 as 9e5f7866: $3.29 in 24.6 min, FP8 gate passes, results below) | 1x RunPod 2x H100 SXM, 9f0853d7's BF16 and FP8 cells again, evals and gate only (`workloads: []`), tool-calling data version 2; 1.27 h of a 2.5 h TTL (planner; ~45 min at 9f0853d7's timings) | $10.20 | $20.04 | $22 |
 | `llama-3.3-70b-h100-tp2-fp8-capacity-runpod` (**proposed 2026-10-31, not approved**) | 1x RunPod 2x H100 SXM, 9f0853d7's FP8 cell alone (same config hash, `0381825d763025fd`), load only: finer searches inside 9f0853d7's brackets (fixed-1k-1k 2.4 → 4 req/s, shared-prefix 4.8 → 8, step 1.2, `rel_tol` 0.1, at most 5 points each), so goodput lands within 10% of the limit; ranked on 9e5f7866's gate when reported with it (`bench report -e 9f0853d7 -e <id> -e 9e5f7866`); no new smoke (the run's paths ran on RunPod at an unchanged run path: 9f0853d7, 7a8237d0's FP8 cold start, 55a6222b's load-only search); 2.34 h of a 2.75 h TTL (planner, every point drained) | $18.78 | $22.04 | $22.50 |
+| `runpod-smoke-h200` (**proposed 2026-10-31, not approved**; option B, [section below](#70b-cost-levers-option-b-proposed-2026-10-31)) | 1x RunPod 1x H200 SXM ($5.29/h, "Low"), the H200 run's paths at smoke scale: Qwen3-8B FP8 at TP=1, then EAGLE3 on it (warm restart, draft download), both gated vs 8bc65cfa's stored BF16 smoke evals (limit 4); 37.5 min of a 50 min TTL | $3.31 | $4.42 | $4.50 |
+| `llama-3.3-70b-h200-fp8-runpod` (**proposed 2026-10-31, not approved**; option B) | 1x RunPod 1x H200 SXM ($5.3064/h with 120 GB of disk), the 70B FP8 row at TP=1, then with EAGLE3 (55102ddb's head, 3 draft tokens); fixed-1k-1k only, 9f0853d7's windows, search 1.44 → 3 req/s by 1.2, `rel_tol` 0.1, at most 5 points per cell; both new configs gated vs 9e5f7866's stored BF16 (2f7fb3f9); 3.43 h of a 4 h TTL | $18.23 | $21.23 | $21.50 |
 | `qwen3-8b-quality-runpod` | 2x RunPod 1x L40S, evals and gate only, 3 eval passes per engine (finishes 565b8d3f's gate), 105 min each of a 135 min TTL (planned; ~35 min at b1b904dc's measured pass time) | $3.85 | $4.95 | $5.00 |
 | `qwen3-8b-config-sweep-runpod` (ran 2026-10-09/10 as 7a8237d0: $14.44, 13.1 pod-hours, [results below](#qwen3-8b-config-sweep-result-7a8237d0-2026-10-10)) | 3x RunPod 1x L40S in sequence (host groups), 5 vLLM cells: BF16, BF16 + FP8 KV, FP8, FP8 + FP8 KV, FP8 + FP8 KV + `max_num_batched_tokens` 1024; chat-sharegpt and fixed-1k-1k; every candidate gated vs BF16 in-run, 3 passes; 7.0 / 6.6 / 3.4 h of a 7.5 h TTL. [Section below](#qwen3-8b-config-sweep-proposed) | $18.71 | $24.77 | $25 |
 | `runpod-smoke-8b-sweep` (ran 2026-10-09 as 8bc65cfa: $1.02, passed) | The sweep at smoke scale on the same three pods, 68 / 67 / 39 min of a 75 min TTL | $3.20 | $4.13 | $4.25 |
@@ -700,6 +702,41 @@ top-1 95%; BF16's self-KL ≤ 0.0004). Sanity over 2,428 FP8 outputs: empty 0%, 
   types numbers as strings, a model trait, not FP8's: the gate compares the two configs,
   and FP8 costs nothing measurable on any task.
 
+
+### 70B cost levers, option B (proposed 2026-10-31)
+
+**Not approved; nothing has run.** The FP8 row costs $0.546 per 1M blended at fixed-1k-1k
+on 2x H100 SXM (9f0853d7), 2.60x DeepInfra's $0.21. Option B tests three levers on three
+pods, run in this order:
+
+| Spec | Lever | Estimate | Worst case (TTL) | Cap |
+|---|---|---|---|---|
+| `runpod-smoke-h200` | smoke for the H200 run's new paths | $3.31 | $4.42 | $4.50 |
+| `llama-3.3-70b-h200-fp8-runpod` | 2: one H200 at TP=1; 3: EAGLE3 on it | $18.23 | $21.23 | $21.50 |
+| `llama-3.3-70b-h100-tp2-fp8-capacity-runpod` | 1: finer load search, 2x H100 FP8 (config 0381825d) | $18.78 | $22.04 | $22.50 |
+| **Total** | 6.40 pod-hours planned (0.63 H200 smoke + 3.43 H200 + 2.34 H100), 3 cold starts | **$40.32** | **$47.69** | **$48.50** |
+
+The caps sum to under the $53.18 the overall cap leaves ($149.75 − $96.57 spent). Past
+RunPod runs cost 30-80% of plan (7a8237d0 $14.44 of $18.71; 9f0853d7 $25.18 of $40.53; 9e5f7866 $3.29 of $10.20),
+so at ~70% expect ~$28.
+
+- **Pods.** H100 and H200 are separate pods in any case: the provider's instance type and
+  disk are in the capacity cell's config hash, so an H200 cell can't share its spec without
+  moving 0381825d. EAGLE3 runs on the H200 pod as a warm restart, so it costs no cold start
+  and its smoke rides the H200 smoke. On the H100 pod, folding it in would force the
+  capacity cell to be re-evaluated and re-gated (`quality` applies to every cell), and it
+  would need a 2x H100 smoke. That adds about $11 of worst case, and the total would then
+  pass the $53.18 left.
+- **Gating.** BF16 70B (141 GB) does not fit one H200, so both H200 configs are gated
+  against 9e5f7866's stored BF16 cell (`quality.baseline`). The gate covers every
+  phase0-strict task, divergence on its stored reference and noise floor, and sanity, as
+  `qwen3-8b-winner-ada-runpod` does across GPUs. `bench plan` loads and checks that
+  baseline ("quality gated against stored baseline 9e5f7866/2f7fb3f9372b on gsm8k, ifeval,
+  json_schema, tool_calling, tool_calling_strict"). The capacity search runs no evals: it
+  keeps 9e5f7866's PASS by config hash.
+- **H200 support.** A `bench/prices.yaml` entry `h200-x1` (API 2026-10-31) and
+  `RUNPOD_GPU_TYPE_IDS["H200"] = "NVIDIA H200"`. `plan.GPU_MEMORY_BANDWIDTH_GB_S`
+  already listed the H200 (4.8 TB/s).
 
 ### Qwen3-8B config sweep (proposed)
 

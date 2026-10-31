@@ -488,6 +488,9 @@ RECORDED_HASHES = {
     ("llama-3.3-70b-h100-tp2-quality-runpod", "vllm-tp2"): "2f7fb3f9372ba095",
     ("llama-3.3-70b-h100-tp2-quality-runpod", "vllm-tp2-fp8"): "0381825d763025fd",
     ("llama-3.3-70b-h100-tp2-fp8-capacity-runpod", "vllm-tp2-fp8"): "0381825d763025fd",
+    # Proposed 2026-10-31, not approved: new configs (H200, TP=1), gated on their own.
+    ("llama-3.3-70b-h200-fp8-runpod", "vllm-h200-fp8"): "28182a0916a33499",
+    ("llama-3.3-70b-h200-fp8-runpod", "vllm-h200-fp8-eagle3"): "6a006d627f1f8686",
 }
 
 

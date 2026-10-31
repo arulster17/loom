@@ -1,0 +1,74 @@
+# PROPOSED 2026-10-31, NOT APPROVED: run this smoke first, then
+# llama-3.3-70b-h200-fp8-runpod.yaml. Part of "option B" (docs/benchmark-lab.md,
+# "70B cost levers").
+#
+# The H200 run's paths at smoke scale on one RunPod Secure 1x H200 SXM pod ($5.29/h,
+# "Low", API 2026-10-31): RedHatAI's FP8-dynamic Qwen3-8B (made like the 70B FP8
+# checkpoint) at TP=1, then a warm restart onto the same with RedHatAI's Qwen3-8B EAGLE3
+# head (3 draft tokens, as the 70B run). What it runs that no earlier run has: the H200
+# GPU type id ("NVIDIA H200") and price entry; a single-GPU pod with no NCCL setting; an
+# EAGLE3 draft on a compressed-tensors FP8 target (55102ddb's EAGLE3 target was BF16)
+# and the draft's download on a warm restart onto it; and a gate against a stored
+# baseline on RunPod (every cell a candidate, divergence scored on the stored reference).
+# The stored baseline is 8bc65cfa's bf16 cell (runpod-smoke-8b-sweep, Qwen3-8B BF16 on
+# 1x L40S), evaluated at the same limit 4 on phase0-strict, data version 2: a smoke may
+# pair only with a smoke's evals at the same limit, as the run pairs with 9e5f7866's
+# full ones. Same workload, search shape (geometric, step 1.2, descend), repetitions,
+# SLO and quality subset as the run. The 70B weights and their KV-cache margin on one
+# H200 are what it cannot run.
+#
+# Budget (proposed, not approved): `bench plan` puts the pod at 37.5 min, $3.31 at
+# $5.3010/h with its disk; the 50-minute TTL holds it and the worst case to TTL is $4.42,
+# under a $4.50 cap.
+name: runpod-smoke-h200
+description: "The 70B H200 run's paths at smoke scale on 1x H200 SXM (Qwen3-8B FP8, with and without EAGLE3, gated vs a stored BF16 smoke)."
+model: qwen3-8b-fp8
+smoke: true
+provider:
+  kind: runpod
+  instance_type: h200-x1
+  container_disk_gb: 80
+variants:
+  - name: vllm-h200-fp8
+    hardware: {gpu: H200, gpus_per_replica: 1, instance_types: {runpod: h200-x1}}
+    parallelism: {tp: 1}
+    engine:
+      args: {gpu_memory_utilization: 0.95}  # the 70B FP8 row's, as the run serves it
+  - name: vllm-h200-fp8-eagle3
+    hardware: {gpu: H200, gpus_per_replica: 1, instance_types: {runpod: h200-x1}}
+    parallelism: {tp: 1}
+    engine:
+      args:
+        gpu_memory_utilization: 0.95
+        speculative_config:
+          method: eagle3
+          model: RedHatAI/Qwen3-8B-speculator.eagle3
+          revision: 08610ffa01dd9f16731fe8f627b85905b6aa51c4
+          num_speculative_tokens: 3
+workloads:
+  - profile: fixed-1k-1k
+    overrides: {output_len: 128}
+    load:
+      mode: open_loop
+      search: {lo: 0.5, hi: 0.6, step: 1.2, rel_tol: 0.1, max_points: 2, scale: geometric, descend: 1}
+      duration_s: 10
+      warmup_s: 2
+      drain_timeout_s: 15
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+quality:
+  suite: qwen3-8b
+  subset: phase0-strict
+  limit: 4
+  # runpod-smoke-8b-sweep (8bc65cfa)'s bf16 cell: stored smoke evals at limit 4.
+  baseline:
+    experiment: 8bc65cfa-126f-4f0e-a4df-a0db2471f3d7
+    config_hash: "7a203a3ffaccb1820fd23e6da9fab1d00c4cb51c427ce1572c56b08a8036107a"
+budget:
+  max_spend: "$4.50"
+  ttl_minutes: 50
+  accrual_interval_s: 15
+seed: 0

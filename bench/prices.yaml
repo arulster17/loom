@@ -11,7 +11,7 @@
 # instance names (l40s-x1, ...) are Loom's names for a GPU type x count. RunPod picks
 # the datacenter; the provider accrues at max(the pod's API costPerHr, this price).
 
-last_checked: 2026-10-09
+last_checked: 2026-10-31
 
 clouds:
   aws:
@@ -305,3 +305,21 @@ clouds:
             - https://www.runpod.io/pricing
             - https://docs.runpod.io/pods/pricing
           last_checked: 2026-10-08
+        # H200 SXM (RunPod id "NVIDIA H200", 141 GB HBM3e, 4.8 TB/s). From the API on
+        # 2026-10-31 20:10 UTC (gpuTypes lowestPrice, gpuCount 1, secureCloud: true):
+        # $5.29/h, stockStatus "Low"; vcpus and memory are minVcpu / minMemory. Same query:
+        # 2x H200 $10.58 "Low", H100 SXM 1x $3.99 / 2x $7.98 "Low", H200 NVL $3.79 and
+        # H100 NVL $3.19 with no stock listed, B200 1x $7.99 "Low". Proposed for
+        # llama-3.3-70b-h200-fp8-runpod (2026-10-31, not approved) and its smoke.
+        h200-x1:
+          gpu: H200
+          gpu_count: 1
+          gpu_memory_gb: 141
+          vcpus: 12
+          memory_gib: 188
+          local_nvme_gb: 0
+          on_demand_per_hour: 5_290_000
+          sources:
+            - https://www.runpod.io/pricing
+            - https://docs.runpod.io/pods/pricing
+          last_checked: 2026-10-31

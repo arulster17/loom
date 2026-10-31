@@ -28,6 +28,10 @@ QWEN_QUALITY_RUNPOD = EXPERIMENTS_DIR / "qwen3-8b-quality-runpod.yaml"
 LLAMA_H100_QUALITY_RUNPOD = EXPERIMENTS_DIR / "llama-3.3-70b-h100-tp2-quality-runpod.yaml"
 # Proposed 2026-10-31, not approved: a finer load search of 9f0853d7's FP8 cell, load only.
 LLAMA_H100_FP8_CAPACITY_RUNPOD = EXPERIMENTS_DIR / "llama-3.3-70b-h100-tp2-fp8-capacity-runpod.yaml"
+# Proposed 2026-10-31, not approved ("option B" levers 2 and 3): the 70B FP8 row on one
+# H200 at TP=1, with and without EAGLE3, gated vs 9e5f7866's stored BF16; and its smoke.
+LLAMA_H200_FP8_RUNPOD = EXPERIMENTS_DIR / "llama-3.3-70b-h200-fp8-runpod.yaml"
+RUNPOD_SMOKE_H200 = EXPERIMENTS_DIR / "runpod-smoke-h200.yaml"
 # Approved 2026-10-09: the Qwen3-8B config sweep, its smoke, and the follow-up that runs
 # the sweep's winner on L40 and RTX 6000 Ada (a draft until the sweep has run).
 QWEN_SWEEP_RUNPOD = EXPERIMENTS_DIR / "qwen3-8b-config-sweep-runpod.yaml"

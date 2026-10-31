@@ -110,6 +110,8 @@ RUNPOD_GPU_TYPE_IDS: dict[str, str] = {
     # bench/prices.yaml is SXM (loom_bench.plan, HBM bandwidth); a PCIe or NVL H100 needs
     # its own GPU name.
     "H100": "NVIDIA H100 80GB HBM3",
+    # The SXM part, 141 GB at 4.8 TB/s (loom_bench.plan); "H200 NVL" is RunPod's PCIe card.
+    "H200": "NVIDIA H200",
     "L40S": "NVIDIA L40S",
     "L40": "NVIDIA L40",
     "RTX 6000 Ada": "NVIDIA RTX 6000 Ada Generation",

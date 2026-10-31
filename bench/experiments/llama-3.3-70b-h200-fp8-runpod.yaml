@@ -1,0 +1,91 @@
+# PROPOSED 2026-10-31, NOT APPROVED: do not run without the user's approval of the cap.
+# Part of "option B" with llama-3.3-70b-h100-tp2-fp8-capacity-runpod.yaml (lever 1) and
+# runpod-smoke-h200.yaml, which runs first. docs/benchmark-lab.md, "70B cost levers".
+#
+# Levers 2 and 3 for the Llama 3.3 70B FP8 row: one RunPod Secure 1x H200 SXM pod
+# ($5.29/h, stock "Low", API 2026-10-31 20:10 UTC), vLLM v0.30.0, the FP8 checkpoint
+# alone at TP=1 (no NCCL, no all-reduce), then a warm restart onto the same with EAGLE3.
+# The shipped row runs on 2x H100 SXM at TP=2 ($8.0156/h with its disk): this pod is 0.66x
+# the price, so it is cheaper per token if it reaches 66% of that pod's goodput.
+#
+# Memory at gpu_memory_utilization 0.95: the H200 shows ~140.4 GiB, so vLLM may use
+# ~133 GiB. FP8 weights take ~67.7 GiB (72.7 GB, lm_head in BF16) and activations and
+# CUDA graphs ~4-6 GiB, leaving ~60 GiB of KV cache. Llama 3.3 70B caches 320 KiB per
+# token (80 layers x 8 KV heads x 128 x K,V x BF16), all on one GPU at TP=1: ~195-205k
+# tokens, ~6x one 32k-token request, ~95-100 concurrent 1k+1k requests (2x H100 at TP=2:
+# ~37.8 GiB per GPU at 160 KiB per token, ~245k tokens). A decode step reads 72.7 GB at
+# 4.8 TB/s (15.1 ms; 2x H100: 36 GB per GPU at 3.35 TB/s, 10.8 ms, plus the all-reduce),
+# and every token's compute lands on one GPU (2x H100: split over two).
+#
+# EAGLE3 (lever 3): RedHatAI's Llama 3.3 70B head, pinned as 55102ddb ran it (3 draft
+# tokens; mean 2.28 accepted per step on fixed-1k-1k on 4x L40S). It was trained on BF16
+# hidden states; vLLM v0.30.0 loads it unquantized (SpeculativeConfig.quantization is None
+# unless set; only MTP drafts inherit the target's) next to the FP8 target. ~2 GB more
+# weights and the draft's KV cut the target's KV room. A new config: it is gated like any.
+#
+# Workload: fixed-1k-1k only, the profile the row's price is set from (config/models.yaml,
+# priced on 9f0853d7's fixed-1k-1k) and that the DeepInfra comparison (2.60x) is quoted on;
+# same duration, warmup, drain, repetitions and SLO as 9f0853d7. Search from 1.44 req/s
+# (the expected H200 knee is ~1.4-1.9) up by 1.2 to 3, then one bisection to rel_tol 0.1;
+# descend 2 steps down to 1.0. At most 5 points per cell.
+#
+# Quality: both cells are gated against 9e5f7866's stored BF16 cell (2f7fb3f9, 2x H100,
+# phase0-strict, tool calling data version 2): BF16 70B (141 GB) does not fit on one
+# H200, so no in-run baseline is possible. Every phase0-strict task, divergence (on
+# 9e5f7866's stored reference and noise floor) and sanity are gated; 9e5f7866 ran every
+# task in the subset, so none is ungated. As qwen3-8b-winner-ada-runpod does, a new GPU is
+# a new config and ships only on its own gate pass vs BF16.
+#
+# Budget (proposed, not approved): `bench plan` puts the pod at 3.43 h, $18.23 at
+# $5.3064/h with its disk (cold start incl. the 73 GB download, the eval harness install,
+# two cells x 5 points x 3 reps each waiting out its drain, the EAGLE3 warm restart, two
+# 11.7-minute phase0-strict passes); the 4 h TTL holds it with 17% margin and the worst
+# case to TTL is $21.23, under a $21.50 cap. At past runs' ~70% of plan, ~$13. H200
+# Secure stock was "Low": check it and run with LOOM_RUNPOD_CAPACITY_WAIT_S=7200.
+name: llama-3.3-70b-h200-fp8-runpod
+description: "Llama 3.3 70B FP8 on RunPod Secure 1x H200 SXM (TP=1), with and without EAGLE3, vLLM v0.30.0, fixed-1k-1k at SLO, gated vs 9e5f7866's stored BF16."
+model: llama-3.3-70b-instruct-fp8
+provider:
+  kind: runpod
+  instance_type: h200-x1
+  # FP8 checkpoint 72.7 GB + the 2 GB EAGLE3 head + 35 GB of engine headroom.
+  container_disk_gb: 120
+variants:
+  - name: vllm-h200-fp8
+    hardware: {gpu: H200, gpus_per_replica: 1, instance_types: {runpod: h200-x1}}
+    parallelism: {tp: 1}
+  - name: vllm-h200-fp8-eagle3
+    hardware: {gpu: H200, gpus_per_replica: 1, instance_types: {runpod: h200-x1}}
+    parallelism: {tp: 1}
+    engine:
+      args:
+        speculative_config:
+          method: eagle3
+          model: RedHatAI/Llama-3.3-70B-Instruct-speculator.eagle3
+          revision: 42864f78d503693ae5fd317419f099ab3b7c13e4
+          num_speculative_tokens: 3
+workloads:
+  - profile: fixed-1k-1k
+    load:
+      mode: open_loop
+      search: {lo: 1.44, hi: 3, step: 1.2, rel_tol: 0.1, max_points: 5, scale: geometric, descend: 2}
+      duration_s: 180
+      warmup_s: 30
+      drain_timeout_s: 90
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+quality:
+  suite: llama-3.3-70b-instruct
+  subset: phase0-strict
+  # 9e5f7866's BF16 cell on 2x H100 SXM: stored evals, divergence reference, noise floor.
+  baseline:
+    experiment: 9e5f7866-f2f3-4672-bc05-925fe270271c
+    config_hash: "2f7fb3f9372ba09550198b14978459e35c68866db852f44d4856c293a5adf8f9"
+budget:
+  max_spend: "$21.50"
+  ttl_minutes: 240
+  accrual_interval_s: 15
+seed: 0
