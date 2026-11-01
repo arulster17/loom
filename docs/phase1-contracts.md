@@ -270,6 +270,14 @@ When an assumption fails, the balance can go negative by at most:
 A gateway crash mid-request loses that request's settle: the reservation expires, the
 tokens go unbilled (under-charge, never overshoot).
 
+A **non-streaming** request cut at `LOOM_REQUEST_TIMEOUT_S` is also unbilled: the engine
+reports usage only in its final body, so the tokens it generated before the cut are
+unknown. It settles `aborted` at cost 0 and counts in
+`loom_gateway_usage_missing_total` (alert on it). The bound is that request's reservation.
+Not fixed by streaming from the engine internally: vLLM's streaming tool-call and
+reasoning parsers are a different code path from the non-streaming ones the quality gate
+measured, so that switch waits for a user decision and a gate run on the streaming path.
+
 ### Rate limits
 
 Token buckets per key and per org for requests/min and tokens/min, refilling

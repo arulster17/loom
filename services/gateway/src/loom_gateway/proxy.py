@@ -311,6 +311,11 @@ class Proxy:
                     await ctx.upstream.aclose()
             if ctx.held is not None:
                 self._failed(ctx, ctx.held, "timeout")
+                if not ctx.prep.stream:
+                    # A non-streaming engine call reports usage only in its final body,
+                    # so the tokens generated before the cut are unknown and unbilled:
+                    # `aborted` without usage counts in usage_missing (contracts §6).
+                    await shielded(self.settle(ctx, None, "aborted", None))
             return await self._fail_request(
                 ctx,
                 ApiError(

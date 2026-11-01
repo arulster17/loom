@@ -164,9 +164,14 @@ async def test_request_timeout_before_the_first_byte(make_stack, stream):
     assert time.monotonic() - t0 < 2.5
     assert err.value.status_code == 502 and err.value.code == "upstream_lost"
     [event] = await stack.wait_events(1)
-    assert event.status == "error" and event.cost_micros == 0
+    assert event.cost_micros == 0
     assert await stack.reserved(t) == (0, 0)
     assert stack.gateway.router.inflight("e1") == 0
+    # A non-streaming call cut mid-flight may have generated tokens the engine never
+    # reported: it is flagged (aborted, usage_missing), not silently an error.
+    metrics = stack.gateway.metrics.render().decode()
+    missing = f'loom_gateway_usage_missing_total{{model="{stack.small}"}} 1.0' in metrics
+    assert (event.status, missing) == (("error", False) if stream else ("aborted", True))
 
 
 # ------------------------------------------------------------------ retries
