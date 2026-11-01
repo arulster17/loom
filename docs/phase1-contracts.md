@@ -100,6 +100,7 @@ Every table of the accepted PLAN.md draft exists as drafted, with these addition
 | `usage_events` primary key `(id, created_at)` | A partitioned table's key must hold the partition column. The gateway fixes `created_at` once per request, so `ON CONFLICT (id, created_at) DO NOTHING` de-duplicates redeliveries exactly. |
 | `ledger_transactions` is append-only too | It is half of the ledger; corrections are new transactions. |
 | `admin_audit_log.actor_user_id` has no foreign key | Deleting a user must not need an UPDATE of the log. |
+| `stripe_payments` (migration 0007): PaymentIntent -> session, org, purchase, amount, cumulative refunded and clawed-back micros | Refund and dispute events name the PaymentIntent; this maps them to the org and keeps clawbacks cumulative-safe and capped at the purchase. |
 
 Invariants enforced in the database:
 
@@ -123,7 +124,7 @@ the first transaction with `created = false`; other content raises `unique_viola
 | purchase | +X | stripe_clearing -X | `stripe:<event id>` |
 | usage | -X | revenue +X | `usage:<org id>:<YYYY-MM-DDTHH:MMZ>` (`ledger.usage_batch_key`) |
 | promo | +X | promo_expense -X | `promo:signup:<org id>` |
-| refund | -X | stripe_clearing +X | `stripe:<event id>` |
+| refund | -X | stripe_clearing +X | `stripe:<event id>` (`charge.refunded`: the new part of the cumulative `amount_refunded`; `charge.dispute.created`: the disputed amount, once per dispute; at most the purchase in total; the balance may go negative) |
 | adjustment | +/-X | promo_expense (grant) or revenue (correction) | `admin:<admin_audit_log id>` |
 
 Platform accounts have fixed ids: revenue `...0001`, stripe_clearing `...0002`,

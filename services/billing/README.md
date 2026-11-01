@@ -42,7 +42,7 @@ reconcile does not rewrite `usage`.
 
 | Endpoint | Auth | Notes |
 |---|---|---|
-| `POST /stripe/webhook` | `Stripe-Signature` (HMAC-SHA256 of `t.body`, 300 s tolerance) | Stores the event in `stripe_events` and, for a paid Loom credits Checkout session, posts a `purchase` keyed `stripe:<event id>`. A replay answers 200 `duplicate`; a session is credited at most once even across event ids. Events that cannot be applied (unknown org, not USD) answer 200 and stay `processed_at IS NULL` for an admin. Live-mode events are refused. |
+| `POST /stripe/webhook` | `Stripe-Signature` (HMAC-SHA256 of `t.body`, 300 s tolerance) | Stores the event in `stripe_events` and, for a paid Loom credits Checkout session, posts a `purchase` keyed `stripe:<event id>`. A replay answers 200 `duplicate`; a session is credited at most once even across event ids. `charge.refunded` and `charge.dispute.created` post a `refund` (org credit -X) found through the payment's PaymentIntent (`stripe_payments`): refunds by the charge's cumulative `amount_refunded` minus what was already taken back, disputes once per dispute id, never more than the purchase in total; the balance may go negative. Events that cannot be applied (unknown org or payment, not USD) answer 200 and stay `processed_at IS NULL` for an admin. Live-mode events are refused. |
 | `POST /internal/checkout-sessions` | `Authorization: Bearer $LOOM_BILLING_INTERNAL_TOKEN` | Called by the web app's server (never the browser) after it has checked the user belongs to the org. Body `{"org_id", "amount_micros", "success_url", "cancel_url", "customer_email"?}`, whole cents within [`LOOM_CHECKOUT_MIN_MICROS`, `LOOM_CHECKOUT_MAX_MICROS`], org `active`. Answers `{"id", "url", "amount_micros"}`; redirect the user to `url`. `success_url` may contain `{CHECKOUT_SESSION_ID}`. 401 bad token, 503 token unset, 400 bad body/amount, 404 unknown org, 409 org not active, 502 Stripe error. |
 | `GET /health` | none | Postgres and Redis reachable; `stripe_mode` |
 
@@ -74,7 +74,12 @@ In stub mode:
 
 Clicking Pay again re-sends the same event id (exercises replay protection).
 
-Not built yet: refunds (`charge.refunded`), and auto-recharge charging a saved card.
+The stub also refunds (`POST /v1/refunds`, Stripe's API: `payment_intent`, optional
+`amount` in cents) and simulates a dispute (`POST /stub/disputes`, JSON
+`{"payment_intent", "amount"?}`, not a Stripe API), each delivering its signed event.
+
+Not built yet: auto-recharge charging a saved card; reinstating credit when a dispute is
+won (`charge.dispute.closed`).
 
 ## Notifications outbox
 

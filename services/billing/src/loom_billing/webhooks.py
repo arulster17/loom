@@ -15,6 +15,19 @@ Purchases: `checkout.session.completed` with `payment_status = paid`, or
 what Stripe says was paid (`amount_total`, USD cents). A session is credited at most
 once even across different event ids (completed, then async-succeeded): an advisory
 lock on the session id and a check for an earlier purchase with that `external_ref`.
+The session's PaymentIntent is recorded in `stripe_payments` with the purchase.
+
+Clawbacks (`refund` transactions: org credit -X, stripe_clearing +X, keyed
+`stripe:<event id>`), found through the PaymentIntent in `stripe_payments` (row-locked):
+
+- `charge.refunded`: the charge's cumulative `amount_refunded` minus what was already
+  applied for that payment, so each refund is taken back once whatever the order or
+  repetition of events (an older event with a smaller total takes nothing).
+- `charge.dispute.created`: the disputed `amount`, once per dispute id.
+
+Together they never take back more than the purchase. The balance may go negative,
+which is correct: the money was returned. An event for a payment not in
+`stripe_payments` stays unapplied (an admin looks; a replay retries).
 """
 
 from __future__ import annotations
@@ -36,11 +49,14 @@ from loom_platform.ledger import STRIPE_CLEARING, Entry, org_credit_account, pos
 log = logging.getLogger("loom_billing.webhooks")
 
 CREDIT_TYPES = {"checkout.session.completed", "checkout.session.async_payment_succeeded"}
+CLAWBACK_TYPES = {"charge.refunded", "charge.dispute.created"}
 
 
 @dataclass(frozen=True)
 class Outcome:
-    result: str  # credited | duplicate | ignored | not_paid | already_credited | unapplied
+    # credited | refunded | duplicate | ignored | not_paid | already_credited |
+    # already_refunded | unapplied
+    result: str
     org_id: uuid.UUID | None = None
     amount_micros: int = 0
     transaction_id: uuid.UUID | None = None
@@ -84,6 +100,8 @@ async def handle_event(conn: AsyncConnection, event: dict[str, Any]) -> Outcome:
         outcome = Outcome("duplicate")
     elif typ in CREDIT_TYPES:
         outcome = await _credit_checkout(conn, evt_id, typ, event)
+    elif typ in CLAWBACK_TYPES:
+        outcome = await _claw_back(conn, evt_id, typ, event)
     else:
         outcome = Outcome("ignored")
     if outcome.processed and outcome.result != "duplicate":
@@ -160,5 +178,88 @@ async def _credit_checkout(
         external_ref=session_id,
         memo="Stripe checkout",
     )
+    payment_intent = obj.get("payment_intent")
+    if isinstance(payment_intent, str) and payment_intent:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO stripe_payments (payment_intent, session_id, org_id, "
+                "purchase_transaction_id, amount_micros) VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
+                (payment_intent, session_id, org_id, posted.transaction_id, amount),
+            )
     metrics.CREDITED_MICROS.inc(amount)
     return Outcome("credited", org_id, amount, posted.transaction_id)
+
+
+def _cents(v: Any) -> int | None:
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
+
+async def _claw_back(
+    conn: AsyncConnection, evt_id: str, typ: str, event: dict[str, Any]
+) -> Outcome:
+    obj = (event.get("data") or {}).get("object")
+    want = "charge" if typ == "charge.refunded" else "dispute"
+    if not isinstance(obj, dict) or obj.get("object") != want:
+        return Outcome("unapplied", reason=f"data.object is not a {want}")
+    payment_intent = obj.get("payment_intent")
+    if not isinstance(payment_intent, str) or not payment_intent:
+        return Outcome("unapplied", reason="no payment_intent")
+    if obj.get("currency") != "usd":
+        return Outcome("unapplied", reason=f"currency {obj.get('currency')!r}")
+    cents = _cents(obj.get("amount_refunded" if want == "charge" else "amount"))
+    if cents is None:
+        return Outcome("unapplied", reason="no amount")
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT org_id, amount_micros, refunded_micros, clawed_back_micros "
+            "FROM stripe_payments WHERE payment_intent = %s FOR UPDATE",
+            (payment_intent,),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return Outcome("unapplied", reason="payment not credited by Loom (yet)")
+        org_id, purchased, refunded, clawed = row
+        if want == "charge":
+            # Cumulative: take only what is new since the last refund applied.
+            new = cents * MICROS_PER_CENT - refunded
+            if new <= 0:
+                return Outcome("already_refunded", org_id)
+            await cur.execute(
+                "UPDATE stripe_payments SET refunded_micros = %s WHERE payment_intent = %s",
+                (cents * MICROS_PER_CENT, payment_intent),
+            )
+            ref, memo = payment_intent, "Stripe refund"
+        else:
+            dispute_id = obj.get("id")
+            if not isinstance(dispute_id, str) or not dispute_id:
+                return Outcome("unapplied", org_id, reason="dispute without id")
+            ref, memo = dispute_id, "Stripe dispute"
+            await cur.execute(
+                "SELECT 1 FROM ledger_transactions WHERE kind = 'refund' AND org_id = %s "
+                "AND external_ref = %s",
+                (org_id, ref),
+            )
+            if await cur.fetchone() is not None:
+                return Outcome("already_refunded", org_id)
+            new = cents * MICROS_PER_CENT
+        amount = min(new, purchased - clawed)
+        if amount <= 0:
+            return Outcome("already_refunded", org_id, reason="whole purchase already taken back")
+        await cur.execute(
+            "UPDATE stripe_payments SET clawed_back_micros = clawed_back_micros + %s "
+            "WHERE payment_intent = %s",
+            (amount, payment_intent),
+        )
+    account = await org_credit_account(conn, org_id)
+    posted = await post_transaction(
+        conn,
+        kind="refund",
+        idempotency_key=f"stripe:{evt_id}",
+        org_id=org_id,
+        entries=[Entry(account, -amount), Entry(STRIPE_CLEARING, amount)],
+        external_ref=ref,
+        memo=memo,
+    )
+    metrics.CLAWED_BACK_MICROS.inc(amount)
+    return Outcome("refunded", org_id, amount, posted.transaction_id)

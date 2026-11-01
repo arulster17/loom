@@ -42,6 +42,9 @@ PARTITIONS_CREATED = Counter(P + "partitions_created_total", "usage_events parti
 
 WEBHOOKS = Counter(P + "stripe_webhooks_total", "Stripe webhooks", ["result"])
 CREDITED_MICROS = Counter(P + "stripe_credited_micros_total", "Purchase credit posted")
+CLAWED_BACK_MICROS = Counter(
+    P + "stripe_clawed_back_micros_total", "Credit taken back for Stripe refunds and disputes"
+)
 CHECKOUT_SESSIONS = Counter(P + "checkout_sessions_total", "Checkout sessions", ["result"])
 
 NOTIFICATIONS = Counter(P + "notifications_total", "Outbox notifications emitted", ["type"])

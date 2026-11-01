@@ -139,7 +139,7 @@ def create_app(
             metrics.WEBHOOKS.labels("bad_event").inc()
             log.warning("stripe.bad_event", extra=fields(reason=str(e)))
             raise _error(400, "bad_event", "Unreadable or refused event.") from None
-        if outcome.result == "credited" and outcome.org_id is not None:
+        if outcome.result in ("credited", "refunded") and outcome.org_id is not None:
             await _refresh_credit(request, outcome.org_id)
         return JSONResponse({"received": True, "result": outcome.result})
 

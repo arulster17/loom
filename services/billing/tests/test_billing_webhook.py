@@ -16,7 +16,14 @@ from billing_fixtures import STUB, STUB_WEBHOOK_SECRET, ledger_is_balanced
 from loom_billing.api import create_app
 from loom_billing.settings import BillingSettings
 from loom_billing.stripe_sig import sign
-from loom_platform.ledger import STRIPE_CLEARING, org_balance
+from loom_platform.ledger import (
+    REVENUE,
+    STRIPE_CLEARING,
+    Entry,
+    org_balance,
+    org_credit_account,
+    post_transaction,
+)
 from loom_platform.limiter import Limiter, org_key
 
 pytestmark = [pytest.mark.postgres, pytest.mark.redis]
@@ -306,3 +313,126 @@ async def test_checkout_needs_an_active_org(client, make_tenant):
     assert r.status_code == 404
     r = await client.post("/internal/checkout-sessions", json={"org_id": "x"}, headers=auth)
     assert r.status_code == 400
+
+
+# ------------------------------------------------------------ refunds and disputes
+
+
+def _event(typ: str, obj: dict) -> dict:
+    return {
+        "id": f"evt_test_{secrets.token_hex(8)}",
+        "object": "event",
+        "type": typ,
+        "livemode": False,
+        "data": {"object": obj},
+    }
+
+
+def charge_event(pi: str, amount_refunded: int, cents: int = 2000) -> dict:
+    charge = {
+        "id": "ch_test_1",
+        "object": "charge",
+        "amount": cents,
+        "currency": "usd",
+        "amount_refunded": amount_refunded,
+        "payment_intent": pi,
+        "livemode": False,
+    }
+    return _event("charge.refunded", charge)
+
+
+def dispute_event(pi: str, cents: int, dispute_id: str | None = None) -> dict:
+    dispute = {
+        "id": dispute_id or f"dp_test_{secrets.token_hex(6)}",
+        "object": "dispute",
+        "amount": cents,
+        "currency": "usd",
+        "payment_intent": pi,
+        "charge": "ch_test_1",
+    }
+    return _event("charge.dispute.created", dispute)
+
+
+async def refunds(pool, org) -> list[int]:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT e.amount_micros FROM ledger_transactions t "
+            "JOIN ledger_entries e ON e.transaction_id = t.id "
+            "WHERE t.org_id = %s AND t.kind = 'refund' AND e.account_id <> %s "
+            "ORDER BY t.created_at",
+            (org, STRIPE_CLEARING),
+        )
+        return [r[0] for r in await cur.fetchall()]
+
+
+async def test_refunds_claw_back_credit_once_and_cumulatively(
+    client, pool, redis_client, make_tenant
+):
+    t = await make_tenant()
+    limiter = Limiter(redis_client)
+    async with pool.connection() as conn:
+        await limiter.load_from_postgres(conn, org_id=t.org_id, key_id=t.key_id)
+    pi = f"pi_test_{secrets.token_hex(8)}"
+    assert (await deliver(client, checkout_event(t.org_id, 2000, payment_intent=pi))).json()[
+        "result"
+    ] == "credited"
+
+    first = charge_event(pi, amount_refunded=500)  # $5 of $20 refunded
+    assert (await deliver(client, first)).json()["result"] == "refunded"
+    assert (await deliver(client, first)).json()["result"] == "duplicate"
+    # Another event repeating the same cumulative total takes nothing more.
+    assert (await deliver(client, charge_event(pi, 500))).json()["result"] == "already_refunded"
+    # A second refund: Stripe's total is now $12; $7 more is taken back.
+    assert (await deliver(client, charge_event(pi, 1200))).json()["result"] == "refunded"
+    # An older event arriving late (total $5) changes nothing.
+    assert (await deliver(client, charge_event(pi, 500))).json()["result"] == "already_refunded"
+    assert await refunds(pool, t.org_id) == [-5_000_000, -7_000_000]
+    async with pool.connection() as conn:
+        assert await org_balance(conn, t.org_id) == 8_000_000
+        assert await ledger_is_balanced(conn)
+    assert int(await redis_client.get(org_key(t.org_id, "credit"))) == 8_000_000
+
+    # A dispute on the rest takes the remaining $8 at most, once per dispute id.
+    dp = dispute_event(pi, 2000, "dp_test_x")
+    assert (await deliver(client, dp)).json()["result"] == "refunded"
+    again = dispute_event(pi, 2000, "dp_test_x")
+    assert (await deliver(client, again)).json()["result"] == "already_refunded"
+    assert await refunds(pool, t.org_id) == [-5_000_000, -7_000_000, -8_000_000]
+    async with pool.connection() as conn:
+        assert await org_balance(conn, t.org_id) == 0
+
+
+async def post_usage(conn, org, micros: int) -> None:
+    acct = await org_credit_account(conn, org)
+    await post_transaction(
+        conn,
+        kind="usage",
+        idempotency_key=f"usage:{org}:{secrets.token_hex(4)}",
+        org_id=org,
+        entries=[Entry(acct, -micros), Entry(REVENUE, micros)],
+    )
+    await conn.commit()
+
+
+async def test_dispute_can_take_the_balance_negative(client, pool, make_tenant):
+    t = await make_tenant()
+    pi = f"pi_test_{secrets.token_hex(8)}"
+    await deliver(client, checkout_event(t.org_id, 1000, payment_intent=pi))
+    async with pool.connection() as conn:
+        # The org spent $6 of its $10 before disputing the payment.
+        await post_usage(conn, t.org_id, 6_000_000)
+    assert (await deliver(client, dispute_event(pi, 1000))).json()["result"] == "refunded"
+    async with pool.connection() as conn:
+        assert await org_balance(conn, t.org_id) == -6_000_000
+        assert await ledger_is_balanced(conn)
+
+
+async def test_clawback_for_an_unknown_payment_is_kept_for_an_admin(client, pool, make_tenant):
+    t = await make_tenant()
+    ev = charge_event("pi_test_unknown", 500)
+    assert (await deliver(client, ev)).json()["result"] == "unapplied"
+    assert await stripe_row(pool, ev["id"]) == ("charge.refunded", False)
+    bad = dispute_event("pi_test_unknown", 500)
+    bad["data"]["object"]["object"] = "charge"
+    assert (await deliver(client, bad)).json()["result"] == "unapplied"
+    assert await refunds(pool, t.org_id) == []

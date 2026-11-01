@@ -13,6 +13,11 @@ account (port 12111, `python -m loom_billing stripe-stub`).
   same event id (a replay, which billing must ignore). `?format=json` answers JSON
   instead of redirecting (scripts and tests).
 - `POST /checkout/{id}/cancel`: redirects to `cancel_url`.
+- `POST /v1/refunds`: Stripe's refund API (form `payment_intent`, optional `amount` in
+  cents, default the rest); delivers `charge.refunded` with the charge's cumulative
+  `amount_refunded`.
+- `POST /stub/disputes`: not a Stripe API (Stripe tests disputes with special cards):
+  JSON `{"payment_intent", "amount"?}` delivers `charge.dispute.created`.
 
 State is in memory; restarting the stub forgets sessions. Not a security boundary: it
 exists only for local development and tests.
@@ -73,7 +78,9 @@ def create_stub_app(
     app = FastAPI(title="Loom Stripe stub", docs_url=None, redoc_url=None)
     sessions: dict[str, dict[str, Any]] = {}
     events: dict[str, str] = {}  # session id -> event id (stable across re-sends)
+    charges: dict[str, dict[str, Any]] = {}  # payment intent -> charge
     app.state.sessions = sessions
+    app.state.charges = charges
     base = public_url.rstrip("/")
 
     def _auth(authorization: str | None) -> JSONResponse | None:
@@ -167,20 +174,10 @@ button{{font-size:1rem;padding:.6rem 1.2rem;margin-right:.5rem}}
 </body></html>"""
         )
 
-    @app.post("/checkout/{sid}/complete")
-    async def complete(sid: str, format: str | None = None) -> Response:
-        s = sessions.get(sid)
-        if s is None:
-            return _err(404, f"No such checkout.session: '{sid}'")
-        if s["status"] == "expired":
-            return _err(400, "session was cancelled")
-        if s["payment_status"] != "paid":
-            s.update(
-                status="complete",
-                payment_status="paid",
-                payment_intent="pi_test_" + secrets.token_hex(12),
-            )
-        evt_id = events.setdefault(sid, "evt_test_" + secrets.token_hex(12))
+    async def send_event(typ: str, obj: dict[str, Any], evt_id: str | None = None) -> int:
+        """Deliver a signed event, exactly as Stripe would; returns the HTTP status (0 when
+        the webhook endpoint was unreachable)."""
+        evt_id = evt_id or "evt_test_" + secrets.token_hex(12)
         event = {
             "id": evt_id,
             "object": "event",
@@ -188,8 +185,8 @@ button{{font-size:1rem;padding:.6rem 1.2rem;margin-right:.5rem}}
             "created": int(time.time()),
             "livemode": False,
             "pending_webhooks": 1,
-            "type": "checkout.session.completed",
-            "data": {"object": s},
+            "type": typ,
+            "data": {"object": obj},
         }
         body = json.dumps(event).encode()
         headers = {
@@ -199,13 +196,103 @@ button{{font-size:1rem;padding:.6rem 1.2rem;margin-right:.5rem}}
         try:
             status = await deliver(webhook_url, body, headers)
         except (TimeoutError, OSError) as exc:
-            log.error("stub.webhook_failed", extra=fields(session_id=sid, reason=str(exc)))
+            log.error("stub.webhook_failed", extra=fields(event_id=evt_id, reason=str(exc)))
             status = 0
-        log.info("stub.webhook_sent", extra=fields(session_id=sid, event_id=evt_id, status=status))
+        log.info("stub.webhook_sent", extra=fields(type=typ, event_id=evt_id, status=status))
+        return status
+
+    def delivery_failed(status: int) -> JSONResponse:
+        return _err(502, f"webhook delivery to {webhook_url} failed ({status}); retry", "api_error")
+
+    @app.post("/v1/refunds")
+    async def refund(
+        request: Request, authorization: Annotated[str | None, Header()] = None
+    ) -> JSONResponse:
+        if (bad := _auth(authorization)) is not None:
+            return bad
+        form = dict(urllib.parse.parse_qsl((await request.body()).decode(), True))
+        charge = charges.get(form.get("payment_intent", ""))
+        if charge is None:
+            return _err(404, "No such payment_intent (pay a checkout session first).")
+        left = charge["amount"] - charge["amount_refunded"]
+        try:
+            amount = int(form.get("amount") or left)
+        except ValueError:
+            return _err(400, "amount must be an integer number of cents")
+        if left <= 0:
+            return _err(400, f"Charge {charge['id']} has already been refunded.")
+        if not 0 < amount <= left:
+            return _err(400, f"amount must be between 1 and {left}")
+        charge["amount_refunded"] += amount
+        charge["refunded"] = charge["amount_refunded"] == charge["amount"]
+        refund_obj = {
+            "id": "re_test_" + secrets.token_hex(12),
+            "object": "refund",
+            "amount": amount,
+            "charge": charge["id"],
+            "payment_intent": charge["payment_intent"],
+            "currency": charge["currency"],
+            "status": "succeeded",
+        }
+        charge["refunds"]["data"].insert(0, refund_obj)
+        status = await send_event("charge.refunded", charge)
         if status // 100 != 2:
-            return _err(
-                502, f"webhook delivery to {webhook_url} failed ({status}); retry", "api_error"
-            )
+            return delivery_failed(status)
+        return JSONResponse(refund_obj)
+
+    @app.post("/stub/disputes")
+    async def dispute(request: Request) -> JSONResponse:
+        try:
+            form = json.loads(await request.body() or b"{}")
+            charge = charges.get(form.get("payment_intent", ""))
+            amount = int(form.get("amount") or (charge or {}).get("amount", 0))
+        except (ValueError, TypeError, AttributeError):
+            return _err(400, 'body: {"payment_intent": "pi_...", "amount": cents?}')
+        if charge is None:
+            return _err(404, "No such payment_intent (pay a checkout session first).")
+        if not 0 < amount <= charge["amount"]:
+            return _err(400, f"amount must be between 1 and {charge['amount']}")
+        dispute_obj = {
+            "id": "dp_test_" + secrets.token_hex(12),
+            "object": "dispute",
+            "amount": amount,
+            "charge": charge["id"],
+            "payment_intent": charge["payment_intent"],
+            "currency": charge["currency"],
+            "reason": "fraudulent",
+            "status": "needs_response",
+            "livemode": False,
+        }
+        status = await send_event("charge.dispute.created", dispute_obj)
+        if status // 100 != 2:
+            return delivery_failed(status)
+        return JSONResponse(dispute_obj)
+
+    @app.post("/checkout/{sid}/complete")
+    async def complete(sid: str, format: str | None = None) -> Response:
+        s = sessions.get(sid)
+        if s is None:
+            return _err(404, f"No such checkout.session: '{sid}'")
+        if s["status"] == "expired":
+            return _err(400, "session was cancelled")
+        if s["payment_status"] != "paid":
+            pi = "pi_test_" + secrets.token_hex(12)
+            s.update(status="complete", payment_status="paid", payment_intent=pi)
+            charges[pi] = {
+                "id": "ch_test_" + secrets.token_hex(12),
+                "object": "charge",
+                "amount": s["amount_total"],
+                "amount_refunded": 0,
+                "currency": s["currency"],
+                "payment_intent": pi,
+                "refunded": False,
+                "refunds": {"object": "list", "data": []},
+                "livemode": False,
+            }
+        evt_id = events.setdefault(sid, "evt_test_" + secrets.token_hex(12))
+        status = await send_event("checkout.session.completed", s, evt_id)
+        if status // 100 != 2:
+            return delivery_failed(status)
         if format == "json":
             return JSONResponse({"session": s, "event_id": evt_id, "webhook_status": status})
         return RedirectResponse(
