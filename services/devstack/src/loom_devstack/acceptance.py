@@ -1265,7 +1265,7 @@ class Acceptance:
         b_key = create_key(bob, "bobs")
         self.report.canaries.add(b_key)
         a_kid = self.db.key_id(a_key)
-        checks: dict[str, str] = {}
+        checks = res.numbers  # filled as the checks pass
 
         # Web: Bob cannot revoke Alice's key by posting her key id with his session.
         page = bob.get("/dashboard/keys")
@@ -1310,10 +1310,11 @@ class Acceptance:
         pend = sign_in(self.stack, self.email("pending"))
         self.browsers["pending"] = pend
         p_org = self.db.org_of(self.email("pending"))
+        tampered = a_key[:-1] + ("y" if a_key[-1] == "x" else "x")
         r2 = httpx.post(
             f"{self.stack.gateway}/chat/completions",
             json={},
-            headers={"Authorization": f"Bearer {a_key[:-1]}x"},
+            headers={"Authorization": f"Bearer {tampered}"},
             timeout=10,
         )
         check(r2.status_code == 401, f"tampered key: {r2.status_code}")
@@ -1323,7 +1324,6 @@ class Acceptance:
             "pending user reached the keys page",
         )
         checks["pending org keys page"] = "redirected to the approval page"
-        res.numbers.update(checks)
         res.numbers["orgs"] = {"alice": a_org, "bob": b_org, "pending": p_org}
 
     # -- item i: logs
