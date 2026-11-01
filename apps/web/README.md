@@ -14,8 +14,11 @@ It reads and writes the platform database, whose schema is owned by the migratio
 docker compose up -d postgres redis          # from the repo root
 uv run loom-migrate --create-database        # platform DB loom_platform
 cd apps/web && npm ci
-AUTH_SECRET=dev-secret LOOM_ADMIN_EMAILS=you@example.com npm run dev   # http://localhost:3000
+LOOM_ENV=dev AUTH_SECRET=dev-secret LOOM_ADMIN_EMAILS=you@example.com npm run dev   # http://localhost:3000
 ```
+
+`LOOM_ENV=dev` is required for local runs: without it the server starts in production
+mode, which refuses to start on a missing or docker-compose default secret (below).
 
 Sign in with a magic link: locally the email goes to Mailpit (web UI on :8025). The
 first sign-in creates your user and org, waiting for approval; an email listed in
@@ -49,8 +52,9 @@ web app and the registry.
 | Variable | Default | What |
 |---|---|---|
 | `DATABASE_URL` (or `LOOM_DATABASE_URL`) | `postgresql://loom:loom@localhost:5432/loom_platform` | Platform database |
+| `LOOM_ENV` | `prod` when unset | `dev` or `prod`; compose sets `dev`. Outside `dev` the server exits at start (`src/instrumentation.ts`, `src/lib/env-check.ts`) when `AUTH_SECRET` or `AUTH_URL` is missing, the billing internal token is missing, or either is the compose dev default (`loom-dev-auth-secret-not-for-production`, `loom-dev-internal-token`) |
 | `AUTH_SECRET` | none, **required** | Auth.js secret; also derives the playground key secret |
-| `AUTH_URL` | from the request | Public URL of the app, e.g. `http://localhost:3000` (links in emails, Stripe return URLs) |
+| `AUTH_URL` | from the request (dev only) | Public URL of the app, e.g. `http://localhost:3000` (links in emails, Stripe return URLs). Required outside `LOOM_ENV=dev`: Auth.js trusts the request's Host header without it |
 | `EMAIL_SERVER` | `smtp://localhost:1025` | SMTP for magic links; compose: `smtp://mailpit:1025` |
 | `EMAIL_FROM` | `Loom <no-reply@loom.local>` | Sender |
 | `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` | none | Google sign-in appears only when both are set; redirect URI `<AUTH_URL>/api/auth/callback/google`. A Google sign-in is refused unless Google reports `email_verified: true` |
