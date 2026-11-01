@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from loom_platform.ledger import approve_org, org_usage_total
+from loom_platform.ledger import approve_org, org_credit_state, org_usage_total
 from loom_platform.limiter import NO_LIMITS, Limiter, Limits, api_key_key, org_key
 from loom_platform.pricing import Price, cost_micros
 from loom_platform.testing import create_api_key, create_org, create_user
@@ -256,11 +256,43 @@ async def test_concurrent_reserves_never_overspend(limiter, org):
 
 async def test_set_credit_only_for_loaded_orgs(limiter, org):
     org_id, _ = org
-    assert await limiter.set_credit(org_id, 2_000_000)
+    assert await limiter.set_credit(org_id, 2_000_000, 1)
     assert await limiter.available(org_id) == 2_000_000
     stranger = uuid.uuid4()
-    assert not await limiter.set_credit(stranger, 5)
+    assert not await limiter.set_credit(stranger, 5, 1)
     assert await limiter.redis.get(org_key(stranger, "credit")) is None
+
+
+async def test_a_stale_credit_never_overwrites_a_newer_one(limiter, org):
+    """Two refreshers race: one read Postgres before a refund (version 1, $2), the other
+    after it (version 2, $1.50) and wrote first. The late, stale write must not put the
+    refunded money back: before versioning, it did (read-then-SET)."""
+    org_id, _ = org
+    assert await limiter.set_credit(org_id, 1_500_000, 2)
+    assert not await limiter.set_credit(org_id, 2_000_000, 1)
+    assert await limiter.available(org_id) == 1_500_000
+    assert await limiter.set_credit(org_id, 1_500_000, 2)  # same version: same total
+    assert await limiter.set_credit(org_id, 1_700_000, 3)
+    assert await limiter.available(org_id) == 1_700_000
+
+
+@pytest.mark.postgres
+async def test_load_and_refresh_carry_the_postgres_version(limiter, pg):
+    admin = await create_user(pg, role="admin")
+    org_id = await create_org(pg, owner=admin)
+    await approve_org(pg, org_id, admin, 3_000_000)
+    key_id, _ = await create_api_key(pg, org_id)
+    await pg.commit()
+    try:
+        await limiter.load_from_postgres(pg, org_id=org_id, key_id=key_id)
+        assert await org_credit_state(pg, org_id) == (3_000_000, 1)
+        assert await limiter.redis.get(org_key(org_id, "credit_v")) == b"1"
+        assert not await limiter.set_credit(org_id, 0, 0)  # older than the load
+        assert await limiter.available(org_id) == 3_000_000
+    finally:
+        keys = [k async for k in limiter.redis.scan_iter(match=f"loom:org:{org_id}:*")]
+        if keys:
+            await limiter.redis.delete(*keys)
 
 
 @pytest.mark.postgres
@@ -294,3 +326,23 @@ async def test_end_to_end_with_postgres(limiter, pg, stream):
         keys = [k async for k in limiter.redis.scan_iter(match=f"loom:org:{org_id}:*")]
         if keys:
             await limiter.redis.delete(*keys)
+
+
+async def test_release_refunds_tpm_keeps_rpm_and_appends_nothing(limiter, org, stream):
+    org_id, key_id = org
+    limits = Limits(2, 1000, None, 1000, None, None)
+    rid = uuid.uuid4()
+    assert (
+        await reserve(limiter, org_id, key_id, cost=500, tpm=900, limits=limits, rid=rid)
+    ).admitted
+    assert await limiter.available(org_id) == 1_000_000 - 500
+    assert await limiter.release(org_id, rid) is True
+    assert await limiter.release(org_id, rid) is False  # nothing left to release
+    assert await limiter.available(org_id) == 1_000_000
+    assert int(await limiter.redis.get(api_key_key(org_id, key_id, "inflight"))) == 0
+    for k in (api_key_key(org_id, key_id, "tb:tpm"), org_key(org_id, "tb:tpm")):
+        assert float(await limiter.redis.hget(k, "t")) > 990  # the 900 came back
+    assert await limiter.redis.xlen(stream) == 0
+    # The rpm token stays spent: a 2 rpm key admits one more, then refuses.
+    assert (await reserve(limiter, org_id, key_id, tpm=1, limits=limits)).admitted
+    assert (await reserve(limiter, org_id, key_id, tpm=1, limits=limits)).reason == "key_rpm"

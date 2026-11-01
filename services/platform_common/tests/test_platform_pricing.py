@@ -83,6 +83,7 @@ def test_registry_prices():
 def test_prompt_upper_bound():
     assert prompt_tokens_upper_bound(100, 32768) == 100 + TEMPLATE_OVERHEAD_TOKENS
     assert prompt_tokens_upper_bound(10**6, 32768) == 32768
+    assert prompt_tokens_upper_bound(100, 32768, template_json=True) == 32768
 
 
 def test_max_cost_covers_every_feasible_outcome():

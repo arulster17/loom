@@ -164,9 +164,14 @@ async def test_request_timeout_before_the_first_byte(make_stack, stream):
     assert time.monotonic() - t0 < 2.5
     assert err.value.status_code == 502 and err.value.code == "upstream_lost"
     [event] = await stack.wait_events(1)
-    assert event.status == "error" and event.cost_micros == 0
+    assert event.cost_micros == 0
     assert await stack.reserved(t) == (0, 0)
     assert stack.gateway.router.inflight("e1") == 0
+    # A non-streaming call cut mid-flight may have generated tokens the engine never
+    # reported: it is flagged (aborted, usage_missing), not silently an error.
+    metrics = stack.gateway.metrics.render().decode()
+    missing = f'loom_gateway_usage_missing_total{{model="{stack.small}"}} 1.0' in metrics
+    assert (event.status, missing) == (("error", False) if stream else ("aborted", True))
 
 
 # ------------------------------------------------------------------ retries
@@ -264,6 +269,17 @@ async def test_plain_http_replica_for_local_dev(make_stack):
     t = await stack.tenant()
     r = await stack.openai(t).chat.completions.create(model=stack.small, messages=MESSAGES)
     assert r.usage.completion_tokens == 5
+
+
+async def test_plain_http_replica_is_never_used_outside_dev(make_stack):
+    """Outside LOOM_ENV=dev the pod token (and the prompt) never go over plain http."""
+    stack = await make_stack(tls=False, env="prod")
+    t = await stack.tenant()
+    with pytest.raises(openai.APIStatusError) as e:
+        await stack.openai(t).chat.completions.create(model=stack.small, messages=MESSAGES)
+    assert e.value.status_code == 502 and e.value.code == "upstream_lost"
+    assert stack.engine.requests == []
+    assert await stack.reserved(t) == (0, 0)
 
 
 # ------------------------------------------------------------------ revocation

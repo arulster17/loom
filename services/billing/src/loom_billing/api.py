@@ -40,7 +40,7 @@ from loom_billing.stripe_sig import SignatureError, verify
 from loom_billing.webhooks import BadEvent, handle_event
 from loom_platform.db import open_pool
 from loom_platform.errors import ApiError
-from loom_platform.ledger import org_credit_total
+from loom_platform.ledger import org_credit_state
 from loom_platform.limiter import Limiter
 
 log = logging.getLogger("loom_billing.api")
@@ -119,7 +119,7 @@ def create_app(
         request: Request,
         stripe_signature: Annotated[str | None, Header(alias="Stripe-Signature")] = None,
     ) -> JSONResponse:
-        payload = await request.body()
+        payload = await read_body(request, settings.billing_max_body_bytes)
         try:
             verify(
                 payload,
@@ -139,7 +139,7 @@ def create_app(
             metrics.WEBHOOKS.labels("bad_event").inc()
             log.warning("stripe.bad_event", extra=fields(reason=str(e)))
             raise _error(400, "bad_event", "Unreadable or refused event.") from None
-        if outcome.result == "credited" and outcome.org_id is not None:
+        if outcome.result in ("credited", "refunded") and outcome.org_id is not None:
             await _refresh_credit(request, outcome.org_id)
         return JSONResponse({"received": True, "result": outcome.result})
 
@@ -150,7 +150,9 @@ def create_app(
     ) -> JSONResponse:
         _check_internal_token(settings, authorization)
         try:
-            body = CheckoutRequest.model_validate_json(await request.body())
+            body = CheckoutRequest.model_validate_json(
+                await read_body(request, settings.billing_max_body_bytes)
+            )
         except ValidationError as e:
             raise _error(400, "invalid_request", _first_error(e)) from None
         amount = body.amount_micros
@@ -194,12 +196,31 @@ def create_app(
     return app
 
 
+async def read_body(request: Request, limit: int) -> bytes:
+    """The request body, refusing (413) one over `limit` bytes by its Content-Length or,
+    without one, as soon as the stream passes it: never buffers more than `limit`."""
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            too_big = int(declared) > limit
+        except ValueError:
+            raise _error(400, "invalid_request", "Bad Content-Length.") from None
+        if too_big:
+            raise _error(413, "request_too_large", f"Body over {limit} bytes.")
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > limit:
+            raise _error(413, "request_too_large", f"Body over {limit} bytes.")
+    return bytes(body)
+
+
 async def _refresh_credit(request: Request, org_id: uuid.UUID) -> None:
     """Push the new credit to Redis now (the loom_credit_changed listener would too)."""
     try:
         async with request.app.state.pool.connection() as conn:
-            credit = await org_credit_total(conn, org_id)
-        await request.app.state.limiter.set_credit(org_id, credit)
+            credit, version = await org_credit_state(conn, org_id)
+        await request.app.state.limiter.set_credit(org_id, credit, version)
     except Exception:
         log.exception("stripe.credit_refresh_failed")
 

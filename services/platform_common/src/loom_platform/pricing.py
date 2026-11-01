@@ -106,17 +106,27 @@ def cost_micros(
     return _ceil_div(numerator, TOKENS_PER_MTOK)
 
 
-def prompt_tokens_upper_bound(body_bytes: int, max_context: int) -> int:
+def prompt_tokens_upper_bound(
+    body_bytes: int, max_context: int, *, template_json: bool = False
+) -> int:
     """Upper bound on a request's prompt tokens, without tokenizing.
 
     Byte-level BPE tokenizers (Qwen3, Llama 3) never produce more tokens than the
     UTF-8 bytes of the text, and the JSON request body holds every byte of text the
-    template will see (JSON escaping only adds bytes). The template's own tokens are
-    bounded by TEMPLATE_OVERHEAD_TOKENS. The engine refuses prompts over the context.
+    template will see verbatim (JSON escaping only adds bytes). The template's own tokens
+    are bounded by TEMPLATE_OVERHEAD_TOKENS. The engine refuses prompts over the context.
     Not valid for image inputs (no vision model is served).
+
+    `template_json`: the request carries values the chat template re-serialises rather
+    than copies (`tools` and similar, rendered with `tojson`). Those can come out far
+    longer than they went in (`9e15` becomes `9000000000000000.0`, one token per digit
+    on Qwen3; `tojson(indent=4)` adds indentation per nesting level), so no factor of the
+    body size bounds them: the bound is then the context, which the engine enforces.
     """
     if body_bytes < 0 or max_context < 1:
         raise ValueError("body_bytes >= 0 and max_context >= 1 required")
+    if template_json:
+        return max_context
     return min(body_bytes + TEMPLATE_OVERHEAD_TOKENS, max_context)
 
 

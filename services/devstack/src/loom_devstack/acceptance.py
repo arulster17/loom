@@ -1183,6 +1183,10 @@ class Acceptance:
                     r2 = http.post(url, json=body, headers=hdr)
                     if r2.status_code == 200:
                         break
+                    if r2.status_code == 429:
+                        # Each 503 spends an rpm token (contracts §8): polling is limited.
+                        time.sleep(int(r2.headers.get("retry-after", "1")))
+                        continue
                     check(r2.status_code == 503, f"warming: {r2.status_code}")
                     ra = int(r2.headers["retry-after"])
                     if seen != ra:
@@ -1193,7 +1197,7 @@ class Acceptance:
                 ready_after = time.monotonic() - t0
             check(
                 self.db.one("SELECT count(*) FROM usage_events WHERE id = %s", rid) == 0,
-                "a 503 before reserve must not emit a usage event",
+                "a 503 model_unavailable must not emit a usage event",
             )
         finally:
             poolsim(self.stack, "set", model, "ready")

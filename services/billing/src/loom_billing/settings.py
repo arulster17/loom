@@ -1,20 +1,27 @@
 """Billing settings: `LOOM_*` variables (docs/phase1-contracts.md §2) plus the Stripe keys.
 
-Stripe mode is decided by two variables without the `LOOM_` prefix, the names Stripe's
-own docs use:
+Stripe mode is explicit, `LOOM_STRIPE_MODE`:
 
-- both `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` set: **real Stripe**, test mode
-  only. A live key (`sk_live_`, `rk_live_`) is refused at startup.
-- neither set: **local stub** (`loom_billing.stripe_stub`). Billing calls the stub's
-  Checkout API at `LOOM_STRIPE_STUB_URL` and verifies webhooks with
-  `LOOM_STRIPE_STUB_WEBHOOK_SECRET`, a fixed dev value shared with the stub.
-- only one set: a configuration error.
+- `stripe` (the default): **real Stripe**, test mode only. Both `STRIPE_SECRET_KEY` and
+  `STRIPE_WEBHOOK_SECRET` (the names Stripe's own docs use) are required by anything that
+  talks to Stripe (the HTTP API refuses to start without them); a live key (`sk_live_`,
+  `rk_live_`) is refused at startup.
+- `stub`: **local stub** (`loom_billing.stripe_stub`), local dev only (compose sets it).
+  Billing calls the stub's Checkout API at `LOOM_STRIPE_STUB_URL` and verifies webhooks
+  with a secret it shares with the stub, `LOOM_STRIPE_STUB_WEBHOOK_SECRET` or the file
+  named by `LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE` (compose: generated per stack by
+  `loom-devcerts --secret`). There is no default: a secret written in code would let
+  anyone forge a purchase. Stripe keys set together with `stub` are refused.
+
+The stub is never chosen because keys are missing: a deployment that forgot its keys
+fails to start instead of silently accepting forged webhooks.
 """
 
 from __future__ import annotations
 
 import socket
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
@@ -28,9 +35,12 @@ StripeMode = Literal["stripe", "stub"]
 
 # Micro-dollars per US cent: Stripe amounts are integer cents.
 MICROS_PER_CENT = 10_000
-# Not a secret: the stub and billing share it in local dev only. Real Stripe never sees it.
-STUB_WEBHOOK_SECRET = "whsec_loom_local_stub_not_a_secret"
+# docker-compose's shared web/billing token: refused outside LOOM_ENV=dev.
+DEV_INTERNAL_TOKEN = "loom-dev-internal-token"
+# The API key billing sends to the stub (the stub does not check it). Not a secret.
 STUB_SECRET_KEY = "sk_test_loom_local_stub"
+# Shortest stub webhook secret accepted.
+MIN_STUB_SECRET_CHARS = 24
 
 
 class BillingSettings(PlatformSettings):
@@ -72,6 +82,8 @@ class BillingSettings(PlatformSettings):
     checkout_min_micros: PositiveInt = 5_000_000  # $5
     checkout_max_micros: PositiveInt = 500_000_000  # $500
 
+    # stripe (default: real Stripe, test mode) or stub (local dev, explicit opt-in).
+    stripe_mode: StripeMode = "stripe"
     # Real Stripe (test mode only).
     stripe_secret_key: SecretStr | None = Field(
         default=None, validation_alias=AliasChoices("STRIPE_SECRET_KEY", "stripe_secret_key")
@@ -82,17 +94,24 @@ class BillingSettings(PlatformSettings):
     )
     stripe_api_base: str = "https://api.stripe.com"
     stripe_webhook_tolerance_s: PositiveInt = 300
+    # Largest request body billing reads (webhooks, internal API): 413 above, refused by
+    # Content-Length or while streaming, before buffering more. Stripe events are a few KB.
+    billing_max_body_bytes: PositiveInt = 262_144
 
     # Local stub. Billing calls the stub at stripe_stub_url; the browser opens checkout
     # pages at stripe_stub_public_url; the stub posts webhooks to stripe_stub_webhook_url.
     stripe_stub_url: str = "http://localhost:12111"
     stripe_stub_public_url: str = "http://localhost:12111"
     stripe_stub_webhook_url: str = "http://localhost:8090/stripe/webhook"
-    stripe_stub_webhook_secret: SecretStr = SecretStr(STUB_WEBHOOK_SECRET)
+    # Shared by stub and billing; one of the two is required in stub mode, no default.
+    stripe_stub_webhook_secret: SecretStr | None = None
+    stripe_stub_webhook_secret_file: Path | None = None
     stripe_stub_host: str = "0.0.0.0"
     stripe_stub_port: PositiveInt = 12111
 
-    @field_validator("stripe_secret_key", "stripe_webhook_secret", mode="before")
+    @field_validator(
+        "stripe_secret_key", "stripe_webhook_secret", "stripe_stub_webhook_secret", mode="before"
+    )
     @classmethod
     def _blank_is_unset(cls, v: object) -> object:
         # docker-compose passes `${STRIPE_SECRET_KEY:-}` through as an empty string: that
@@ -111,28 +130,79 @@ class BillingSettings(PlatformSettings):
             raise ValueError("set both STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET, or neither")
         if wh and not wh.startswith("whsec_"):
             raise ValueError("STRIPE_WEBHOOK_SECRET must start with whsec_")
+        if self.stripe_mode == "stub":
+            if sk:
+                raise ValueError("LOOM_STRIPE_MODE=stub with Stripe keys set: unset one")
+            if len(self._stub_secret() or "") < MIN_STUB_SECRET_CHARS:
+                raise ValueError(
+                    "LOOM_STRIPE_MODE=stub needs LOOM_STRIPE_STUB_WEBHOOK_SECRET or "
+                    f"LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE (at least {MIN_STUB_SECRET_CHARS} "
+                    "characters, e.g. from `loom-devcerts --secret stripe-stub-webhook`)"
+                )
         if self.checkout_min_micros > self.checkout_max_micros:
             raise ValueError("checkout_min_micros > checkout_max_micros")
         return self
 
-    @property
-    def stripe_mode(self) -> StripeMode:
-        return "stripe" if self.stripe_secret_key else "stub"
+    def production_problems(self, *, serves_api: bool = True) -> list[str]:
+        """Outside LOOM_ENV=dev: the platform checks, no Stripe stub, and (for the HTTP
+        API) the internal token set and not the compose default."""
+        problems = super().production_problems()
+        if self.env == "dev":
+            return problems
+        if self.stripe_mode == "stub":
+            problems.append("LOOM_STRIPE_MODE=stub (the local Stripe stub is dev only)")
+        if serves_api:
+            token = self.billing_internal_token
+            if token is None or not token.get_secret_value():
+                problems.append("LOOM_BILLING_INTERNAL_TOKEN is not set")
+            elif token.get_secret_value() == DEV_INTERNAL_TOKEN:
+                problems.append("LOOM_BILLING_INTERNAL_TOKEN is the docker-compose default")
+        return problems
 
     @property
     def consumer_name(self) -> str:
         return self.billing_consumer or f"billing-{socket.gethostname()}"
 
+    def _stub_secret(self) -> str | None:
+        if self.stripe_stub_webhook_secret is not None and self.stripe_stub_webhook_secret_file:
+            raise ValueError(
+                "set LOOM_STRIPE_STUB_WEBHOOK_SECRET or LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE, "
+                "not both"
+            )
+        if self.stripe_stub_webhook_secret is not None:
+            return self.stripe_stub_webhook_secret.get_secret_value().strip()
+        if self.stripe_stub_webhook_secret_file is not None:
+            try:
+                return self.stripe_stub_webhook_secret_file.read_text().strip()
+            except OSError as e:
+                raise ValueError(f"LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE: {e}") from None
+        return None
+
+    def _require_stripe_keys(self) -> tuple[str, str]:
+        if self.stripe_secret_key is None or self.stripe_webhook_secret is None:
+            raise ValueError(
+                "real Stripe (LOOM_STRIPE_MODE=stripe, the default) needs STRIPE_SECRET_KEY "
+                "and STRIPE_WEBHOOK_SECRET (test mode); for local dev set LOOM_STRIPE_MODE=stub"
+            )
+        return (
+            self.stripe_secret_key.get_secret_value(),
+            self.stripe_webhook_secret.get_secret_value(),
+        )
+
     def stripe_api(self) -> tuple[str, str]:
-        """(API base URL, secret key) for Checkout calls in the current mode."""
-        if self.stripe_secret_key is not None:
-            return self.stripe_api_base, self.stripe_secret_key.get_secret_value()
-        return self.stripe_stub_url, STUB_SECRET_KEY
+        """(API base URL, secret key) for Checkout calls in the current mode. Raises
+        ValueError when real Stripe is selected without its keys."""
+        if self.stripe_mode == "stub":
+            return self.stripe_stub_url, STUB_SECRET_KEY
+        return self.stripe_api_base, self._require_stripe_keys()[0]
 
     def webhook_secret(self) -> str:
-        if self.stripe_webhook_secret is not None:
-            return self.stripe_webhook_secret.get_secret_value()
-        return self.stripe_stub_webhook_secret.get_secret_value()
+        """The secret webhooks are verified with (raises like `stripe_api`)."""
+        if self.stripe_mode == "stub":
+            secret = self._stub_secret()
+            assert secret  # checked at validation
+            return secret
+        return self._require_stripe_keys()[1]
 
 
 @lru_cache(maxsize=1)

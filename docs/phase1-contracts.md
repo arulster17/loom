@@ -65,6 +65,7 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 
 | Variable | Default | Used by |
 |---|---|---|
+| `LOOM_ENV` | unset = `prod`; compose: `dev` | all services: `dev` or `prod` (anything else refuses to start). Outside dev a service refuses to start on a missing secret or a compose dev default: gateway (DB password, `LOOM_POD_CA_CERT`, client certificate, `LOOM_CORS_ORIGINS`; and it never uses an `http://` replica), billing (DB password, `LOOM_STRIPE_MODE=stub`, internal token missing or the compose value), web (`AUTH_SECRET` missing or the compose value, `AUTH_URL` missing, internal token missing or the compose value) |
 | `LOOM_DATABASE_URL` | `postgresql://loom:loom@localhost:5432/loom_platform` | all (web: as `DATABASE_URL`) |
 | `LOOM_REDIS_URL` | `redis://localhost:6379/0` | gateway, billing, poolsim |
 | `LOOM_MODELS_YAML` | repo `config/models.yaml` | gateway, billing |
@@ -77,11 +78,14 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_DEFAULT_ORG_RPM` / `_TPM` / `_CONCURRENCY` | 120 / 400000 / 16 | gateway |
 | `LOOM_SIGNUP_PROMO_MICROS` | 5000000 | web (admin approval) |
 | `LOOM_CLOUD` / `LOOM_REGION` | `local` / empty | gateway (usage events) |
-| `LOOM_GATEWAY_CLIENT_CERT` / `_KEY`, `LOOM_POD_CA_CERT` | none | gateway (mTLS to pods) |
+| `LOOM_GATEWAY_CLIENT_CERT` / `_KEY`, `LOOM_POD_CA_CERT` | none | gateway (mTLS to pods; required outside `LOOM_ENV=dev`) |
 | `LOOM_CORS_ORIGINS` | `http://localhost:3000` | gateway |
-| `AUTH_SECRET`, `AUTH_URL`, `AUTH_GOOGLE_ID` / `_SECRET`, `EMAIL_SERVER` | none | web (Auth.js) |
+| `AUTH_SECRET`, `AUTH_URL`, `AUTH_GOOGLE_ID` / `_SECRET`, `EMAIL_SERVER` | none | web (Auth.js); `AUTH_URL` is required outside `LOOM_ENV=dev` |
+| `LOOM_GOOGLE_EMAIL_LINKING` | `true` | web: a Google sign-in may link to an existing user with the same email; Google sign-in always requires `email_verified` |
 | `LOOM_ADMIN_EMAILS` | empty | web: dev bootstrap of the first admin (§4) |
 | `LOOM_INTERNAL_TOKEN` / `LOOM_BILLING_INTERNAL_TOKEN` | compose: one shared dev value | web / billing: bearer token of billing's internal API |
+| `LOOM_STRIPE_MODE` | `stripe`; compose: `stub` | billing: real Stripe (test keys required) or the local stub (explicit opt-in, never a fallback) |
+| `LOOM_STRIPE_STUB_WEBHOOK_SECRET` / `_FILE` | none; compose: `.dev/certs/stripe-stub-webhook.secret` from `loom-devcerts --secret` | billing and stripe-stub in stub mode |
 | `LOOM_GATEWAY_URL`, `LOOM_PUBLIC_API_URL`, `LOOM_BILLING_URL` | `http://localhost:8080`, `http://localhost:8080/v1`, `http://localhost:8090` | web: the gateway and billing as the server reaches them; the API base shown to users |
 | `LOOM_PLAYGROUND_KEY_SECRET` / `LOOM_PLAYGROUND_KEY_TTL_S` | derived from `AUTH_SECRET` / 3600 | web: playground keys (§5) *(wave 2)* |
 | `LOOM_NOTIFY_STREAM` | `loom:notify` | billing: notifications outbox (§7) *(wave 2)* |
@@ -108,6 +112,7 @@ Every table of the accepted PLAN.md draft exists as drafted, with these addition
 | `usage_events` primary key `(id, created_at)` | A partitioned table's key must hold the partition column. The gateway fixes `created_at` once per request, so `ON CONFLICT (id, created_at) DO NOTHING` de-duplicates redeliveries exactly. |
 | `ledger_transactions` is append-only too | It is half of the ledger; corrections are new transactions. |
 | `admin_audit_log.actor_user_id` has no foreign key | Deleting a user must not need an UPDATE of the log. |
+| `stripe_payments` (migration 0007): PaymentIntent -> session, org, purchase, amount, cumulative refunded and clawed-back micros | Refund and dispute events name the PaymentIntent; this maps them to the org and keeps clawbacks cumulative-safe and capped at the purchase. |
 
 Invariants enforced in the database:
 
@@ -131,7 +136,7 @@ the first transaction with `created = false`; other content raises `unique_viola
 | purchase | +X | stripe_clearing -X | `stripe:<event id>` |
 | usage | -X | revenue +X | `usage:<org id>:<YYYY-MM-DDTHH:MMZ>` (`ledger.usage_batch_key`) |
 | promo | +X | promo_expense -X | `promo:signup:<org id>` |
-| refund | -X | stripe_clearing +X | `stripe:<event id>` |
+| refund | -X | stripe_clearing +X | `stripe:<event id>` (`charge.refunded`: the new part of the cumulative `amount_refunded`; `charge.dispute.created`: the disputed amount, once per dispute; at most the purchase in total; the balance may go negative) |
 | adjustment | +/-X | promo_expense (grant) or revenue (correction) | `admin:<admin_audit_log id>` |
 
 Platform accounts have fixed ids: revenue `...0001`, stripe_clearing `...0002`,
@@ -152,7 +157,7 @@ NOTIFY channels (delivered on commit):
 | Channel | Fires on | Payload | Listener |
 |---|---|---|---|
 | `loom_auth_changed` | `api_keys` revoked/limits/scopes change; `orgs` status/limits change | `{"kind":"api_key","org_id","key_id","key_hash"}` or `{"kind":"org","org_id","status"}` | gateway: delete `loom:apikey:<key_hash>`; for an org, its keys' entries |
-| `loom_credit_changed` | non-usage ledger transaction with an org | `{"org_id","kind"}` | billing: `Limiter.set_credit(org, loom_org_credit_total(org))` |
+| `loom_credit_changed` | non-usage ledger transaction with an org | `{"org_id","kind"}` | billing: `Limiter.set_credit(org, *ledger.org_credit_state(org))` (total and version) |
 
 Row-level security is not enabled yet: isolation is org-scoped queries plus the
 cross-tenant tests M1 requires.
@@ -216,6 +221,7 @@ without also discarding the stream (both are one state).
 |---|---|---|---|
 | `loom:apikey:<sha256 hex>` | string, JSON | gateway | Auth record (`loom_platform.auth.AuthRecord`) or `{"found":false}`; TTL `LOOM_AUTH_CACHE_TTL_S` |
 | `loom:org:<org>:credit` | int | init, billing | `loom_org_credit_total` |
+| `loom:org:<org>:credit_v` | int | init, billing | Its version, `loom_org_credit_version` (migration 0006): the org's count of non-usage ledger transactions, read in the same snapshot |
 | `loom:org:<org>:usage` | int | init, settle | Cumulative settled cost (all time) |
 | `loom:org:<org>:rsum` | int | reserve, settle | Sum of live reservations |
 | `loom:org:<org>:rsv` | hash | reserve, settle | request id -> `<max cost>|<key id>|<tpm estimate>` |
@@ -243,7 +249,11 @@ available = credit - usage - rsum
 `credit` comes only from Postgres (purchases, promos, refunds, adjustments); `usage` only
 from settle; `rsum` from live reservations. Redis is ahead of Postgres by the events still
 in the stream, and `usage` already counts them, so `credit` can be overwritten from
-Postgres at any time without a race. The per-minute usage batch only moves cost from
+Postgres at any time, but only with a total at least as new as the one Redis holds:
+every write carries the total's version (`set_credit.lua`, `init_org.lua`), and a
+writer whose snapshot predates another's is refused rather than putting back a stale
+total. (The ledger is append-only and a snapshot sees a prefix of the commit order, so
+the count of an org's non-usage transactions orders its credit totals.) The per-minute usage batch only moves cost from
 unposted `usage_events` to posted ledger entries, both of which are already inside
 `usage`, so **batching never touches Redis**.
 
@@ -254,7 +264,7 @@ snapshot; `init_org.lua` sets them only if absent) and retries once.
 
 ### Reserve and settle (one Lua call each)
 
-Per request, after auth, model lookup and pool check (§8):
+Per request, after auth and model lookup, before the pool check (§8):
 
 1. **Reserve** (`reserve.lua`): purge up to 64 expired reservations of the org, then check
    in order: initialized; request id not seen; `available >= max_cost` (402); key spend
@@ -263,12 +273,14 @@ Per request, after auth, model lookup and pool check (§8):
    `min(tpm_estimate, limit)` (429 with Retry-After from the refill rate). Only if all
    pass: charge the buckets, store the reservation with `ttl = request timeout + 60 s`.
    `max_cost = pricing.max_cost_micros(price, prompt upper bound, max_tokens,
-   max_context)`, the most the request can cost; `tpm_estimate` = the prompt upper bound.
+   max_context)`, the most the request can cost; `tpm_estimate` = body bytes + 1024
+   (the body-size bound, corrected at settle; it stays this even when the prompt bound
+   is the context, so tool requests are not throttled by a full context of tpm each).
 2. **Dispatch** with `max_tokens` always set explicitly (the client's value, or
    `LOOM_MAX_TOKENS_CAP` when it sent none; a value above the cap is a 400 at step 2 of
    §8), so the engine cannot exceed what was reserved.
 3. **Settle** (`settle.lua`), exactly once when the response ends (complete, client
-   abort, upstream loss, engine error, or 503 after reserve): refuse a repeat; release the
+   abort, upstream loss, engine error, or no replica answered): refuse a repeat; release the
    reservation; charge tpm buckets `actual tokens - estimate` (refunds an over-estimate,
    debt floored at one minute of tokens); `usage += cost`; key usage += cost; `XADD` the
    usage event with `org_usage_total_micros`. Settling without a live reservation still
@@ -276,13 +288,23 @@ Per request, after auth, model lookup and pool check (§8):
    event but creates no counters, so the next reserve loads them from Postgres. Cost is
    `pricing.cost_micros` on the engine's token counts.
 
-Rejected requests (401/402/403/404/413/429, and 503 decided before reserve) emit no
-usage event; they are metrics only.
+Rejected requests (401/402/403/404/413/429, and 503 `model_unavailable`) emit no usage
+event; they are metrics only. A 503 `model_unavailable` comes after reserve (§8) and
+**releases** its reservation (`release.lua`): the tpm estimate is refunded, the rpm token
+stays spent, nothing is charged.
 
 ### Worst-case overshoot
 
-**Zero**, given: (a) the prompt bound holds (tokens <= UTF-8 bytes of the JSON body + 1024
-template tokens, true for the byte-level BPE tokenizers served, Qwen3 and Llama 3); (b) the
+**Zero**, given: (a) the prompt bound holds. It is `pricing.prompt_tokens_upper_bound`:
+UTF-8 bytes of the JSON body + 1024 template tokens for text the template copies verbatim
+(true for the byte-level BPE tokenizers served, Qwen3 and Llama 3); but **the context** for
+a chat request with values the template re-serialises with `tojson` (`tools`,
+`functions`, `documents`, an assistant message's `tool_calls`) or a request-supplied
+`chat_template` / `chat_template_kwargs`. Re-serialised JSON can be much longer than it
+was in the body (`9e15` renders as `9000000000000000.0`, one token per digit on Qwen3;
+Llama's `tojson(indent=4)` adds indentation per nesting level), and the engine refuses a
+prompt over the context. `response_format` is not rendered into the prompt (vLLM applies
+it as guided decoding), so it keeps the body bound. (b) the
 engine honours `max_tokens`; (c) the gateway settles within the reservation TTL (it
 cancels upstream at `LOOM_REQUEST_TIMEOUT_S`); (d) Redis keeps its writes. Then every
 admitted request's cost is at most its reservation, and `credit - usage` never goes
@@ -299,6 +321,14 @@ When an assumption fails, the balance can go negative by at most:
 
 A gateway crash mid-request loses that request's settle: the reservation expires, the
 tokens go unbilled (under-charge, never overshoot).
+
+A **non-streaming** request cut at `LOOM_REQUEST_TIMEOUT_S` is also unbilled: the engine
+reports usage only in its final body, so the tokens it generated before the cut are
+unknown. It settles `aborted` at cost 0 and counts in
+`loom_gateway_usage_missing_total` (alert on it). The bound is that request's reservation.
+Not fixed by streaming from the engine internally: vLLM's streaming tool-call and
+reasoning parsers are a different code path from the non-streaming ones the quality gate
+measured, so that switch waits for a user decision and a gate run on the streaming path.
 
 ### Rate limits
 
@@ -355,7 +385,7 @@ cost_micros > 0` (`FOR UPDATE`), post one `usage` transaction for their sum keye
 back both; a racing second worker hits the idempotency key.
 
 **Reconcile** (billing, every minute): for each org loaded in Redis
-(`SCAN loom:org:*:credit`), `set_credit(org, loom_org_credit_total(org))`; also on every
+(`SCAN loom:org:*:credit`), `set_credit(org, credit total, version)`; also on every
 `loom_credit_changed` notification.
 
 **Notifications outbox** *(wave 2, billing)*: stream `loom:notify`
@@ -395,10 +425,13 @@ by the signed `checkout.session.completed` webhook, as a `purchase` keyed
    sent to the engine explicitly (chat completions without one get the cap, §6 step 2).
    At most 16 choices per request (`n` x prompts); `best_of` and `use_beam_search` are
    refused (the engine would generate more than the reservation covers).
-3. Pool state (§10): not routable -> 503 `model_unavailable`, no reservation.
-4. Reserve (402/429). If the org's balance cannot be loaded from Postgres into Redis
+3. Reserve (402/429). If the org's balance cannot be loaded from Postgres into Redis
    (`noinit` again after the load), 503 `balance_unavailable` with `Retry-After: 1`
    *(wave 2)*.
+4. Pool state (§10): not routable -> release the reservation, 503 `model_unavailable`.
+   Reserving first means a cold model is only woken (a GPU start, §10) by a request that
+   has the balance for it and passes the rate limits; every 503 spends an rpm token, so
+   polling an unavailable model is rate-limited like any other request.
 5. Dispatch to a replica (§9); retry once on another replica only before the first byte
    reaches the client.
 6. Stream through; settle once at the end; usage event.
@@ -429,9 +462,12 @@ a replica's URL host and `server_name` are the same (`https://mock-pod-1:8443`).
 - **Per-chunk usage** (`continuous_usage_stats`, in the mock since M1) is vLLM's: only
   together with `include_usage`; every chunk, the role chunk included (0 completion
   tokens), carries `{prompt_tokens, completion_tokens so far, total_tokens}` and **no**
-  `prompt_tokens_details`; cached tokens come only in the final usage chunk. A stream that
-  ends early is billed from its last chunk's usage, with 0 cached tokens (cached input is
-  priced as input in M1, so this is exact today).
+  `prompt_tokens_details`; cached tokens come only in the final usage chunk. With `n > 1`
+  the choices interleave and each chunk's `completion_tokens` is **its own choice's**
+  running count (only the final usage chunk sums the choices; the prompt counts once). A
+  stream that ends early is billed the prompt plus, per choice index, the highest count
+  forwarded (`sse.UsageTracker`), with 0 cached tokens (cached input is priced as input
+  in M1, so this is exact today). Non-streaming responses carry the engine's total.
 - **Proxy behaviour** (`loom_podproxy`, tests in `services/podproxy/tests`): source-address
   allowlist (`LOOM_PODPROXY_ALLOW_IPS`) checked before the TLS handshake; TLS 1.3 only; a
   client certificate chaining to Loom's CA with `clientAuth` (a pod's own server
@@ -497,7 +533,7 @@ Clients branch on the status; `code` gives the reason.
 | 429 | `rate_limit_error` | `rate_limit_exceeded`, `concurrency_limit_exceeded` | Limits; `Retry-After` in seconds |
 | 502 | `server_error` | `upstream_lost` | Pod lost before any byte reached the client, retry used up; *(wave 2)* also no answer within `LOOM_REQUEST_TIMEOUT_S` of receipt. Billed nothing (usage event `error`) |
 | 503 | `server_error` | `model_unavailable` | §10; `Retry-After` in seconds |
-| 503 | `server_error` | `balance_unavailable` | *(wave 2)* the org's balance could not be loaded into Redis (§8 step 4); `Retry-After: 1`; no reservation, no usage event |
+| 503 | `server_error` | `balance_unavailable` | *(wave 2)* the org's balance could not be loaded into Redis (§8 step 3); `Retry-After: 1`; no reservation, no usage event |
 
 Mid-stream failures end the stream with `data: {"error": {... "code": "upstream_lost"}}`
 and `data: [DONE]` (`ApiError.sse_chunk`).
@@ -554,3 +590,11 @@ strings. An unknown id is 404 `model_not_found`.
 - **Gateway image size**: `loom-platform` depends on `loom-bench` for the registry,
   which pulls numpy, scipy and pyarrow. Splitting the registry into its own small
   package is a later refactor.
+- **Non-streaming requests cut at the timeout** are unbilled (§6). Billing them means
+  streaming from the engine internally, which first needs a quality-gate run on vLLM's
+  streaming tool-call and reasoning parsers (user decision).
+- **Google email linking**: kept on (`LOOM_GOOGLE_EMAIL_LINKING`, verified emails only);
+  whether to keep it at all is a user decision.
+- **Disputes won** (`charge.dispute.closed`, status `won`) do not reinstate the credit
+  taken back yet; an admin adjustment does. Stripe's webhook endpoint must subscribe to
+  `charge.refunded` and `charge.dispute.created`.

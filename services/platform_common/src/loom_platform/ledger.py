@@ -124,6 +124,17 @@ async def org_credit_total(conn: psycopg.AsyncConnection, org_id: uuid.UUID) -> 
     return await _scalar(conn, "SELECT loom_org_credit_total(%s)", org_id)
 
 
+async def org_credit_state(conn: psycopg.AsyncConnection, org_id: uuid.UUID) -> tuple[int, int]:
+    """(credit total, its version) in one snapshot, for `Limiter.set_credit`."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT loom_org_credit_total(%s), loom_org_credit_version(%s)", (org_id, org_id)
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return int(row[0]), int(row[1])
+
+
 async def org_usage_total(conn: psycopg.AsyncConnection, org_id: uuid.UUID) -> int:
     return await _scalar(conn, "SELECT loom_org_usage_total(%s)", org_id)
 

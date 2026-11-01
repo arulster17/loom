@@ -3,9 +3,10 @@
 Every minute, for each org loaded in Redis (`SCAN loom:org:*:credit`) that exists in
 Postgres:
 
-1. **Credit**: `Limiter.set_credit(org, loom_org_credit_total(org))`. Only the `credit`
-   field is written. Safe without a lock because `credit` comes only from Postgres;
-   `usage` (written by settle) is never touched here.
+1. **Credit**: `Limiter.set_credit(org, credit total, version)`, both read in one
+   snapshot. Only `credit` (and its version) is written, and never over a newer version,
+   so a slow reconcile cannot undo a fresher refresh; `usage` (written by settle) is
+   never touched here.
 2. **Drift check** on `usage`, race-free:
    a. in one MULTI: read every org's Redis `usage` (U1) and the stream's last id (L);
    b. check the consumer group has delivered and acked everything up to L (else the
@@ -46,7 +47,7 @@ from loom_billing.logs import fields
 from loom_billing.notify import AutoRecharge, Notifier
 from loom_billing.streams import StreamId, consumed_through, parse_id, s
 from loom_platform.db import libpq_url
-from loom_platform.ledger import org_credit_total
+from loom_platform.ledger import org_credit_state
 from loom_platform.limiter import KEY_ROOT, Limiter, org_key
 
 log = logging.getLogger("loom_billing.reconcile")
@@ -150,11 +151,11 @@ class Reconciler:
             # (c) Postgres, one snapshot.
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT o.id, loom_org_credit_total(o.id), loom_org_usage_total(o.id) "
-                    "FROM unnest(%s::uuid[]) AS o(id)",
+                    "SELECT o.id, loom_org_credit_total(o.id), loom_org_usage_total(o.id), "
+                    "loom_org_credit_version(o.id) FROM unnest(%s::uuid[]) AS o(id)",
                     (orgs,),
                 )
-                pg = {r[0]: (int(r[1]), int(r[2])) for r in await cur.fetchall()}
+                pg = {r[0]: (int(r[1]), int(r[2]), int(r[3])) for r in await cur.fetchall()}
             await conn.commit()
             # (d) U2.
             u2_raw = await self.redis.mget([org_key(o, "usage") for o in orgs])
@@ -166,8 +167,8 @@ class Reconciler:
                 metrics.DRIFT_CHECK_SKIPPED.inc()
 
             for o, before, after in zip(orgs, u1, u2, strict=True):
-                credit, pg_usage = pg[o]
-                if await self.limiter.set_credit(o, credit):
+                credit, pg_usage, version = pg[o]
+                if await self.limiter.set_credit(o, credit, version):
                     run.credits_set += 1
                     metrics.RECONCILE_ORGS.inc()
                 if drained and before is not None and pg_usage < before:
@@ -221,8 +222,8 @@ class CreditListener:
             log.warning("credit_listener.bad_payload")
             return False
         async with self.pool.connection() as conn:
-            credit = await org_credit_total(conn, org_id)
-        done = await self.limiter.set_credit(org_id, credit)
+            credit, version = await org_credit_state(conn, org_id)
+        done = await self.limiter.set_credit(org_id, credit, version)
         metrics.CREDIT_NOTIFICATIONS.inc()
         log.info(
             "credit_listener.applied",

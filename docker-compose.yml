@@ -6,6 +6,8 @@
 # Published host ports can be moved with the *_PORT variables below (e.g. to run a second
 # stack next to the first: LOOM_PG_PORT=15432 ... docker compose -p loom2 up -d).
 # Nothing here is a production secret: the dev values are fixed or generated locally.
+# LOOM_ENV=dev is what lets the services start on them: with LOOM_ENV unset (prod) the
+# gateway, billing and web refuse dev defaults and missing secrets (contracts §2).
 
 x-devstack: &devstack
   # Mock pods, poolsim, dev certificates and the migration (services/devstack/Dockerfile).
@@ -15,6 +17,7 @@ x-devstack: &devstack
     dockerfile: services/devstack/Dockerfile
 
 x-platform-env: &platform-env
+  LOOM_ENV: dev
   LOOM_DATABASE_URL: postgresql://loom:loom@postgres:5432/loom_platform
   LOOM_REDIS_URL: redis://redis:6379/0
   LOOM_MODELS_YAML: /loom-config/models.yaml
@@ -89,6 +92,9 @@ services:
       - mock-pod-1
       - --pod
       - mock-pod-2
+      # The Stripe stub's webhook signing secret, random per stack, shared with billing.
+      - --secret
+      - stripe-stub-webhook
       # Keys readable by the other containers' users; dev only.
       - --readable-keys
     volumes:
@@ -216,11 +222,14 @@ services:
       LOOM_BILLING_INTERNAL_TOKEN: *internal-token
       # Stable across container re-creates, so a restart recovers its own pending entries.
       LOOM_BILLING_CONSUMER: billing-1
-      # Local stub unless both test-mode keys are set (a live key refuses to start).
+      # The local stub, by explicit opt-in. For real Stripe (test mode) set
+      # LOOM_STRIPE_MODE=stripe with both keys; a live key refuses to start.
+      LOOM_STRIPE_MODE: ${LOOM_STRIPE_MODE:-stub}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       LOOM_STRIPE_STUB_URL: http://stripe-stub:12111
-    volumes: [*config-volume]
+      LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE: /certs/stripe-stub-webhook.secret
+    volumes: [*config-volume, *certs-volume]
     ports:
       - "${LOOM_BILLING_PORT:-8090}:8090"
       - "${LOOM_BILLING_METRICS_PORT:-9101}:9101"
@@ -229,6 +238,8 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+      devcerts:
+        condition: service_completed_successfully
     healthcheck:
       test:
         - CMD
@@ -250,8 +261,15 @@ services:
       dockerfile: services/billing/Dockerfile
     command: ["stripe-stub"]
     environment:
+      LOOM_ENV: dev
+      LOOM_STRIPE_MODE: stub
       LOOM_STRIPE_STUB_WEBHOOK_URL: http://billing:8090/stripe/webhook
       LOOM_STRIPE_STUB_PUBLIC_URL: http://localhost:${LOOM_STRIPE_STUB_PORT:-12111}
+      LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE: /certs/stripe-stub-webhook.secret
+    volumes: [*certs-volume]
+    depends_on:
+      devcerts:
+        condition: service_completed_successfully
     ports:
       - "${LOOM_STRIPE_STUB_PORT:-12111}:12111"
     healthcheck:
@@ -273,6 +291,7 @@ services:
       context: .
       dockerfile: apps/web/Dockerfile
     environment:
+      LOOM_ENV: dev
       DATABASE_URL: postgresql://loom:loom@postgres:5432/loom_platform
       LOOM_DATABASE_URL: postgresql://loom:loom@postgres:5432/loom_platform
       LOOM_REDIS_URL: redis://redis:6379/0

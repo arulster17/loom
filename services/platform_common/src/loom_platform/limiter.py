@@ -49,13 +49,14 @@ def api_key_key(org_id: uuid.UUID | str, key_id: uuid.UUID | str, name: str) -> 
 def _script_source(name: str) -> str:
     lua = resources.files("loom_platform.lua")
     body = lua.joinpath(f"{name}.lua").read_text(encoding="utf-8")
-    if name == "init_org":
+    if name in ("init_org", "set_credit"):
         return body
     return lua.joinpath("common.lua").read_text(encoding="utf-8") + "\n" + body
 
 
 def script_source(name: str) -> str:
-    """Full Lua source of 'reserve', 'settle' or 'init_org' (common helpers prepended)."""
+    """Full Lua source of 'reserve', 'settle', 'release', 'init_org' or 'set_credit'
+    (common helpers prepended where used)."""
     return _script_source(name)
 
 
@@ -119,7 +120,9 @@ class Limiter:
         self.usage_stream = usage_stream
         self._reserve = redis.register_script(script_source("reserve"))
         self._settle = redis.register_script(script_source("settle"))
+        self._release = redis.register_script(script_source("release"))
         self._init = redis.register_script(script_source("init_org"))
+        self._set_credit = redis.register_script(script_source("set_credit"))
 
     async def reserve(
         self,
@@ -163,6 +166,11 @@ class Limiter:
         total = int(res[1])
         return SettleResult(True, total if total >= 0 else None, _str(res[2]))
 
+    async def release(self, org_id: uuid.UUID, request_id: uuid.UUID) -> bool:
+        """Drop a reservation that was never dispatched (503 after reserve): refund its tpm
+        estimate, keep its rpm token spent, charge nothing, append no usage event."""
+        return bool(await self._release(keys=[org_prefix(org_id)], args=[str(request_id)]))
+
     async def init_org(
         self,
         *,
@@ -171,10 +179,11 @@ class Limiter:
         credit_total: int,
         usage_total: int,
         key_usage_total: int,
+        credit_version: int = 0,
     ) -> tuple[bool, bool]:
         res = await self._init(
             keys=[org_prefix(org_id)],
-            args=[credit_total, usage_total, str(key_id), key_usage_total],
+            args=[credit_total, usage_total, str(key_id), key_usage_total, credit_version],
         )
         return bool(res[0]), bool(res[1])
 
@@ -185,27 +194,30 @@ class Limiter:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT loom_org_credit_total(%s), loom_org_usage_total(%s), "
-                "loom_key_usage_total(%s)",
-                (org_id, org_id, key_id),
+                "loom_key_usage_total(%s), loom_org_credit_version(%s)",
+                (org_id, org_id, key_id, org_id),
             )
             row = await cur.fetchone()
         assert row is not None
-        credit, usage, key_usage = row
+        credit, usage, key_usage, version = row
         return await self.init_org(
             org_id=org_id,
             key_id=key_id,
             credit_total=credit,
             usage_total=usage,
             key_usage_total=key_usage,
+            credit_version=version,
         )
 
-    async def set_credit(self, org_id: uuid.UUID, credit_total: int) -> bool:
+    async def set_credit(self, org_id: uuid.UUID, credit_total: int, version: int) -> bool:
         """Refresh an org's credit total from Postgres (on loom_credit_changed and in the
-        minute reconcile). Only updates an org that is already loaded: a lone credit key
-        without its usage counter would never be read anyway."""
-        if not await self.redis.exists(org_key(org_id, "usage")):
-            return False
-        return bool(await self.redis.set(org_key(org_id, "credit"), credit_total, xx=True))
+        minute reconcile) with its version (`ledger.org_credit_state`, one snapshot).
+        Only updates an org that is already loaded (a lone credit key without its usage
+        counter would never be read), and never with an older version than Redis holds:
+        a reader whose snapshot predates another writer's cannot put back a stale total.
+        True when Redis now holds this version's total."""
+        res = await self._set_credit(keys=[org_prefix(org_id)], args=[credit_total, version])
+        return int(res) == 1
 
     async def available(self, org_id: uuid.UUID) -> int | None:
         """credit - usage - reserved, or None when the org is not loaded."""

@@ -24,16 +24,20 @@ DEFAULT_COLD_START_S = 300
 COMPLETIONS_DEFAULT_MAX_TOKENS = 16
 
 
+DEV_CORS_ORIGINS = "http://localhost:3000"
+
+
 class GatewaySettings(PlatformSettings):
     # Recorded on usage events.
     cloud: str = "local"
     region: str | None = None
 
     # Comma-separated origins allowed by CORS (the web app).
-    cors_origins: str = "http://localhost:3000"
+    cors_origins: str = DEV_CORS_ORIGINS
 
     # mTLS to the pods' proxies (contracts §9). Unset: plain TLS with the system trust
     # store (or plain HTTP for http:// replica URLs, which only tests and local dev use).
+    # Outside LOOM_ENV=dev all three are required and http:// replicas are never used.
     gateway_client_cert: str | None = None
     gateway_client_key: str | None = None
     pod_ca_cert: str | None = None
@@ -57,6 +61,18 @@ class GatewaySettings(PlatformSettings):
 
     redis_max_connections: Annotated[int, Field(gt=0)] = 256
     pg_pool_max: Annotated[int, Field(gt=0)] = 10
+
+    def production_problems(self) -> list[str]:
+        problems = super().production_problems()
+        if self.env == "dev":
+            return problems
+        if not self.pod_ca_cert:
+            problems.append("LOOM_POD_CA_CERT is not set (pods would be trusted by the system CAs)")
+        if not (self.gateway_client_cert and self.gateway_client_key):
+            problems.append("LOOM_GATEWAY_CLIENT_CERT / _KEY are not set (no mTLS to pods)")
+        if self.cors_origins == DEV_CORS_ORIGINS:
+            problems.append("LOOM_CORS_ORIGINS is the docker-compose default (localhost)")
+        return problems
 
     @property
     def cors_origin_list(self) -> list[str]:

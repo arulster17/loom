@@ -26,6 +26,18 @@ MAX_SEQUENCES = 16
 # Parameters that make the engine generate more than it returns (cost not covered by the
 # reservation's `n * max_tokens`), refused rather than passed through.
 _REFUSED = ("best_of", "use_beam_search")
+# Chat fields the template renders through `tojson` (re-serialised, possibly much longer
+# than in the body) or that change the template itself: the prompt bound is the context.
+_TEMPLATE_JSON_FIELDS = ("tools", "functions", "documents", "chat_template", "chat_template_kwargs")
+
+
+def _template_json(data: dict[str, Any]) -> bool:
+    """Whether the chat template will re-serialise JSON from this request: the fields
+    above, or an assistant message's tool calls (vLLM parses their `arguments` string
+    and the template renders the object)."""
+    if any(data.get(f) not in (None, [], {}) for f in _TEMPLATE_JSON_FIELDS):
+        return True
+    return any(isinstance(m, dict) and m.get("tool_calls") for m in data.get("messages") or [])
 
 
 @dataclass(frozen=True)
@@ -162,7 +174,13 @@ def prepare(
     else:
         out.pop("stream_options", None)
 
-    prompt_upper = prompt_tokens_upper_bound(body_bytes, max_context)
+    # The reservation uses the safe bound; the tpm estimate (corrected to the engine's
+    # count at settle) keeps the body-size one, so tool requests are not throttled by a
+    # full context of tpm each.
+    estimate = prompt_tokens_upper_bound(body_bytes, max_context)
+    prompt_upper = prompt_tokens_upper_bound(
+        body_bytes, max_context, template_json=endpoint == "chat" and _template_json(data)
+    )
     max_cost = sequences * max_cost_micros(price, prompt_upper, max_tokens, max_context)
     return Prepared(
         endpoint=endpoint,
@@ -173,7 +191,7 @@ def prepare(
         max_tokens=max_tokens,
         sequences=sequences,
         prompt_upper=prompt_upper,
-        tpm_estimate=prompt_upper * prompts,
+        tpm_estimate=estimate * prompts,
         max_cost_micros=max_cost,
         upstream_body=json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode(),
     )

@@ -83,6 +83,20 @@ def test_readable_keys_cli(tmp_path, capsys):
     assert "up to date" in capsys.readouterr().out
 
 
+def test_shared_secrets_are_random_per_directory_and_kept(tmp_path, capsys):
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d in (a, b):
+        main(["--out", str(d), "--pod", "p1", "--secret", "stripe-stub-webhook"])
+    first = (a / "stripe-stub-webhook.secret").read_text().strip()
+    assert first.startswith("whsec_") and len(first) > 40
+    assert first != (b / "stripe-stub-webhook.secret").read_text().strip()
+    assert stat.S_IMODE((a / "stripe-stub-webhook.secret").stat().st_mode) == 0o600
+    main(["--out", str(a), "--pod", "p1", "--secret", "stripe-stub-webhook"])
+    assert (a / "stripe-stub-webhook.secret").read_text().strip() == first  # kept
+    with pytest.raises(ValueError):
+        main(["--out", str(a), "--secret", "../x"])
+
+
 @pytest.mark.skipif(shutil.which("openssl") is None, reason="no openssl")
 def test_openssl_verifies_the_chain(tmp_path):
     ensure_dev_certs(tmp_path, ("mock-pod-1",))

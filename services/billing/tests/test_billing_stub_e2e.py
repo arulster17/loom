@@ -13,10 +13,10 @@ from collections.abc import AsyncIterator, Mapping
 import httpx
 import pytest
 import uvicorn
-from billing_fixtures import asgi_transport, ledger_is_balanced
+from billing_fixtures import STUB, STUB_WEBHOOK_SECRET, asgi_transport, ledger_is_balanced
 
 from loom_billing.api import create_app
-from loom_billing.settings import STUB_WEBHOOK_SECRET, BillingSettings
+from loom_billing.settings import BillingSettings
 from loom_billing.stripe_stub import create_stub_app
 from loom_platform.ledger import org_balance
 from loom_platform.limiter import Limiter, org_key
@@ -43,7 +43,7 @@ async def test_checkout_through_stub_credits_the_org(pool, redis_client, make_te
     async with pool.connection() as conn:
         await limiter.load_from_postgres(conn, org_id=t.org_id, key_id=t.key_id)
 
-    settings = BillingSettings(billing_internal_token=TOKEN)
+    settings = BillingSettings(billing_internal_token=TOKEN, **STUB)
     billing_box: dict[str, object] = {}
 
     async def deliver(url: str, body: bytes, headers: Mapping[str, str]) -> int:
@@ -104,6 +104,24 @@ async def test_checkout_through_stub_credits_the_org(pool, redis_client, make_te
         async with pool.connection() as conn:
             assert await org_balance(conn, t.org_id) == 12_340_000
             assert await ledger_is_balanced(conn)
+
+        # A partial refund, then a dispute over the rest, each claw the credit back.
+        pi = stub.state.sessions[session["id"]]["payment_intent"]
+        stripe_auth = {"Authorization": "Bearer sk_test_loom_local_stub"}
+        r = await user.post(
+            "/v1/refunds", data={"payment_intent": pi, "amount": "234"}, headers=stripe_auth
+        )
+        assert r.status_code == 200 and r.json()["amount"] == 234
+        async with pool.connection() as conn:
+            assert await org_balance(conn, t.org_id) == 10_000_000
+        assert int(await redis_client.get(org_key(t.org_id, "credit"))) == 10_000_000
+        r = await user.post("/stub/disputes", json={"payment_intent": pi})
+        assert r.status_code == 200 and r.json()["amount"] == 1234
+        async with pool.connection() as conn:
+            assert await org_balance(conn, t.org_id) == 0  # capped at the purchase
+            assert await ledger_is_balanced(conn)
+        r = await user.post("/v1/refunds", data={"payment_intent": "pi_nope"}, headers=stripe_auth)
+        assert r.status_code == 404
 
 
 async def test_stub_refuses_bad_requests():
@@ -170,7 +188,7 @@ async def test_checkout_over_real_http(pool, redis_client, make_tenant):
         deliver=lazy_deliver,
     )
     async with serve(stub) as stub_url:
-        settings = BillingSettings(billing_internal_token=TOKEN, stripe_stub_url=stub_url)
+        settings = BillingSettings(billing_internal_token=TOKEN, stripe_stub_url=stub_url, **STUB)
         billing = create_app(settings, pool=pool, redis=redis_client)
         async with serve(billing) as billing_url:
             holder["billing"] = billing_url

@@ -70,6 +70,12 @@ class Stack:
     tls: bool
     tenants: list[Tenant] = field(default_factory=list)
     clients: list[AsyncOpenAI] = field(default_factory=list)
+    exit_stack: contextlib.AsyncExitStack | None = None
+
+    async def track_server(self, server: contextlib.AbstractAsyncContextManager[int]) -> int:
+        """Enter a `serve(...)` context for the lifetime of the stack; returns its port."""
+        assert self.exit_stack is not None
+        return await self.exit_stack.enter_async_context(server)
 
     @property
     def gateway(self) -> Gateway:
@@ -146,6 +152,7 @@ async def make_stack(
                 "usage_stream": f"loom:test:usage:{uuid.uuid4().hex}",
                 "pool_cache_ttl_s": 0,
                 "log_level": "WARNING",
+                "env": "dev",  # plain-http replicas in some tests; prod checks: units
             }
             if tls:
                 settings_kw |= {
@@ -177,6 +184,7 @@ async def make_stack(
                 big=big,
                 unpriced=unpriced,
                 tls=tls,
+                exit_stack=es,
             )
             stacks.append(stack)
             return stack

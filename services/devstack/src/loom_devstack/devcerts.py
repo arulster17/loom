@@ -8,6 +8,7 @@ Writes into one directory (default `.dev/certs`, gitignored; never commit it):
 | `gateway.crt`, `gateway.key` | Gateway client certificate (CN `loom-gateway`, clientAuth) |
 | `<pod>.crt`, `<pod>.key` | Pod proxy server certificate, SAN DNS `<pod>` (serverAuth) |
 | `<pod>.token` | That pod's `X-Loom-Pod-Token` value |
+| `<name>.secret` | A random shared secret per `--secret <name>` (`whsec_...`) |
 
 Idempotent: existing files are kept while they are valid for at least another day and
 chain to the CA, so re-running (every `docker compose up`) changes nothing. `--force`
@@ -21,6 +22,7 @@ import argparse
 import datetime as dt
 import ipaddress
 import os
+import re
 import secrets
 import shutil
 from dataclasses import dataclass
@@ -208,6 +210,7 @@ def ensure_dev_certs(
     *,
     force: bool = False,
     key_mode: int = 0o600,
+    secret_names: tuple[str, ...] = (),
 ) -> list[str]:
     """Create or refresh everything in `out`; returns the file stems (re)written."""
     if force and out.exists():
@@ -231,6 +234,13 @@ def ensure_dev_certs(
         if not token.is_file() or not token.read_text().strip():
             _write(token, secrets.token_urlsafe(32).encode() + b"\n", key_mode)
             written.append(f"{pod}.token")
+    for name in secret_names:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
+            raise ValueError(f"secret name {name!r}: lowercase letters, digits and dashes")
+        path = out / f"{name}.secret"
+        if not path.is_file() or not path.read_text().strip():
+            _write(path, b"whsec_" + secrets.token_urlsafe(32).encode() + b"\n", key_mode)
+            written.append(f"{name}.secret")
     return written
 
 
@@ -242,6 +252,12 @@ def main(argv: list[str] | None = None) -> None:
         action="append",
         help=f"pod id to issue a server certificate for (default: {', '.join(DEFAULT_PODS)})",
     )
+    p.add_argument(
+        "--secret",
+        action="append",
+        default=[],
+        help="also keep a random shared secret in <name>.secret (e.g. stripe-stub-webhook)",
+    )
     p.add_argument("--force", action="store_true", help="discard everything, new CA")
     p.add_argument(
         "--readable-keys",
@@ -252,7 +268,11 @@ def main(argv: list[str] | None = None) -> None:
     args = p.parse_args(argv)
     pods = tuple(args.pod or DEFAULT_PODS)
     written = ensure_dev_certs(
-        args.out, pods, force=args.force, key_mode=0o644 if args.readable_keys else 0o600
+        args.out,
+        pods,
+        force=args.force,
+        key_mode=0o644 if args.readable_keys else 0o600,
+        secret_names=tuple(args.secret),
     )
     print(f"{args.out}: " + (", ".join(written) + " written" if written else "up to date"))
 
