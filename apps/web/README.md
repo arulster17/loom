@@ -59,7 +59,7 @@ web app and the registry.
 | `LOOM_GATEWAY_URL` | `http://localhost:8080` | Gateway as the server reaches it (compose: `http://gateway:8080`) |
 | `LOOM_PUBLIC_API_URL` | `http://localhost:8080/v1` | API base shown in code samples |
 | `LOOM_BILLING_URL` | `http://localhost:8090` | Billing service (compose: `http://billing:8090`) |
-| `LOOM_INTERNAL_TOKEN` | none | Sent as `Authorization: Bearer` to billing if set |
+| `LOOM_BILLING_INTERNAL_TOKEN` | none, **required for Add credit** | Shared with billing; sent as `Authorization: Bearer` |
 | `LOOM_REDIS_URL` | `redis://localhost:6379/0` | Read-only: model pool state for the Models page |
 | `LOOM_MODELS_YAML` | `../../config/models.yaml` (image: `/app/config/models.yaml`) | Model registry |
 | `LOOM_PLAYGROUND_KEY_SECRET` | derived from `AUTH_SECRET` | Optional separate secret for playground keys |
@@ -85,12 +85,13 @@ after `LOOM_PLAYGROUND_KEY_TTL_S` (the old one revoked) and revoked at sign-out.
 gateway needs nothing new: limits, credit, suspension and usage apply as for any key.
 Usage shows it as "Playground"; the API keys page hides it.
 
-**Checkout** (proposed contract for the billing service). The Billing page calls
-`POST {LOOM_BILLING_URL}/checkout/sessions` with
-`{"org_id", "amount_micros", "customer_email", "success_url", "cancel_url"}` and
-redirects the browser to the `url` in the JSON answer (locally the Stripe stub's page).
-Amounts are $5 to $1,000. Credit appears only when the signed webhook posts it; the
-success page says so.
+**Checkout** (billing's contract, `services/billing/README.md`). The Billing page calls
+`POST {LOOM_BILLING_URL}/internal/checkout-sessions` with the shared bearer token and
+`{"org_id", "amount_micros", "success_url", "cancel_url", "customer_email"}`, then
+redirects the browser to the `url` in the answer (locally the Stripe stub's pay page on
+:12111). Amounts are whole cents, $5 to $500. Credit appears only when the signed
+webhook posts it: the return page shows it as pending and refreshes itself for a minute.
+Auto-recharge settings are stored; billing does not charge saved cards yet.
 
 **Model disable.** The contracts have no runtime switch: a model is disabled with
 `status: disabled` in `config/models.yaml`. The admin page says so.

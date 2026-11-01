@@ -6,7 +6,8 @@ import { lockOrgStatus } from "@/lib/data/orgs";
 
 /** Purchase and auto-recharge amounts, micro-dollars. */
 export const MIN_TOPUP_MICROS = 5_000_000n; // $5
-export const MAX_TOPUP_MICROS = 1_000_000_000n; // $1,000
+export const MAX_TOPUP_MICROS = 500_000_000n; // $500 (billing's LOOM_CHECKOUT_MAX_MICROS)
+const CENT_MICROS = 10_000n;
 
 export interface Balance {
   creditMicros: bigint; // purchases, promos, refunds, adjustments
@@ -61,6 +62,12 @@ export async function creditHistory(ctx: Pick<OrgContext, "orgId">, limit = 100,
   }));
 }
 
+/** True when a purchase was credited in the last 15 minutes (the checkout return page). */
+export function purchaseLandedRecently(history: CreditEntry[], windowMs = 15 * 60_000): boolean {
+  const now = Date.now();
+  return history.some((h) => h.kind === "purchase" && now - h.createdAt.getTime() < windowMs);
+}
+
 export interface AutoRecharge {
   enabled: boolean;
   thresholdMicros: bigint;
@@ -85,19 +92,20 @@ export async function getAutoRecharge(ctx: Pick<OrgContext, "orgId">, db: Db = g
 
 export function validateTopup(amountMicros: bigint): void {
   if (amountMicros < MIN_TOPUP_MICROS || amountMicros > MAX_TOPUP_MICROS) {
-    throw new RangeError("Amounts are between $5 and $1,000.");
+    throw new RangeError("Amounts are between $5 and $500.");
   }
+  if (amountMicros % CENT_MICROS !== 0n) throw new RangeError("Amounts are in whole cents.");
 }
 
 /**
- * Saves the org's auto-recharge settings. The billing service acts on them (charging
- * the saved card when the balance drops below the threshold); this only stores them.
+ * Saves the org's auto-recharge settings. Only stored for now: the billing service
+ * reads them (auto_recharge_due on loom:notify) but charging a saved card is not built.
  */
 export async function saveAutoRecharge(ctx: OrgContext, s: AutoRecharge): Promise<void> {
   if (!canManageBilling(ctx)) throw new AuthzError("Only org owners and admins can change billing.");
   validateTopup(s.amountMicros);
   if (s.thresholdMicros < 0n || s.thresholdMicros > MAX_TOPUP_MICROS) {
-    throw new RangeError("The threshold is between $0 and $1,000.");
+    throw new RangeError("The threshold is between $0 and $500.");
   }
   await withTx(async (c) => {
     if ((await lockOrgStatus(c, ctx.orgId)) !== "active") {

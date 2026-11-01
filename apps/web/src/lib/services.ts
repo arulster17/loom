@@ -42,16 +42,18 @@ export interface CheckoutRequest {
 
 /**
  * Starts a Stripe Checkout for prepaid credit through the billing service:
- * `POST {LOOM_BILLING_URL}/checkout/sessions` (contract proposed by the web app; see
- * apps/web/README.md). Locally the billing service answers with its Stripe stub's URL.
- * Credit is posted only by the signed webhook, never by this call or the success page.
+ * `POST {LOOM_BILLING_URL}/internal/checkout-sessions` with the shared
+ * LOOM_BILLING_INTERNAL_TOKEN (services/billing/README.md). Locally the answer's `url`
+ * is the Stripe stub's pay page. Credit is posted only by the signed webhook, never by
+ * this call or the success page.
  */
 export async function createCheckout(req: CheckoutRequest): Promise<string> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (process.env.LOOM_INTERNAL_TOKEN) headers.Authorization = `Bearer ${process.env.LOOM_INTERNAL_TOKEN}`;
+  const token = process.env.LOOM_BILLING_INTERNAL_TOKEN;
+  if (!token) throw new ServiceError("LOOM_BILLING_INTERNAL_TOKEN is not set");
+  const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
   let res: Response;
   try {
-    res = await fetch(`${billingUrl()}/checkout/sessions`, {
+    res = await fetch(`${billingUrl()}/internal/checkout-sessions`, {
       method: "POST",
       headers,
       cache: "no-store",

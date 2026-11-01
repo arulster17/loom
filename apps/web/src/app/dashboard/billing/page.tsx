@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
 
+import { AutoRefresh } from "@/components/auto-refresh";
 import { Badge, Card, Empty, Notice, PageHeader, formatDate, td, tdNum, th, thNum } from "@/components/ui";
 import { canManageBilling } from "@/lib/authz";
-import { creditHistory, getAutoRecharge, getBalance } from "@/lib/data/billing";
+import { creditHistory, getAutoRecharge, getBalance, purchaseLandedRecently } from "@/lib/data/billing";
 import { formatUsd, microsToDecimalString } from "@/lib/money";
 import { requireActiveOrg } from "@/lib/session";
 
@@ -22,15 +23,24 @@ export default async function BillingPage(props: PageProps<"/dashboard/billing">
   const { checkout } = await props.searchParams;
   const [balance, history, auto] = await Promise.all([getBalance(ctx), creditHistory(ctx), getAutoRecharge(ctx)]);
   const manage = canManageBilling(ctx);
+  const landed = purchaseLandedRecently(history);
 
   return (
     <>
       <PageHeader title="Billing">
         Loom is prepaid: you add credit, and each request is charged from it at the listed per-token price.
       </PageHeader>
-      {checkout === "success" ? (
+      {checkout === "success" && landed ? (
         <div className="mb-6">
-          <Notice tone="ok">Payment received. Your credit appears here once Stripe confirms it, usually within seconds.</Notice>
+          <Notice tone="ok">Payment received and your credit has been added. Thank you.</Notice>
+        </div>
+      ) : checkout === "success" ? (
+        <div className="mb-6">
+          <Notice tone="wait">
+            Payment received; the credit is pending until Stripe confirms it, usually within seconds. This page refreshes
+            on its own; the purchase shows in the history below when it lands.
+          </Notice>
+          <AutoRefresh />
         </div>
       ) : checkout === "cancelled" ? (
         <div className="mb-6">
@@ -56,6 +66,9 @@ export default async function BillingPage(props: PageProps<"/dashboard/billing">
         </Card>
       </div>
       <Card title="Auto-recharge" className="mt-6">
+        <p className="mb-3 text-xs text-zinc-500">
+          Your settings are saved now; automatic charging of a saved card is not switched on yet.
+        </p>
         <AutoRechargeForm
           enabled={auto.enabled}
           threshold={microsToDecimalString(auto.thresholdMicros).replace(/\.?0+$/, "")}

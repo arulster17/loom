@@ -63,9 +63,10 @@ describe.skipIf(!hasDb)("usage and billing are org-scoped", () => {
     await expect(
       saveAutoRecharge(member, { enabled: false, thresholdMicros: 0n, amountMicros: 10_000_000n }),
     ).rejects.toBeInstanceOf(AuthzError);
-    await expect(
-      saveAutoRecharge(a, { enabled: true, thresholdMicros: 0n, amountMicros: 1_000_000n }),
-    ).rejects.toBeInstanceOf(RangeError);
+    for (const amountMicros of [1_000_000n, 600_000_000n, 10_005_000n]) {
+      // under $5, over $500 (billing's limits), not whole cents
+      await expect(saveAutoRecharge(a, { enabled: true, thresholdMicros: 0n, amountMicros })).rejects.toBeInstanceOf(RangeError);
+    }
     const n = await getPool().query("SELECT count(*)::int AS n FROM auto_recharge WHERE org_id = $1", [b.orgId]);
     expect(n.rows[0].n).toBe(0);
   });

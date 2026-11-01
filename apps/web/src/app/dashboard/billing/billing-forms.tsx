@@ -29,7 +29,7 @@ export function AddCreditForm({ disabled }: { disabled: boolean }) {
       <div className="flex items-end gap-3">
         <div>
           <label htmlFor="amount" className={label}>
-            Amount (USD, $5 to $1,000)
+            Amount (USD, $5 to $500)
           </label>
           <input
             id="amount"
