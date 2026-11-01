@@ -21,6 +21,14 @@ export interface PoolStatus {
 
 type Row = Record<string, unknown>;
 
+/** YAML 1.1 ints like 77_000 (PyYAML reads them; js-yaml's YAML 1.2 keeps a string). */
+function num(v: unknown): number {
+  if (typeof v === "string" && /^\d[\d_]*$/.test(v)) return Number(v.replace(/_/g, ""));
+  const n = Number(v);
+  if (!Number.isFinite(n)) throw new Error(`models.yaml: not a number: ${String(v)}`);
+  return n;
+}
+
 /** Cold starts the user should expect (measured: 70B ~7.5 min, budget 20). */
 export function startupNote(id: string, params?: string): string | null {
   if (/70b/i.test(id) || /70b/i.test(params ?? "")) return "Can take up to ~20 min to start when it has been idle.";
@@ -39,10 +47,10 @@ export function catalogFromRegistry(doc: unknown): ModelInfo[] {
     out.push({
       id,
       displayName: String(m.display_name ?? id),
-      maxContext: Number(m.max_context),
-      inputPerMtokMicros: Number(pricing.input_per_mtok),
-      cachedInputPerMtokMicros: Number(pricing.cached_input_per_mtok ?? pricing.input_per_mtok),
-      outputPerMtokMicros: Number(pricing.output_per_mtok),
+      maxContext: num(m.max_context),
+      inputPerMtokMicros: num(pricing.input_per_mtok),
+      cachedInputPerMtokMicros: num(pricing.cached_input_per_mtok ?? pricing.input_per_mtok),
+      outputPerMtokMicros: num(pricing.output_per_mtok),
       status: String(m.status ?? ""),
       startupNote: startupNote(id),
     });

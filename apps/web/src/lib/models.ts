@@ -18,7 +18,8 @@ let cached: { at: number; models: ModelInfo[] } | undefined;
 /** The models the public API offers (priced and not disabled), from the registry. */
 export async function listCatalog(): Promise<ModelInfo[]> {
   if (cached && Date.now() - cached.at < 60_000) return cached.models;
-  const doc = yaml.load(await readFile(modelsYamlPath(), "utf8"));
+  // Runtime path (the Docker image copies the file in); not part of the build trace.
+  const doc = yaml.load(await readFile(/*turbopackIgnore: true*/ modelsYamlPath(), "utf8"));
   const models = catalogFromRegistry(doc);
   cached = { at: Date.now(), models };
   return models;
