@@ -76,6 +76,18 @@ def test_settings_default_to_the_stub(monkeypatch):
     assert s.stripe_api() == ("http://localhost:12111", "sk_test_loom_local_stub")
 
 
+def test_settings_empty_keys_mean_the_stub(monkeypatch):
+    # docker-compose sets STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}, i.e. "" when unset.
+    # Regression: "" used to select real Stripe's API base with an empty key.
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "")
+    s = BillingSettings()
+    assert s.stripe_mode == "stub"
+    assert s.stripe_secret_key is None and s.stripe_webhook_secret is None
+    assert s.webhook_secret() == STUB_WEBHOOK_SECRET
+    assert s.stripe_api() == ("http://localhost:12111", "sk_test_loom_local_stub")
+
+
 def test_settings_real_stripe_from_env(monkeypatch):
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_51abc")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_xyz")
