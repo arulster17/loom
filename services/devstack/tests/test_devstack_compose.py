@@ -75,3 +75,19 @@ def test_gateway_has_the_mtls_material():
     assert env["LOOM_GATEWAY_CLIENT_KEY"] == "/certs/gateway.key"
     assert env["LOOM_POD_CA_CERT"] == "/certs/ca.crt"
     assert env["LOOM_DATABASE_URL"].endswith("@postgres:5432/loom_platform")
+
+
+def test_billing_wiring_matches_its_readme():
+    services = compose()
+    billing, stub = services["billing"], services["stripe-stub"]
+    # The image's entrypoint is `loom-billing`; commands are its subcommands.
+    assert billing["command"] == ["all"] and stub["command"] == ["stripe-stub"]
+    assert billing["build"]["dockerfile"] == stub["build"]["dockerfile"]
+    assert billing["environment"]["LOOM_STRIPE_STUB_URL"] == "http://stripe-stub:12111"
+    stub_env = stub["environment"]
+    assert stub_env["LOOM_STRIPE_STUB_WEBHOOK_URL"] == "http://billing:8090/stripe/webhook"
+    assert stub_env["LOOM_STRIPE_STUB_PUBLIC_URL"].startswith("http://localhost:")
+    assert published(stub) == {12111}
+    token = billing["environment"]["LOOM_BILLING_INTERNAL_TOKEN"]
+    assert token and services["web"]["environment"]["LOOM_INTERNAL_TOKEN"] == token
+    assert billing["depends_on"]["migrate"]["condition"] == "service_completed_successfully"

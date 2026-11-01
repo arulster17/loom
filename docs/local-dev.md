@@ -92,14 +92,14 @@ docker compose ps                            # all running; migrate and devcerts
 ```
 
 The first build takes a few minutes; later `up`s reuse the images. Nothing calls a cloud
-or Stripe: billing talks to a local Stripe stub and the "GPUs" are mock pods.
+or Stripe: billing talks to a local Stripe stub (unless `STRIPE_SECRET_KEY` and
+`STRIPE_WEBHOOK_SECRET`, test mode only, are set) and the "GPUs" are mock pods.
 
 | Service | Host port | What |
 |---|---|---|
 | `web` | [3000](http://localhost:3000) | Dashboard, playground, admin |
 | `gateway` | [8080](http://localhost:8080/v1), metrics 9100 | Public OpenAI-compatible API |
-| `billing` | 8090, metrics 9101 | Stripe webhooks, internal checkout API |
-| `billing-worker` | metrics 9102 | Usage stream consumer, ledger batches, reconcile |
+| `billing` | 8090, metrics 9101 | `loom-billing all`: usage stream consumer, ledger batches, reconcile, Stripe webhooks, internal checkout API |
 | `stripe-stub` | [12111](http://localhost:12111) | Local Stripe Checkout stand-in |
 | `mailpit` | [8025](http://localhost:8025) (UI), SMTP 1025 | Catches magic-link email |
 | `postgres` | 5432 | Databases `loom_platform` (platform) and `loom` (bench) |
@@ -136,7 +136,7 @@ Host ports move with variables, e.g. to run a second stack next to the main one:
 `LOOM_PG_PORT=15432 LOOM_REDIS_PORT=16379 LOOM_GATEWAY_PORT=18080 ... docker compose -p
 loom2 up -d` (the variables are in `docker-compose.yml`: `LOOM_PG_PORT`,
 `LOOM_REDIS_PORT`, `LOOM_GATEWAY_PORT`, `LOOM_GATEWAY_METRICS_PORT`, `LOOM_BILLING_PORT`,
-`LOOM_BILLING_METRICS_PORT`, `LOOM_BILLING_WORKER_METRICS_PORT`, `LOOM_STRIPE_STUB_PORT`,
+`LOOM_BILLING_METRICS_PORT`, `LOOM_STRIPE_STUB_PORT`,
 `LOOM_WEB_PORT`, `LOOM_MAILPIT_UI_PORT`, `LOOM_MAILPIT_SMTP_PORT`).
 
 Start over: `docker compose down -v` (drops the databases) and `rm -rf .dev/certs` (a new
