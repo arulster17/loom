@@ -1,0 +1,15 @@
+# Build context is the repository root; send only what the gateway image needs.
+*
+!pyproject.toml
+!uv.lock
+!config/models.yaml
+!bench/pyproject.toml
+!bench/src
+!services/platform_common/pyproject.toml
+!services/platform_common/src
+!services/gateway/pyproject.toml
+!services/gateway/src
+!services/billing/pyproject.toml
+!services/billing/src
+**/__pycache__
+**/*.pyc
