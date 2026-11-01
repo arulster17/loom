@@ -40,7 +40,7 @@ from loom_billing.stripe_sig import SignatureError, verify
 from loom_billing.webhooks import BadEvent, handle_event
 from loom_platform.db import open_pool
 from loom_platform.errors import ApiError
-from loom_platform.ledger import org_credit_total
+from loom_platform.ledger import org_credit_state
 from loom_platform.limiter import Limiter
 
 log = logging.getLogger("loom_billing.api")
@@ -198,8 +198,8 @@ async def _refresh_credit(request: Request, org_id: uuid.UUID) -> None:
     """Push the new credit to Redis now (the loom_credit_changed listener would too)."""
     try:
         async with request.app.state.pool.connection() as conn:
-            credit = await org_credit_total(conn, org_id)
-        await request.app.state.limiter.set_credit(org_id, credit)
+            credit, version = await org_credit_state(conn, org_id)
+        await request.app.state.limiter.set_credit(org_id, credit, version)
     except Exception:
         log.exception("stripe.credit_refresh_failed")
 

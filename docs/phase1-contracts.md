@@ -144,7 +144,7 @@ NOTIFY channels (delivered on commit):
 | Channel | Fires on | Payload | Listener |
 |---|---|---|---|
 | `loom_auth_changed` | `api_keys` revoked/limits/scopes change; `orgs` status/limits change | `{"kind":"api_key","org_id","key_id","key_hash"}` or `{"kind":"org","org_id","status"}` | gateway: delete `loom:apikey:<key_hash>`; for an org, its keys' entries |
-| `loom_credit_changed` | non-usage ledger transaction with an org | `{"org_id","kind"}` | billing: `Limiter.set_credit(org, loom_org_credit_total(org))` |
+| `loom_credit_changed` | non-usage ledger transaction with an org | `{"org_id","kind"}` | billing: `Limiter.set_credit(org, *ledger.org_credit_state(org))` (total and version) |
 
 Row-level security is not enabled yet: isolation is org-scoped queries plus the
 cross-tenant tests M1 requires.
@@ -188,6 +188,7 @@ without also discarding the stream (both are one state).
 |---|---|---|---|
 | `loom:apikey:<sha256 hex>` | string, JSON | gateway | Auth record (`loom_platform.auth.AuthRecord`) or `{"found":false}`; TTL `LOOM_AUTH_CACHE_TTL_S` |
 | `loom:org:<org>:credit` | int | init, billing | `loom_org_credit_total` |
+| `loom:org:<org>:credit_v` | int | init, billing | Its version, `loom_org_credit_version` (migration 0006): the org's count of non-usage ledger transactions, read in the same snapshot |
 | `loom:org:<org>:usage` | int | init, settle | Cumulative settled cost (all time) |
 | `loom:org:<org>:rsum` | int | reserve, settle | Sum of live reservations |
 | `loom:org:<org>:rsv` | hash | reserve, settle | request id -> `<max cost>|<key id>|<tpm estimate>` |
@@ -213,7 +214,11 @@ available = credit - usage - rsum
 `credit` comes only from Postgres (purchases, promos, refunds, adjustments); `usage` only
 from settle; `rsum` from live reservations. Redis is ahead of Postgres by the events still
 in the stream, and `usage` already counts them, so `credit` can be overwritten from
-Postgres at any time without a race. The per-minute usage batch only moves cost from
+Postgres at any time, but only with a total at least as new as the one Redis holds:
+every write carries the total's version (`set_credit.lua`, `init_org.lua`), and a
+writer whose snapshot predates another's is refused rather than putting back a stale
+total. (The ledger is append-only and a snapshot sees a prefix of the commit order, so
+the count of an org's non-usage transactions orders its credit totals.) The per-minute usage batch only moves cost from
 unposted `usage_events` to posted ledger entries, both of which are already inside
 `usage`, so **batching never touches Redis**.
 
@@ -345,7 +350,7 @@ cost_micros > 0` (`FOR UPDATE`), post one `usage` transaction for their sum keye
 back both; a racing second worker hits the idempotency key.
 
 **Reconcile** (billing, every minute): for each org loaded in Redis
-(`SCAN loom:org:*:credit`), `set_credit(org, loom_org_credit_total(org))`; also on every
+(`SCAN loom:org:*:credit`), `set_credit(org, credit total, version)`; also on every
 `loom_credit_changed` notification.
 
 ## 8. Gateway request order

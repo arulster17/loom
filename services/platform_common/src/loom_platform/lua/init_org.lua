@@ -5,6 +5,7 @@
 -- ARGV[2]  usage total, micros (loom_org_usage_total)
 -- ARGV[3]  api key id
 -- ARGV[4]  key usage total, micros (loom_key_usage_total)
+-- ARGV[5]  credit version (loom_org_credit_version, same snapshot as ARGV[1])
 --
 -- Org credit and usage are set together or not at all: a state where one exists without
 -- the other could misstate the balance. Values already present are newer than any
@@ -17,6 +18,7 @@ local org_new = 0
 local key_new = 0
 if redis.call('EXISTS', p .. ':usage') == 0 then
   redis.call('SET', p .. ':credit', ARGV[1])
+  redis.call('SET', p .. ':credit_v', ARGV[5])
   redis.call('SET', p .. ':usage', ARGV[2])
   org_new = 1
 end
