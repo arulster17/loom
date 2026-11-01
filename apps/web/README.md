@@ -59,7 +59,7 @@ web app and the registry.
 | `LOOM_GATEWAY_URL` | `http://localhost:8080` | Gateway as the server reaches it (compose: `http://gateway:8080`) |
 | `LOOM_PUBLIC_API_URL` | `http://localhost:8080/v1` | API base shown in code samples |
 | `LOOM_BILLING_URL` | `http://localhost:8090` | Billing service (compose: `http://billing:8090`) |
-| `LOOM_BILLING_INTERNAL_TOKEN` | none, **required for Add credit** | Shared with billing; sent as `Authorization: Bearer` |
+| `LOOM_BILLING_INTERNAL_TOKEN` (or `LOOM_INTERNAL_TOKEN`, as compose sets it) | none, **required for Add credit** | Shared with billing; sent as `Authorization: Bearer` |
 | `LOOM_REDIS_URL` | `redis://localhost:6379/0` | Read-only: model pool state for the Models page |
 | `LOOM_MODELS_YAML` | `../../config/models.yaml` (image: `/app/config/models.yaml`) | Model registry |
 | `LOOM_PLAYGROUND_KEY_SECRET` | derived from `AUTH_SECRET` | Optional separate secret for playground keys |

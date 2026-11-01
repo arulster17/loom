@@ -48,7 +48,8 @@ export interface CheckoutRequest {
  * this call or the success page.
  */
 export async function createCheckout(req: CheckoutRequest): Promise<string> {
-  const token = process.env.LOOM_BILLING_INTERNAL_TOKEN;
+  // docker-compose.yml passes it to the web app as LOOM_INTERNAL_TOKEN.
+  const token = process.env.LOOM_BILLING_INTERNAL_TOKEN || process.env.LOOM_INTERNAL_TOKEN;
   if (!token) throw new ServiceError("LOOM_BILLING_INTERNAL_TOKEN is not set");
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
   let res: Response;

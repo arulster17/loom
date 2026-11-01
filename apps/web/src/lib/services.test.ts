@@ -36,8 +36,19 @@ describe("createCheckout (billing's /internal/checkout-sessions)", () => {
     });
   });
 
+  it("accepts the token as LOOM_INTERNAL_TOKEN too (docker-compose.yml)", async () => {
+    vi.stubEnv("LOOM_BILLING_INTERNAL_TOKEN", "");
+    vi.stubEnv("LOOM_INTERNAL_TOKEN", "compose-tok");
+    const fetchMock = vi.fn(async () => Response.json({ id: "cs", url: "http://localhost:12111/checkout/cs" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await createCheckout(req);
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer compose-tok");
+  });
+
   it("fails as a service error without a token, on errors and on a missing URL", async () => {
     vi.stubEnv("LOOM_BILLING_INTERNAL_TOKEN", "");
+    vi.stubEnv("LOOM_INTERNAL_TOKEN", "");
     await expect(createCheckout(req)).rejects.toBeInstanceOf(ServiceError);
     vi.stubEnv("LOOM_BILLING_INTERNAL_TOKEN", "tok");
     vi.stubGlobal("fetch", vi.fn(async () => new Response("no", { status: 409 })));
