@@ -497,3 +497,11 @@ it is always in the usage API. The gateway lists these headers in
 - **Gateway image size**: `loom-platform` depends on `loom-bench` for the registry,
   which pulls numpy, scipy and pyarrow. Splitting the registry into its own small
   package is a later refactor.
+- **Non-streaming requests cut at the timeout** are unbilled (§6). Billing them means
+  streaming from the engine internally, which first needs a quality-gate run on vLLM's
+  streaming tool-call and reasoning parsers (user decision).
+- **Google email linking**: kept on (`LOOM_GOOGLE_EMAIL_LINKING`, verified emails only);
+  whether to keep it at all is a user decision.
+- **Disputes won** (`charge.dispute.closed`, status `won`) do not reinstate the credit
+  taken back yet; an admin adjustment does. Stripe's webhook endpoint must subscribe to
+  `charge.refunded` and `charge.dispute.created`.
