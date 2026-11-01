@@ -428,6 +428,8 @@ Each milestone ends with a stop for the user's go-ahead before the next paid one
 
 ## 15. Open questions for the user
 
+**Decided 2026-10-31** ([PLAN.md](PLAN.md#decisions-so-far)): 1 on demand (always-on comes back with outside users); 2 yes, the user creates the account; 7 yes; 8 manual admin approval of every signup at first, open signups later. New: when no GPU of the model's own config can be had, no fallback to other GPU types: the request is declined with a clear "model temporarily unavailable" error. Still open: 3-6, 9, 10.
+
 Each needs an account, money or a hard-to-reverse choice.
 
 1. **Availability mode** (money). A: both on demand, ~$0 base; B: 8B always on, $804 a

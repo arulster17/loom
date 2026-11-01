@@ -975,6 +975,10 @@ uv run pytest -q bench/tests/config/test_registry.py -k price
 #   recomputes each price from the committed report's CI high bounds
 ```
 
+## Approval
+
+**Accepted by the user on 2026-10-31**, after the free checks were re-run that day (every one matched; stale counts fixed) and on the terms below: every item in "Open items before approval" is resolved or was accepted as-is. Known and accepted at approval: the 70B FP8 price is 2-5x the cheapest public list prices (a finer capacity search, 2b291998, found no 2x H100 SXM stock in 2 h and spent $0; Phase 1's measured cost per 1M served replaces it); the reapers have never removed a real orphan; the budget abort has only fired on the mock. Phase 1 resumes ([PLAN.md](PLAN.md#decisions-so-far)).
+
 ## Open items before approval
 
 These are either not met or wait on a decision from you:
