@@ -18,8 +18,10 @@ members = [
     "loom",
     "loom-bench",
     "loom-billing",
+    "loom-devstack",
     "loom-gateway",
     "loom-platform",
+    "loom-podproxy",
 ]
 
 [[package]]
@@ -1334,8 +1336,10 @@ source = { virtual = "." }
 dev = [
     { name = "loom-bench", extra = ["aws", "mock"] },
     { name = "loom-billing" },
+    { name = "loom-devstack" },
     { name = "loom-gateway" },
     { name = "loom-platform" },
+    { name = "loom-podproxy" },
     { name = "moto", extra = ["s3", "ssm"] },
     { name = "mypy" },
     { name = "pyarrow-stubs" },
@@ -1354,8 +1358,10 @@ dev = [
 dev = [
     { name = "loom-bench", extras = ["mock", "aws"], editable = "bench" },
     { name = "loom-billing", editable = "services/billing" },
+    { name = "loom-devstack", editable = "services/devstack" },
     { name = "loom-gateway", editable = "services/gateway" },
     { name = "loom-platform", editable = "services/platform_common" },
+    { name = "loom-podproxy", editable = "services/podproxy" },
     { name = "moto", extras = ["ec2", "s3", "ssm", "secretsmanager"], specifier = ">=5.0" },
     { name = "mypy", specifier = ">=1.11" },
     { name = "pyarrow-stubs", specifier = ">=20.0.0.20260819" },
@@ -1448,6 +1454,29 @@ requires-dist = [
 ]
 
 [[package]]
+name = "loom-devstack"
+version = "0.1.0"
+source = { editable = "services/devstack" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "httpx" },
+    { name = "loom-bench", extra = ["mock"] },
+    { name = "loom-platform" },
+    { name = "loom-podproxy" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cryptography", specifier = ">=42" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "loom-bench", extras = ["mock"], editable = "bench" },
+    { name = "loom-platform", editable = "services/platform_common" },
+    { name = "loom-podproxy", editable = "services/podproxy" },
+    { name = "pyyaml", specifier = ">=6.0" },
+]
+
+[[package]]
 name = "loom-gateway"
 version = "0.1.0"
 source = { editable = "services/gateway" }
@@ -1487,6 +1516,21 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.8" },
     { name = "pydantic-settings", specifier = ">=2.4" },
     { name = "redis", extras = ["hiredis"], specifier = ">=5.1" },
+]
+
+[[package]]
+name = "loom-podproxy"
+version = "0.1.0"
+source = { editable = "services/podproxy" }
+dependencies = [
+    { name = "h11" },
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "h11", specifier = ">=0.14" },
+    { name = "httpx", specifier = ">=0.27" },
 ]
 
 [[package]]

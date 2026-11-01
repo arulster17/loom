@@ -1,0 +1,27 @@
+[project]
+name = "loom-devstack"
+version = "0.1.0"
+description = "Loom local stack: mock pod launcher, pool simulator, dev certificates, gateway load test"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = [
+    "loom-platform",
+    "loom-podproxy",
+    "loom-bench[mock]",
+    "cryptography>=42",
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+loom-devcerts = "loom_devstack.devcerts:main"
+loom-poolsim = "loom_devstack.poolsim:main"
+loom-mockpod = "loom_devstack.mockpod:main"
+loom-loadtest = "loom_devstack.loadtest:main"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/loom_devstack"]
