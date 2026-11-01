@@ -107,7 +107,8 @@ def prepare(
 ) -> Prepared:
     """Validate a parsed body (400s) and build the engine request and its reservation."""
     for name in _REFUSED:
-        if data.get(name) not in (None, False, 1):
+        v = data.get(name)
+        if not (v is None or v is False or (type(v) is int and v == 1)):
             raise errors.invalid_request(f"'{name}' is not supported.", name)
     stream = _bool_field(data, "stream")
     n = _int_field(data, "n") or 1
