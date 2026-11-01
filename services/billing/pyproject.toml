@@ -1,0 +1,19 @@
+[project]
+name = "loom-billing"
+version = "0.1.0"
+description = "Loom billing worker: usage-event consumer, ledger batches, balance reconcile, Stripe webhooks"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = [
+    "loom-platform",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "prometheus-client>=0.20",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/loom_billing"]
