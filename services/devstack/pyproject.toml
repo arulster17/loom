@@ -13,11 +13,16 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+# loom-m1-acceptance drives the gateway with the OpenAI SDK (also in the root dev group).
+acceptance = ["openai>=1.50"]
+
 [project.scripts]
 loom-devcerts = "loom_devstack.devcerts:main"
 loom-poolsim = "loom_devstack.poolsim:main"
 loom-mockpod = "loom_devstack.mockpod:main"
 loom-loadtest = "loom_devstack.loadtest:main"
+loom-m1-acceptance = "loom_devstack.acceptance:main"
 
 [build-system]
 requires = ["hatchling>=1.25"]
