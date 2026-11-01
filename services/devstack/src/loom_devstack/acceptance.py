@@ -214,7 +214,7 @@ def visible(page: str) -> str:
 def page_errors(page: str) -> list[str]:
     return [
         html.unescape(re.sub(r"<[^>]+>", "", m))
-        for m in re.findall(r'class="[^"]*text-red-700[^"]*">(.*?)</p>', page)
+        for m in re.findall(r'<p class="[^"]*text-red-700[^"]*">(.*?)</p>', page)
     ]
 
 

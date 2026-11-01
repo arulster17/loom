@@ -52,6 +52,8 @@ def test_parse_forms_reads_next_progressive_enhancement_fields():
 def test_visible_text_and_page_errors():
     page = (
         '<p class="mt-2 text-xs">$5.00<!-- --> added, <!-- -->$0.000118<!-- --> used.</p>'
+        # A red button before the message must not be swept into it.
+        '<button class="btn text-red-700">Revoke</button>'
         '<p class="text-sm text-red-700">Key &quot;x&quot; <b>not</b> found.</p>'
     )
     assert "$5.00 added, $0.000118 used." in acc.visible(page)
