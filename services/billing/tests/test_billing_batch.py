@@ -59,8 +59,7 @@ async def test_batch_sum_equals_usage_events_exactly(pool, make_tenant):
         )
         assert await cur.fetchone() == (expected, 39)
         await cur.execute(
-            "SELECT count(*) FROM usage_events WHERE org_id = %s "
-            "AND ledger_transaction_id IS NULL",
+            "SELECT count(*) FROM usage_events WHERE org_id = %s AND ledger_transaction_id IS NULL",
             (t.org_id,),
         )
         assert await cur.fetchone() == (1,)
@@ -153,6 +152,6 @@ async def test_partitions_created_ahead_and_idempotent(pool):
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
             "SELECT count(*) FROM pg_class WHERE relkind = 'r' "
-                "AND relname LIKE 'usage_events_2091_0%%'"
+            "AND relname LIKE 'usage_events_2091_0%%'"
         )
         assert await cur.fetchone() == (4,)
