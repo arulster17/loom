@@ -20,18 +20,6 @@ export function billingUrl(): string {
   return (process.env.LOOM_BILLING_URL ?? "http://localhost:8090").replace(/\/+$/, "");
 }
 
-/** Model ids from the gateway's GET /v1/models (OpenAI list shape). */
-export async function gatewayModelIds(apiKey: string): Promise<string[]> {
-  const res = await fetch(`${gatewayUrl()}/v1/models`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-    cache: "no-store",
-    signal: AbortSignal.timeout(5000),
-  });
-  if (!res.ok) throw new Error(`gateway answered ${res.status}`);
-  const body = (await res.json()) as { data?: { id?: unknown }[] };
-  return (body.data ?? []).map((m) => String(m.id)).filter(Boolean);
-}
-
 export interface CheckoutRequest {
   orgId: string;
   amountMicros: bigint;

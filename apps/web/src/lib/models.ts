@@ -6,7 +6,15 @@ import path from "node:path";
 import Redis from "ioredis";
 import yaml from "js-yaml";
 
-import { catalogFromRegistry, parsePoolHash, type ModelInfo, type PoolStatus } from "@/lib/model-catalog";
+import {
+  catalogFromGateway,
+  catalogFromRegistry,
+  parsePoolHash,
+  type CatalogEntry,
+  type ModelInfo,
+  type PoolStatus,
+} from "@/lib/model-catalog";
+import { gatewayUrl } from "@/lib/services";
 
 /** config/models.yaml: $LOOM_MODELS_YAML, else the repo copy (dev runs from apps/web). */
 export function modelsYamlPath(): string {
@@ -62,4 +70,29 @@ export async function poolStatuses(modelIds: string[]): Promise<Record<string, P
     // leave "unknown"
   }
   return out;
+}
+
+export interface Catalog {
+  entries: CatalogEntry[];
+  source: "gateway" | "registry"; // registry = the gateway was unreachable
+}
+
+/**
+ * What the API offers right now: the gateway's public `GET /v1/models` (no key; prices,
+ * context, live availability). If the gateway is unreachable, the registry file plus the
+ * pool hashes in Redis, so the pages still render.
+ */
+export async function loadCatalog(): Promise<Catalog> {
+  try {
+    const res = await fetch(`${gatewayUrl()}/v1/models`, { cache: "no-store", signal: AbortSignal.timeout(3000) });
+    if (res.ok) return { entries: catalogFromGateway(await res.json()), source: "gateway" };
+  } catch {
+    // fall through to the registry
+  }
+  const models = await listCatalog();
+  const pools = await poolStatuses(models.map((m) => m.id));
+  return {
+    entries: models.map((model) => ({ model, pool: pools[model.id] ?? { state: "unknown" } })),
+    source: "registry",
+  };
 }

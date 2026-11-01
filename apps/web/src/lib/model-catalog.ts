@@ -58,6 +58,46 @@ export function catalogFromRegistry(doc: unknown): ModelInfo[] {
   return out;
 }
 
+export interface CatalogEntry {
+  model: ModelInfo;
+  pool: PoolStatus;
+}
+
+const POOL_STATES = new Set(["ready", "warming", "cold", "unavailable"]);
+
+/**
+ * The gateway's public `GET /v1/models` (services/gateway): each entry has
+ * `context_length`, `status`, `pricing.*_per_mtok_micros` and
+ * `availability {state, ready_replicas, retry_after_s}`.
+ */
+export function catalogFromGateway(body: unknown): CatalogEntry[] {
+  const data = (body as { data?: unknown })?.data;
+  if (!Array.isArray(data)) throw new Error("gateway /v1/models: no data list");
+  return (data as Row[]).map((m) => {
+    const id = String(m.id);
+    const pricing = (m.pricing ?? {}) as Row;
+    const avail = (m.availability ?? {}) as Row;
+    const retry = Number(avail.retry_after_s);
+    const state = String(avail.state ?? "");
+    return {
+      model: {
+        id,
+        displayName: String(m.display_name ?? id),
+        maxContext: num(m.context_length),
+        inputPerMtokMicros: num(pricing.input_per_mtok_micros),
+        cachedInputPerMtokMicros: num(pricing.cached_input_per_mtok_micros ?? pricing.input_per_mtok_micros),
+        outputPerMtokMicros: num(pricing.output_per_mtok_micros),
+        status: String(m.status ?? ""),
+        startupNote: startupNote(id),
+      },
+      pool: {
+        state: POOL_STATES.has(state) ? (state as PoolState) : "unknown",
+        retryAfterS: Number.isFinite(retry) && retry > 0 ? retry : undefined,
+      },
+    };
+  });
+}
+
 /** A `loom:pool:<model>` hash (contracts §10). "ready" needs at least one replica. */
 export function parsePoolHash(h: Record<string, string>): PoolStatus {
   const retry = Number(h.retry_after_s);

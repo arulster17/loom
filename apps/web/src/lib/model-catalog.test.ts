@@ -4,7 +4,7 @@ import path from "node:path";
 import yaml from "js-yaml";
 import { describe, expect, it } from "vitest";
 
-import { catalogFromRegistry, parsePoolHash, poolLabel } from "./model-catalog";
+import { catalogFromGateway, catalogFromRegistry, parsePoolHash, poolLabel } from "./model-catalog";
 
 describe("catalog from config/models.yaml", () => {
   const doc = yaml.load(readFileSync(path.resolve(__dirname, "../../../../config/models.yaml"), "utf8"));
@@ -28,6 +28,57 @@ describe("catalog from config/models.yaml", () => {
     });
     expect(models.map((m) => m.id)).toEqual(["c"]);
     expect(models[0].cachedInputPerMtokMicros).toBe(1);
+  });
+});
+
+describe("catalog from the gateway's GET /v1/models", () => {
+  // Shape of services/gateway/src/loom_gateway/app.py Gateway.list_models.
+  const body = {
+    object: "list",
+    data: [
+      {
+        id: "qwen3-8b",
+        object: "model",
+        created: 0,
+        owned_by: "loom",
+        display_name: "Qwen3 8B",
+        context_length: 32768,
+        quantization: "none",
+        status: "preview",
+        capabilities: { tools: true },
+        pricing: {
+          currency: "USD",
+          price_version: "77000:77000:368000",
+          input_per_mtok_micros: 77000,
+          cached_input_per_mtok_micros: 77000,
+          output_per_mtok_micros: 368000,
+          input_per_mtok_usd: "0.077",
+          cached_input_per_mtok_usd: "0.077",
+          output_per_mtok_usd: "0.368",
+        },
+        availability: { state: "ready", ready_replicas: 1, retry_after_s: null },
+      },
+      {
+        id: "llama-3.3-70b-instruct-fp8",
+        display_name: "Llama 3.3 70B FP8",
+        context_length: 32768,
+        status: "preview",
+        pricing: { input_per_mtok_micros: 571000, cached_input_per_mtok_micros: 571000, output_per_mtok_micros: 797000 },
+        availability: { state: "warming", ready_replicas: 0, retry_after_s: 450 },
+      },
+    ],
+  };
+
+  it("reads context, prices and live availability", () => {
+    const [qwen, llama] = catalogFromGateway(body);
+    expect(qwen.model).toMatchObject({ id: "qwen3-8b", displayName: "Qwen3 8B", maxContext: 32768, outputPerMtokMicros: 368000 });
+    expect(qwen.pool).toEqual({ state: "ready", retryAfterS: undefined });
+    expect(llama.pool).toEqual({ state: "warming", retryAfterS: 450 });
+    expect(llama.model.startupNote).toMatch(/20 min/);
+  });
+
+  it("refuses a body without a data list", () => {
+    expect(() => catalogFromGateway({ error: {} })).toThrow();
   });
 });
 

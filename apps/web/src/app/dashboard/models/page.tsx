@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 
 import { Badge, Card, PageHeader, formatInt, td, tdNum, th, thNum } from "@/components/ui";
 import { poolLabel } from "@/lib/model-catalog";
-import { listCatalog, poolStatuses } from "@/lib/models";
+import { loadCatalog } from "@/lib/models";
 import { formatPricePerMillion } from "@/lib/money";
 import { requireActiveOrg } from "@/lib/session";
 
@@ -10,8 +10,7 @@ export const metadata: Metadata = { title: "Models" };
 
 export default async function ModelsPage() {
   await requireActiveOrg();
-  const models = await listCatalog();
-  const pools = await poolStatuses(models.map((m) => m.id));
+  const catalog = await loadCatalog();
 
   return (
     <>
@@ -19,6 +18,9 @@ export default async function ModelsPage() {
         Prices are per 1 million tokens, input and output priced separately. Models start on demand: when one is asleep or
         starting, requests get a “temporarily unavailable” reply (HTTP 503 with a Retry-After) instead of waiting.
       </PageHeader>
+      {catalog.source !== "gateway" ? (
+        <p className="mb-4 text-xs text-zinc-500">The API is not reachable right now; showing the catalog without live status.</p>
+      ) : null}
       <Card>
         <div className="-mx-5 overflow-x-auto">
           <table className="min-w-full divide-y divide-zinc-200">
@@ -32,8 +34,8 @@ export default async function ModelsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-100">
-              {models.map((m) => {
-                const p = poolLabel(pools[m.id] ?? { state: "unknown" });
+              {catalog.entries.map(({ model: m, pool }) => {
+                const p = poolLabel(pool);
                 return (
                   <tr key={m.id}>
                     <td className={td}>
