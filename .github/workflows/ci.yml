@@ -18,8 +18,15 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U loom" --health-interval 5s
           --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 5s --health-retries 10
     env:
       LOOM_TEST_DATABASE_URL: postgresql+psycopg://loom:loom@localhost:5432/loom_test
+      LOOM_TEST_REDIS_URL: redis://localhost:6379/15
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -27,6 +34,7 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy bench/src
+      - run: uv run mypy services/platform_common/src services/gateway/src services/billing/src
       - run: uv run pytest -q -n auto
 
   # The GPU hosts' client environment rebuilt from uv.lock exactly as RunPod and AWS

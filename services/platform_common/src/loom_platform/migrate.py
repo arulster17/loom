@@ -116,7 +116,7 @@ def create_database(url: str) -> bool:
     if not dbname:
         raise MigrationError("database URL names no database")
     admin = {**info, "dbname": "postgres"}
-    with psycopg.connect(psycopg.conninfo.make_conninfo(**admin), autocommit=True) as conn:
+    with psycopg.connect(psycopg.conninfo.make_conninfo("", **admin), autocommit=True) as conn:
         exists = conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (dbname,)).fetchone()
         if exists:
             return False

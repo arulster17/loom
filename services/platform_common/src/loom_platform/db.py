@@ -18,9 +18,12 @@ from psycopg_pool import AsyncConnectionPool
 
 
 def libpq_url(url: str) -> str:
-    """Accept SQLAlchemy-style URLs ('postgresql+psycopg://...') as plain libpq URLs."""
+    """Accept SQLAlchemy-style URLs ('postgresql+psycopg://...') as plain libpq URLs.
+    Keyword/value conninfo strings ('host=... dbname=...') pass through unchanged."""
     scheme, sep, rest = url.partition("://")
     if not sep:
+        if "=" in url:
+            return url
         raise ValueError(f"not a database URL: {url!r}")
     base = scheme.split("+", 1)[0]
     if base not in ("postgresql", "postgres"):
@@ -38,9 +41,7 @@ def connect_sync(url: str, *, autocommit: bool = False) -> psycopg.Connection:
 
 async def open_pool(url: str, *, min_size: int = 1, max_size: int = 10) -> AsyncConnectionPool:
     """An opened pool; close it with `await pool.close()`."""
-    pool = AsyncConnectionPool(
-        libpq_url(url), min_size=min_size, max_size=max_size, open=False
-    )
+    pool = AsyncConnectionPool(libpq_url(url), min_size=min_size, max_size=max_size, open=False)
     await pool.open(wait=True)
     return pool
 
