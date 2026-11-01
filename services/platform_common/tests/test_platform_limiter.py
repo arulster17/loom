@@ -294,3 +294,23 @@ async def test_end_to_end_with_postgres(limiter, pg, stream):
         keys = [k async for k in limiter.redis.scan_iter(match=f"loom:org:{org_id}:*")]
         if keys:
             await limiter.redis.delete(*keys)
+
+
+async def test_release_refunds_tpm_keeps_rpm_and_appends_nothing(limiter, org, stream):
+    org_id, key_id = org
+    limits = Limits(2, 1000, None, 1000, None, None)
+    rid = uuid.uuid4()
+    assert (
+        await reserve(limiter, org_id, key_id, cost=500, tpm=900, limits=limits, rid=rid)
+    ).admitted
+    assert await limiter.available(org_id) == 1_000_000 - 500
+    assert await limiter.release(org_id, rid) is True
+    assert await limiter.release(org_id, rid) is False  # nothing left to release
+    assert await limiter.available(org_id) == 1_000_000
+    assert int(await limiter.redis.get(api_key_key(org_id, key_id, "inflight"))) == 0
+    for k in (api_key_key(org_id, key_id, "tb:tpm"), org_key(org_id, "tb:tpm")):
+        assert float(await limiter.redis.hget(k, "t")) > 990  # the 900 came back
+    assert await limiter.redis.xlen(stream) == 0
+    # The rpm token stays spent: a 2 rpm key admits one more, then refuses.
+    assert (await reserve(limiter, org_id, key_id, tpm=1, limits=limits)).admitted
+    assert (await reserve(limiter, org_id, key_id, tpm=1, limits=limits)).reason == "key_rpm"

@@ -23,10 +23,12 @@ Run: `python -m loom_gateway` (settings from `LOOM_*`, see `settings.py`), or th
    drops cached records on commit, so revocation and suspension take milliseconds; the TTL
    alone bounds them at 4 s.
 2. 404 model, 400 validation (`max_tokens` over `LOOM_MAX_TOKENS_CAP`, `n`, `best_of`, ...).
-3. 503 `model_unavailable` with `Retry-After` unless the model's pool is `ready` (a cold
-   model also gets a wake request). No fallback to another model or GPU type.
-4. One `reserve.lua` call (402/429), loading the org from Postgres and retrying once on
+3. One `reserve.lua` call (402/429), loading the org from Postgres and retrying once on
    `noinit`.
+4. 503 `model_unavailable` with `Retry-After` unless the model's pool is `ready` (a cold
+   model also gets a wake request). No fallback to another model or GPU type. The 503
+   releases the reservation (`release.lua`: tpm refunded, the rpm token stays spent, no
+   usage event), so only a request with the balance and rate limit to run can wake a GPU.
 5. Dispatch over mTLS (client certificate, pod CA, server name = pod id, TLS 1.3,
    `X-Loom-Pod-Token`) to the replica with the fewest open requests; a replica that just
    failed goes last. Retry once on another replica, only before the first byte reaches the

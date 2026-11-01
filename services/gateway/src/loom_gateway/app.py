@@ -24,6 +24,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg_pool import AsyncConnectionPool
 from redis.asyncio import BlockingConnectionPool, Redis
+from redis.exceptions import RedisError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, Response
 
@@ -209,9 +210,18 @@ class Gateway:
                 max_context=spec.max_context,
                 max_tokens_cap=self.settings.max_tokens_cap,
             )
-            pool = await self.router.pool(model_id)
-            await self.router.check_routable(pool)
+            # Reserve before the pool check: a cold model is only woken (a GPU start) for
+            # a request that has the balance and passes the rate limits (contracts §8).
             await self.reserve(record, request_id, prep)
+            try:
+                pool = await self.router.pool(model_id)
+                await self.router.check_routable(pool)
+            except BaseException:
+                # Never dispatched: drop the reservation, no usage event (if this fails
+                # too, the reservation expires with its TTL).
+                with contextlib.suppress(RedisError, OSError):
+                    await shielded(self.limiter.release(record.org_id, request_id))
+                raise
             headers["X-Loom-Max-Cost-Micros"] = str(prep.max_cost_micros)
         except ApiError as e:
             return self.rejected(e, headers, endpoint, model_label, t0)

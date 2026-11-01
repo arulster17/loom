@@ -222,7 +222,7 @@ snapshot; `init_org.lua` sets them only if absent) and retries once.
 
 ### Reserve and settle (one Lua call each)
 
-Per request, after auth, model lookup and pool check (§8):
+Per request, after auth and model lookup, before the pool check (§8):
 
 1. **Reserve** (`reserve.lua`): purge up to 64 expired reservations of the org, then check
    in order: initialized; request id not seen; `available >= max_cost` (402); key spend
@@ -236,7 +236,7 @@ Per request, after auth, model lookup and pool check (§8):
    `LOOM_MAX_TOKENS_CAP` when it sent none; a value above the cap is a 400 at step 2 of
    §8), so the engine cannot exceed what was reserved.
 3. **Settle** (`settle.lua`), exactly once when the response ends (complete, client
-   abort, upstream loss, engine error, or 503 after reserve): refuse a repeat; release the
+   abort, upstream loss, engine error, or no replica answered): refuse a repeat; release the
    reservation; charge tpm buckets `actual tokens - estimate` (refunds an over-estimate,
    debt floored at one minute of tokens); `usage += cost`; key usage += cost; `XADD` the
    usage event with `org_usage_total_micros`. Settling without a live reservation still
@@ -244,8 +244,10 @@ Per request, after auth, model lookup and pool check (§8):
    event but creates no counters, so the next reserve loads them from Postgres. Cost is
    `pricing.cost_micros` on the engine's token counts.
 
-Rejected requests (401/402/403/404/413/429, and 503 decided before reserve) emit no
-usage event; they are metrics only.
+Rejected requests (401/402/403/404/413/429, and 503 `model_unavailable`) emit no usage
+event; they are metrics only. A 503 `model_unavailable` comes after reserve (§8) and
+**releases** its reservation (`release.lua`): the tpm estimate is refunded, the rpm token
+stays spent, nothing is charged.
 
 ### Worst-case overshoot
 
@@ -332,8 +334,11 @@ back both; a racing second worker hits the idempotency key.
    not active).
 2. Model: registry id, priced and not disabled (`pricing.servable`), else 404. Request
    validation (400), including `max_tokens` above the cap.
-3. Pool state (§10): not routable -> 503 `model_unavailable`, no reservation.
-4. Reserve (402/429).
+3. Reserve (402/429).
+4. Pool state (§10): not routable -> release the reservation, 503 `model_unavailable`.
+   Reserving first means a cold model is only woken (a GPU start, §10) by a request that
+   has the balance for it and passes the rate limits; every 503 spends an rpm token, so
+   polling an unavailable model is rate-limited like any other request.
 5. Dispatch to a replica (§9); retry once on another replica only before the first byte
    reaches the client.
 6. Stream through; settle once at the end; usage event.

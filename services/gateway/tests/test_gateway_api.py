@@ -512,3 +512,27 @@ async def test_unknown_route_is_openai_shaped(stack):
         r = await c.post(f"{stack.url}/v1/embeddings", json={})
     assert r.status_code == 404
     _err(r)
+
+
+async def test_cold_model_wake_needs_balance_and_rate_limit(stack, redis_client):
+    """A wake (a GPU start) is only requested for a request that passes reserve: an org
+    without the balance gets 402 and wakes nothing; each 503 spends an rpm token."""
+    await redis_client.delete(f"loom:pool:{stack.big}", wake_key(stack.big))
+    broke = await stack.tenant(credit_micros=1)
+    r = await _post(stack, broke.key, {"model": stack.big, "messages": MESSAGES})
+    assert r.status_code == 402 and _err(r)["code"] == "insufficient_balance"
+    assert not await redis_client.exists(wake_key(stack.big))
+
+    limited = await stack.tenant(key_limits={"rpm_limit": 2, "tpm_limit": 100_000})
+    for _ in range(2):
+        r = await _post(stack, limited.key, {"model": stack.big, "messages": MESSAGES})
+        assert r.status_code == 503 and _err(r)["code"] == "model_unavailable"
+    assert await redis_client.exists(wake_key(stack.big))
+    r = await _post(stack, limited.key, {"model": stack.big, "messages": MESSAGES})
+    assert r.status_code == 429 and _err(r)["code"] == "rate_limit_exceeded"
+    # The 503s released their reservations (tpm estimate refunded) and billed nothing.
+    assert await stack.reserved(limited) == (0, 0)
+    assert await stack.events() == []
+    key_tpm = f"loom:org:{limited.org_id}:key:{limited.key_id}:tb:tpm"
+    level = await redis_client.hget(key_tpm, "t")
+    assert level is None or float(level) > 99_000

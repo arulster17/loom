@@ -55,7 +55,8 @@ def _script_source(name: str) -> str:
 
 
 def script_source(name: str) -> str:
-    """Full Lua source of 'reserve', 'settle' or 'init_org' (common helpers prepended)."""
+    """Full Lua source of 'reserve', 'settle', 'release' or 'init_org' (common helpers
+    prepended)."""
     return _script_source(name)
 
 
@@ -119,6 +120,7 @@ class Limiter:
         self.usage_stream = usage_stream
         self._reserve = redis.register_script(script_source("reserve"))
         self._settle = redis.register_script(script_source("settle"))
+        self._release = redis.register_script(script_source("release"))
         self._init = redis.register_script(script_source("init_org"))
 
     async def reserve(
@@ -162,6 +164,11 @@ class Limiter:
             return SettleResult(False)
         total = int(res[1])
         return SettleResult(True, total if total >= 0 else None, _str(res[2]))
+
+    async def release(self, org_id: uuid.UUID, request_id: uuid.UUID) -> bool:
+        """Drop a reservation that was never dispatched (503 after reserve): refund its tpm
+        estimate, keep its rpm token spent, charge nothing, append no usage event."""
+        return bool(await self._release(keys=[org_prefix(org_id)], args=[str(request_id)]))
 
     async def init_org(
         self,
