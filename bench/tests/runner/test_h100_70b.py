@@ -176,9 +176,7 @@ def test_the_quality_rerun_fits_its_cap_to_ttl_and_runs_no_load():
 
 def test_the_capacity_search_is_marked_approved_at_its_cap():
     text = LLAMA_H100_FP8_CAPACITY_RUNPOD.read_text()
-    assert text.startswith(
-        "# APPROVED 2026-10-31 (user): fixed-1k-1k only, no smoke, $14.70 cap\n"
-    )
+    assert text.startswith("# APPROVED 2026-10-31 (user): fixed-1k-1k only, no smoke, $14.70 cap\n")
     assert "NOT APPROVED" not in text
 
 
