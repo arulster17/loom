@@ -11,10 +11,10 @@ import uuid
 
 import httpx
 import pytest
-from billing_fixtures import ledger_is_balanced
+from billing_fixtures import STUB, STUB_WEBHOOK_SECRET, ledger_is_balanced
 
 from loom_billing.api import create_app
-from loom_billing.settings import STUB_WEBHOOK_SECRET, BillingSettings
+from loom_billing.settings import BillingSettings
 from loom_billing.stripe_sig import sign
 from loom_platform.ledger import STRIPE_CLEARING, org_balance
 from loom_platform.limiter import Limiter, org_key
@@ -26,6 +26,8 @@ TOKEN = "internal-test-token"
 
 def settings(**kw) -> BillingSettings:
     kw.setdefault("billing_internal_token", TOKEN)
+    if "stripe_secret_key" not in kw:
+        kw = {**STUB, **kw}
     return BillingSettings(**kw)
 
 
@@ -265,7 +267,7 @@ async def test_checkout_requires_the_internal_token(client, pool, redis_client, 
         headers={"Authorization": "Bearer wrong"},
     )
     assert r.status_code == 401
-    unset = create_app(BillingSettings(), pool=pool, redis=redis_client)
+    unset = create_app(BillingSettings(**STUB), pool=pool, redis=redis_client)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=unset), base_url="http://b"
     ) as c:

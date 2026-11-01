@@ -89,6 +89,9 @@ services:
       - mock-pod-1
       - --pod
       - mock-pod-2
+      # The Stripe stub's webhook signing secret, random per stack, shared with billing.
+      - --secret
+      - stripe-stub-webhook
       # Keys readable by the other containers' users; dev only.
       - --readable-keys
     volumes:
@@ -209,11 +212,14 @@ services:
       LOOM_BILLING_INTERNAL_TOKEN: *internal-token
       # Stable across container re-creates, so a restart recovers its own pending entries.
       LOOM_BILLING_CONSUMER: billing-1
-      # Local stub unless both test-mode keys are set (a live key refuses to start).
+      # The local stub, by explicit opt-in. For real Stripe (test mode) set
+      # LOOM_STRIPE_MODE=stripe with both keys; a live key refuses to start.
+      LOOM_STRIPE_MODE: ${LOOM_STRIPE_MODE:-stub}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       LOOM_STRIPE_STUB_URL: http://stripe-stub:12111
-    volumes: [*config-volume]
+      LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE: /certs/stripe-stub-webhook.secret
+    volumes: [*config-volume, *certs-volume]
     ports:
       - "${LOOM_BILLING_PORT:-8090}:8090"
       - "${LOOM_BILLING_METRICS_PORT:-9101}:9101"
@@ -222,6 +228,8 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+      devcerts:
+        condition: service_completed_successfully
     healthcheck:
       test:
         - CMD
@@ -243,8 +251,14 @@ services:
       dockerfile: services/billing/Dockerfile
     command: ["stripe-stub"]
     environment:
+      LOOM_STRIPE_MODE: stub
       LOOM_STRIPE_STUB_WEBHOOK_URL: http://billing:8090/stripe/webhook
       LOOM_STRIPE_STUB_PUBLIC_URL: http://localhost:${LOOM_STRIPE_STUB_PORT:-12111}
+      LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE: /certs/stripe-stub-webhook.secret
+    volumes: [*certs-volume]
+    depends_on:
+      devcerts:
+        condition: service_completed_successfully
     ports:
       - "${LOOM_STRIPE_STUB_PORT:-12111}:12111"
     restart: unless-stopped

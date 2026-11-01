@@ -13,10 +13,10 @@ from collections.abc import AsyncIterator, Mapping
 import httpx
 import pytest
 import uvicorn
-from billing_fixtures import asgi_transport, ledger_is_balanced
+from billing_fixtures import STUB, STUB_WEBHOOK_SECRET, asgi_transport, ledger_is_balanced
 
 from loom_billing.api import create_app
-from loom_billing.settings import STUB_WEBHOOK_SECRET, BillingSettings
+from loom_billing.settings import BillingSettings
 from loom_billing.stripe_stub import create_stub_app
 from loom_platform.ledger import org_balance
 from loom_platform.limiter import Limiter, org_key
@@ -43,7 +43,7 @@ async def test_checkout_through_stub_credits_the_org(pool, redis_client, make_te
     async with pool.connection() as conn:
         await limiter.load_from_postgres(conn, org_id=t.org_id, key_id=t.key_id)
 
-    settings = BillingSettings(billing_internal_token=TOKEN)
+    settings = BillingSettings(billing_internal_token=TOKEN, **STUB)
     billing_box: dict[str, object] = {}
 
     async def deliver(url: str, body: bytes, headers: Mapping[str, str]) -> int:
@@ -170,7 +170,7 @@ async def test_checkout_over_real_http(pool, redis_client, make_tenant):
         deliver=lazy_deliver,
     )
     async with serve(stub) as stub_url:
-        settings = BillingSettings(billing_internal_token=TOKEN, stripe_stub_url=stub_url)
+        settings = BillingSettings(billing_internal_token=TOKEN, stripe_stub_url=stub_url, **STUB)
         billing = create_app(settings, pool=pool, redis=redis_client)
         async with serve(billing) as billing_url:
             holder["billing"] = billing_url

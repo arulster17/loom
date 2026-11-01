@@ -92,8 +92,10 @@ docker compose ps                            # all running; migrate and devcerts
 ```
 
 The first build takes a few minutes; later `up`s reuse the images. Nothing calls a cloud
-or Stripe: billing talks to a local Stripe stub (unless `STRIPE_SECRET_KEY` and
-`STRIPE_WEBHOOK_SECRET`, test mode only, are set) and the "GPUs" are mock pods.
+or Stripe: billing talks to a local Stripe stub (compose sets `LOOM_STRIPE_MODE=stub`;
+its webhook secret is generated per stack into `.dev/certs`; for Stripe test mode set
+`LOOM_STRIPE_MODE=stripe` with `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`) and the
+"GPUs" are mock pods.
 
 | Service | Host port | What |
 |---|---|---|

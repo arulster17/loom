@@ -80,8 +80,8 @@ def main(argv: list[str] | None = None) -> int:
     settings = BillingSettings()
 
     if args.command == "stripe-stub":
-        if settings.stripe_mode == "stripe":
-            print("real Stripe keys are set; the stub is for local dev only", file=sys.stderr)
+        if settings.stripe_mode != "stub":
+            print("the stub runs only with LOOM_STRIPE_MODE=stub (local dev)", file=sys.stderr)
             return 2
         app = create_stub_app(
             public_url=settings.stripe_stub_public_url,
@@ -90,6 +90,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         asyncio.run(_server(app, settings.stripe_stub_host, settings.stripe_stub_port).serve())
         return 0
+
+    if args.command in ("all", "api"):
+        try:
+            settings.stripe_api()
+            settings.webhook_secret()
+        except ValueError as e:
+            print(f"loom-billing {args.command}: {e}", file=sys.stderr)
+            return 2
 
     if args.command in ("all", "worker", "api") and settings.billing_metrics_port:
         start_http_server(settings.billing_metrics_port)

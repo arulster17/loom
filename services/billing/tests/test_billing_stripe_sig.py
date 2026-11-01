@@ -8,7 +8,8 @@ import hmac
 import pytest
 from pydantic import ValidationError
 
-from loom_billing.settings import STUB_WEBHOOK_SECRET, BillingSettings
+from loom_billing.api import create_app
+from loom_billing.settings import BillingSettings
 from loom_billing.stripe_api import StripeClient, form_encode
 from loom_billing.stripe_sig import SignatureError, compute, sign, verify
 
@@ -67,13 +68,66 @@ def test_tolerance_window():
     verify(BODY, header, SECRET, now=NOW + 3000, tolerance_s=3600)
 
 
-def test_settings_default_to_the_stub(monkeypatch):
-    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
-    monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
+STUB_ENV = (
+    "STRIPE_SECRET_KEY",
+    "STRIPE_WEBHOOK_SECRET",
+    "LOOM_STRIPE_MODE",
+    "LOOM_STRIPE_STUB_WEBHOOK_SECRET",
+    "LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE",
+)
+
+
+@pytest.fixture
+def clean_env(monkeypatch):
+    for k in STUB_ENV:
+        monkeypatch.delenv(k, raising=False)
+    return monkeypatch
+
+
+def test_missing_keys_never_fall_back_to_the_stub(clean_env):
+    """Without keys and without LOOM_STRIPE_MODE=stub, nothing that talks to Stripe
+    starts: before, it silently ran the stub with a public webhook secret, so anyone
+    could sign a checkout event and credit any org."""
     s = BillingSettings()
-    assert s.stripe_mode == "stub"
-    assert s.webhook_secret() == STUB_WEBHOOK_SECRET
+    assert s.stripe_mode == "stripe"
+    with pytest.raises(ValueError, match="STRIPE_SECRET_KEY"):
+        s.webhook_secret()
+    with pytest.raises(ValueError, match="STRIPE_SECRET_KEY"):
+        s.stripe_api()
+    with pytest.raises(ValueError, match="LOOM_STRIPE_MODE=stub"):
+        create_app(s)
+
+
+def test_stub_mode_is_explicit_and_needs_its_own_secret(clean_env, tmp_path):
+    clean_env.setenv("LOOM_STRIPE_MODE", "stub")
+    with pytest.raises(ValidationError, match="STUB_WEBHOOK_SECRET"):
+        BillingSettings()  # no default secret
+    clean_env.setenv("LOOM_STRIPE_STUB_WEBHOOK_SECRET", "short")
+    with pytest.raises(ValidationError, match="at least"):
+        BillingSettings()
+    secret = "whsec_" + "k" * 30
+    clean_env.setenv("LOOM_STRIPE_STUB_WEBHOOK_SECRET", secret)
+    s = BillingSettings()
+    assert s.stripe_mode == "stub" and s.webhook_secret() == secret
     assert s.stripe_api() == ("http://localhost:12111", "sk_test_loom_local_stub")
+    assert secret not in repr(s)
+
+    path = tmp_path / "stripe-stub-webhook.secret"
+    path.write_text(secret + "\n")
+    clean_env.setenv("LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE", str(path))
+    with pytest.raises(ValidationError, match="not both"):
+        BillingSettings()
+    clean_env.delenv("LOOM_STRIPE_STUB_WEBHOOK_SECRET")
+    assert BillingSettings().webhook_secret() == secret
+    clean_env.setenv("LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE", str(tmp_path / "missing"))
+    with pytest.raises(ValidationError):
+        BillingSettings()
+
+    clean_env.setenv("LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE", str(path))
+    clean_env.setenv("STRIPE_SECRET_KEY", "sk_test_51abc")
+    clean_env.setenv("STRIPE_WEBHOOK_SECRET", "whsec_xyz")
+    with pytest.raises(ValidationError, match="unset one"):
+        BillingSettings()  # stub and real keys at once
 
 
 def test_settings_real_stripe_from_env(monkeypatch):

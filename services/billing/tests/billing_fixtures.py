@@ -25,6 +25,10 @@ from loom_platform.usage import UsageEvent
 
 __all__ = ["pg", "pg_url", "redis_client"]
 
+# Stub-mode settings for tests (LOOM_STRIPE_MODE=stub has no default secret).
+STUB_WEBHOOK_SECRET = "whsec_test_stub_" + "s" * 24
+STUB = {"stripe_mode": "stub", "stripe_stub_webhook_secret": STUB_WEBHOOK_SECRET}
+
 # Qwen3-8B-like list price, micro-dollars per 1M (input, cached input, output).
 PRICE = Price(77_000, 38_000, 308_000)
 GROUP = "billing"

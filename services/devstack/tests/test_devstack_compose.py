@@ -88,6 +88,17 @@ def test_billing_wiring_matches_its_readme():
     assert stub_env["LOOM_STRIPE_STUB_WEBHOOK_URL"] == "http://billing:8090/stripe/webhook"
     assert stub_env["LOOM_STRIPE_STUB_PUBLIC_URL"].startswith("http://localhost:")
     assert published(stub) == {12111}
+    # Stub only by explicit opt-in, with a secret generated per stack (never in code).
+    assert billing["environment"]["LOOM_STRIPE_MODE"] == "${LOOM_STRIPE_MODE:-stub}"
+    assert stub_env["LOOM_STRIPE_MODE"] == "stub"
+    secret_file = "/certs/stripe-stub-webhook.secret"
+    assert billing["environment"]["LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE"] == secret_file
+    assert stub_env["LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE"] == secret_file
+    cmd = services["devcerts"]["command"]
+    assert cmd[cmd.index("--secret") + 1] == "stripe-stub-webhook"
+    for svc in (billing, stub):
+        assert svc["depends_on"]["devcerts"]["condition"] == "service_completed_successfully"
+        assert "./.dev/certs:/certs:ro" in svc["volumes"]
     token = billing["environment"]["LOOM_BILLING_INTERNAL_TOKEN"]
     assert token and services["web"]["environment"]["LOOM_INTERNAL_TOKEN"] == token
     assert billing["depends_on"]["migrate"]["condition"] == "service_completed_successfully"

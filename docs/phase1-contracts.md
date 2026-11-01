@@ -75,6 +75,8 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `AUTH_SECRET`, `AUTH_URL`, `AUTH_GOOGLE_ID` / `_SECRET`, `EMAIL_SERVER` | none | web (Auth.js) |
 | `LOOM_ADMIN_EMAILS` | empty | web: dev bootstrap of the first admin (§4) |
 | `LOOM_INTERNAL_TOKEN` / `LOOM_BILLING_INTERNAL_TOKEN` | compose: one shared dev value | web / billing: bearer token of billing's internal API |
+| `LOOM_STRIPE_MODE` | `stripe`; compose: `stub` | billing: real Stripe (test keys required) or the local stub (explicit opt-in, never a fallback) |
+| `LOOM_STRIPE_STUB_WEBHOOK_SECRET` / `_FILE` | none; compose: `.dev/certs/stripe-stub-webhook.secret` from `loom-devcerts --secret` | billing and stripe-stub in stub mode |
 | `LOOM_POOLSIM_REPLICAS` | compose: `<model>=<pod>@https://<pod>:8443,...` | poolsim (§10) |
 | `LOOM_POOLSIM_TOKEN_DIR`, `_COLD_START_S`, `_IDLE_STOP_S` | `.dev/certs`, 20, 0 (off) | poolsim |
 | `LOOM_MOCKPOD_ID`, `LOOM_MOCKPOD_MODELS`, `LOOM_DEV_CERTS` | `mock-pod-1`, `qwen3-8b`, `.dev/certs` | mock pods |

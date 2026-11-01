@@ -16,7 +16,7 @@ One image (`services/billing/Dockerfile`, built from the repo root:
 | `all` (default) | worker + HTTP API in one process: the contract's `billing` service | 8090, metrics 9101 |
 | `worker` | consumer, batches, reconcile, partitions, credit listener | metrics 9101 |
 | `api` | HTTP API only | 8090, metrics 9101 |
-| `stripe-stub` | local Stripe stand-in; refuses to start when real Stripe keys are set | 12111 |
+| `stripe-stub` | local Stripe stand-in; starts only with `LOOM_STRIPE_MODE=stub` | 12111 |
 | `batch-once`, `reconcile-once`, `partitions-once` | one run of a job (ops) | |
 
 Run several workers if needed: each gets its own consumer name in the group, batches
@@ -48,9 +48,21 @@ reconcile does not rewrite `usage`.
 
 ## Stripe: real or stub
 
-Real Stripe is used only when both `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` are set,
-and only test-mode keys (`sk_test_`/`rk_test_`) are accepted; a live key stops the
-process at startup. With neither set, billing talks to the stub:
+`LOOM_STRIPE_MODE` chooses, and the stub is never a fallback:
+
+- `stripe` (the default): real Stripe. Both `STRIPE_SECRET_KEY` and
+  `STRIPE_WEBHOOK_SECRET` are required (`all` and `api` refuse to start without them; the
+  `worker` never calls Stripe), and only test-mode keys (`sk_test_`/`rk_test_`) are
+  accepted; a live key stops the process at startup.
+- `stub`: local dev only (compose sets it). Billing and the stub share a webhook signing
+  secret that has no default: `LOOM_STRIPE_STUB_WEBHOOK_SECRET`, or a file named by
+  `LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE`; compose generates one per stack with
+  `loom-devcerts --secret stripe-stub-webhook` (`.dev/certs/stripe-stub-webhook.secret`).
+  Before, a missing key silently meant the stub with a secret written in the code, so
+  anyone could sign a `checkout.session.completed` and credit any org. Stripe keys set
+  together with `stub` are refused.
+
+In stub mode:
 
 1. web -> `POST /internal/checkout-sessions` -> billing -> stub `POST /v1/checkout/sessions`
    (Stripe's wire format) -> `url` = `http://localhost:12111/checkout/cs_test_...`;
@@ -96,13 +108,14 @@ Shared `LOOM_*` variables are in the contracts (§2). Billing adds:
 | `LOOM_NOTIFY_STREAM` / `LOOM_LOW_BALANCE_MICROS` | `loom:notify` / 1000000 | |
 | `LOOM_AUTO_RECHARGE_ENABLED` | false | |
 | `LOOM_CHECKOUT_MIN_MICROS` / `_MAX_MICROS` | 5000000 / 500000000 | $5 to $500 |
-| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | unset | real Stripe, test mode only |
+| `LOOM_STRIPE_MODE` | `stripe` | `stripe` or `stub` (compose: `stub`) |
+| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | unset | real Stripe, test mode only; required in `stripe` mode |
 | `LOOM_STRIPE_API_BASE` | `https://api.stripe.com` | |
 | `LOOM_STRIPE_WEBHOOK_TOLERANCE_S` | 300 | |
 | `LOOM_STRIPE_STUB_URL` | `http://localhost:12111` | where billing calls the stub (compose: `http://stripe-stub:12111`) |
 | `LOOM_STRIPE_STUB_PUBLIC_URL` | `http://localhost:12111` | stub: base of the pay page URL the browser opens |
 | `LOOM_STRIPE_STUB_WEBHOOK_URL` | `http://localhost:8090/stripe/webhook` | stub: where it posts (compose: `http://billing:8090/stripe/webhook`) |
-| `LOOM_STRIPE_STUB_WEBHOOK_SECRET` | a fixed dev value | shared by stub and billing; not a secret |
+| `LOOM_STRIPE_STUB_WEBHOOK_SECRET` / `_FILE` | unset (required in `stub` mode) | shared by stub and billing, at least 24 characters; compose: the file from `loom-devcerts --secret stripe-stub-webhook` |
 | `LOOM_STRIPE_STUB_HOST` / `_PORT` | `0.0.0.0` / 12111 | |
 | `LOOM_LOG_LEVEL` | `INFO` | |
 
