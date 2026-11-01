@@ -32,7 +32,8 @@ Run: `python -m loom_gateway` (settings from `LOOM_*`, see `settings.py`), or th
    failed goes last. Retry once on another replica, only before the first byte reaches the
    client.
 6. One `settle.lua` call when the response ends, which appends the usage event. Streams
-   ask the engine for usage on every chunk and bill the last usage forwarded, so a client
+   ask the engine for usage on every chunk and bill what was forwarded (the prompt plus
+   each choice's last running count, as vLLM counts per choice with `n > 1`), so a client
    abort or a lost pod bills exactly the tokens streamed.
 
 Cost: `X-Loom-Request-Id`, `X-Loom-Price-Version`, `X-Loom-Max-Cost-Micros` on every

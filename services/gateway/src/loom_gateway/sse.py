@@ -1,8 +1,9 @@
 """Server-sent events from the engine: splitting, usage tracking, client rewriting.
 
 The engine sends usage on every chunk (the gateway forces `continuous_usage_stats`) and
-a final usage-only chunk (`choices: []`). The gateway keeps the latest usage of what it
-forwarded, so a stream cut at any point is billed the engine's own counts, and shows the
+a final usage-only chunk (`choices: []`). The gateway tracks the usage of what it
+forwarded (`UsageTracker`), so a stream cut at any point is billed the engine's own
+counts, and shows the
 client only what it asked for (contracts §9): no usage at all, the final usage chunk
 (`include_usage`, with `cost_micros` added, §12), or per-chunk usage as well.
 """
@@ -59,6 +60,7 @@ class Processed:
     done: bool = False  # the [DONE] marker
     content: bool = False  # a chunk with choices (a token, role or finish)
     error: bool = False  # an in-stream engine error
+    indices: tuple[int, ...] = ()  # the choices this chunk carries (content chunks)
 
 
 class ChunkRewriter:
@@ -96,13 +98,64 @@ class ChunkRewriter:
                 return Processed(None, usage)
             obj["usage"] = client_usage(usage, self.cost_of(usage))
             return Processed(event_bytes(obj), usage)
+        indices = _choice_indices(choices)
         if "usage" not in obj or self.continuous_usage:
-            return Processed(b"data: " + payload + b"\n\n", usage, content=True)
+            return Processed(b"data: " + payload + b"\n\n", usage, content=True, indices=indices)
         if self.include_usage:
             obj["usage"] = None  # OpenAI: usage is null on every chunk but the last
         else:
             del obj["usage"]
-        return Processed(event_bytes(obj), usage, content=True)
+        return Processed(event_bytes(obj), usage, content=True, indices=indices)
+
+
+def _choice_indices(choices: Any) -> tuple[int, ...]:
+    if not isinstance(choices, list):
+        return (0,)
+    out = []
+    for c in choices:
+        i = c.get("index", 0) if isinstance(c, dict) else 0
+        out.append(i if isinstance(i, int) and not isinstance(i, bool) else 0)
+    return tuple(dict.fromkeys(out)) or (0,)
+
+
+class UsageTracker:
+    """The engine usage of what was forwarded to the client.
+
+    The final usage chunk (no choices) is the engine's total and wins once seen. Before
+    it, vLLM's continuous usage on a chunk counts the prompt and **that chunk's own
+    choice** only (with `n > 1` the choices interleave, each with its own running
+    count), so a stream cut early is billed the prompt once plus, per choice index, the
+    highest count forwarded. Cached tokens are only in the final chunk (0 before it).
+    """
+
+    def __init__(self) -> None:
+        self.final: dict[str, Any] | None = None
+        self.prompt = 0
+        self.per_choice: dict[int, int] = {}
+
+    def add(self, p: Processed) -> None:
+        if p.usage is None:
+            return
+        if not p.indices:
+            self.final = p.usage
+            return
+        prompt, completion, _ = token_counts(p.usage)
+        self.prompt = max(self.prompt, prompt)
+        for i in p.indices:
+            self.per_choice[i] = max(self.per_choice.get(i, 0), completion)
+
+    @property
+    def usage(self) -> dict[str, Any] | None:
+        if self.final is not None:
+            return self.final
+        if not self.per_choice:
+            return None
+        completion = sum(self.per_choice.values())
+        return {
+            "prompt_tokens": self.prompt,
+            "completion_tokens": completion,
+            "total_tokens": self.prompt + completion,
+        }
 
 
 def token_counts(usage: dict[str, Any] | None) -> tuple[int, int, int]:

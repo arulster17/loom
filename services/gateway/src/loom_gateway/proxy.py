@@ -5,7 +5,8 @@ After a successful reserve every path ends in exactly one `settle` call, which r
 the reservation, charges the engine-reported tokens and appends the usage event:
 
 - complete: the engine's final usage, status `ok`;
-- client gone mid-stream: usage of the last chunk forwarded, status `aborted`;
+- client gone mid-stream: usage of the chunks forwarded (prompt plus each choice's last
+  running count, `sse.UsageTracker`), status `aborted`;
 - pod lost mid-stream (or the request timeout): the same, after an `upstream_lost` error
   chunk and `[DONE]`;
 - engine 4xx, or no replica answered: nothing billed, status `error`.
@@ -36,7 +37,14 @@ from loom_gateway.metrics import GatewayMetrics
 from loom_gateway.request_body import Prepared
 from loom_gateway.routing import Router
 from loom_gateway.settings import GatewaySettings
-from loom_gateway.sse import DONE_EVENT, ChunkRewriter, client_usage, sse_payloads, token_counts
+from loom_gateway.sse import (
+    DONE_EVENT,
+    ChunkRewriter,
+    UsageTracker,
+    client_usage,
+    sse_payloads,
+    token_counts,
+)
 from loom_platform import errors
 from loom_platform.auth import AuthRecord
 from loom_platform.errors import ApiError
@@ -422,7 +430,7 @@ class StreamResponse(Response):
             (b"x-accel-buffering", b"no"),
             *((k.lower().encode(), v.encode()) for k, v in ctx.headers.items()),
         ]
-        self.last_usage: dict[str, Any] | None = None
+        self.usage = UsageTracker()
         self.saw_done = False
         self.engine_error = False
         self.client_gone = False
@@ -492,8 +500,7 @@ class StreamResponse(Response):
         if p.out is not None:
             await send({"type": "http.response.body", "body": p.out, "more_body": True})
         # Recorded only once forwarded: an aborted stream bills what the client was sent.
-        if p.usage is not None:
-            self.last_usage = p.usage
+        self.usage.add(p)
         if p.content and self.first_token_at is None:
             self.first_token_at = time.perf_counter()
 
@@ -506,7 +513,7 @@ class StreamResponse(Response):
 
     async def _settle(self) -> int:
         ttft = None if self.first_token_at is None else self.first_token_at - self.ctx.t0
-        return await self.proxy.settle(self.ctx, self.last_usage, self._status(), ttft)
+        return await self.proxy.settle(self.ctx, self.usage.usage, self._status(), ttft)
 
     async def _finish(self) -> None:
         proxy, ctx, m = self.proxy, self.ctx, self.ctx.model_id
@@ -521,7 +528,7 @@ class StreamResponse(Response):
         proxy.metrics.requests.labels(ctx.prep.endpoint, m, "200").inc()
         if self.first_token_at is not None:
             proxy.metrics.ttft.labels(m).observe(self.first_token_at - ctx.t0)
-            _, completion, _ = token_counts(self.last_usage)
+            _, completion, _ = token_counts(self.usage.usage)
             elapsed = time.perf_counter() - self.first_token_at
             if completion > 1 and elapsed > 0:
                 proxy.metrics.tokens_per_s.labels(m).observe((completion - 1) / elapsed)

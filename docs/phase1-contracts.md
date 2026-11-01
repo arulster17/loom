@@ -364,9 +364,12 @@ a replica's URL host and `server_name` are the same (`https://mock-pod-1:8443`).
 - **Per-chunk usage** (`continuous_usage_stats`, in the mock since M1) is vLLM's: only
   together with `include_usage`; every chunk, the role chunk included (0 completion
   tokens), carries `{prompt_tokens, completion_tokens so far, total_tokens}` and **no**
-  `prompt_tokens_details`; cached tokens come only in the final usage chunk. A stream that
-  ends early is billed from its last chunk's usage, with 0 cached tokens (cached input is
-  priced as input in M1, so this is exact today).
+  `prompt_tokens_details`; cached tokens come only in the final usage chunk. With `n > 1`
+  the choices interleave and each chunk's `completion_tokens` is **its own choice's**
+  running count (only the final usage chunk sums the choices; the prompt counts once). A
+  stream that ends early is billed the prompt plus, per choice index, the highest count
+  forwarded (`sse.UsageTracker`), with 0 cached tokens (cached input is priced as input
+  in M1, so this is exact today). Non-streaming responses carry the engine's total.
 - **Proxy behaviour** (`loom_podproxy`, tests in `services/podproxy/tests`): source-address
   allowlist (`LOOM_PODPROXY_ALLOW_IPS`) checked before the TLS handshake; TLS 1.3 only; a
   client certificate chaining to Loom's CA with `clientAuth` (a pod's own server
