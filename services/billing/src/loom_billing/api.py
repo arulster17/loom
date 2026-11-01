@@ -119,7 +119,7 @@ def create_app(
         request: Request,
         stripe_signature: Annotated[str | None, Header(alias="Stripe-Signature")] = None,
     ) -> JSONResponse:
-        payload = await request.body()
+        payload = await read_body(request, settings.billing_max_body_bytes)
         try:
             verify(
                 payload,
@@ -150,7 +150,9 @@ def create_app(
     ) -> JSONResponse:
         _check_internal_token(settings, authorization)
         try:
-            body = CheckoutRequest.model_validate_json(await request.body())
+            body = CheckoutRequest.model_validate_json(
+                await read_body(request, settings.billing_max_body_bytes)
+            )
         except ValidationError as e:
             raise _error(400, "invalid_request", _first_error(e)) from None
         amount = body.amount_micros
@@ -192,6 +194,25 @@ def create_app(
         )
 
     return app
+
+
+async def read_body(request: Request, limit: int) -> bytes:
+    """The request body, refusing (413) one over `limit` bytes by its Content-Length or,
+    without one, as soon as the stream passes it: never buffers more than `limit`."""
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            too_big = int(declared) > limit
+        except ValueError:
+            raise _error(400, "invalid_request", "Bad Content-Length.") from None
+        if too_big:
+            raise _error(413, "request_too_large", f"Body over {limit} bytes.")
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > limit:
+            raise _error(413, "request_too_large", f"Body over {limit} bytes.")
+    return bytes(body)
 
 
 async def _refresh_credit(request: Request, org_id: uuid.UUID) -> None:

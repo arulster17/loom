@@ -117,6 +117,7 @@ Shared `LOOM_*` variables are in the contracts (§2). Billing adds:
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | unset | real Stripe, test mode only; required in `stripe` mode |
 | `LOOM_STRIPE_API_BASE` | `https://api.stripe.com` | |
 | `LOOM_STRIPE_WEBHOOK_TOLERANCE_S` | 300 | |
+| `LOOM_BILLING_MAX_BODY_BYTES` | 262144 | 413 above, by Content-Length or while streaming, before the signature or token body is read in full |
 | `LOOM_STRIPE_STUB_URL` | `http://localhost:12111` | where billing calls the stub (compose: `http://stripe-stub:12111`) |
 | `LOOM_STRIPE_STUB_PUBLIC_URL` | `http://localhost:12111` | stub: base of the pay page URL the browser opens |
 | `LOOM_STRIPE_STUB_WEBHOOK_URL` | `http://localhost:8090/stripe/webhook` | stub: where it posts (compose: `http://billing:8090/stripe/webhook`) |

@@ -436,3 +436,29 @@ async def test_clawback_for_an_unknown_payment_is_kept_for_an_admin(client, pool
     bad["data"]["object"]["object"] = "charge"
     assert (await deliver(client, bad)).json()["result"] == "unapplied"
     assert await refunds(pool, t.org_id) == []
+
+
+# ------------------------------------------------------------ body size
+
+
+async def test_oversized_bodies_are_refused_before_buffering(client):
+    """Unauthenticated callers must not make billing buffer arbitrary bodies: refused by
+    Content-Length, or once a chunked stream passes the cap (it is not read to the end)."""
+    big = b"x" * (262_144 + 1)
+    r = await client.post("/stripe/webhook", content=big, headers={"Stripe-Signature": "t=1"})
+    assert r.status_code == 413 and r.json()["error"]["code"] == "request_too_large"
+
+    sent = 0
+
+    async def endless():
+        nonlocal sent
+        for _ in range(1000):  # 64 MiB if read to the end
+            sent += 1
+            yield b"y" * 65_536
+
+    r = await client.post("/stripe/webhook", content=endless())
+    assert r.status_code == 413
+    assert sent < 10
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    r = await client.post("/internal/checkout-sessions", content=big, headers=auth)
+    assert r.status_code == 413

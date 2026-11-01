@@ -92,6 +92,9 @@ class BillingSettings(PlatformSettings):
     )
     stripe_api_base: str = "https://api.stripe.com"
     stripe_webhook_tolerance_s: PositiveInt = 300
+    # Largest request body billing reads (webhooks, internal API): 413 above, refused by
+    # Content-Length or while streaming, before buffering more. Stripe events are a few KB.
+    billing_max_body_bytes: PositiveInt = 262_144
 
     # Local stub. Billing calls the stub at stripe_stub_url; the browser opens checkout
     # pages at stripe_stub_public_url; the stub posts webhooks to stripe_stub_webhook_url.
