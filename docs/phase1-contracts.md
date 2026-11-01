@@ -231,7 +231,9 @@ Per request, after auth and model lookup, before the pool check (§8):
    `min(tpm_estimate, limit)` (429 with Retry-After from the refill rate). Only if all
    pass: charge the buckets, store the reservation with `ttl = request timeout + 60 s`.
    `max_cost = pricing.max_cost_micros(price, prompt upper bound, max_tokens,
-   max_context)`, the most the request can cost; `tpm_estimate` = the prompt upper bound.
+   max_context)`, the most the request can cost; `tpm_estimate` = body bytes + 1024
+   (the body-size bound, corrected at settle; it stays this even when the prompt bound
+   is the context, so tool requests are not throttled by a full context of tpm each).
 2. **Dispatch** with `max_tokens` always set explicitly (the client's value, or
    `LOOM_MAX_TOKENS_CAP` when it sent none; a value above the cap is a 400 at step 2 of
    §8), so the engine cannot exceed what was reserved.
@@ -251,8 +253,16 @@ stays spent, nothing is charged.
 
 ### Worst-case overshoot
 
-**Zero**, given: (a) the prompt bound holds (tokens <= UTF-8 bytes of the JSON body + 1024
-template tokens, true for the byte-level BPE tokenizers served, Qwen3 and Llama 3); (b) the
+**Zero**, given: (a) the prompt bound holds. It is `pricing.prompt_tokens_upper_bound`:
+UTF-8 bytes of the JSON body + 1024 template tokens for text the template copies verbatim
+(true for the byte-level BPE tokenizers served, Qwen3 and Llama 3); but **the context** for
+a chat request with values the template re-serialises with `tojson` (`tools`,
+`functions`, `documents`, an assistant message's `tool_calls`) or a request-supplied
+`chat_template` / `chat_template_kwargs`. Re-serialised JSON can be much longer than it
+was in the body (`9e15` renders as `9000000000000000.0`, one token per digit on Qwen3;
+Llama's `tojson(indent=4)` adds indentation per nesting level), and the engine refuses a
+prompt over the context. `response_format` is not rendered into the prompt (vLLM applies
+it as guided decoding), so it keeps the body bound. (b) the
 engine honours `max_tokens`; (c) the gateway settles within the reservation TTL (it
 cancels upstream at `LOOM_REQUEST_TIMEOUT_S`); (d) Redis keeps its writes. Then every
 admitted request's cost is at most its reservation, and `credit - usage` never goes

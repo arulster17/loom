@@ -11,7 +11,7 @@ import pytest
 from loom_gateway.logs import JsonFormatter
 from loom_gateway.metrics import GatewayMetrics
 from loom_gateway.proxy import _engine_error, cost_headers
-from loom_gateway.request_body import parse_json_object, prepare
+from loom_gateway.request_body import Prepared, parse_json_object, prepare
 from loom_gateway.routing import Router
 from loom_gateway.settings import GatewaySettings
 from loom_gateway.sse import ChunkRewriter, client_usage, sse_payloads, token_counts
@@ -144,6 +144,37 @@ def test_unicode_body_bound_holds():
     p = prepare("chat", data, body_bytes=len(body), model_id="m", price=QWEN,
                 max_context=CTX, max_tokens_cap=CAP)  # fmt: skip
     assert p.prompt_upper >= len(text.encode()) + 1024
+
+
+def test_template_rendered_json_is_bounded_by_the_context():
+    """`tools` reach the prompt through the template's `tojson`, which re-serialises
+    them: `9e15` (4 bytes) comes out as `9000000000000000.0` (18 tokens on Qwen3, one per
+    digit), far beyond body bytes + 1024. The bound for such requests is the context."""
+    enum = ",".join(["9e15"] * 1000)
+    raw = (
+        '{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function",'
+        '"function":{"name":"f","parameters":{"type":"number","enum":[' + enum + "]}}}]}"
+    )
+    data = json.loads(raw)
+    rendered = json.dumps(data["tools"], ensure_ascii=False)  # what tojson renders
+    assert len(rendered.encode()) > len(raw) + 1024  # the body-size bound would break
+
+    def bound(d: dict) -> Prepared:
+        body = json.dumps(d).encode()
+        return prepare("chat", d, body_bytes=len(raw) if d is data else len(body),
+                       model_id="m", price=QWEN, max_context=CTX, max_tokens_cap=CAP)  # fmt: skip
+
+    p = bound(data)
+    assert p.prompt_upper == CTX >= len(rendered.encode())
+    assert p.max_cost_micros == max_cost_micros(QWEN, CTX, CAP, CTX)
+    assert p.tpm_estimate == len(raw) + 1024  # rate limits keep the body-size estimate
+    call = {"id": "c", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+    msgs = [{"role": "user", "content": "x"}, {"role": "assistant", "tool_calls": [call]}]
+    assert bound({"model": "m", "messages": msgs}).prompt_upper == CTX
+    for field in ("documents", "chat_template", "chat_template_kwargs", "functions"):
+        assert bound({"model": "m", "messages": msgs[:1], field: [{"a": 1}]}).prompt_upper == CTX
+    # Plain text and an empty tools list keep the tight bound.
+    assert bound({"model": "m", "messages": msgs[:1], "tools": []}).prompt_upper < CTX
 
 
 # ------------------------------------------------------------------ SSE
