@@ -15,5 +15,29 @@ services:
       timeout: 5s
       retries: 10
 
+  # Platform cache, limits and the usage stream (docs/phase1-contracts.md). AOF with
+  # fsync every second, as in production; noeviction because evicting a balance or
+  # reservation key would be wrong, not just slow.
+  redis:
+    image: redis:7.4-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory-policy
+      - noeviction
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   pgdata:
+  redisdata:

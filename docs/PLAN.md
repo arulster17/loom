@@ -110,6 +110,8 @@ How Phase 1 serves from RunPod (control plane, pod security, replicas, costs, mi
 
 Billing and ledger design are expensive to reverse; this draft was reviewed and accepted at the start of Phase 1.
 
+Built as SQL migrations in `services/platform_common` (2026-11-01). Additions to the draft (uuid Auth.js ids, `users.role`, `orgs.status` `pending_approval`/`rejected` for manual signup approval with the $5 credit posted only on approval, limit overrides, `usage_events.ledger_transaction_id`) are listed in [phase1-contracts.md](phase1-contracts.md#3-postgres).
+
 ```sql
 -- Auth.js Postgres adapter tables: users, accounts, sessions, verification_token
 orgs (id uuid PK, name text, status text,          -- active|suspended
