@@ -91,3 +91,18 @@ def test_billing_wiring_matches_its_readme():
     token = billing["environment"]["LOOM_BILLING_INTERNAL_TOKEN"]
     assert token and services["web"]["environment"]["LOOM_INTERNAL_TOKEN"] == token
     assert billing["depends_on"]["migrate"]["condition"] == "service_completed_successfully"
+
+
+def test_every_long_running_service_has_a_healthcheck():
+    # `docker compose up --wait` and `ps` then mean "healthy", not just "started".
+    images_with_their_own = ("axllent/mailpit",)
+    for name, svc in compose().items():
+        if svc.get("restart") == "no":
+            continue  # one-shot jobs
+        if "healthcheck" in svc or svc.get("image", "").startswith(images_with_their_own):
+            continue
+        build = svc.get("build") or {}
+        dockerfile = build.get("dockerfile") if isinstance(build, dict) else None
+        assert dockerfile and "HEALTHCHECK" in (ROOT / dockerfile).read_text(), (
+            f"{name} has no healthcheck"
+        )
