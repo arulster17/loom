@@ -174,7 +174,7 @@ export function Playground({ models, apiBase, gatewayDown }: { models: Playgroun
         </div>
       </aside>
 
-      <section className="flex min-h-[28rem] flex-col rounded-lg border border-zinc-200 bg-white">
+      <section className="flex min-h-[28rem] min-w-0 flex-col rounded-lg border border-zinc-200 bg-white">
         {showCode ? (
           <div className="border-b border-zinc-200 p-4">
             <div className="mb-2 flex gap-2 text-sm">

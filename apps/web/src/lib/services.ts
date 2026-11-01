@@ -52,17 +52,17 @@ export async function createCheckout(req: CheckoutRequest): Promise<string> {
   let res: Response;
   try {
     res = await fetch(`${billingUrl()}/checkout/sessions`, {
-    method: "POST",
-    headers,
-    cache: "no-store",
-    signal: AbortSignal.timeout(10_000),
-    body: JSON.stringify({
-      org_id: req.orgId,
-      amount_micros: Number(req.amountMicros),
-      customer_email: req.customerEmail,
-      success_url: req.successUrl,
-      cancel_url: req.cancelUrl,
-    }),
+      method: "POST",
+      headers,
+      cache: "no-store",
+      signal: AbortSignal.timeout(10_000),
+      body: JSON.stringify({
+        org_id: req.orgId,
+        amount_micros: Number(req.amountMicros),
+        customer_email: req.customerEmail,
+        success_url: req.successUrl,
+        cancel_url: req.cancelUrl,
+      }),
     });
   } catch (e) {
     throw new ServiceError(`billing unreachable: ${e instanceof Error ? e.message : "error"}`);
