@@ -17,7 +17,7 @@ import socket
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import AliasChoices, Field, SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import SettingsConfigDict
 
 from loom_platform.settings import PlatformSettings
@@ -91,6 +91,15 @@ class BillingSettings(PlatformSettings):
     stripe_stub_webhook_secret: SecretStr = SecretStr(STUB_WEBHOOK_SECRET)
     stripe_stub_host: str = "0.0.0.0"
     stripe_stub_port: PositiveInt = 12111
+
+    @field_validator("stripe_secret_key", "stripe_webhook_secret", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, v: object) -> object:
+        # docker-compose passes `${STRIPE_SECRET_KEY:-}` through as an empty string: that
+        # means "not set" (the stub), never real Stripe with an empty key.
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     @model_validator(mode="after")
     def _stripe_keys(self) -> BillingSettings:

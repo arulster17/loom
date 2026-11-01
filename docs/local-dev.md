@@ -67,7 +67,8 @@ LOOM_TEST_DATABASE_URL=postgresql+psycopg://loom:loom@localhost:5432/loom \
   uv run pytest -q -m postgres          # or drop -m to run everything
 ```
 
-Markers (`pyproject.toml`): `postgres`, `slow`, `network` (deselected unless `-m network`).
+Markers (`pyproject.toml`): `postgres`, `redis`, `slow`, `network` and `acceptance` (the last two
+deselected unless asked for with `-m network` or `-m acceptance`).
 Default per-test timeout is 120 s.
 
 ## Platform (Phase 1)
@@ -130,7 +131,8 @@ The end-to-end flow:
    )
    ```
 
-4. Usage and balance update in the dashboard (the billing worker posts usage every minute).
+4. Usage and balance update in the dashboard within a second or two, once billing has
+   consumed the usage event; the per-minute batch then posts it to the ledger.
 
 Host ports move with variables, e.g. to run a second stack next to the main one:
 `LOOM_PG_PORT=15432 LOOM_REDIS_PORT=16379 LOOM_GATEWAY_PORT=18080 ... docker compose -p
@@ -141,6 +143,27 @@ loom2 up -d` (the variables are in `docker-compose.yml`: `LOOM_PG_PORT`,
 
 Start over: `docker compose down -v` (drops the databases) and `rm -rf .dev/certs` (a new
 CA on the next `up`).
+
+### M1 acceptance
+
+`loom-m1-acceptance` (`services/devstack`) runs the whole M1 acceptance against a running
+stack, from the outside, and exits 0 only if every item passes
+([phase1-m1-acceptance.md](phase1-m1-acceptance.md) has the items and the recorded
+numbers). It signs up through the web app (magic links from Mailpit's API), approves as
+the bootstrap admin, calls the gateway with the OpenAI SDK, kills and restarts a mock pod,
+sets a pool cold, pays through the Stripe stub and greps every container's logs. It
+creates its own users and orgs, so it can run repeatedly against one stack:
+
+```bash
+LOOM_ADMIN_EMAILS=admin@m1.test docker compose up -d --build --wait
+uv run loom-m1-acceptance --json /tmp/m1.json          # ~5 minutes
+uv run loom-m1-acceptance --only b,f                    # a subset (the sign-up flow always runs)
+```
+
+On moved ports, export the same `LOOM_*_PORT` variables and `COMPOSE_PROJECT_NAME` for the
+run as for `docker compose` (or pass `--web`, `--gateway`, `--database-url`, `--project`,
+...). As a test: `uv run pytest -m acceptance -s services/devstack/tests/test_devstack_acceptance.py`
+(deselected by default; skips when the stack is down).
 
 ### Mock pods and the pod proxy
 
@@ -365,8 +388,11 @@ imported with a targeted `# type: ignore[import-untyped]`.
 `.github/workflows/ci.yml` runs on pushes to `main` and on pull requests:
 `uv sync --frozen`, `ruff check`, `ruff format --check`, `mypy bench/src`,
 `pytest -q -n auto` with a Postgres 16
-service and `LOOM_TEST_DATABASE_URL` set, so Postgres-marked tests run there. A second
-job, `pod-client-env`, runs `pytest -m network bench/tests/deps` (above).
+service and `LOOM_TEST_DATABASE_URL` set, so Postgres-marked tests run there. The `web`
+job checks `apps/web`: `npm ci`, `npm run lint`, `npm run typecheck`, `npm test`,
+`npm run test:integration` (Postgres service, migrated with `uv run loom-migrate`) and
+`npm run build`. A third job, `pod-client-env`, runs `pytest -m network bench/tests/deps`
+(above).
 `.github/workflows/site.yml` builds the results site on pushes to `main` that touch the
 site or report code, and deploys it to GitHub Pages once Pages is enabled
 ([site.md](site.md#deployment)).
