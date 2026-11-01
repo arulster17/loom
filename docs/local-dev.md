@@ -68,6 +68,18 @@ LOOM_TEST_DATABASE_URL=postgresql+psycopg://loom:loom@localhost:5432/loom \
 Markers (`pyproject.toml`): `postgres`, `slow`, `network` (deselected unless `-m network`).
 Default per-test timeout is 120 s.
 
+## Platform (Phase 1)
+
+```bash
+docker compose up -d postgres redis
+uv run loom-migrate --create-database        # database loom_platform
+uv run pytest -q services                    # platform tests use the compose servers
+```
+
+Platform tests use `LOOM_TEST_DATABASE_URL` / `LOOM_TEST_REDIS_URL` when set, else the
+compose servers, and skip when neither is reachable. Each session creates and drops its
+own database. Contracts: [phase1-contracts.md](phase1-contracts.md).
+
 ## Results database
 
 `bench` uses `--db URL`, else `$LOOM_DATABASE_URL`, else
