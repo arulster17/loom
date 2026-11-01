@@ -81,6 +81,9 @@ class RequestCtx:
     cost: int = 0
     status: str = ""
     t_dispatch: float | None = None
+    # Dispatch state, so a timeout can release what an interrupted attempt held.
+    held: Replica | None = None
+    upstream: httpx.Response | None = None
 
     @property
     def model_id(self) -> str:
@@ -240,8 +243,12 @@ class Proxy:
         )
         return await self.client.send(request, stream=stream)
 
+    def _release(self, ctx: RequestCtx, replica: Replica, *, failed: bool = False) -> None:
+        ctx.held = None
+        self.router.release(replica, failed=failed)
+
     def _failed(self, ctx: RequestCtx, replica: Replica, why: str) -> None:
-        self.router.release(replica, failed=True)
+        self._release(ctx, replica, failed=True)
         self.metrics.upstream_failures.labels(ctx.model_id, replica.id).inc()
         log.warning(
             "upstream attempt failed",
@@ -265,6 +272,7 @@ class Proxy:
             self.metrics.upstream_retries.labels(ctx.model_id).inc()
         tried.add(replica.id)
         self.router.acquire(replica)
+        ctx.held = replica
         return replica
 
     async def _fail_request(self, ctx: RequestCtx, error: ApiError) -> Response:
@@ -273,6 +281,39 @@ class Proxy:
 
     async def complete(self, ctx: RequestCtx) -> Response:
         """A non-streaming request."""
+        return await self._within_deadline(ctx, self._complete(ctx))
+
+    async def stream(self, ctx: RequestCtx) -> Response:
+        """A streaming request: commit to a replica once its first event arrives."""
+        return await self._within_deadline(ctx, self._stream(ctx))
+
+    async def _within_deadline(
+        self, ctx: RequestCtx, attempts: Coroutine[Any, Any, Response]
+    ) -> Response:
+        """Run the attempts within LOOM_REQUEST_TIMEOUT_S of receipt, so the request
+        settles well inside its reservation's TTL whatever the replicas do."""
+        timeout = self.settings.request_timeout_s
+        remaining = ctx.t0 + timeout - time.perf_counter()
+        try:
+            async with asyncio.timeout(max(remaining, 0.001)):
+                return await attempts
+        except TimeoutError:
+            if ctx.upstream is not None:
+                with contextlib.suppress(Exception):
+                    await ctx.upstream.aclose()
+            if ctx.held is not None:
+                self._failed(ctx, ctx.held, "timeout")
+            return await self._fail_request(
+                ctx,
+                ApiError(
+                    502,
+                    "server_error",
+                    "upstream_lost",
+                    f"The model server did not respond within {timeout} s.",
+                ),
+            )
+
+    async def _complete(self, ctx: RequestCtx) -> Response:
         tried: set[str] = set()
         while (replica := self._next_replica(ctx, tried)) is not None:
             try:
@@ -281,7 +322,7 @@ class Proxy:
                 self._failed(ctx, replica, type(e).__name__)
                 continue
             if resp.status_code in _PASS_THROUGH:
-                self.router.release(replica)
+                self._release(ctx, replica)
                 return await self._fail_request(ctx, _engine_error(resp.status_code, resp.content))
             if resp.status_code != 200:
                 self._failed(ctx, replica, f"status {resp.status_code}")
@@ -293,7 +334,7 @@ class Proxy:
             except ValueError:
                 self._failed(ctx, replica, "bad JSON")
                 continue
-            self.router.release(replica)
+            self._release(ctx, replica)
             usage = body.get("usage") if isinstance(body.get("usage"), dict) else None
             cost = await shielded(self.settle(ctx, usage, "ok", None))
             if usage is not None:
@@ -305,12 +346,11 @@ class Proxy:
             )
         return await self._fail_request(ctx, errors.upstream_lost())
 
-    async def stream(self, ctx: RequestCtx) -> Response:
-        """A streaming request: commit to a replica once its first event arrives."""
+    async def _stream(self, ctx: RequestCtx) -> Response:
         tried: set[str] = set()
         while (replica := self._next_replica(ctx, tried)) is not None:
             try:
-                resp = await self._send(ctx, replica, stream=True)
+                resp = ctx.upstream = await self._send(ctx, replica, stream=True)
             except httpx.HTTPError as e:
                 self._failed(ctx, replica, type(e).__name__)
                 continue
@@ -321,7 +361,7 @@ class Proxy:
                     body = b""
                 await resp.aclose()
                 if resp.status_code in _PASS_THROUGH:
-                    self.router.release(replica)
+                    self._release(ctx, replica)
                     return await self._fail_request(ctx, _engine_error(resp.status_code, body))
                 self._failed(ctx, replica, f"status {resp.status_code}")
                 continue
@@ -332,6 +372,8 @@ class Proxy:
                 await resp.aclose()
                 self._failed(ctx, replica, type(e).__name__)
                 continue
+            # The stream response owns the replica and the upstream from here.
+            ctx.held = ctx.upstream = None
             return StreamResponse(self, ctx, replica, resp, payloads, first)
         return await self._fail_request(ctx, errors.upstream_lost())
 
@@ -401,7 +443,15 @@ class StreamResponse(Response):
                 pump.cancel()
             if watch is not None:
                 watch.cancel()
-            await asyncio.gather(*(t for t in (pump, watch) if t), return_exceptions=True)
+            results = await asyncio.gather(*(t for t in (pump, watch) if t), return_exceptions=True)
+            for r in results:
+                if isinstance(r, Exception):
+                    self.lost = self.lost or "upstream_lost"
+                    log.error(
+                        "stream pump failed",
+                        exc_info=r,
+                        extra={"fields": {"request_id": str(self.ctx.request_id)}},
+                    )
             await shielded(self._finish())
 
     async def _pump(self, send: Send) -> None:

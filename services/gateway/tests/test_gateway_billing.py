@@ -148,6 +148,27 @@ async def test_request_timeout_cuts_the_stream(make_stack):
     assert 1 <= event.completion_tokens <= 4
 
 
+@pytest.mark.parametrize("stream", [False, True])
+async def test_request_timeout_before_the_first_byte(make_stack, stream):
+    """A replica that never answers is cut at LOOM_REQUEST_TIMEOUT_S, retries included,
+    so the settle lands well inside the reservation's TTL."""
+    stack = await make_stack(engines=("e1", "e2"), request_timeout_s=1)
+    t = await stack.tenant()
+    for e in stack.engines.values():
+        e.behavior.first_token_delay_s = 3
+    t0 = time.monotonic()
+    with pytest.raises(openai.APIStatusError) as err:
+        await stack.openai(t).chat.completions.create(
+            model=stack.small, messages=MESSAGES, stream=stream
+        )
+    assert time.monotonic() - t0 < 2.5
+    assert err.value.status_code == 502 and err.value.code == "upstream_lost"
+    [event] = await stack.wait_events(1)
+    assert event.status == "error" and event.cost_micros == 0
+    assert await stack.reserved(t) == (0, 0)
+    assert stack.gateway.router.inflight("e1") == 0
+
+
 # ------------------------------------------------------------------ retries
 
 

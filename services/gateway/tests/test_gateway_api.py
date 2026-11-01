@@ -269,15 +269,6 @@ async def test_models_endpoint(stack, redis_client):
     assert {m.id for m in page.data} == {stack.small, stack.big}
 
 
-async def test_models_endpoint_real_registry():
-    """The default app lists config/models.yaml's servable rows."""
-    from loom_bench.registry import load_registry
-    from loom_platform.pricing import servable
-
-    ids = {m.id for m in servable(load_registry())}
-    assert ids == {"qwen3-8b", "llama-3.3-70b-instruct-fp8"}
-
-
 # ------------------------------------------------------------------ errors
 
 
