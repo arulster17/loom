@@ -136,6 +136,90 @@ def test_completions_usage_and_streaming(client):
     assert events[-2]["usage"] == data["usage"]
 
 
+CONTINUOUS = {"include_usage": True, "continuous_usage_stats": True}
+
+
+def test_chat_continuous_usage_stats(client):
+    body = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Write a story."}],
+        "max_tokens": 25,
+        "stream_options": CONTINUOUS,
+    }
+    events = stream_events(client, "/v1/chat/completions", body)
+    assert events[-1] == "[DONE]"
+    final = events[-2]["usage"]
+    chunks = events[:-2]
+    # Every chunk carries the running count: 0 on the role chunk, then one per token.
+    running = [c["usage"] for c in chunks]
+    assert [u["completion_tokens"] for u in running] == list(range(len(chunks)))
+    assert {u["prompt_tokens"] for u in running} == {final["prompt_tokens"]}
+    assert all(u["total_tokens"] == u["prompt_tokens"] + u["completion_tokens"] for u in running)
+    # As in vLLM, cached-token details are reported only in the final usage.
+    assert all("prompt_tokens_details" not in u for u in running)
+    assert running[-1]["completion_tokens"] == final["completion_tokens"]
+    assert "prompt_tokens_details" in final
+
+
+def test_continuous_usage_needs_include_usage(client):
+    body = {
+        "model": MODEL,
+        "prompt": "Once upon",
+        "max_tokens": 5,
+        "stream_options": {"continuous_usage_stats": True},
+    }
+    events = stream_events(client, "/v1/completions", body)
+    assert all("usage" not in e for e in events[:-1])
+
+
+def test_completions_continuous_usage_stats(client):
+    body = {"model": MODEL, "prompt": "The batch", "max_tokens": 12, "ignore_eos": True}
+    events = stream_events(client, "/v1/completions", {**body, "stream_options": CONTINUOUS})
+    chunks, final = events[:-2], events[-2]["usage"]
+    assert [c["usage"]["completion_tokens"] for c in chunks] == list(range(1, 13))
+    assert final["completion_tokens"] == 12
+    assert {c["usage"]["prompt_tokens"] for c in chunks} == {TOK.count("The batch")}
+
+
+def test_tool_call_streaming_continuous_usage(client):
+    body = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Weather in Rome?"}],
+        "tools": [WEATHER_TOOL],
+        "max_tokens": 200,
+        "stream_options": CONTINUOUS,
+    }
+    events = stream_events(client, "/v1/chat/completions", body)
+    chunks, final = events[:-2], events[-2]["usage"]
+    assert chunks[-1]["usage"]["completion_tokens"] == final["completion_tokens"]
+    assert chunks[0]["usage"]["completion_tokens"] == 0
+
+
+def test_aborted_stream_last_usage_counts_tokens_received(make_client):
+    """A stream that drops mid-way: the last chunk's usage equals the tokens received."""
+    c = make_client(abort_rate=1.0)
+    body = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 40,
+        "ignore_eos": True,
+        "stream": True,
+        "stream_options": CONTINUOUS,
+    }
+    for _ in range(5):
+        received: list[dict] = []
+        with (
+            pytest.raises(httpx.RemoteProtocolError),
+            c.stream("POST", "/v1/chat/completions", json=body) as response,
+        ):
+            for line in response.iter_lines():
+                if line.startswith("data: {"):
+                    received.append(json.loads(line[6:]))
+        tokens = sum(1 for e in received if e["choices"][0]["delta"].get("content"))
+        if received:
+            assert received[-1]["usage"]["completion_tokens"] == tokens
+
+
 def test_completions_prompt_list(client):
     prompts = ["What is 2 + 2?", "What is 3 * 4?"]
     data = client.post(

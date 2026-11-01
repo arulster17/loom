@@ -47,6 +47,10 @@ class _Body(BaseModel):
 
 class StreamOptions(_Body):
     include_usage: bool = False
+    # vLLM: a usage block on every chunk (prompt tokens, completion tokens so far), only
+    # together with include_usage. A client that drops the stream mid-way knows exactly
+    # how many tokens it was sent, which is how the gateway bills aborted streams.
+    continuous_usage_stats: bool = False
 
 
 class JsonSchemaFormat(_Body):
@@ -88,6 +92,12 @@ class _GenerateRequest(_Body):
     @property
     def include_usage(self) -> bool:
         return self.stream_options is not None and self.stream_options.include_usage
+
+    @property
+    def continuous_usage(self) -> bool:
+        return self.include_usage and bool(
+            self.stream_options and self.stream_options.continuous_usage_stats
+        )
 
 
 class ChatCompletionRequest(_GenerateRequest):
@@ -318,6 +328,16 @@ def _usage(requests: Iterable[tuple[Generation, SimSequence]]) -> dict[str, Any]
     }
 
 
+def _running_usage(gen: Generation, completion_tokens: int) -> dict[str, Any]:
+    """Per-chunk usage under `continuous_usage_stats`, as vLLM sends it: no
+    `prompt_tokens_details` (vLLM reports cached tokens only in the final usage)."""
+    return {
+        "prompt_tokens": gen.prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": gen.prompt_tokens + completion_tokens,
+    }
+
+
 def _chat_logprob(entry: TokenLogprob) -> dict[str, Any]:
     return {
         "token": entry.token,
@@ -478,8 +498,10 @@ async def _chat_completions(server: MockServer, request: Request) -> Response:
     pieces = gen.output.pieces
     abort_at = server.abort_index(len(pieces))
 
-    def chunk(delta: dict[str, Any], **extra: Any) -> str:
+    def chunk(delta: dict[str, Any], sent: int, **extra: Any) -> str:
         choice = {"index": 0, "delta": delta, "logprobs": None, "finish_reason": None, **extra}
+        if req.continuous_usage:
+            return envelope.sse([choice], usage=_running_usage(gen, sent))
         return envelope.sse([choice])
 
     async def events() -> AsyncIterator[str]:
@@ -491,10 +513,11 @@ async def _chat_completions(server: MockServer, request: Request) -> Response:
                 if i == 0:
                     # vLLM sends the role with the first token, not before prefill.
                     if tool is None:
-                        yield chunk({"role": "assistant", "content": ""})
+                        yield chunk({"role": "assistant", "content": ""}, 0)
                     else:
                         header = {"index": 0, **_tool_call(call_id, tool.name, "")}
-                        yield chunk({"role": "assistant", "content": None, "tool_calls": [header]})
+                        role = {"role": "assistant", "content": None, "tool_calls": [header]}
+                        yield chunk(role, 0)
                 if tool is None:
                     delta: dict[str, Any] = {"content": pieces[i]}
                 else:
@@ -502,6 +525,7 @@ async def _chat_completions(server: MockServer, request: Request) -> Response:
                 entry = logprobs[i] if logprobs is not None else None
                 yield chunk(
                     delta,
+                    n,
                     logprobs={"content": [_chat_logprob(entry)]} if entry else None,
                     finish_reason=gen.finish_reason if n == len(pieces) else None,
                 )
@@ -589,7 +613,10 @@ async def _completions(server: MockServer, request: Request) -> Response:
                     choice["logprobs"] = _completion_logprobs(
                         tokens, entries, offset, known=server.config.text_offsets
                     )
-                yield envelope.sse([choice])
+                if req.continuous_usage:
+                    yield envelope.sse([choice], usage=_running_usage(gen, n))
+                else:
+                    yield envelope.sse([choice])
                 offset += len(text)
             if req.include_usage:
                 yield envelope.sse([], usage=_usage([(gen, seq)]))

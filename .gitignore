@@ -42,3 +42,6 @@ inference-platform-build-prompt.md
 # Claude Code agent worktrees
 .claude/worktrees/
 .playwright-mcp/
+
+# Local dev certificates and tokens (loom-devcerts); never commit
+/.dev/
