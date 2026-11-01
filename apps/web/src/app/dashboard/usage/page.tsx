@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 
 import { Card, Empty, PageHeader, btn, btnSecondary, formatInt, input, label, td, tdNum, th, thNum } from "@/components/ui";
 import { usageRows } from "@/lib/data/usage";
-import { formatUsd } from "@/lib/money";
+import { formatCost } from "@/lib/money";
 import { requireActiveOrg } from "@/lib/session";
 import { groupUsage, parseDayRange, totalsOf, type UsageGroup } from "@/lib/usage";
 
@@ -32,7 +32,7 @@ function GroupTable({ title, first, groups }: { title: string; first: string; gr
                   <td className={tdNum}>{formatInt(g.requests)}</td>
                   <td className={tdNum}>{formatInt(g.promptTokens)}</td>
                   <td className={tdNum}>{formatInt(g.completionTokens)}</td>
-                  <td className={tdNum}>{formatUsd(g.costMicros, 4)}</td>
+                  <td className={tdNum}>{formatCost(g.costMicros)}</td>
                 </tr>
               ))}
             </tbody>
@@ -78,7 +78,7 @@ export default async function UsagePage(props: PageProps<"/dashboard/usage">) {
       </form>
       <div className="mt-6 grid gap-4 sm:grid-cols-4">
         <Card title="Cost">
-          <p className="text-xl font-semibold tabular-nums">{formatUsd(total.costMicros, 4)}</p>
+          <p className="text-xl font-semibold tabular-nums">{formatCost(total.costMicros)}</p>
         </Card>
         <Card title="Requests">
           <p className="text-xl font-semibold tabular-nums">{formatInt(total.requests)}</p>

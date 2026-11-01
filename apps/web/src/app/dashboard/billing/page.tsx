@@ -4,7 +4,7 @@ import { AutoRefresh } from "@/components/auto-refresh";
 import { Badge, Card, Empty, Notice, PageHeader, formatDate, td, tdNum, th, thNum } from "@/components/ui";
 import { canManageBilling } from "@/lib/authz";
 import { creditHistory, getAutoRecharge, getBalance, purchaseLandedRecently } from "@/lib/data/billing";
-import { formatUsd, microsToDecimalString } from "@/lib/money";
+import { formatCost, formatUsd, microsToDecimalString } from "@/lib/money";
 import { requireActiveOrg } from "@/lib/session";
 
 import { AddCreditForm, AutoRechargeForm } from "./billing-forms";
@@ -53,7 +53,7 @@ export default async function BillingPage(props: PageProps<"/dashboard/billing">
             {formatUsd(balance.balanceMicros)}
           </p>
           <p className="mt-2 text-xs text-zinc-500">
-            {formatUsd(balance.creditMicros)} added, {formatUsd(balance.usageMicros, 4)} used.
+            {formatUsd(balance.creditMicros)} added, {formatCost(balance.usageMicros)} used.
           </p>
           {balance.balanceMicros <= 0n ? (
             <p className="mt-2 text-sm text-red-700">Requests are refused until you add credit.</p>

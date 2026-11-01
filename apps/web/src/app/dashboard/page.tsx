@@ -5,7 +5,7 @@ import { Card, PageHeader, formatInt } from "@/components/ui";
 import { getBalance } from "@/lib/data/billing";
 import { listKeys } from "@/lib/data/keys";
 import { usageRows } from "@/lib/data/usage";
-import { formatUsd } from "@/lib/money";
+import { formatCost, formatUsd } from "@/lib/money";
 import { publicApiBase } from "@/lib/services";
 import { requireActiveOrg } from "@/lib/session";
 import { parseDayRange, totalsOf } from "@/lib/usage";
@@ -33,7 +33,7 @@ export default async function OverviewPage() {
           </Link>
         </Card>
         <Card title="Last 30 days">
-          <p className="text-2xl font-semibold tabular-nums">{formatUsd(month.costMicros)}</p>
+          <p className="text-2xl font-semibold tabular-nums">{formatCost(month.costMicros)}</p>
           <p className="mt-2 text-sm text-zinc-600">
             {formatInt(month.requests)} requests, {formatInt(month.promptTokens + month.completionTokens)} tokens
           </p>

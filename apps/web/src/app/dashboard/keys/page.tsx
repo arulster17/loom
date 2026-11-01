@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { Badge, Card, Empty, PageHeader, formatDate, td, tdNum, th, thNum } from "@/components/ui";
 import { canRevokeKey } from "@/lib/authz";
 import { listKeys } from "@/lib/data/keys";
-import { formatUsd } from "@/lib/money";
+import { formatCost, formatUsd } from "@/lib/money";
 import { requireActiveOrg } from "@/lib/session";
 
 import { CreateKeyForm, RevokeKeyButton } from "./key-forms";
@@ -49,7 +49,7 @@ export default async function KeysPage() {
                       {formatDate(k.createdAt)}
                       {k.createdByEmail ? <div className="text-xs text-zinc-500">{k.createdByEmail}</div> : null}
                     </td>
-                    <td className={tdNum}>{formatUsd(k.spentMicros, 4)}</td>
+                    <td className={tdNum}>{formatCost(k.spentMicros)}</td>
                     <td className={tdNum}>{k.spendLimitMicros ? formatUsd(k.spendLimitMicros) : "—"}</td>
                     <td className={td}>
                       {k.revokedAt ? <Badge>revoked {formatDate(k.revokedAt).slice(0, 10)}</Badge> : <Badge tone="ok">active</Badge>}

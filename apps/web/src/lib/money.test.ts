@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatPricePerMillion, formatUsd, formatUsdExact, microsToDecimalString, parseUsdToMicros, toMicros } from "./money";
+import { formatCost, formatPricePerMillion, formatUsd, formatUsdExact, microsToDecimalString, parseUsdToMicros, toMicros } from "./money";
 
 describe("formatUsd", () => {
   it("formats micro-dollars as dollars with 2 decimals", () => {
@@ -34,6 +34,12 @@ describe("formatUsdExact and prices", () => {
     expect(formatUsdExact(5_000_000)).toBe("$5.00");
     expect(formatUsdExact(5_100_000)).toBe("$5.10");
     expect(formatUsdExact(-22_414)).toBe("-$0.022414");
+  });
+
+  it("shows small usage costs exactly and larger ones in cents", () => {
+    expect(formatCost(21)).toBe("$0.000021");
+    expect(formatCost(0)).toBe("$0.00");
+    expect(formatCost(1_234_567)).toBe("$1.23");
   });
 
   it("formats registry prices per 1M tokens", () => {

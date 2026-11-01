@@ -57,6 +57,12 @@ export function formatUsdExact(micros: MicrosLike): string {
   return `${neg ? "-" : ""}$${groupThousands(whole.toString())}.${frac}`;
 }
 
+/** Usage costs: exact below $1 (requests cost fractions of a cent), cents above. */
+export function formatCost(micros: MicrosLike): string {
+  const m = toMicros(micros);
+  return (m < 0n ? -m : m) < MICROS_PER_USD ? formatUsdExact(m) : formatUsd(m);
+}
+
 /** Price per 1M tokens from the registry's micro-dollars per 1M: 368_000 -> "$0.368". */
 export function formatPricePerMillion(microsPerMtok: MicrosLike): string {
   return formatUsdExact(microsPerMtok);
