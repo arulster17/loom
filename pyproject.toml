@@ -69,14 +69,15 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 timeout = 120
 # Under `-n auto`, tests sharing an expensive module fixture (`xdist_group`) stay on one
-# worker; without `-n` this does nothing. `network` tests are deselected unless asked for
-# with `-m network` (a later -m replaces this one).
-addopts = "--dist loadgroup -m 'not network'"
+# worker; without `-n` this does nothing. `network` and `acceptance` tests are deselected
+# unless asked for with `-m network` / `-m acceptance` (a later -m replaces this one).
+addopts = "--dist loadgroup -m 'not network and not acceptance'"
 markers = [
     "postgres: needs a Postgres database (LOOM_TEST_DATABASE_URL)",
     "redis: needs a Redis server (LOOM_TEST_REDIS_URL, default redis://localhost:6379/15)",
     "slow: slower integration tests",
     "network: downloads packages and datasets; minutes (CI job pod-client-env)",
+    "acceptance: needs the whole compose stack up; minutes (docs/phase1-m1-acceptance.md)",
 ]
 
 [tool.ruff.lint.isort]

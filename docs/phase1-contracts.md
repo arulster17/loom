@@ -1,8 +1,15 @@
 # Phase 1 contracts (M1)
 
-Status: wave 1 of M1, 2026-11-01. The interfaces the gateway, billing worker, web app and
-mock pod build against. Changing one means changing this document, the shared code in
+Status: M1, 2026-11-01. The interfaces the gateway, billing worker, web app and mock pod
+build against. Changing one means changing this document, the shared code in
 `services/platform_common` (`loom_platform`) and its tests together.
+
+Wave 1 wrote this document; wave 2 (gateway, billing, web) added interfaces that were
+recorded here at the M1 acceptance ([phase1-m1-acceptance.md](phase1-m1-acceptance.md)),
+marked *(wave 2)*: playground keys (§5), the `loom:notify` stream (§6, §7), billing's
+internal checkout API (§7), the `/v1/completions` default `max_tokens` (§8), the public
+`GET /v1/models` shape (§12), the 502 `upstream_lost` timeout and 503
+`balance_unavailable` (§11).
 
 Background: [PLAN.md](PLAN.md) (decisions, the accepted ledger draft) and
 [phase1-runpod-plan.md](phase1-runpod-plan.md) (§4 pod security, §7 routing, §8 failure
@@ -43,7 +50,7 @@ compose servers are down, and fail when the variable is set. Factories:
 | redis | 6379 | AOF `everysec`, `maxmemory-policy noeviction` (already in `docker-compose.yml`) |
 | migrate | none | One-shot: `loom-migrate --create-database`; others start after it succeeds |
 | gateway | 8080 | Public API at `http://localhost:8080/v1`; Prometheus `/metrics` on 9100 |
-| billing | 8090 | `POST /stripe/webhook`, `GET /health`; Prometheus `/metrics` on 9101 |
+| billing | 8090 | `POST /stripe/webhook`, `POST /internal/checkout-sessions` (§7), `GET /health`; Prometheus `/metrics` on 9101 |
 | web | 3000 | Next.js |
 | stripe-stub | 12111 | Local Stripe stand-in (`loom-billing stripe-stub`) |
 | mailpit | 8025 (UI), 1025 (SMTP) | Catches the web app's magic-link email |
@@ -79,6 +86,9 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_INTERNAL_TOKEN` / `LOOM_BILLING_INTERNAL_TOKEN` | compose: one shared dev value | web / billing: bearer token of billing's internal API |
 | `LOOM_STRIPE_MODE` | `stripe`; compose: `stub` | billing: real Stripe (test keys required) or the local stub (explicit opt-in, never a fallback) |
 | `LOOM_STRIPE_STUB_WEBHOOK_SECRET` / `_FILE` | none; compose: `.dev/certs/stripe-stub-webhook.secret` from `loom-devcerts --secret` | billing and stripe-stub in stub mode |
+| `LOOM_GATEWAY_URL`, `LOOM_PUBLIC_API_URL`, `LOOM_BILLING_URL` | `http://localhost:8080`, `http://localhost:8080/v1`, `http://localhost:8090` | web: the gateway and billing as the server reaches them; the API base shown to users |
+| `LOOM_PLAYGROUND_KEY_SECRET` / `LOOM_PLAYGROUND_KEY_TTL_S` | derived from `AUTH_SECRET` / 3600 | web: playground keys (§5) *(wave 2)* |
+| `LOOM_NOTIFY_STREAM` | `loom:notify` | billing: notifications outbox (§7) *(wave 2)* |
 | `LOOM_POOLSIM_REPLICAS` | compose: `<model>=<pod>@https://<pod>:8443,...` | poolsim (§10) |
 | `LOOM_POOLSIM_TOKEN_DIR`, `_COLD_START_S`, `_IDLE_STOP_S` | `.dev/certs`, 20, 0 (off) | poolsim |
 | `LOOM_MOCKPOD_ID`, `LOOM_MOCKPOD_MODELS`, `LOOM_DEV_CERTS` | `mock-pod-1`, `qwen3-8b`, `.dev/certs` | mock pods |
@@ -182,6 +192,26 @@ key, 32 bytes). The plaintext is shown once. The web app generates keys with the
 format (crypto-random base62) or calls a shared helper; the gateway only hashes. A
 malformed bearer token is a 401 without any lookup.
 
+**Playground keys** *(wave 2, web)*. The browser never holds an API key. The playground
+posts to the web app's `POST /api/playground/chat` with its session cookie (a cross-site
+`Origin` is refused with 403); the handler checks the session and that the org is
+`active`, then calls the gateway's `/v1/chat/completions` (always streaming, with
+`include_usage`) with the user's playground key and streams the answer back unchanged:
+
+- one key per (org, user): an ordinary `api_keys` row with `scopes = {playground}`, name
+  `Playground`, `created_by` = the user. The gateway needs nothing new: limits, credit,
+  suspension, revocation and usage apply as to any key; usage shows it as "Playground";
+  the API keys page hides it;
+- its plaintext is never stored. The secret half is derived on the server:
+  `HMAC-SHA256(server secret, "<prefix>:<n>")`, n = 0, 1, ..., bytes below 248 mapped
+  mod 62 to base62 until 40 characters, where the server secret is
+  `LOOM_PLAYGROUND_KEY_SECRET` or `HMAC-SHA256(AUTH_SECRET, "loom-playground-key-v1")`.
+  The database holds only `prefix` and `key_hash`, as for every key, and the server
+  rebuilds the plaintext per request;
+- rotated after `LOOM_PLAYGROUND_KEY_TTL_S` (default 3600 s, at least 600): a newer key is
+  minted and older ones revoked (the revocation reaches the gateway as in §6). Signing out
+  revokes the user's playground keys at once.
+
 ## 6. Redis
 
 One Redis node (no Cluster: scripts derive key names). Never evict, never `FLUSHALL`
@@ -202,6 +232,8 @@ without also discarding the stream (both are one state).
 | `loom:org:<org>:key:<key>:rsum`, `:inflight` | int | reserve, settle | Key's reservations and in-flight count |
 | `loom:org:<org>:key:<key>:tb:rpm`, `:tb:tpm` | hash | reserve, settle | Key token buckets |
 | `loom:usage` | stream | settle | Usage events (§7) |
+| `loom:notify` | stream | billing reconcile | Notifications outbox (§7) *(wave 2)* |
+| `loom:org:<org>:lowbal` | string | billing reconcile | Low-balance notice sent for the current crossing *(wave 2)* |
 | `loom:pool:<model>` | hash | pool manager / poolsim | Pool state (§10) |
 | `loom:pool:<model>:wake` | string, 600 s | gateway | Start request for a cold model; also `PUBLISH loom:pool:wake <model>` |
 
@@ -356,13 +388,46 @@ back both; a racing second worker hits the idempotency key.
 (`SCAN loom:org:*:credit`), `set_credit(org, credit total, version)`; also on every
 `loom_credit_changed` notification.
 
+**Notifications outbox** *(wave 2, billing)*: stream `loom:notify`
+(`LOOM_NOTIFY_STREAM`), flat string entries `type`, `org_id`, `balance_micros`,
+`threshold_micros`, `at` (ISO 8601, seconds), plus `amount_micros` for
+`auto_recharge_due`. Reconcile appends:
+
+- `low_balance`: the org's balance (credit - usage) fell below `LOOM_LOW_BALANCE_MICROS`
+  ($1). Once per crossing: marker `loom:org:<org>:lowbal`, cleared when the balance is
+  back above;
+- `auto_recharge_due`: only with `LOOM_AUTO_RECHARGE_ENABLED=true`, for an org whose
+  `auto_recharge` row is enabled and whose balance is below its threshold. A hook only:
+  charging a saved card is not built.
+
+A consumer reads it with its own consumer group and sends the email. In M1 nothing
+consumes it; the entries and billing's `notification.emitted` log line are the record.
+
+**Checkout** *(wave 2, billing's internal API)*: `POST /internal/checkout-sessions` on
+billing (8090), `Authorization: Bearer $LOOM_BILLING_INTERNAL_TOKEN` (the web app's
+`LOOM_INTERNAL_TOKEN`; unset = 503). Called only by the web app's server after it has
+checked the caller may buy credit for the org. Body `{"org_id", "amount_micros",
+"success_url", "cancel_url", "customer_email"?}`: whole cents within
+[`LOOM_CHECKOUT_MIN_MICROS`, `LOOM_CHECKOUT_MAX_MICROS`] ($5 to $500), org `active`.
+Answers `{"id", "url", "amount_micros"}`; the web app redirects the browser to `url`
+(Stripe Checkout, or the local stub's pay page). Errors: 401 bad token, 400 bad body or
+amount, 404 unknown org, 409 org not active, 502 Stripe error. The credit is posted only
+by the signed `checkout.session.completed` webhook, as a `purchase` keyed
+`stripe:<event id>`, and at most once per session.
+
 ## 8. Gateway request order
 
 1. Body size (413), bearer token format (401), auth record (401 unknown/revoked, 403 org
    not active).
 2. Model: registry id, priced and not disabled (`pricing.servable`), else 404. Request
    validation (400), including `max_tokens` above the cap.
-3. Reserve (402/429).
+   *(wave 2)* `/v1/completions` without `max_tokens` gets OpenAI's default of **16**,
+   sent to the engine explicitly (chat completions without one get the cap, §6 step 2).
+   At most 16 choices per request (`n` x prompts); `best_of` and `use_beam_search` are
+   refused (the engine would generate more than the reservation covers).
+3. Reserve (402/429). If the org's balance cannot be loaded from Postgres into Redis
+   (`noinit` again after the load), 503 `balance_unavailable` with `Retry-After: 1`
+   *(wave 2)*.
 4. Pool state (§10): not routable -> release the reservation, 503 `model_unavailable`.
    Reserving first means a cold model is only woken (a GPU start, §10) by a request that
    has the balance for it and passes the rate limits; every 503 spends an rpm token, so
@@ -466,8 +531,9 @@ Clients branch on the status; `code` gives the reason.
 | 404 | `invalid_request_error` | `model_not_found` (`param: "model"`) | Unknown, unpriced or disabled model |
 | 413 | `invalid_request_error` | `request_too_large` | Body over `LOOM_MAX_BODY_BYTES` |
 | 429 | `rate_limit_error` | `rate_limit_exceeded`, `concurrency_limit_exceeded` | Limits; `Retry-After` in seconds |
-| 502 | `server_error` | `upstream_lost` | Pod lost before any byte reached the client, retry used up |
+| 502 | `server_error` | `upstream_lost` | Pod lost before any byte reached the client, retry used up; *(wave 2)* also no answer within `LOOM_REQUEST_TIMEOUT_S` of receipt. Billed nothing (usage event `error`) |
 | 503 | `server_error` | `model_unavailable` | §10; `Retry-After` in seconds |
+| 503 | `server_error` | `balance_unavailable` | *(wave 2)* the org's balance could not be loaded into Redis (§8 step 3); `Retry-After: 1`; no reservation, no usage event |
 
 Mid-stream failures end the stream with `data: {"error": {... "code": "upstream_lost"}}`
 and `data: [DONE]` (`ApiError.sse_chunk`).
@@ -486,6 +552,33 @@ Headers of a streamed response leave before the cost is known, so a stream carri
 charge in its final usage chunk as `usage.cost_micros` (when the client asked for usage);
 it is always in the usage API. The gateway lists these headers in
 `Access-Control-Expose-Headers`.
+
+### Public model list *(wave 2)*
+
+`GET /v1/models` and `GET /v1/models/{id}` need no key (the web app's Models page and
+playground read them; the web app falls back to `loom:pool:*` in Redis only when the
+gateway is down). They list the servable registry rows (`pricing.servable`) in OpenAI's
+list shape, with Loom fields added; OpenAI SDKs ignore the extra fields:
+
+```json
+{"object": "list", "data": [{
+  "id": "qwen3-8b", "object": "model", "created": 0, "owned_by": "loom",
+  "display_name": "Qwen3 8B", "context_length": 32768, "quantization": "none",
+  "status": "preview",
+  "capabilities": {"tools": true, "json_schema": true, "vision": false, "reasoning": true},
+  "pricing": {"currency": "USD", "price_version": "77000:77000:368000",
+              "input_per_mtok_micros": 77000, "cached_input_per_mtok_micros": 77000,
+              "output_per_mtok_micros": 368000, "input_per_mtok_usd": "0.077000",
+              "cached_input_per_mtok_usd": "0.077000", "output_per_mtok_usd": "0.368000"},
+  "availability": {"state": "ready", "ready_replicas": 1, "retry_after_s": null}
+}]}
+```
+
+`status` is the registry status; `availability.state` is the pool state (§10: `ready`,
+`warming`, `cold`, `unavailable`; a `ready` hash without replicas shows as `cold`),
+`ready_replicas` counts replicas only when `ready`, and `retry_after_s` is null when
+routable. Prices are integers in micro-dollars per 1M tokens plus 6-decimal dollar
+strings. An unknown id is 404 `model_not_found`.
 
 ## 13. Open for the user or the next agents
 

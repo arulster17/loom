@@ -1602,6 +1602,11 @@ dependencies = [
     { name = "pyyaml" },
 ]
 
+[package.optional-dependencies]
+acceptance = [
+    { name = "openai" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=42" },
@@ -1609,8 +1614,10 @@ requires-dist = [
     { name = "loom-bench", extras = ["mock"], editable = "bench" },
     { name = "loom-platform", editable = "services/platform_common" },
     { name = "loom-podproxy", editable = "services/podproxy" },
+    { name = "openai", marker = "extra == 'acceptance'", specifier = ">=1.50" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
+provides-extras = ["acceptance"]
 
 [[package]]
 name = "loom-gateway"

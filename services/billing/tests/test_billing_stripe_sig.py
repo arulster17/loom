@@ -130,6 +130,25 @@ def test_stub_mode_is_explicit_and_needs_its_own_secret(clean_env, tmp_path):
         BillingSettings()  # stub and real keys at once
 
 
+def test_settings_empty_keys_are_unset(clean_env):
+    # docker-compose sets STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}, i.e. "" when unset.
+    # Regression: "" used to select real Stripe's API base with an empty key. Empty is
+    # unset: with the compose opt-in that is the stub; without it, nothing starts.
+    clean_env.setenv("STRIPE_SECRET_KEY", "")
+    clean_env.setenv("STRIPE_WEBHOOK_SECRET", "")
+    clean_env.setenv("LOOM_STRIPE_STUB_WEBHOOK_SECRET", "")
+    s = BillingSettings()
+    assert s.stripe_secret_key is None and s.stripe_webhook_secret is None
+    with pytest.raises(ValueError, match="LOOM_STRIPE_MODE=stub"):
+        s.stripe_api()
+    secret = "whsec_" + "e" * 30
+    clean_env.setenv("LOOM_STRIPE_MODE", "stub")
+    clean_env.setenv("LOOM_STRIPE_STUB_WEBHOOK_SECRET", secret)
+    s = BillingSettings()  # empty keys alongside stub are not "keys set"
+    assert s.stripe_mode == "stub" and s.webhook_secret() == secret
+    assert s.stripe_api() == ("http://localhost:12111", "sk_test_loom_local_stub")
+
+
 def test_settings_real_stripe_from_env(monkeypatch):
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_51abc")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_xyz")

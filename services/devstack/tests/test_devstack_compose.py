@@ -110,3 +110,18 @@ def test_every_service_on_dev_defaults_runs_with_loom_env_dev():
     services = compose()
     for name in ("gateway", "billing", "stripe-stub", "web", "poolsim"):
         assert services[name]["environment"]["LOOM_ENV"] == "dev", name
+
+
+def test_every_long_running_service_has_a_healthcheck():
+    # `docker compose up --wait` and `ps` then mean "healthy", not just "started".
+    images_with_their_own = ("axllent/mailpit",)
+    for name, svc in compose().items():
+        if svc.get("restart") == "no":
+            continue  # one-shot jobs
+        if "healthcheck" in svc or svc.get("image", "").startswith(images_with_their_own):
+            continue
+        build = svc.get("build") or {}
+        dockerfile = build.get("dockerfile") if isinstance(build, dict) else None
+        assert dockerfile and "HEALTHCHECK" in (ROOT / dockerfile).read_text(), (
+            f"{name} has no healthcheck"
+        )
