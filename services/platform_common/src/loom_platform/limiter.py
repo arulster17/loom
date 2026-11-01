@@ -102,6 +102,7 @@ class ReserveResult:
 @dataclass(frozen=True)
 class SettleResult:
     settled: bool  # False: this request id was settled before; nothing changed
+    # None when the org's state was not loaded (event appended, no counter bumped).
     org_usage_total_micros: int | None = None
     stream_id: str | None = None
 
@@ -159,7 +160,8 @@ class Limiter:
         )
         if not res[0]:
             return SettleResult(False)
-        return SettleResult(True, int(res[1]), _str(res[2]))
+        total = int(res[1])
+        return SettleResult(True, total if total >= 0 else None, _str(res[2]))
 
     async def init_org(
         self,

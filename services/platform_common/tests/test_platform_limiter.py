@@ -123,6 +123,24 @@ async def test_settle_without_reservation_still_charges(limiter, org, stream):
     assert await limiter.redis.xlen(stream) == 1
 
 
+async def test_settle_on_unloaded_org_creates_no_state(limiter, stream):
+    """Redis lost the org's state mid-request: settle still records the event, but must
+    not create a lone usage counter that would keep init_org from loading credit."""
+    org_id, key_id = uuid.uuid4(), uuid.uuid4()
+    e = event(org_id, key_id, uuid.uuid4())
+    res = await limiter.settle(e)
+    assert res.settled and res.org_usage_total_micros is None
+    assert await limiter.redis.get(org_key(org_id, "usage")) is None
+    assert await limiter.redis.get(api_key_key(org_id, key_id, "usage")) is None
+    (_, fields), *_ = await limiter.redis.xrange(stream)
+    assert UsageEvent.from_stream_fields(fields) == e
+    assert await limiter.init_org(
+        org_id=org_id, key_id=key_id, credit_total=1000, usage_total=261, key_usage_total=261
+    ) == (True, True)
+    assert await limiter.available(org_id) == 1000 - 261
+    await limiter.redis.delete(*[k async for k in limiter.redis.scan_iter(f"loom:org:{org_id}:*")])
+
+
 async def test_duplicate_request_id(limiter, org):
     org_id, key_id = org
     rid = uuid.uuid4()
