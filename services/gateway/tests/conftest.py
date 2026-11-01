@@ -69,6 +69,7 @@ class Stack:
     unpriced: str
     tls: bool
     tenants: list[Tenant] = field(default_factory=list)
+    clients: list[AsyncOpenAI] = field(default_factory=list)
 
     @property
     def gateway(self) -> Gateway:
@@ -87,7 +88,14 @@ class Stack:
 
     def openai(self, tenant: Tenant | str) -> AsyncOpenAI:
         key = tenant if isinstance(tenant, str) else tenant.key
-        return AsyncOpenAI(base_url=f"{self.url}/v1", api_key=key, max_retries=0, timeout=30)
+        return self.track(
+            AsyncOpenAI(base_url=f"{self.url}/v1", api_key=key, max_retries=0, timeout=30)
+        )
+
+    def track(self, client: AsyncOpenAI) -> AsyncOpenAI:
+        """Close this SDK client at teardown (inside the test's event loop)."""
+        self.clients.append(client)
+        return client
 
     async def events(self) -> list[UsageEvent]:
         return await usage_events(self.redis, self.stream)
@@ -176,6 +184,9 @@ async def make_stack(
         try:
             yield build
         finally:
+            for s in stacks:
+                for c in s.clients:
+                    await c.close()
             await es.aclose()
             for s in stacks:
                 keys = [s.stream]

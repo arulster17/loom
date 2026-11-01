@@ -47,6 +47,9 @@ class Authenticator:
         self.local_ttl_s = local_ttl_s
         # key hash -> (monotonic expiry, record or None for an unknown key)
         self._local: dict[bytes, tuple[float, AuthRecord | None]] = {}
+        # Bumped by every invalidation: a lookup that overlapped one does not keep a
+        # local copy (it may have read the record just before it was dropped).
+        self._epoch = 0
         self.listening = asyncio.Event()
 
     async def authenticate(self, authorization: str | None) -> AuthRecord:
@@ -68,6 +71,7 @@ class Authenticator:
         hit = self._local.get(key_hash)
         if hit is not None and hit[0] > now:
             return hit[1]
+        epoch = self._epoch
         async with self.redis.pipeline(transaction=False) as pipe:
             pipe.get(auth_cache_key(key_hash))
             pipe.pttl(auth_cache_key(key_hash))
@@ -83,25 +87,35 @@ class Authenticator:
             ttl = self.local_ttl_s
         if len(self._local) >= _LOCAL_MAX:
             self._local.clear()
-        if ttl > 0:
+        if ttl > 0 and epoch == self._epoch:
             self._local[key_hash] = (now + ttl, record)
         return record
 
     # ------------------------------------------------------------ invalidation
 
+    def _drop_local(self, org_id: uuid.UUID | None = None, key_hash: bytes | None = None) -> None:
+        self._epoch += 1
+        if key_hash is not None:
+            self._local.pop(key_hash, None)
+        if org_id is not None:
+            for kh, (_, rec) in list(self._local.items()):
+                if rec is not None and rec.org_id == org_id:
+                    self._local.pop(kh, None)
+
     async def drop_key(self, key_hash: bytes) -> None:
-        self._local.pop(key_hash, None)
+        self._drop_local(key_hash=key_hash)
         await self.redis.delete(auth_cache_key(key_hash))
+        # Again: a lookup may have copied the Redis entry while it was being deleted.
+        self._drop_local(key_hash=key_hash)
 
     async def drop_org(self, org_id: uuid.UUID) -> None:
-        for kh, (_, rec) in list(self._local.items()):
-            if rec is not None and rec.org_id == org_id:
-                self._local.pop(kh, None)
+        self._drop_local(org_id=org_id)
         async with self.pg_pool.connection() as conn, conn.cursor() as cur:
             await cur.execute("SELECT key_hash FROM api_keys WHERE org_id = %s", (org_id,))
             hashes = [bytes(r[0]) for r in await cur.fetchall()]
         if hashes:
             await self.redis.delete(*(auth_cache_key(h) for h in hashes))
+        self._drop_local(org_id=org_id)
 
     async def on_notify(self, payload: str) -> None:
         try:
