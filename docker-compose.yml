@@ -195,39 +195,24 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  # Usage-stream consumer, per-minute ledger batches, reconcile, partitions. Metrics on
-  # 9101 inside, 9102 on the host (the API below has 9101).
-  billing-worker:
-    image: loom-billing:dev
-    build:
-      context: .
-      dockerfile: services/billing/Dockerfile
-    command: ["loom-billing", "worker"]
-    environment:
-      <<: *platform-env
-    volumes: [*config-volume]
-    ports:
-      - "${LOOM_BILLING_WORKER_METRICS_PORT:-9102}:9101"
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-
-  # Stripe webhooks and the internal checkout API on 8090, metrics on 9101.
+  # Billing (services/billing/README.md): `all` = the usage-stream worker (consumer,
+  # per-minute ledger batches, reconcile, partitions) and the HTTP API (Stripe webhooks,
+  # internal checkout API) in one process. The image's entrypoint is `loom-billing`.
   billing:
     image: loom-billing:dev
     build:
       context: .
       dockerfile: services/billing/Dockerfile
-    command: ["loom-billing", "api"]
+    command: ["all"]
     environment:
       <<: *platform-env
       LOOM_BILLING_INTERNAL_TOKEN: *internal-token
-      # No STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET: billing uses the local stub.
+      # Stable across container re-creates, so a restart recovers its own pending entries.
+      LOOM_BILLING_CONSUMER: billing-1
+      # Local stub unless both test-mode keys are set (a live key refuses to start).
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       LOOM_STRIPE_STUB_URL: http://stripe-stub:12111
-      LOOM_STRIPE_STUB_PUBLIC_URL: http://localhost:${LOOM_STRIPE_STUB_PORT:-12111}
     volumes: [*config-volume]
     ports:
       - "${LOOM_BILLING_PORT:-8090}:8090"
@@ -237,15 +222,26 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - /app/.venv/bin/python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     restart: unless-stopped
 
-  # Local stand-in for Stripe Checkout: checkout pages on 12111, signed webhooks to billing.
+  # Local stand-in for Stripe Checkout: the pay page the browser opens on 12111, then a
+  # signed checkout.session.completed webhook to billing. Not started with real keys.
   stripe-stub:
     image: loom-billing:dev
     build:
       context: .
       dockerfile: services/billing/Dockerfile
-    command: ["loom-billing", "stripe-stub"]
+    command: ["stripe-stub"]
     environment:
       LOOM_STRIPE_STUB_WEBHOOK_URL: http://billing:8090/stripe/webhook
       LOOM_STRIPE_STUB_PUBLIC_URL: http://localhost:${LOOM_STRIPE_STUB_PORT:-12111}

@@ -45,7 +45,6 @@ compose servers are down, and fail when the variable is set. Factories:
 | gateway | 8080 | Public API at `http://localhost:8080/v1`; Prometheus `/metrics` on 9100 |
 | billing | 8090 | `POST /stripe/webhook`, `GET /health`; Prometheus `/metrics` on 9101 |
 | web | 3000 | Next.js |
-| billing-worker | metrics 9101 inside, 9102 on the host | `loom-billing worker` |
 | stripe-stub | 12111 | Local Stripe stand-in (`loom-billing stripe-stub`) |
 | mailpit | 8025 (UI), 1025 (SMTP) | Catches the web app's magic-link email |
 | mock-pod-1, mock-pod-2 | 8443, not published | One per servable model (`qwen3-8b`, `llama-3.3-70b-instruct-fp8`): mTLS pod proxy; the mock engine listens on `127.0.0.1:8000` inside the container |
