@@ -1,0 +1,121 @@
+"""Stripe-Signature verification and billing settings (no servers needed)."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+
+import pytest
+from pydantic import ValidationError
+
+from loom_billing.settings import STUB_WEBHOOK_SECRET, BillingSettings
+from loom_billing.stripe_api import StripeClient, form_encode
+from loom_billing.stripe_sig import SignatureError, compute, sign, verify
+
+SECRET = "whsec_test_abc123"
+BODY = b'{"id":"evt_1","type":"checkout.session.completed"}'
+NOW = 1_700_000_000
+
+
+def test_signature_matches_stripes_scheme():
+    # Independent computation of Stripe's documented scheme.
+    expected = hmac.new(SECRET.encode(), f"{NOW}.".encode() + BODY, hashlib.sha256).hexdigest()
+    assert compute(BODY, SECRET, NOW) == expected
+    assert sign(BODY, SECRET, NOW) == f"t={NOW},v1={expected}"
+
+
+def test_accepts_valid_signature():
+    assert verify(BODY, sign(BODY, SECRET, NOW), SECRET, now=NOW + 10) == NOW
+
+
+def test_accepts_any_v1_during_secret_roll_and_ignores_v0():
+    good = compute(BODY, SECRET, NOW)
+    header = f"t={NOW},v1={'0' * 64},v0=abc,v1={good}"
+    assert verify(BODY, header, SECRET, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        None,
+        "",
+        f"v1={compute(BODY, SECRET, NOW)}",  # no timestamp
+        f"t={NOW}",  # no signature
+        f"t={NOW},v0={compute(BODY, SECRET, NOW)}",  # only the legacy scheme
+        f"t=abc,v1={compute(BODY, SECRET, NOW)}",
+        f"t={NOW},v1={compute(BODY, 'whsec_other', NOW)}",  # wrong secret
+        f"t={NOW + 1},v1={compute(BODY, SECRET, NOW)}",  # timestamp swapped
+    ],
+)
+def test_rejects_bad_headers(header):
+    with pytest.raises(SignatureError):
+        verify(BODY, header, SECRET, now=NOW)
+
+
+def test_rejects_tampered_body():
+    with pytest.raises(SignatureError):
+        verify(BODY + b" ", sign(BODY, SECRET, NOW), SECRET, now=NOW)
+
+
+def test_tolerance_window():
+    header = sign(BODY, SECRET, NOW)
+    verify(BODY, header, SECRET, now=NOW + 300)
+    with pytest.raises(SignatureError, match="tolerance"):
+        verify(BODY, header, SECRET, now=NOW + 301)  # replayed too late
+    with pytest.raises(SignatureError, match="tolerance"):
+        verify(BODY, header, SECRET, now=NOW - 301)  # from the future
+    verify(BODY, header, SECRET, now=NOW + 3000, tolerance_s=3600)
+
+
+def test_settings_default_to_the_stub(monkeypatch):
+    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
+    s = BillingSettings()
+    assert s.stripe_mode == "stub"
+    assert s.webhook_secret() == STUB_WEBHOOK_SECRET
+    assert s.stripe_api() == ("http://localhost:12111", "sk_test_loom_local_stub")
+
+
+def test_settings_real_stripe_from_env(monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_51abc")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_xyz")
+    s = BillingSettings()
+    assert s.stripe_mode == "stripe"
+    assert s.webhook_secret() == "whsec_xyz"
+    assert s.stripe_api() == ("https://api.stripe.com", "sk_test_51abc")
+    assert "sk_test_51abc" not in repr(s)  # secrets stay out of logs
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"STRIPE_SECRET_KEY": "sk_live_51abc", "STRIPE_WEBHOOK_SECRET": "whsec_x"},
+        {"STRIPE_SECRET_KEY": "rk_live_51abc", "STRIPE_WEBHOOK_SECRET": "whsec_x"},
+        {"STRIPE_SECRET_KEY": "pk_test_51abc", "STRIPE_WEBHOOK_SECRET": "whsec_x"},
+        {"STRIPE_SECRET_KEY": "sk_test_51abc"},  # only one of the pair
+        {"STRIPE_WEBHOOK_SECRET": "whsec_x"},
+        {"STRIPE_SECRET_KEY": "sk_test_51abc", "STRIPE_WEBHOOK_SECRET": "nope"},
+    ],
+)
+def test_settings_refuse_live_or_partial_keys(monkeypatch, env):
+    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    with pytest.raises(ValidationError):
+        BillingSettings()
+
+
+def test_client_refuses_live_key():
+    with pytest.raises(ValueError):
+        StripeClient("https://api.stripe.com", "sk_live_123")
+
+
+def test_form_encoding_uses_stripe_brackets():
+    body = form_encode(
+        {"mode": "payment", "metadata": {"org_id": "o"}, "line_items": [{"quantity": 1}],
+         "skip": None, "flag": True}
+    )  # fmt: skip
+    assert body == (
+        b"mode=payment&metadata%5Borg_id%5D=o&line_items%5B0%5D%5Bquantity%5D=1&flag=true"
+    )

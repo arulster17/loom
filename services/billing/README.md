@@ -1,7 +1,122 @@
 # billing
 
-Placeholder package (`loom_billing`). The usage-stream consumer, per-org per-minute ledger
-batches, balance reconcile, partition upkeep and Stripe webhooks (against a local stub
-until test-mode keys exist). Built in Phase 1 M1 on `loom_platform`; contracts in
+`loom_billing`: the usage-stream consumer, per-org per-minute ledger batches, the
+minute balance reconcile, `usage_events` partition upkeep, Stripe webhooks and Checkout,
+and a local Stripe stub. Built on `loom_platform`; the contracts it implements are in
 [docs/phase1-contracts.md](../../docs/phase1-contracts.md) (§3 ledger, §6 balance model,
 §7 usage stream and batches).
+
+## Processes
+
+One image (`services/billing/Dockerfile`, built from the repo root:
+`docker build -f services/billing/Dockerfile .`), entrypoint `loom-billing <command>`:
+
+| Command | What | Ports |
+|---|---|---|
+| `all` (default) | worker + HTTP API in one process: the contract's `billing` service | 8090, metrics 9101 |
+| `worker` | consumer, batches, reconcile, partitions, credit listener | metrics 9101 |
+| `api` | HTTP API only | 8090, metrics 9101 |
+| `stripe-stub` | local Stripe stand-in; refuses to start when real Stripe keys are set | 12111 |
+| `batch-once`, `reconcile-once`, `partitions-once` | one run of a job (ops) | |
+
+Run several workers if needed: each gets its own consumer name in the group, batches
+and reconcile are safe to race.
+
+| Job | When | What |
+|---|---|---|
+| Consumer | continuous | `XREADGROUP` on `loom:usage` (group `billing`), insert `usage_events` (`ON CONFLICT DO NOTHING`), commit, then `XACK`; poison entries to `loom:usage:dead` with `dead_reason`; missing partition = left pending and retried; `XTRIM MINID` below the oldest entry still needed |
+| Batch | each minute, :05 | per org: lock unposted events, post one `usage` transaction for their exact sum keyed `usage:<org>:<minute>`, link the events |
+| Reconcile | each minute, :35 | Redis `credit` <- `loom_org_credit_total`; drift check of Redis `usage` vs Postgres; low-balance and auto-recharge hooks |
+| Credit listener | continuous | `LISTEN loom_credit_changed` -> `set_credit` for that org |
+| Partitions | start, then daily | `loom_ensure_usage_partitions(today, LOOM_PARTITION_MONTHS_AHEAD)` |
+
+**Drift check.** In one MULTI read each org's Redis `usage` (U1) and the stream's last
+id; check the group has acked everything up to that id (else skip: billing is behind,
+not wrong); read Postgres usage (P); read Redis `usage` again (U2). A healthy system has
+U1 <= P <= U2. `P < U1` (`missing_in_postgres`) means events were lost or
+dead-lettered; `P > U2` (`redis_behind`) means Redis lost usage. Both are logged at
+error with the org id and counted (`loom_billing_usage_drift_detected_total{direction}`);
+reconcile does not rewrite `usage`.
+
+## HTTP API (port 8090)
+
+| Endpoint | Auth | Notes |
+|---|---|---|
+| `POST /stripe/webhook` | `Stripe-Signature` (HMAC-SHA256 of `t.body`, 300 s tolerance) | Stores the event in `stripe_events` and, for a paid Loom credits Checkout session, posts a `purchase` keyed `stripe:<event id>`. A replay answers 200 `duplicate`; a session is credited at most once even across event ids. Events that cannot be applied (unknown org, not USD) answer 200 and stay `processed_at IS NULL` for an admin. Live-mode events are refused. |
+| `POST /internal/checkout-sessions` | `Authorization: Bearer $LOOM_BILLING_INTERNAL_TOKEN` | Called by the web app's server (never the browser) after it has checked the user belongs to the org. Body `{"org_id", "amount_micros", "success_url", "cancel_url", "customer_email"?}`, whole cents within [`LOOM_CHECKOUT_MIN_MICROS`, `LOOM_CHECKOUT_MAX_MICROS`], org `active`. Answers `{"id", "url", "amount_micros"}`; redirect the user to `url`. `success_url` may contain `{CHECKOUT_SESSION_ID}`. 401 bad token, 503 token unset, 400 bad body/amount, 404 unknown org, 409 org not active, 502 Stripe error. |
+| `GET /health` | none | Postgres and Redis reachable; `stripe_mode` |
+
+## Stripe: real or stub
+
+Real Stripe is used only when both `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` are set,
+and only test-mode keys (`sk_test_`/`rk_test_`) are accepted; a live key stops the
+process at startup. With neither set, billing talks to the stub:
+
+1. web -> `POST /internal/checkout-sessions` -> billing -> stub `POST /v1/checkout/sessions`
+   (Stripe's wire format) -> `url` = `http://localhost:12111/checkout/cs_test_...`;
+2. the user opens the page and clicks Pay;
+3. the stub posts a `checkout.session.completed` event, signed with
+   `LOOM_STRIPE_STUB_WEBHOOK_SECRET` exactly as Stripe signs, to
+   `LOOM_STRIPE_STUB_WEBHOOK_URL`, then redirects to `success_url`;
+4. billing verifies, credits the org, refreshes its Redis credit.
+
+Clicking Pay again re-sends the same event id (exercises replay protection).
+
+Not built yet: refunds (`charge.refunded`), and auto-recharge charging a saved card.
+
+## Notifications outbox
+
+Redis stream `loom:notify` (`LOOM_NOTIFY_STREAM`), flat entries `type`, `org_id`,
+`balance_micros`, `threshold_micros`, `at`:
+
+- `low_balance`: balance (credit - usage) below `LOOM_LOW_BALANCE_MICROS` ($1). Once per
+  crossing (marker `loom:org:<org>:lowbal`, cleared when the balance is back above).
+- `auto_recharge_due` (+ `amount_micros`): only with `LOOM_AUTO_RECHARGE_ENABLED=true`, for
+  an org whose `auto_recharge` row is enabled and whose balance is below its threshold.
+  This is the hook point; charging needs a saved Stripe payment method (later).
+
+The web/email layer consumes the stream with its own group and sends the email. In
+local dev nothing consumes it; the entries and the `notification.emitted` log line are
+the record.
+
+## Settings
+
+Shared `LOOM_*` variables are in the contracts (§2). Billing adds:
+
+| Variable | Default | |
+|---|---|---|
+| `LOOM_USAGE_GROUP` | `billing` | consumer group |
+| `LOOM_USAGE_DEAD_STREAM` | `loom:usage:dead` | dead letters |
+| `LOOM_BILLING_CONSUMER` | `billing-<hostname>` | consumer name; keep it stable across restarts so a restart recovers its own pending entries |
+| `LOOM_USAGE_READ_COUNT` / `_BLOCK_MS` / `_CLAIM_IDLE_MS` | 500 / 2000 / 60000 | |
+| `LOOM_BATCH_INTERVAL_S` / `LOOM_RECONCILE_INTERVAL_S` | 60 / 60 | |
+| `LOOM_PARTITION_INTERVAL_S` / `LOOM_PARTITION_MONTHS_AHEAD` | 86400 / 3 | |
+| `LOOM_BILLING_HOST` / `_PORT` / `_METRICS_PORT` | `0.0.0.0` / 8090 / 9101 | metrics port 0 = off |
+| `LOOM_BILLING_INTERNAL_TOKEN` | unset (checkout endpoint answers 503) | shared with the web app |
+| `LOOM_NOTIFY_STREAM` / `LOOM_LOW_BALANCE_MICROS` | `loom:notify` / 1000000 | |
+| `LOOM_AUTO_RECHARGE_ENABLED` | false | |
+| `LOOM_CHECKOUT_MIN_MICROS` / `_MAX_MICROS` | 5000000 / 500000000 | $5 to $500 |
+| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | unset | real Stripe, test mode only |
+| `LOOM_STRIPE_API_BASE` | `https://api.stripe.com` | |
+| `LOOM_STRIPE_WEBHOOK_TOLERANCE_S` | 300 | |
+| `LOOM_STRIPE_STUB_URL` | `http://localhost:12111` | where billing calls the stub (compose: `http://stripe-stub:12111`) |
+| `LOOM_STRIPE_STUB_PUBLIC_URL` | `http://localhost:12111` | stub: base of the pay page URL the browser opens |
+| `LOOM_STRIPE_STUB_WEBHOOK_URL` | `http://localhost:8090/stripe/webhook` | stub: where it posts (compose: `http://billing:8090/stripe/webhook`) |
+| `LOOM_STRIPE_STUB_WEBHOOK_SECRET` | a fixed dev value | shared by stub and billing; not a secret |
+| `LOOM_STRIPE_STUB_HOST` / `_PORT` | `0.0.0.0` / 12111 | |
+| `LOOM_LOG_LEVEL` | `INFO` | |
+
+## Observability
+
+Logs are JSON lines on stderr (`event` plus fields; org ids, amounts, stream ids). No
+prompts or completions reach billing; webhook payloads go to `stripe_events`, never to
+logs; dead-letter reasons carry field names, not values. Prometheus metrics are
+`loom_billing_*` (`metrics.py`): entries by result, pending and lag, batch totals,
+drift, webhooks by result, checkout sessions, notifications, job errors.
+
+## Tests
+
+```bash
+docker compose up -d postgres redis
+set -o pipefail; uv run pytest -q services/billing/tests
+```
