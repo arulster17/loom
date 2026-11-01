@@ -21,6 +21,7 @@ import logging
 import os
 import signal
 import socket
+import ssl
 import sys
 import tempfile
 from pathlib import Path
@@ -153,17 +154,30 @@ async def run(args: argparse.Namespace) -> int:
         os.unlink(config_path)
 
 
-def healthcheck(port: int, engine_port: int = ENGINE_PORT) -> int:
+def healthcheck(
+    port: int, engine_port: int = ENGINE_PORT, *, pod_id: str = "", certs: Path | None = None
+) -> int:
+    """0 when the engine is healthy and the proxy serves `GET /health` over mTLS (with the
+    gateway's dev certificate, when the certificate directory has it), else 1."""
     try:
         url = f"http://{ENGINE_HOST}:{engine_port}/health"
-        r = httpx.get(url, timeout=2, trust_env=False)
-        if not r.is_success:
+        if not httpx.get(url, timeout=2, trust_env=False).is_success:
             return 1
-        with socket.create_connection(("127.0.0.1", port), timeout=2):
-            pass
+        if certs is None or not (certs / "gateway.crt").is_file():
+            with socket.create_connection(("127.0.0.1", port), timeout=2):
+                return 0
+        ctx = ssl.create_default_context(cafile=certs / "ca.crt")
+        ctx.load_cert_chain(certs / "gateway.crt", certs / "gateway.key")
+        token = (certs / f"{pod_id}.token").read_text().strip()
+        with httpx.Client(verify=ctx, timeout=2, trust_env=False) as http:
+            r = http.get(
+                f"https://127.0.0.1:{port}/health",
+                headers={"X-Loom-Pod-Token": token},
+                extensions={"sni_hostname": pod_id},
+            )
+        return 0 if r.is_success else 1
     except (httpx.HTTPError, OSError):
         return 1
-    return 0
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -196,12 +210,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--log-level", default=env("LOOM_MOCKPOD_LOG_LEVEL", "info"))
     args = p.parse_args(argv)
     if args.healthcheck:
-        raise SystemExit(healthcheck(args.port, args.engine_port))
+        raise SystemExit(
+            healthcheck(args.port, args.engine_port, pod_id=args.pod_id, certs=args.certs_dir)
+        )
     if not args.model:
         args.model = [m for m in env("LOOM_MOCKPOD_MODELS", "qwen3-8b").split(",") if m]
     logging.basicConfig(
         level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     raise SystemExit(asyncio.run(run(args)))
 
 

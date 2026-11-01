@@ -54,7 +54,7 @@ def test_mock_pod_serves_over_mtls_only(tmp_path):
     proc = subprocess.Popen(cmd)
     try:
         deadline = time.monotonic() + 30
-        while healthcheck(port, engine_port) != 0:
+        while healthcheck(port, engine_port, pod_id="mock-pod-9", certs=tmp_path) != 0:
             assert proc.poll() is None, "mock pod exited"
             assert time.monotonic() < deadline, "mock pod not healthy"
             time.sleep(0.1)

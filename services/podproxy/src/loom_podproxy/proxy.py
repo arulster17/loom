@@ -222,7 +222,12 @@ class PodProxy:
                 ssl=self.ssl_context,
                 ssl_handshake_timeout=self.config.handshake_timeout_s,
             )
-        except (ssl.SSLError, OSError, TimeoutError) as e:
+        except (ConnectionError, TimeoutError) as e:
+            # Port probes and clients that hang up before or during the handshake.
+            log.debug("connection from %s closed during the TLS handshake: %s", peer, _short(e))
+            conn.close()
+            return
+        except (ssl.SSLError, OSError) as e:
             log.warning("TLS handshake with %s failed: %s", peer, _short(e))
             conn.close()
             return
@@ -307,7 +312,9 @@ class PodProxy:
         path = bytes(request.target).split(b"?", 1)[0]
         headers = {bytes(k).lower(): bytes(v) for k, v in request.headers}
         status, sent, pipelined = await self._route(conn, reader, writer, method, path, headers)
-        log.info(
+        quiet = status == 200 and path in (b"/health", b"/metrics")  # probes, every few s
+        log.log(
+            logging.DEBUG if quiet else logging.INFO,
             "%s %s %s -> %d %dB %.1fms",
             peer,
             method.decode(),
