@@ -102,3 +102,11 @@ def test_billing_wiring_matches_its_readme():
     token = billing["environment"]["LOOM_BILLING_INTERNAL_TOKEN"]
     assert token and services["web"]["environment"]["LOOM_INTERNAL_TOKEN"] == token
     assert billing["depends_on"]["migrate"]["condition"] == "service_completed_successfully"
+
+
+def test_every_service_on_dev_defaults_runs_with_loom_env_dev():
+    """Unset LOOM_ENV means prod, where the gateway, billing and web refuse to start on
+    the dev values this file uses."""
+    services = compose()
+    for name in ("gateway", "billing", "stripe-stub", "web", "poolsim"):
+        assert services[name]["environment"]["LOOM_ENV"] == "dev", name

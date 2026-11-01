@@ -6,6 +6,8 @@
 # Published host ports can be moved with the *_PORT variables below (e.g. to run a second
 # stack next to the first: LOOM_PG_PORT=15432 ... docker compose -p loom2 up -d).
 # Nothing here is a production secret: the dev values are fixed or generated locally.
+# LOOM_ENV=dev is what lets the services start on them: with LOOM_ENV unset (prod) the
+# gateway, billing and web refuse dev defaults and missing secrets (contracts §2).
 
 x-devstack: &devstack
   # Mock pods, poolsim, dev certificates and the migration (services/devstack/Dockerfile).
@@ -15,6 +17,7 @@ x-devstack: &devstack
     dockerfile: services/devstack/Dockerfile
 
 x-platform-env: &platform-env
+  LOOM_ENV: dev
   LOOM_DATABASE_URL: postgresql://loom:loom@postgres:5432/loom_platform
   LOOM_REDIS_URL: redis://redis:6379/0
   LOOM_MODELS_YAML: /loom-config/models.yaml
@@ -251,6 +254,7 @@ services:
       dockerfile: services/billing/Dockerfile
     command: ["stripe-stub"]
     environment:
+      LOOM_ENV: dev
       LOOM_STRIPE_MODE: stub
       LOOM_STRIPE_STUB_WEBHOOK_URL: http://billing:8090/stripe/webhook
       LOOM_STRIPE_STUB_PUBLIC_URL: http://localhost:${LOOM_STRIPE_STUB_PORT:-12111}
@@ -270,6 +274,7 @@ services:
       context: .
       dockerfile: apps/web/Dockerfile
     environment:
+      LOOM_ENV: dev
       DATABASE_URL: postgresql://loom:loom@postgres:5432/loom_platform
       LOOM_DATABASE_URL: postgresql://loom:loom@postgres:5432/loom_platform
       LOOM_REDIS_URL: redis://redis:6379/0

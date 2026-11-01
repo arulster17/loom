@@ -58,6 +58,7 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 
 | Variable | Default | Used by |
 |---|---|---|
+| `LOOM_ENV` | unset = `prod`; compose: `dev` | all services: `dev` or `prod` (anything else refuses to start). Outside dev a service refuses to start on a missing secret or a compose dev default: gateway (DB password, `LOOM_POD_CA_CERT`, client certificate, `LOOM_CORS_ORIGINS`; and it never uses an `http://` replica), billing (DB password, `LOOM_STRIPE_MODE=stub`, internal token missing or the compose value), web (`AUTH_SECRET` missing or the compose value, `AUTH_URL` missing, internal token missing or the compose value) |
 | `LOOM_DATABASE_URL` | `postgresql://loom:loom@localhost:5432/loom_platform` | all (web: as `DATABASE_URL`) |
 | `LOOM_REDIS_URL` | `redis://localhost:6379/0` | gateway, billing, poolsim |
 | `LOOM_MODELS_YAML` | repo `config/models.yaml` | gateway, billing |
@@ -70,9 +71,10 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_DEFAULT_ORG_RPM` / `_TPM` / `_CONCURRENCY` | 120 / 400000 / 16 | gateway |
 | `LOOM_SIGNUP_PROMO_MICROS` | 5000000 | web (admin approval) |
 | `LOOM_CLOUD` / `LOOM_REGION` | `local` / empty | gateway (usage events) |
-| `LOOM_GATEWAY_CLIENT_CERT` / `_KEY`, `LOOM_POD_CA_CERT` | none | gateway (mTLS to pods) |
+| `LOOM_GATEWAY_CLIENT_CERT` / `_KEY`, `LOOM_POD_CA_CERT` | none | gateway (mTLS to pods; required outside `LOOM_ENV=dev`) |
 | `LOOM_CORS_ORIGINS` | `http://localhost:3000` | gateway |
-| `AUTH_SECRET`, `AUTH_URL`, `AUTH_GOOGLE_ID` / `_SECRET`, `EMAIL_SERVER` | none | web (Auth.js) |
+| `AUTH_SECRET`, `AUTH_URL`, `AUTH_GOOGLE_ID` / `_SECRET`, `EMAIL_SERVER` | none | web (Auth.js); `AUTH_URL` is required outside `LOOM_ENV=dev` |
+| `LOOM_GOOGLE_EMAIL_LINKING` | `true` | web: a Google sign-in may link to an existing user with the same email; Google sign-in always requires `email_verified` |
 | `LOOM_ADMIN_EMAILS` | empty | web: dev bootstrap of the first admin (§4) |
 | `LOOM_INTERNAL_TOKEN` / `LOOM_BILLING_INTERNAL_TOKEN` | compose: one shared dev value | web / billing: bearer token of billing's internal API |
 | `LOOM_STRIPE_MODE` | `stripe`; compose: `stub` | billing: real Stripe (test keys required) or the local stub (explicit opt-in, never a fallback) |

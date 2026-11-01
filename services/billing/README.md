@@ -124,6 +124,7 @@ Shared `LOOM_*` variables are in the contracts (§2). Billing adds:
 | `LOOM_STRIPE_STUB_WEBHOOK_SECRET` / `_FILE` | unset (required in `stub` mode) | shared by stub and billing, at least 24 characters; compose: the file from `loom-devcerts --secret stripe-stub-webhook` |
 | `LOOM_STRIPE_STUB_HOST` / `_PORT` | `0.0.0.0` / 12111 | |
 | `LOOM_LOG_LEVEL` | `INFO` | |
+| `LOOM_ENV` | unset = `prod` (compose: `dev`) | outside dev every command refuses to start with compose's database password or `LOOM_STRIPE_MODE=stub`, and `all`/`api` also without a non-default `LOOM_BILLING_INTERNAL_TOKEN` |
 
 ## Observability
 

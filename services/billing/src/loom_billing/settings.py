@@ -35,6 +35,8 @@ StripeMode = Literal["stripe", "stub"]
 
 # Micro-dollars per US cent: Stripe amounts are integer cents.
 MICROS_PER_CENT = 10_000
+# docker-compose's shared web/billing token: refused outside LOOM_ENV=dev.
+DEV_INTERNAL_TOKEN = "loom-dev-internal-token"
 # The API key billing sends to the stub (the stub does not check it). Not a secret.
 STUB_SECRET_KEY = "sk_test_loom_local_stub"
 # Shortest stub webhook secret accepted.
@@ -129,6 +131,22 @@ class BillingSettings(PlatformSettings):
         if self.checkout_min_micros > self.checkout_max_micros:
             raise ValueError("checkout_min_micros > checkout_max_micros")
         return self
+
+    def production_problems(self, *, serves_api: bool = True) -> list[str]:
+        """Outside LOOM_ENV=dev: the platform checks, no Stripe stub, and (for the HTTP
+        API) the internal token set and not the compose default."""
+        problems = super().production_problems()
+        if self.env == "dev":
+            return problems
+        if self.stripe_mode == "stub":
+            problems.append("LOOM_STRIPE_MODE=stub (the local Stripe stub is dev only)")
+        if serves_api:
+            token = self.billing_internal_token
+            if token is None or not token.get_secret_value():
+                problems.append("LOOM_BILLING_INTERNAL_TOKEN is not set")
+            elif token.get_secret_value() == DEV_INTERNAL_TOKEN:
+                problems.append("LOOM_BILLING_INTERNAL_TOKEN is the docker-compose default")
+        return problems
 
     @property
     def consumer_name(self) -> str:

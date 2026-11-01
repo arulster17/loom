@@ -9,10 +9,12 @@ from prometheus_client import start_http_server
 from loom_gateway.app import create_app
 from loom_gateway.logs import configure_logging
 from loom_gateway.settings import GatewaySettings
+from loom_platform.settings import enforce_environment
 
 
 def main() -> None:
     settings = GatewaySettings()
+    enforce_environment(settings, "loom-gateway")
     configure_logging(settings.log_level)
     app = create_app(settings)
     start_http_server(

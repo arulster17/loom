@@ -319,3 +319,56 @@ def test_json_log_lines():
     out = json.loads(JsonFormatter().format(rec))
     assert out["msg"] == "request" and out["request_id"] == "r1" and out["cost_micros"] == 5
     assert out["level"] == "info" and out["ts"].endswith("+00:00")
+
+
+# ------------------------------------------------------------------ LOOM_ENV
+
+
+PROD_OK = {
+    "env": "prod",
+    "database_url": "postgresql://loom:s3cret@db:5432/loom_platform",
+    "pod_ca_cert": "/certs/ca.crt",
+    "gateway_client_cert": "/certs/gateway.crt",
+    "gateway_client_key": "/certs/gateway.key",
+    "cors_origins": "https://loom.example",
+}
+
+
+@pytest.mark.parametrize(
+    ("unset", "problem"),
+    [
+        ("pod_ca_cert", "LOOM_POD_CA_CERT"),
+        ("gateway_client_cert", "LOOM_GATEWAY_CLIENT_CERT"),
+        ("gateway_client_key", "LOOM_GATEWAY_CLIENT_CERT"),
+        ("cors_origins", "LOOM_CORS_ORIGINS"),
+        ("database_url", "LOOM_DATABASE_URL"),
+    ],
+)
+def test_gateway_refuses_dev_defaults_outside_dev(unset, problem):
+    assert GatewaySettings(**PROD_OK).production_problems() == []
+    kw = {k: v for k, v in PROD_OK.items() if k != unset}
+    [found] = GatewaySettings(**kw).production_problems()
+    assert problem in found
+    assert GatewaySettings(**{**kw, "env": "dev"}).production_problems() == []
+
+
+def test_gateway_main_exits_before_serving_on_dev_defaults(monkeypatch, capsys):
+    import loom_gateway.__main__ as entry
+
+    for k in ("LOOM_ENV", "LOOM_POD_CA_CERT", "LOOM_DATABASE_URL", "LOOM_CORS_ORIGINS"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(entry, "create_app", lambda s: pytest.fail("started"))
+    with pytest.raises(SystemExit) as e:
+        entry.main()
+    assert e.value.code == 2
+    assert "LOOM_POD_CA_CERT" in capsys.readouterr().err
+
+
+def test_router_never_picks_a_plain_http_replica_outside_dev():
+    http, https = Replica("h", "http://h:8000", "s", "t"), Replica("s", "https://s", "s", "t")
+    pool = PoolState("m", "ready", 0, (http, https))
+    prod = Router(None, GatewaySettings(**PROD_OK), GatewayMetrics())  # type: ignore[arg-type]
+    assert prod.pick(pool, set()) == https
+    assert prod.pick(pool, {"s"}) is None
+    dev = Router(None, GatewaySettings(env="dev"), GatewayMetrics())  # type: ignore[arg-type]
+    assert dev.pick(pool, set()) == http

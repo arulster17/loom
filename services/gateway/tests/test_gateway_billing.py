@@ -271,6 +271,17 @@ async def test_plain_http_replica_for_local_dev(make_stack):
     assert r.usage.completion_tokens == 5
 
 
+async def test_plain_http_replica_is_never_used_outside_dev(make_stack):
+    """Outside LOOM_ENV=dev the pod token (and the prompt) never go over plain http."""
+    stack = await make_stack(tls=False, env="prod")
+    t = await stack.tenant()
+    with pytest.raises(openai.APIStatusError) as e:
+        await stack.openai(t).chat.completions.create(model=stack.small, messages=MESSAGES)
+    assert e.value.status_code == 502 and e.value.code == "upstream_lost"
+    assert stack.engine.requests == []
+    assert await stack.reserved(t) == (0, 0)
+
+
 # ------------------------------------------------------------------ revocation
 
 

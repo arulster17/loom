@@ -26,6 +26,7 @@ from loom_billing.settings import BillingSettings
 from loom_billing.stripe_stub import create_stub_app
 from loom_billing.worker import Worker, redis_from_settings, run_worker
 from loom_platform.db import open_pool
+from loom_platform.settings import enforce_environment
 
 COMMANDS = (
     "all",
@@ -78,6 +79,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     configure_logging(os.environ.get("LOOM_LOG_LEVEL", "INFO"))
     settings = BillingSettings()
+    enforce_environment(
+        settings,
+        f"loom-billing {args.command}",
+        settings.production_problems(serves_api=args.command in ("all", "api")),
+    )
 
     if args.command == "stripe-stub":
         if settings.stripe_mode != "stub":

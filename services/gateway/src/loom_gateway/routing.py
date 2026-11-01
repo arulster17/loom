@@ -9,6 +9,7 @@ first listed. No replica: 503 `model_unavailable` at once; the gateway never que
 
 from __future__ import annotations
 
+import logging
 import ssl
 import time
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from loom_gateway.metrics import GatewayMetrics
 from loom_gateway.settings import COLD_START_ESTIMATE_S, DEFAULT_COLD_START_S, GatewaySettings
 from loom_platform import errors
 from loom_platform.pool import PoolState, Replica, get_pool, request_wake
+
+log = logging.getLogger("loom_gateway.routing")
 
 
 def upstream_client(s: GatewaySettings) -> httpx.AsyncClient:
@@ -117,11 +120,25 @@ class Router:
         for i, r in enumerate(pool.replicas):
             if r.id in exclude:
                 continue
+            if not self._transport_ok(pool.model_id, r):
+                continue
             st = self._st(r)
             key = (st.penalty_until > now, st.inflight, i)
             if best is None or key < best:
                 best, choice = key, r
         return choice
+
+    def _transport_ok(self, model_id: str, replica: Replica) -> bool:
+        """Outside LOOM_ENV=dev a replica is only ever reached over https: a plain http://
+        URL would send the pod token and the prompt in clear text."""
+        if self.settings.env == "dev" or replica.url.lower().startswith("https://"):
+            return True
+        self.metrics.upstream_failures.labels(model_id, replica.id).inc()
+        log.error(
+            "replica refused: not https outside LOOM_ENV=dev",
+            extra={"fields": {"replica": replica.id}},
+        )
+        return False
 
     def acquire(self, replica: Replica) -> None:
         self._st(replica).inflight += 1

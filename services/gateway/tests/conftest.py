@@ -152,6 +152,7 @@ async def make_stack(
                 "usage_stream": f"loom:test:usage:{uuid.uuid4().hex}",
                 "pool_cache_ttl_s": 0,
                 "log_level": "WARNING",
+                "env": "dev",  # plain-http replicas in some tests; prod checks: units
             }
             if tls:
                 settings_kw |= {

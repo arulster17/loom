@@ -173,3 +173,37 @@ def test_form_encoding_uses_stripe_brackets():
     assert body == (
         b"mode=payment&metadata%5Borg_id%5D=o&line_items%5B0%5D%5Bquantity%5D=1&flag=true"
     )
+
+
+def test_billing_refuses_dev_defaults_outside_dev(clean_env, capsys):
+    from loom_billing import cli
+
+    prod = {
+        "env": "prod",
+        "database_url": "postgresql://loom:s3cret@db/loom_platform",
+        "stripe_secret_key": "sk_test_51abc",
+        "stripe_webhook_secret": "whsec_xyz",
+        "billing_internal_token": "a-real-random-token",
+    }
+    assert BillingSettings(**prod).production_problems() == []
+    stub = {**prod, "stripe_secret_key": None, "stripe_webhook_secret": None,
+            "stripe_mode": "stub", "stripe_stub_webhook_secret": "whsec_" + "k" * 30}  # fmt: skip
+    assert any("LOOM_STRIPE_MODE=stub" in p for p in BillingSettings(**stub).production_problems())
+    for token in (None, "loom-dev-internal-token"):
+        [p] = BillingSettings(**{**prod, "billing_internal_token": token}).production_problems()
+        assert "LOOM_BILLING_INTERNAL_TOKEN" in p
+        # The worker serves no API: it does not need the token.
+        assert (
+            BillingSettings(**{**prod, "billing_internal_token": token}).production_problems(
+                serves_api=False
+            )
+            == []
+        )
+    assert BillingSettings(**{**stub, "env": "dev"}).production_problems() == []
+
+    # The entrypoint exits before starting anything, whatever the command.
+    for command in ("all", "worker", "stripe-stub"):
+        with pytest.raises(SystemExit) as e:
+            cli.main([command])
+        assert e.value.code == 2
+    assert "refusing to start" in capsys.readouterr().err
