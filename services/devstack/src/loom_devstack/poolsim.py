@@ -156,10 +156,11 @@ class PoolSim:
             last = await self.redis.xrevrange(self.config.usage_stream, count=1)
             self._usage_cursor = _s(last[0][0]) if last else "0-0"
         while True:
-            batch = await self.redis.xread({self.config.usage_stream: self._usage_cursor}, 1000)
+            stream = self.config.usage_stream
+            batch: Any = await self.redis.xread({stream: self._usage_cursor}, count=1000)
             if not batch:
                 return
-            entries = batch[0][1]
+            entries: list[tuple[Any, dict[Any, Any]]] = batch[0][1]
             for entry_id, fields in entries:
                 self._usage_cursor = _s(entry_id)
                 model = _s(fields.get(b"model_id") or fields.get("model_id") or "")
