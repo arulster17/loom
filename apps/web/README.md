@@ -53,7 +53,8 @@ web app and the registry.
 | `AUTH_URL` | from the request | Public URL of the app, e.g. `http://localhost:3000` (links in emails, Stripe return URLs) |
 | `EMAIL_SERVER` | `smtp://localhost:1025` | SMTP for magic links; compose: `smtp://mailpit:1025` |
 | `EMAIL_FROM` | `Loom <no-reply@loom.local>` | Sender |
-| `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` | none | Google sign-in appears only when both are set; redirect URI `<AUTH_URL>/api/auth/callback/google` |
+| `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` | none | Google sign-in appears only when both are set; redirect URI `<AUTH_URL>/api/auth/callback/google`. A Google sign-in is refused unless Google reports `email_verified: true` |
+| `LOOM_GOOGLE_EMAIL_LINKING` | `true` | `true`/`false`: a Google sign-in may attach to an existing user with the same (verified) email, e.g. one who signed up by magic link (Auth.js `allowDangerousEmailAccountLinking`) |
 | `LOOM_ADMIN_EMAILS` | empty | Comma-separated; these users get `users.role = 'admin'` at sign-in (audited) |
 | `LOOM_SIGNUP_PROMO_MICROS` | `5000000` | Credit posted when an admin approves a signup |
 | `LOOM_GATEWAY_URL` | `http://localhost:8080` | Gateway as the server reaches it (compose: `http://gateway:8080`) |
