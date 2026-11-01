@@ -290,5 +290,10 @@ def _merge(into: RoundResult, r: RoundResult) -> None:
 
 
 def _short(e: Exception) -> str:
-    text = str(e).replace("\n", " ")
+    """The reason without field values (pydantic's message would echo the input)."""
+    if isinstance(e, ValidationError):
+        errs = e.errors(include_input=False, include_url=False)
+        text = "; ".join(f"{'.'.join(map(str, x['loc'])) or 'event'}: {x['msg']}" for x in errs)
+    else:
+        text = str(e).replace("\n", " ")
     return text[:300]

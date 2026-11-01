@@ -155,6 +155,7 @@ async def test_malformed_entries_go_to_dead_letter(
     dead = await redis_client.xrange(stream + ":dead")
     assert [d[1][b"dead_source_id"] for d in dead] == bad_ids
     assert all(d[1][b"dead_reason"].startswith(b"invalid:") for d in dead)
+    assert all(b"input_value" not in d[1][b"dead_reason"] for d in dead)  # no values echoed
     st = await group_state(redis_client, stream, GROUP)
     assert st is not None and st.pending == 0  # acked, not stuck
     assert await count_events(pool, t.org_id) == 1
@@ -188,13 +189,14 @@ async def test_missing_partition_leaves_entry_pending_without_blocking(
     ok = make_event(t)
     await xadd_event(redis_client, stream, ok)
 
-    c = make_consumer(claim_idle_ms=10)
+    c = make_consumer(claim_idle_ms=100)
     r = await c.drain()
-    assert (r.inserted, r.left_pending, r.dead) == (1, 1, 0)
-    # Later entries are not blocked by the stuck one.
+    # (left_pending counts each retry; a slow machine may retry it within the drain.)
+    assert (r.inserted, r.dead) == (1, 0) and r.left_pending >= 1
+    # Later entries are not blocked by the stuck one, whether or not it is retried.
     later = make_event(t)
     await xadd_event(redis_client, stream, later)
-    await asyncio.sleep(0.02)
+    await asyncio.sleep(0.15)
     r = await c.drain()
     assert r.inserted == 1
     st = await group_state(redis_client, stream, GROUP)
@@ -203,7 +205,7 @@ async def test_missing_partition_leaves_entry_pending_without_blocking(
 
     # Partition upkeep creates the month; the retry then lands.
     assert await ensure_partitions(pool, months=1, today=far.date()) == 1
-    await asyncio.sleep(0.02)
+    await asyncio.sleep(0.15)
     r = await c.drain()
     assert r.inserted == 1
     st = await group_state(redis_client, stream, GROUP)
