@@ -1,6 +1,7 @@
 import { AuthzError, isOrgActive } from "@/lib/authz";
 import { getPlaygroundKey } from "@/lib/data/playground";
 import { gatewayBody, playgroundRequest } from "@/lib/playground";
+import { readBodyLimited } from "@/lib/request-body";
 import { gatewayUrl } from "@/lib/services";
 import { currentOrgContext } from "@/lib/session";
 
@@ -35,11 +36,12 @@ export async function POST(req: Request) {
   if (!ctx) return error(401, "Sign in first.", "unauthenticated");
   if (!isOrgActive(ctx)) return error(403, "This account is not active.", "org_not_active");
 
-  const raw = await req.text();
-  if (raw.length > MAX_BODY_BYTES) return error(413, "The conversation is too long.", "request_too_large");
+  // Capped while reading (Content-Length, then a running byte count), never buffered whole.
+  const body = await readBodyLimited(req, MAX_BODY_BYTES);
+  if (!body.ok) return error(413, "The conversation is too long.", "request_too_large");
   let parsed;
   try {
-    parsed = playgroundRequest.safeParse(JSON.parse(raw));
+    parsed = playgroundRequest.safeParse(JSON.parse(body.text));
   } catch {
     return error(400, "Invalid JSON.", "invalid_request");
   }
