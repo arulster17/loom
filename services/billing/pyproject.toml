@@ -11,6 +11,9 @@ dependencies = [
     "prometheus-client>=0.20",
 ]
 
+[project.scripts]
+loom-billing = "loom_billing.cli:main"
+
 [build-system]
 requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"

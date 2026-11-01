@@ -35,6 +35,7 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy bench/src
       - run: uv run mypy services/platform_common/src services/gateway/src services/billing/src
+      - run: uv run mypy services/platform_common/src services/podproxy/src services/devstack/src
       - run: uv run pytest -q -n auto
 
   # The GPU hosts' client environment rebuilt from uv.lock exactly as RunPod and AWS

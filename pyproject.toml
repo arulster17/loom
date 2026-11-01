@@ -10,13 +10,22 @@ license = "Apache-2.0"
 package = false
 
 [tool.uv.workspace]
-members = ["bench", "services/platform_common", "services/gateway", "services/billing"]
+members = [
+    "bench",
+    "services/platform_common",
+    "services/gateway",
+    "services/billing",
+    "services/podproxy",
+    "services/devstack",
+]
 
 [tool.uv.sources]
 loom-bench = { workspace = true }
 loom-platform = { workspace = true }
 loom-gateway = { workspace = true }
 loom-billing = { workspace = true }
+loom-podproxy = { workspace = true }
+loom-devstack = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -24,6 +33,8 @@ dev = [
     "loom-platform",
     "loom-gateway",
     "loom-billing",
+    "loom-podproxy",
+    "loom-devstack",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-timeout>=2.3",
@@ -50,6 +61,8 @@ testpaths = [
     "services/platform_common/tests",
     "services/gateway/tests",
     "services/billing/tests",
+    "services/podproxy/tests",
+    "services/devstack/tests",
 ]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
@@ -66,4 +79,11 @@ markers = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["loom_bench", "loom_platform", "loom_gateway", "loom_billing"]
+known-first-party = [
+    "loom_bench",
+    "loom_platform",
+    "loom_gateway",
+    "loom_billing",
+    "loom_podproxy",
+    "loom_devstack",
+]
