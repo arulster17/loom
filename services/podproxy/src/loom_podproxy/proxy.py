@@ -341,7 +341,10 @@ class PodProxy:
         if (method, path) not in ROUTES:
             await self._send_simple(conn, writer, 404, "Not found.", "not_found")
             return 404, 0, None
-        body = await self._read_body(conn, reader)
+        try:
+            body = await asyncio.wait_for(self._read_body(conn, reader), self.config.idle_timeout_s)
+        except TimeoutError:
+            raise _ClientGone from None
         if body is None:
             await self._send_simple(conn, writer, 413, "Request body too large.", "too_large")
             return 413, 0, None
