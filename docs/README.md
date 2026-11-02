@@ -13,6 +13,7 @@
 - [load-generators.md](load-generators.md): the native load generator and the `vllm bench` / `sglang` wrappers.
 - [quality-gate.md](quality-gate.md): eval suites, the gate's decision rule, sample sizes, logprob divergence, sanity checks.
 - [cost-model.md](cost-model.md): $/1M tokens at SLO: goodput, allocation, CIs, what the hourly price includes, margins.
+- [perf/speculative-decoding.md](perf/speculative-decoding.md): speculative decoding in plain words, the Qwen3-8B n-gram vs EAGLE3 study (proposed) and why EAGLE3 did not help the 70B on 4x L40S.
 - [site.md](site.md): the public results site: snapshot export, build, deployment, waitlist form.
 
 ## Operations

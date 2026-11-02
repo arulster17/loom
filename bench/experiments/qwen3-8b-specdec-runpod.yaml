@@ -1,0 +1,98 @@
+# PROPOSED 2026-11-01, NOT APPROVED: do not run without the user's approval of the cap.
+# Run runpod-smoke-specdec.yaml first. docs/perf/speculative-decoding.md explains the
+# study and has the plan and quote; docs/benchmark-lab.md lists it with the others.
+#
+# Speculative decoding on Qwen3-8B, one RunPod Secure 1x L40S pod per host group, vLLM
+# v0.30.0, three rows:
+#
+# - bf16: no speculation (the registry row as shipped; reference and gate baseline);
+# - bf16-ngram: n-gram prompt lookup, 3 draft tokens, n-gram windows of 2 to 4 tokens
+#   (vLLM's default is 5 to 5, "arbitrarily chosen" per its source; 4 is the size vLLM's
+#   docs show, and 2 lets the lookup fire on shorter repeats). No draft weights;
+# - bf16-eagle3: RedHatAI's Qwen3-8B EAGLE3 head (Apache-2.0, trained on ShareGPT and
+#   UltraChat with thinking disabled, as these runs serve Qwen3: enable_thinking false),
+#   3 draft tokens as its card and 55102ddb's 70B head use. Pinned to the commit
+#   runpod-smoke-h200 already pins (the repo's head on 2026-11-01). ~2.0 GB.
+#
+# Same draft length on both, so the two methods differ only in where drafts come from.
+#
+# Loads: open loop at fixed rates (no search), the same on every row, so every row is
+# measured at every load and the speed-up is read at equal load. Chat-sharegpt (the
+# leading, realistic workload): 0.25 req/s (~2 requests decoding at once), 1, 2 (bf16's
+# goodput in 7a8237d0 is 2.213 req/s, failing at 2.449) and 3 (past bf16's knee).
+# code-completion-256: the repo's templated Python, 1.5k-token prompts, 256-token
+# continuations (overridden from 48 so decode matters): the closest profile to "output
+# repeats the prompt", where n-gram lookup should work. No profile has real edits or
+# copied text; see the doc. 0.25, 1 and 2 req/s.
+#
+# Windows: chat 180 s after 30 s of warmup (7a8237d0 used 255/45 for a 5% search; fixed
+# points need fewer requests), 60 s drain; code the same. 3 repetitions.
+#
+# Quality: each speculative row gated in-run against bf16 on phase0-strict, 3 replicated
+# passes a side (IFEval's 2-point margin needs them, quality-gate.md). Speculation is
+# lossless in theory (greedy: a draft token is kept only if it equals the target's
+# argmax), but the verify pass runs the target on 1 + k tokens per sequence, a different
+# kernel shape, so near-tie tokens can flip like batch noise: measured, not assumed.
+#
+# Budget (proposed, not approved): `bench plan` (2026-11-01) puts the pod at 7.32 h of the
+# 8 h TTL (RunPod's limit), estimate $8.06; the worst case to TTL is $8.81, under a $9 cap.
+# Past RunPod runs came in at 30-80% of plan, so expect ~$5-6.
+name: qwen3-8b-specdec-runpod
+description: "Qwen3-8B on RunPod Secure 1x L40S, vLLM v0.30.0: no speculation vs n-gram vs EAGLE3 (3 draft tokens), chat and templated code at fixed loads, gated vs BF16."
+model: qwen3-8b
+provider:
+  kind: runpod
+  # The BF16 checkpoint (16.4 GB) and the EAGLE3 head (2.0 GB) plus 35 GB of engine
+  # headroom; the dataset (0.7 GB) fits in the rest.
+  container_disk_gb: 80
+variants:
+  - name: bf16
+  - name: bf16-ngram
+    engine:
+      args:
+        speculative_config:
+          method: ngram
+          num_speculative_tokens: 3
+          prompt_lookup_max: 4
+          prompt_lookup_min: 2
+  - name: bf16-eagle3
+    engine:
+      args:
+        speculative_config:
+          method: eagle3
+          model: RedHatAI/Qwen3-8B-speculator.eagle3
+          revision: 08610ffa01dd9f16731fe8f627b85905b6aa51c4
+          num_speculative_tokens: 3
+workloads:
+  - profile: chat-sharegpt
+    load:
+      mode: open_loop
+      values: [0.25, 1, 2, 3]
+      duration_s: 180
+      warmup_s: 30
+      drain_timeout_s: 60
+  - profile: code-completion
+    label: code-completion-256
+    overrides: {output_len: 256}
+    load:
+      mode: open_loop
+      values: [0.25, 1, 2]
+      duration_s: 180
+      warmup_s: 30
+      # 256 tokens at the 50 ms TPOT target take ~13 s; 30 s drains any passing load.
+      drain_timeout_s: 30
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+quality:
+  suite: qwen3-8b
+  subset: phase0-strict
+  baseline_variant: bf16
+  replicates: 3
+budget:
+  max_spend: "$9"
+  ttl_minutes: 480
+  accrual_interval_s: 15
+seed: 0
