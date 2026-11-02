@@ -5,7 +5,7 @@ incidents, reproducing, publishing and tearing everything down. One-time account
 (quotas, HF token secret, Terraform, runner policy, `AwsSettings`) is in
 [aws-setup.md](aws-setup.md); do that first.
 
-Money rails, for reference: $149.75 overall, $50 per experiment (`bench/budget.yaml`), and
+Money rails, for reference: $249.75 overall (raised from $149.75 on 2026-11-02), $50 per experiment (`bench/budget.yaml`), and
 each experiment's own `budget.max_spend`. How they act is in
 [benchmark-lab.md](benchmark-lab.md#budget-rails).
 
