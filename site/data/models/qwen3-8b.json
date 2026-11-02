@@ -63,7 +63,8 @@
     },
     "tool_call_parsers": {
       "vllm": "hermes",
-      "sglang": "qwen25"
+      "sglang": "qwen25",
+      "trtllm": "qwen3"
     },
     "routing_tier": 1,
     "status": "preview"

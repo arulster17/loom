@@ -184,10 +184,17 @@ def script_var(script: str, name: str) -> str:
 
 
 def script_array(script: str, name: str) -> list[str]:
-    """An array variable as rendered into a pod script (`NAME=('a' 'b')`)."""
-    m = re.search(rf"^{name}=\((.*)\)$", script, re.MULTILINE)
+    """An array variable as rendered into a pod script (`NAME=('a' 'b')`). An element may
+    span lines inside its quotes (TensorRT-LLM's wrapper source): the array ends at the
+    first `)` closing a line outside any quote."""
+    m = re.search(rf"^{name}=\(", script, re.MULTILINE)
     assert m, name
-    return shlex.split(m.group(1))
+    for end in re.finditer(r"\)$", script[m.end() :], re.MULTILINE):
+        try:
+            return shlex.split(script[m.end() : m.end() + end.start()])
+        except ValueError:  # that `)` sits inside a quoted element
+            continue
+    raise AssertionError(f"{name}: unterminated array")
 
 
 def script_pairs(script: str, name: str) -> list[tuple[str, str]]:

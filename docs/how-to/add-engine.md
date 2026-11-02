@@ -10,7 +10,9 @@ TensorRT-LLM (`trtllm`) is the worked example of an engine that does not fit the
 mould ([perf/tensorrt-llm.md](../perf/tensorrt-llm.md)): its `engine.args` are LLM-API
 options passed as a file (`OPTION_ENGINES`, `TRTLLM_LAUNCHER`), it loads the checkpoint
 from its HF cache snapshot directory (moved to the pod's cache by `engine_process_argv`),
-its Prometheus text is at another path (`engines.METRICS_PATHS`), its tool parser is
+its Prometheus text is at another path (`engines.METRICS_PATHS`), it has no prompt
+logprobs over HTTP, so it runs behind a small wrapper that adds them for the divergence
+check (`trtllm_scorer.py`, `engines.TRTLLM_SERVE_SOURCE`), its tool parser is
 recorded only in its own cells' config hashes (`experiment.serving_model_doc`), and its
 slower start is priced in `plan.ENGINE_START_EXTRA_S`.
 

@@ -260,6 +260,7 @@ def test_shipped_prices_and_the_rows_left_unpriced():
         "llama-3.3-70b-instruct": None,  # the BF16 reference row, not the shipped winner
         "llama-3.3-70b-instruct-fp8": (571_000, 797_000),
         "qwen3-8b-fp8": None,  # fp8-kv8 not shipped (gate inconclusive)
+        "qwen3-8b-fp8-modelopt": None,  # TensorRT-LLM FP8: no gate yet
     }
     assert {m.status for m in reg.models} == {"preview"}  # not yet approved for serving
 

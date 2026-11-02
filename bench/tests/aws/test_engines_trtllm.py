@@ -1,12 +1,14 @@
-"""TensorRT-LLM (`trtllm`) launch rendering: trtllm-serve 1.2.1 on the PyTorch backend.
+"""TensorRT-LLM (`trtllm`) launch rendering: trtllm-serve 1.4.0rc2 on the PyTorch backend,
+started through Loom's prompt-logprobs wrapper (loom_bench/trtllm_scorer.py).
 
 Flag and option names are from tensorrt_llm/commands/serve.py and llmapi/llm_args.py at
-v1.2.1 (docs/perf/tensorrt-llm.md)."""
+v1.4.0rc2 (docs/perf/tensorrt-llm.md)."""
 
 import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,8 @@ import pytest
 from loom_bench.engines import (
     CONTAINER_HF_HOME,
     ENTRYPOINTS,
+    TRTLLM_LAUNCHER,
+    TRTLLM_SERVE_SOURCE,
     docker_run_argv,
     engine_process_argv,
     metrics_path,
@@ -26,7 +30,7 @@ from loom_bench.registry import ModelSpec, load_registry
 
 TRTLLM_IMAGE = (
     "nvcr.io/nvidia/tensorrt-llm/release@sha256:"
-    "33cd085b772947bd22b7273886539331420404e5d2a4a039945241945ff927b9"
+    "93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a"
 )
 QWEN_REV = "b968826d9c46dd6066d109eabc6255188de91218"
 SNAPSHOT = f"{CONTAINER_HF_HOME}/hub/models--Qwen--Qwen3-8B/snapshots/{QWEN_REV}"
@@ -39,7 +43,7 @@ def qwen() -> ModelSpec:
 
 def on_trtllm(spec: ModelSpec, args: dict[str, Any] | None = None, **top: Any) -> ModelSpec:
     doc = spec.model_dump()
-    doc["engine"].update(name="trtllm", version="1.2.1", image=TRTLLM_IMAGE, args=args or {})
+    doc["engine"].update(name="trtllm", version="1.4.0rc2", image=TRTLLM_IMAGE, args=args or {})
     for path, value in top.items():
         *parents, leaf = path.split("__")
         node = doc
@@ -54,7 +58,8 @@ def test_trtllm_qwen_exact_argv(qwen: ModelSpec) -> None:
     assert launch.engine == "trtllm" and launch.image == TRTLLM_IMAGE
     assert launch.served_model == "qwen3-8b" and launch.port == 8000 and launch.gpus == 1
     assert launch.args == [
-        '{"guided_decoding_backend":"xgrammar","return_perf_metrics":true}',
+        '{"enable_iter_perf_stats":true,"guided_decoding_backend":"xgrammar",'
+        '"return_perf_metrics":true}',
         SNAPSHOT,
         "--backend",
         "pytorch",
@@ -66,6 +71,8 @@ def test_trtllm_qwen_exact_argv(qwen: ModelSpec) -> None:
         "32768",
         "--tool_parser",
         "qwen3",
+        "--served_model_name",
+        "qwen3-8b",
         "--host",
         "0.0.0.0",
         "--port",
@@ -83,6 +90,7 @@ def test_engine_args_are_llm_api_options(qwen: ModelSpec) -> None:
     )
     assert trtllm_options(spec) == {
         "enable_chunked_prefill": True,
+        "enable_iter_perf_stats": True,
         "guided_decoding_backend": "xgrammar",
         "kv_cache_config": {"dtype": "fp8", "enable_block_reuse": False},
         "return_perf_metrics": True,
@@ -98,6 +106,8 @@ def test_engine_args_are_llm_api_options(qwen: ModelSpec) -> None:
     [
         ({"tensor_parallel_size": 2}, "set from the registry"),
         ({"return_perf_metrics": False}, "set from the registry"),
+        ({"enable_iter_perf_stats": False}, "set from the registry"),
+        ({"served_model_name": "x"}, "set from the registry"),
         ({"guided_decoding_backend": "llguidance"}, "set from the registry"),
         ({"tool_parser": "qwen3_coder"}, "set from the registry"),
         ({"kv_cache_config": {"dtype": "fp8"}}, "kv_cache_dtype"),
@@ -119,7 +129,7 @@ def test_kv_cache_e5m2_is_rejected(qwen: ModelSpec) -> None:
 
 
 def test_quantization_comes_from_the_checkpoint(qwen: ModelSpec) -> None:
-    # No on-load quantization of BF16 weights, and no compressed-tensors loader in 1.2.1.
+    # No on-load quantization of BF16 weights, and no compressed-tensors loader.
     with pytest.raises(ValueError, match="does not quantize BF16 weights on load"):
         render_launch(on_trtllm(qwen, quantization="fp8"))
     fp8 = load_registry().get("qwen3-8b-fp8")  # RedHatAI compressed-tensors
@@ -141,8 +151,8 @@ def test_tools_need_a_trtllm_parser(qwen: ModelSpec) -> None:
 def test_runpod_process_moves_the_snapshot_to_the_pod_cache(qwen: ModelSpec) -> None:
     launch = render_launch(on_trtllm(qwen))
     argv = engine_process_argv(launch, host="127.0.0.1", weights_dir="/opt/loom/hf/")
-    assert argv[:4] == list(ENTRYPOINTS["trtllm"])
-    assert argv[5] == f"/opt/loom/hf/hub/models--Qwen--Qwen3-8B/snapshots/{QWEN_REV}"
+    assert argv[:5] == list(ENTRYPOINTS["trtllm"])
+    assert argv[6] == f"/opt/loom/hf/hub/models--Qwen--Qwen3-8B/snapshots/{QWEN_REV}"
     assert argv[argv.index("--host") + 1] == "127.0.0.1"
     assert launch.args[1] == SNAPSHOT  # the config hash covers the container path only
     # vLLM's model argument is a hub id: nothing to move.
@@ -157,41 +167,71 @@ def test_docker_run_argv_trtllm_entrypoint(qwen: ModelSpec) -> None:
     argv = docker_run_argv(launch, weights_dir="/w", container_name="c")
     assert "--volume /w:/root/.cache/huggingface" in " ".join(argv)
     i = argv.index("--entrypoint")
-    assert argv[i : i + 5] == ["--entrypoint", "bash", TRTLLM_IMAGE, "-c", ENTRYPOINTS["trtllm"][2]]
-    assert argv[i + 5] == "trtllm-launch" and argv[i + 6 :] == launch.args
+    assert argv[i : i + 5] == ["--entrypoint", "bash", TRTLLM_IMAGE, "-c", TRTLLM_LAUNCHER]
+    assert argv[i + 5 : i + 7] == ["trtllm-launch", TRTLLM_SERVE_SOURCE]
+    assert argv[i + 7 :] == launch.args
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
-def test_launcher_writes_the_options_and_execs_trtllm_serve(qwen: ModelSpec, tmp_path) -> None:
-    # A stand-in trtllm-serve on PATH that prints its argv and the options file.
-    fake = tmp_path / "bin" / "trtllm-serve"
+def test_launcher_writes_the_options_and_runs_the_wrapper(qwen: ModelSpec, tmp_path) -> None:
+    # A stand-in python3 on PATH that records its argv and the options file it was given.
+    fake = tmp_path / "bin" / "python3"
     fake.parent.mkdir()
     fake.write_text(
-        '#!/bin/bash\nfor a in "$@"; do echo "arg:$a"; done\n'
-        'cfg="${@: -1}"; echo "cfg:$(cat "$cfg")"\n'
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "cfg = sys.argv[-1]\n"
+        "json.dump({'argv': sys.argv[1:], 'cfg': open(cfg).read()},"
+        " open(os.environ['LOOM_FAKE_OUT'], 'w'))\n"
     )
     fake.chmod(0o755)
     spec = on_trtllm(qwen, {"kv_cache_config": {"free_gpu_memory_fraction": 0.85}})
     launch = render_launch(spec)
     argv = engine_process_argv(launch, host="127.0.0.1", weights_dir="/opt/loom/hf")
-    env = {**os.environ, "PATH": f"{fake.parent}:{os.environ['PATH']}"}
-    out = subprocess.run(argv, env=env, capture_output=True, text=True, check=True).stdout
-    args = [line[4:] for line in out.splitlines() if line.startswith("arg:")]
-    assert args[0] == "serve"
-    assert args[1:-2] == argv[5:]  # everything after the options document, in order
-    assert args[-2] == "--extra_llm_api_options"
-    path = Path(args[-1])
-    try:
-        assert path.name.startswith("loom-trtllm.") and path.stat().st_mode & 0o077 == 0
-        cfg = next(line[4:] for line in out.splitlines() if line.startswith("cfg:"))
-        assert json.loads(cfg) == trtllm_options(spec)
-    finally:
-        path.unlink(missing_ok=True)
-    # A second start gets its own file (mktemp randomizes trailing X's only on BSD).
-    again = subprocess.run(argv, env=env, capture_output=True, text=True, check=True).stdout
-    second = Path(next(ln[4:] for ln in reversed(again.splitlines()) if ln.startswith("arg:")))
-    second.unlink(missing_ok=True)
-    assert second != path
+    paths = []
+    for run in range(2):
+        out = tmp_path / f"out{run}.json"
+        path_env = f"{fake.parent}:{os.environ['PATH']}"
+        env = {**os.environ, "PATH": path_env, "LOOM_FAKE_OUT": str(out)}
+        subprocess.run(argv, env=env, capture_output=True, text=True, check=True)
+        seen = json.loads(out.read_text())
+        args = seen["argv"]
+        # python3 -c <the wrapper source> serve <launch args after the options> ...
+        assert args[:3] == ["-c", TRTLLM_SERVE_SOURCE, "serve"]
+        assert args[3:-2] == argv[6:]
+        assert args[-2] == "--extra_llm_api_options"
+        path = Path(args[-1])
+        paths.append(path)
+        try:
+            assert path.name.startswith("loom-trtllm.") and path.stat().st_mode & 0o077 == 0
+            assert json.loads(seen["cfg"]) == trtllm_options(spec)
+        finally:
+            path.unlink(missing_ok=True)
+    assert paths[0] != paths[1]  # each start gets its own file
+
+
+def test_the_wrapper_source_compiles_as_one_program() -> None:
+    # detokenize.py's source, then trtllm_scorer.py's: valid Python on its own, with the
+    # wrapper's entry point last.
+    compile(TRTLLM_SERVE_SOURCE, "<trtllm-serve wrapper>", "exec")
+    assert TRTLLM_SERVE_SOURCE.rstrip().endswith('if __name__ == "__main__":\n    main()')
+
+
+def test_pre_release_engine_versions_are_accepted(qwen: ModelSpec) -> None:
+    assert on_trtllm(qwen).engine.version == "1.4.0rc2"
+
+
+def test_the_modelopt_fp8_row_serves_its_checkpoint_with_an_fp8_kv_cache() -> None:
+    spec = load_registry().get("qwen3-8b-fp8-modelopt")
+    launch = render_launch(spec)
+    assert launch.engine == "trtllm" and launch.image == TRTLLM_IMAGE
+    assert launch.served_model == "qwen3-8b-fp8-modelopt"
+    assert launch.args[1] == (
+        f"{CONTAINER_HF_HOME}/hub/models--nvidia--Qwen3-8B-FP8/snapshots/"
+        "2cebc4c89e25abc17668c81b01dceaf3d8b914d5"
+    )
+    assert json.loads(launch.args[0])["kv_cache_config"] == {"dtype": "fp8"}
+    assert "--quantization" not in launch.args  # read from the checkpoint's config
 
 
 def test_metrics_paths() -> None:
@@ -205,3 +245,14 @@ def test_the_trtllm_parser_moves_only_trtllm_config_hashes(qwen: ModelSpec) -> N
     assert set(serving_model_doc(qwen)["tool_call_parsers"]) == HASHED_PARSER_ENGINES
     trt = serving_model_doc(on_trtllm(qwen))["tool_call_parsers"]
     assert trt == {"vllm": "hermes", "sglang": "qwen25", "trtllm": "qwen3"}
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_bash_reads_the_rendered_engine_command_back_exactly(qwen: ModelSpec) -> None:
+    # The pod scripts carry ENGINE_CMD as a bash array; the wrapper source spans lines.
+    from loom_bench.providers.aws_ssm import _assign
+
+    argv = engine_process_argv(render_launch(on_trtllm(qwen)), host="127.0.0.1")
+    program = _assign("ENGINE_CMD", argv) + '\nprintf "%s\\0" "${ENGINE_CMD[@]}"\n'
+    out = subprocess.run(["bash", "-c", program], capture_output=True, check=True).stdout
+    assert out.decode().split("\0")[:-1] == argv

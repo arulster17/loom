@@ -98,12 +98,12 @@ LOCAL_TIMING = Timing(
     eval_job_s=1.0,
 )
 # Extra (image pull, engine init) seconds per engine on top of the provider's Timing,
-# for engines much slower to start than vLLM. TensorRT-LLM 1.2.1's image is 20.9 GB
+# for engines much slower to start than vLLM. TensorRT-LLM 1.4.0rc2's image is 17.3 GB
 # compressed (registry manifest, amd64) against vLLM 0.30.0's 8.7 GB and SGLang
-# 0.5.21's 15.2 GB, whose pull took 226 s on RunPod (b97dea4c): at that rate ~310 s,
-# so +180 s over the shared 240 s leaves margin. Its init adds an autotuner pass and
-# CUDA-graph capture for more batch sizes (no measured start yet): +120 s.
-ENGINE_START_EXTRA_S: dict[str, tuple[float, float]] = {"trtllm": (180.0, 120.0)}
+# 0.5.21's 15.2 GB, whose pull took 226 s on RunPod (b97dea4c): at that rate ~257 s,
+# so +120 s over the shared 240 s leaves margin. Its init adds an autotuner pass and
+# CUDA-graph capture (no measured start yet): +120 s.
+ENGINE_START_EXTRA_S: dict[str, tuple[float, float]] = {"trtllm": (120.0, 120.0)}
 # The mock starts a uvicorn thread, then waits startup_delay_s * time_scale.
 MOCK_SERVER_START_S = 0.5
 MOCK_RUN_OVERHEAD_S = 0.3
