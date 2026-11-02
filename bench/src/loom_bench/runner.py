@@ -579,6 +579,11 @@ class _Executor:
         )
         for entry, profile in self.workloads:
             await self._run_workload(host, cell, endpoint, entry, profile)
+        if self.exp.profile is not None:
+            # Profile windows: extra jobs, never load runs (loom_bench.profile.capture).
+            from loom_bench.profile.capture import run_profiles
+
+            await run_profiles(self, host, cell, endpoint)
         if self.suite is not None:
             await self._run_quality_or_record_failure(host, cell, endpoint, self.suite)
 

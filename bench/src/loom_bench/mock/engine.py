@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 
 from loom_bench.mock.config import MockConfig
 from loom_bench.mock.sim import Clock, SimRequest, SimSequence, Simulator
+from loom_bench.profile.mock_trace import StepRecorder
 
 
 class AsyncEngine:
@@ -17,6 +18,8 @@ class AsyncEngine:
         self._wake = asyncio.Event()
         self._queues: dict[int, asyncio.Queue[int]] = {}
         self._task: asyncio.Task[None] | None = None
+        # Set while a /start_profile session is on (loom_bench.profile.mock_trace).
+        self.recorder: StepRecorder | None = None
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run())
@@ -55,7 +58,17 @@ class AsyncEngine:
                 await self._wake.wait()
                 self._wake.clear()
                 continue
+            started = time.monotonic()
             await asyncio.sleep(plan.duration_s)
+            if self.recorder is not None:
+                # The step as it ran (a sleep can end a little early or late), so
+                # recorded steps never overlap.
+                self.recorder.step(
+                    started,
+                    time.monotonic() - started,
+                    plan.num_decode_seqs,
+                    plan.num_prefill_tokens,
+                )
             for seq in self.sim.finish_step(plan):
                 queue = self._queues.get(seq.seq_id)
                 if queue is not None:

@@ -62,6 +62,11 @@ class MockConfig(BaseModel):
     # does (each token alone, a fragment as latin-1 bytes) with it off.
     byte_level: bool = False
 
+    # Where /start_profile ... /stop_profile writes its synthetic trace
+    # (loom_bench.profile.mock_trace); None: the endpoints answer 404, as vLLM does
+    # without --profiler-config.
+    profile_dir: str | None = None
+
     # Faults.
     error_rate: Probability = 0.0
     abort_rate: Probability = 0.0

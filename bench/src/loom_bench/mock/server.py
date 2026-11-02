@@ -12,6 +12,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, Request
@@ -37,6 +38,7 @@ from loom_bench.mock.engine import AsyncEngine
 from loom_bench.mock.logprobs import MAX_LOGPROBS, VOCAB, TokenLogprob, token_logprobs
 from loom_bench.mock.metrics import CONTENT_TYPE, render_metrics
 from loom_bench.mock.sim import SimRequest, SimSequence, prompt_block_hashes
+from loom_bench.profile.mock_trace import StepRecorder
 
 # ---------------------------------------------------------------- request bodies
 
@@ -657,6 +659,29 @@ def create_app(config: MockConfig | None = None) -> FastAPI:
     @app.post("/v1/completions")
     async def completions(request: Request) -> Response:
         return await _completions(server, request)
+
+    @app.post("/start_profile")
+    async def start_profile(request: Request) -> Response:
+        if config.profile_dir is None:
+            raise ApiError(404, "profiling is not enabled")
+        if server.engine.recorder is not None:
+            raise ApiError(409, "a profiling session is already running")
+        raw = await request.body()
+        body = json.loads(raw) if raw else {}
+        server.engine.recorder = StepRecorder(
+            prefix=str(body.get("profile_prefix") or "mock"),
+            max_iterations=int(body.get("max_iterations") or 0),
+            delay_iterations=int(body.get("delay_iterations") or 0),
+        )
+        return Response(status_code=200)
+
+    @app.post("/stop_profile")
+    async def stop_profile() -> Response:
+        recorder, server.engine.recorder = server.engine.recorder, None
+        if config.profile_dir is None or recorder is None:
+            raise ApiError(404 if config.profile_dir is None else 409, "no profiling session")
+        recorder.write(Path(config.profile_dir))
+        return Response(status_code=200)
 
     @app.get("/metrics")
     async def metrics() -> Response:

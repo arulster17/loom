@@ -16,6 +16,7 @@ import httpx
 from loom_bench.jobs import LoadJob, LoadJobResult
 from loom_bench.loadgen.base import get_load_generator, prepare_load
 from loom_bench.metrics.gpu import NVIDIA_SMI_ARGS
+from loom_bench.profile.capture import run_capture
 
 
 async def _scrape(
@@ -80,17 +81,26 @@ async def execute_load_job(job: LoadJob) -> LoadJobResult:
     gpu = await _start_gpu_sampler(job.scrape_interval_s) if job.sample_gpu else None
     if job.sample_gpu and gpu is None:
         meta["gpu_sampling"] = "nvidia-smi not found"
+    profiler = (
+        asyncio.create_task(run_capture(job.base_url, job.profile, t0))
+        if job.profile is not None
+        else None
+    )
 
     started_at = _now_iso()
     try:
         result = await generator.run(ctx)
     except BaseException:
+        if profiler is not None:
+            profiler.cancel()
         if scraper is not None:
             scraper.cancel()
         if gpu is not None and gpu.returncode is None:
             gpu.kill()
         raise
     finished_at = _now_iso()
+    if profiler is not None:
+        meta["profile"] = await profiler
     stop.set()
     scrapes: list[tuple[float, str]] = []
     if scraper is not None:
