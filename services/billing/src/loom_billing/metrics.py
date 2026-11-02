@@ -56,6 +56,10 @@ CREDITED_MICROS = Counter(P + "stripe_credited_micros_total", "Purchase credit p
 CLAWED_BACK_MICROS = Counter(
     P + "stripe_clawed_back_micros_total", "Credit taken back for Stripe refunds and disputes"
 )
+STRIPE_UNAPPLIED = Gauge(
+    P + "stripe_unapplied_events",
+    "Stored Stripe events not applied yet (e.g. a refund before its purchase): alert if it stays",
+)
 CHECKOUT_SESSIONS = Counter(P + "checkout_sessions_total", "Checkout sessions", ["result"])
 
 NOTIFICATIONS = Counter(P + "notifications_total", "Outbox notifications emitted", ["type"])

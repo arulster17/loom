@@ -141,7 +141,7 @@ the first transaction with `created = false`; other content raises `unique_viola
 | purchase | +X | stripe_clearing -X | `stripe:<event id>` |
 | usage | -X | revenue +X | `usage:<org id>:<YYYY-MM-DDTHH:MMZ>` (`ledger.usage_batch_key`) |
 | promo | +X | promo_expense -X | `promo:signup:<org id>` |
-| refund | -X | stripe_clearing +X | `stripe:<event id>` (`charge.refunded`: the new part of the cumulative `amount_refunded`; `charge.dispute.created`: the disputed amount, once per dispute; at most the purchase in total; the balance may go negative) |
+| refund | -X | stripe_clearing +X | `stripe:<event id>` (`charge.refunded`: the new part of the cumulative `amount_refunded`; `charge.dispute.created`: the disputed amount, once per dispute; at most the purchase in total; the balance may go negative). One that arrives before its purchase is stored unapplied and applied in the purchase's transaction; the billing worker also re-runs unapplied events every minute (migration 0009 indexes them) |
 | adjustment | +/-X | promo_expense (grant) or revenue (correction) | `admin:<admin_audit_log id>` |
 
 Platform accounts have fixed ids: revenue `...0001`, stripe_clearing `...0002`,

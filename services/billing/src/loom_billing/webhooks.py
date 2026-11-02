@@ -26,8 +26,15 @@ Clawbacks (`refund` transactions: org credit -X, stripe_clearing +X, keyed
 - `charge.dispute.created`: the disputed `amount`, once per dispute id.
 
 Together they never take back more than the purchase. The balance may go negative,
-which is correct: the money was returned. An event for a payment not in
-`stripe_payments` stays unapplied (an admin looks; a replay retries).
+which is correct: the money was returned.
+
+Out of order: Stripe does not order deliveries, so a refund or dispute can arrive
+before the purchase it reverses is recorded. It is stored unapplied (Stripe gets 200);
+crediting the purchase then applies every pending clawback for the same PaymentIntent
+in the same transaction, and `retry_unapplied` (billing worker, every minute) re-runs
+unapplied events, which covers the race where both commit at once. Without both the
+customer would be refunded and keep the credit. `loom_billing_stripe_unapplied_events`
+counts what is still waiting (alert when it stays above 0).
 """
 
 from __future__ import annotations
@@ -39,6 +46,7 @@ from typing import Any
 
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
+from psycopg_pool import AsyncConnectionPool
 
 from loom_billing import metrics
 from loom_billing.logs import fields
@@ -82,8 +90,11 @@ def check_event_shape(event: Any) -> tuple[str, str]:
     return evt_id, typ
 
 
-async def handle_event(conn: AsyncConnection, event: dict[str, Any]) -> Outcome:
-    """Process one verified event in the caller's transaction."""
+async def handle_event(
+    conn: AsyncConnection, event: dict[str, Any], *, retry: bool = False
+) -> Outcome:
+    """Process one verified event in the caller's transaction. `retry`: a re-run of a
+    stored unapplied event (`retry_unapplied`), which stays quiet while still unapplied."""
     evt_id, typ = check_event_shape(event)
     async with conn.cursor() as cur:
         await cur.execute(
@@ -109,6 +120,8 @@ async def handle_event(conn: AsyncConnection, event: dict[str, Any]) -> Outcome:
             await cur.execute(
                 "UPDATE stripe_events SET processed_at = now() WHERE id = %s", (evt_id,)
             )
+    if retry and outcome.result == "unapplied":
+        return outcome  # logged and counted when it first arrived
     level = logging.ERROR if outcome.result == "unapplied" else logging.INFO
     log.log(
         level,
@@ -187,8 +200,81 @@ async def _credit_checkout(
                 "ON CONFLICT DO NOTHING",
                 (payment_intent, session_id, org_id, posted.transaction_id, amount),
             )
+        await _apply_pending_clawbacks(conn, payment_intent)
     metrics.CREDITED_MICROS.inc(amount)
     return Outcome("credited", org_id, amount, posted.transaction_id)
+
+
+async def _apply_pending_clawbacks(conn: AsyncConnection, payment_intent: str) -> None:
+    """Refunds and disputes of this PaymentIntent that arrived before its purchase was
+    recorded: apply them now, in the purchase's transaction."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id, type, payload FROM stripe_events "
+            "WHERE processed_at IS NULL AND type = ANY(%s) "
+            "AND payload -> 'data' -> 'object' ->> 'payment_intent' = %s "
+            "ORDER BY received_at, id FOR UPDATE",
+            (sorted(CLAWBACK_TYPES), payment_intent),
+        )
+        pending = await cur.fetchall()
+    for evt_id, typ, payload in pending:
+        outcome = await _claw_back(conn, evt_id, typ, payload)
+        if outcome.processed:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE stripe_events SET processed_at = now() WHERE id = %s", (evt_id,)
+                )
+        metrics.WEBHOOKS.labels(f"late_{outcome.result}").inc()
+        log.info(
+            "stripe.event_applied_late",
+            extra=fields(
+                event_id=evt_id,
+                type=typ,
+                result=outcome.result,
+                org_id=str(outcome.org_id) if outcome.org_id else None,
+                amount_micros=outcome.amount_micros,
+            ),
+        )
+
+
+# Unapplied events younger than this are re-run every minute; older ones are left to
+# an admin (still counted in the gauge).
+RETRY_WINDOW = "30 days"
+
+
+async def retry_unapplied(pool: AsyncConnectionPool, *, limit: int = 500) -> int:
+    """Re-run stored unapplied events (oldest first), each in its own transaction, and
+    refresh the unapplied gauge. Returns how many were applied now."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id FROM stripe_events WHERE processed_at IS NULL "
+            f"AND received_at > now() - interval '{RETRY_WINDOW}' "
+            "ORDER BY received_at, id LIMIT %s",
+            (limit,),
+        )
+        ids = [r[0] for r in await cur.fetchall()]
+    applied = 0
+    for evt_id in ids:
+        async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.execute(
+                "SELECT payload FROM stripe_events WHERE id = %s AND processed_at IS NULL "
+                "FOR UPDATE SKIP LOCKED",
+                (evt_id,),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                continue  # processed meanwhile, or a delivery holds it right now
+            try:
+                outcome = await handle_event(conn, row[0], retry=True)
+            except BadEvent:
+                continue
+            if outcome.processed:
+                applied += 1
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SELECT count(*) FROM stripe_events WHERE processed_at IS NULL")
+        row = await cur.fetchone()
+    metrics.STRIPE_UNAPPLIED.set(int(row[0]) if row else 0)
+    return applied
 
 
 def _cents(v: Any) -> int | None:
