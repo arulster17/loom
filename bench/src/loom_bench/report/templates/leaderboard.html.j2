@@ -70,6 +70,26 @@
 </table>
 </div>
 {% endif %}
+{% if b.specdec %}
+<h4>Speculative decoding by load</h4>
+<p class="lede">{{ specdec_note }}</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr>{% for h in specdec_headers %}<th{% if not loop.index in (2, 4) %} class="num"{% endif %}>{{ h }}</th>{% endfor %}</tr>
+</thead>
+<tbody>
+{% for cells in specdec_rows(b.specdec) %}
+<tr>{% for c in cells %}<td{% if not loop.index in (2, 4) %} class="num"{% endif %}>{{ c }}</td>{% endfor %}</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+<ul>
+{% for line in specdec_lines(b.specdec) %}<li>{{ line }}</li>
+{% endfor %}
+</ul>
+{% endif %}
 {% set warned = b.rows|map(attribute='result')|selectattr('warnings')|list %}
 {% if warned %}
 <h4>Warnings</h4>
