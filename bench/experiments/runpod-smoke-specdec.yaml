@@ -29,6 +29,9 @@ smoke: true
 provider:
   kind: runpod
   container_disk_gb: 80
+  # L40S Secure stock sits on hosts with CUDA 13.1/13.2 drivers; an exact "13.0" pin found none
+  # for 2.5 h (2026-11-02). vLLM's CUDA 13.0 image runs on these newer 13.x drivers.
+  allowed_cuda_versions: ["13.0", "13.1", "13.2"]
 variants:
   - name: bf16
   - name: bf16-ngram
