@@ -1,10 +1,18 @@
 # How to add a serving engine
 
-Adding an engine is **code, not configuration**. vLLM and SGLang are wired into the
-registry schema, the command-line renderer, the Prometheus name map and the host start
-script. Switching an existing model between those two engines, or pinning a new version
+Adding an engine is **code, not configuration**. vLLM, SGLang and TensorRT-LLM are wired
+into the registry schema, the command-line renderer, the Prometheus name map and the host
+start script. Switching an existing model between those engines, or pinning a new version
 of one, is configuration (a new `engine.version` and `engine.image` digest in
-`config/models.yaml` or an experiment variant); this page is for a third engine.
+`config/models.yaml` or an experiment variant); this page is for another engine.
+
+TensorRT-LLM (`trtllm`) is the worked example of an engine that does not fit the vLLM
+mould ([perf/tensorrt-llm.md](../perf/tensorrt-llm.md)): its `engine.args` are LLM-API
+options passed as a file (`OPTION_ENGINES`, `TRTLLM_LAUNCHER`), it loads the checkpoint
+from its HF cache snapshot directory (moved to the pod's cache by `engine_process_argv`),
+its Prometheus text is at another path (`engines.METRICS_PATHS`), its tool parser is
+recorded only in its own cells' config hashes (`experiment.serving_model_doc`), and its
+slower start is priced in `plan.ENGINE_START_EXTRA_S`.
 
 ## What the engine must provide
 
