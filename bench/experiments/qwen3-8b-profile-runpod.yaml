@@ -1,0 +1,105 @@
+# PROPOSED 2026-11-01, NOT APPROVED, NOT RUN. Do not launch without the user's approval.
+#
+# Where a decode step's time goes, measured: Qwen3-8B BF16 and FP8 weights + FP8 KV
+# cache (7a8237d0's bf16 and fp8-kv8 cells) on one RunPod Secure 1x L40S pod, vLLM
+# v0.30.0, each at known batch sizes and at its chat goodput, with a short torch-profiler
+# window at every load point (docs/perf/roofline-and-profiling.md).
+#
+# Why: `bench roofline -e 7a8237d0` puts a typical decode step at 75% of the memory-
+# bandwidth floor for bf16 and 61-65% for fp8-kv8, and fits each step as a fixed cost
+# (bf16 21.9-23.9 ms against a 17.5 ms weight-read floor; fp8-kv8 14.5-15.3 against 9.5)
+# plus a per-sequence cost 1.3-1.8x its KV-read floor. The client data cannot say what
+# the extra ~5 ms per step and the per-sequence excess are (GEMMs below peak bandwidth,
+# attention on an FP8 cache, FP8 activation quantization, sampling, or the GPU idle
+# waiting on the scheduler), nor confirm how much prefill takes from fp8-kv8 at its
+# chat goodput (the mean-vs-median gap implies 25% vs bf16's 15%). A trace answers both.
+#
+# Shape:
+# - fixed-1k-1k, closed loop at concurrency 1, 16 and 64: the batch is known, so each
+#   load point is one point on the step-time-vs-batch line; 1k/1k has no prefill after
+#   the first round, so its steps are almost all pure decode.
+# - chat-sharegpt, open loop at 2.213 and 5.239 req/s: bf16's and fp8-kv8's goodput in
+#   7a8237d0 (both cells run both rates), the windows where the 2.4x was measured.
+# - 2 repetitions per point (measured runs, unprofiled), then ONE profile window per
+#   (cell, workload, load value): 45 s of load to reach steady state, the profiler on
+#   for at most 200 engine steps (about 4-10 s), 5 s more load. Profile windows are
+#   extra jobs: never recorded in bench_runs, never in goodput, latency or cost
+#   (loom_bench.profile.capture); their own ITL is kept only to show the profiler's cost.
+#
+# Config hashes: both variants add `--profiler-config` (vLLM only records between
+# /start_profile and /stop_profile), so these cells hash differently from 7a8237d0's.
+# `bench compare <this> 7a8237d0 --match-by workload` at 2.213 and 5.239 req/s checks
+# that an armed-but-idle profiler costs nothing measurable.
+#
+# Smoke first: runpod-smoke-profile.yaml (same pod shape, variants, engine args,
+# workload profiles and profile section at smoke scale).
+# bench/tests/profile/test_capture.py fails if the two drift apart.
+name: qwen3-8b-profile-runpod
+description: Qwen3-8B bf16 vs fp8-kv8 on RunPod 1x L40S at known batch sizes and chat goodput, with a torch-profiler window per load point.
+model: qwen3-8b
+provider:
+  kind: runpod
+  container_disk_gb: 80
+variants:
+  - name: bf16
+    engine:
+      args:
+        profiler_config:
+          profiler: torch
+          torch_profiler_dir: /var/lib/loom/profiles
+          torch_profiler_with_stack: false
+          torch_profiler_record_shapes: false
+          torch_profiler_with_memory: false
+          torch_profiler_use_gzip: true
+          torch_profiler_dump_cuda_time_total: false
+  - name: fp8-kv8
+    model: qwen3-8b-fp8
+    kv_cache_dtype: fp8
+    engine:
+      args:
+        profiler_config:
+          profiler: torch
+          torch_profiler_dir: /var/lib/loom/profiles
+          torch_profiler_with_stack: false
+          torch_profiler_record_shapes: false
+          torch_profiler_with_memory: false
+          torch_profiler_use_gzip: true
+          torch_profiler_dump_cuda_time_total: false
+workloads:
+  - profile: fixed-1k-1k
+    load:
+      mode: closed_loop
+      values: [1, 16, 64]
+      duration_s: 150
+      warmup_requests: 2
+      drain_timeout_s: 60
+  - profile: chat-sharegpt
+    load:
+      mode: open_loop
+      values: [2.213, 5.239]
+      duration_s: 210
+      warmup_s: 45
+      drain_timeout_s: 60
+repetitions: 2
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+profile:
+  windows:
+    - workload: fixed-1k-1k
+    - workload: chat-sharegpt
+  settle_s: 45
+  capture_s: 20
+  max_iterations: 200
+  tail_s: 5
+  drain_timeout_s: 15
+  trace_dir: /var/lib/loom/profiles
+  max_trace_mb: 256
+# bench plan (2026-11-01, against a copy of the results DB): one pod, 2.23 h of a
+# 2.67 h TTL, estimate $2.45; worst case (the pod lives to its TTL) $2.94; cap $3.00.
+budget:
+  max_spend: "$3"
+  ttl_minutes: 160
+  accrual_interval_s: 15
+seed: 0
