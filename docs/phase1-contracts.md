@@ -80,6 +80,7 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_CLOUD` / `LOOM_REGION` | `local` / empty | gateway (usage events) |
 | `LOOM_GATEWAY_CLIENT_CERT` / `_KEY`, `LOOM_POD_CA_CERT` | none | gateway (mTLS to pods; required outside `LOOM_ENV=dev`) |
 | `LOOM_CORS_ORIGINS` | `http://localhost:3000` | gateway |
+| `LOOM_SHUTDOWN_GRACE_S` | 10 | gateway: on SIGTERM, how long in-flight requests may finish before open streams are cut (§6 "Shutdown") |
 | `AUTH_SECRET`, `AUTH_URL`, `AUTH_GOOGLE_ID` / `_SECRET`, `EMAIL_SERVER` | none | web (Auth.js); `AUTH_URL` is required outside `LOOM_ENV=dev` |
 | `LOOM_GOOGLE_EMAIL_LINKING` | `true` | web: a Google sign-in may link to an existing user with the same email; Google sign-in always requires `email_verified` |
 | `LOOM_ADMIN_EMAILS` | empty | web: dev bootstrap of the first admin (§4) |
@@ -319,8 +320,36 @@ When an assumption fails, the balance can go negative by at most:
 | (d) Redis crash, AOF `everysec` | the cost settled in the last second before the crash (those requests are also never billed), plus events settled after the restart but before the org reloads and not yet consumed by billing |
 | An admin refund or negative adjustment | the amount, by the admin's choice |
 
-A gateway crash mid-request loses that request's settle: the reservation expires, the
-tokens go unbilled (under-charge, never overshoot).
+A gateway crash mid-request (SIGKILL, OOM, host loss) loses that request's settle: the
+reservation expires, the tokens go unbilled (under-charge, never overshoot), and the
+reservation and its in-flight counts are held until the reservation TTL. A **shutdown**
+(SIGTERM) does not lose them, below.
+
+### Shutdown
+
+On SIGTERM the gateway (`python -m loom_gateway`, `GatewayServer`):
+
+1. closes its listener (no new connections);
+2. gives in-flight requests `LOOM_SHUTDOWN_GRACE_S` (10 s) to finish on their own;
+3. cuts every stream still open: the client gets `data: {"error": {... "code":
+   "server_shutdown"}}` and `data: [DONE]` (503 `server_error`, §11; bounded at 1 s for a
+   client that stopped reading), and the request settles `aborted`, billed for the
+   tokens streamed like a client abort; its reservation and in-flight counts are
+   released at once;
+4. waits up to 2 s more for connections to close, then cancels what is left (a
+   non-streaming request still waiting on the engine settles `error`, releasing its
+   reservation; its tokens are unbilled, as at the timeout above);
+5. waits up to 5 s for the settles it started, then closes Redis and Postgres.
+
+The process exits within about `LOOM_SHUTDOWN_GRACE_S` + 8 s (exit status: uvicorn
+re-raises the SIGTERM after a clean shutdown, so 143). **M3 (ECS behind an ALB)**: the
+task's `stopTimeout` must exceed that, so set **30 s** (the ECS default; 120 s max) with
+the default grace; a SIGKILL before step 5 is the crash case above. Set the target
+group's **deregistration delay to 15 s or less** (ECS deregisters a task and waits for the
+delay before sending SIGTERM): longer only delays the stop, since streams can run 600 s
+and are cut and billed at SIGTERM anyway, and an ALB that closes a connection at the end
+of the delay is a client abort, also billed. Keep `LOOM_SHUTDOWN_GRACE_S` +
+deregistration delay well under the deploy's health-check grace.
 
 A **non-streaming** request cut at `LOOM_REQUEST_TIMEOUT_S` is also unbilled: the engine
 reports usage only in its final body, so the tokens it generated before the cut are
@@ -534,6 +563,7 @@ Clients branch on the status; `code` gives the reason.
 | 502 | `server_error` | `upstream_lost` | Pod lost before any byte reached the client, retry used up; *(wave 2)* also no answer within `LOOM_REQUEST_TIMEOUT_S` of receipt. Billed nothing (usage event `error`) |
 | 503 | `server_error` | `model_unavailable` | §10; `Retry-After` in seconds |
 | 503 | `server_error` | `balance_unavailable` | *(wave 2)* the org's balance could not be loaded into Redis (§8 step 3); `Retry-After: 1`; no reservation, no usage event |
+| 503 | `server_error` | `server_shutdown` | Only as a stream's last error chunk: the gateway is shutting down (§6 "Shutdown"); the tokens streamed are billed; retry |
 
 Mid-stream failures end the stream with `data: {"error": {... "code": "upstream_lost"}}`
 and `data: [DONE]` (`ApiError.sse_chunk`).

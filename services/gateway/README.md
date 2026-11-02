@@ -41,6 +41,11 @@ other than compose's, and it never dispatches to an `http://` replica.
    each choice's last running count, as vLLM counts per choice with `n > 1`), so a client
    abort or a lost pod bills exactly the tokens streamed.
 
+Shutdown (SIGTERM): stop accepting, give in-flight requests `LOOM_SHUTDOWN_GRACE_S`
+(10 s), then cut open streams with a `server_shutdown` error chunk and `[DONE]`, billing
+the tokens streamed and releasing their reservations at once; exits within about the
+grace + 8 s. Orchestrator stop timeout: 30 s (contracts §6 "Shutdown").
+
 Cost: `X-Loom-Request-Id`, `X-Loom-Price-Version`, `X-Loom-Max-Cost-Micros` on every
 admitted response; `X-Loom-Cost-Micros` / `X-Loom-Cost-USD` on non-streaming ones;
 `usage.cost_micros` in the response body and in a stream's final usage chunk.

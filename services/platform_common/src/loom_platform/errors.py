@@ -124,6 +124,14 @@ def upstream_lost() -> ApiError:
     return ApiError(502, "server_error", "upstream_lost", "The model server stopped responding.")
 
 
+def server_shutdown() -> ApiError:
+    """A stream cut because this gateway is shutting down (deploy or scale-in); the
+    tokens already streamed are billed. Retrying reaches another gateway."""
+    return ApiError(
+        503, "server_error", "server_shutdown", "The server is restarting. Retry the request."
+    )
+
+
 def from_reserve(result: ReserveResult, needed_micros: int) -> ApiError:
     """The error for a refused reservation. 'noinit' is not an error: load and retry."""
     r = result.reason

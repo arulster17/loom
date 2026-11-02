@@ -59,6 +59,13 @@ class GatewaySettings(PlatformSettings):
     # A replica that failed is tried last for this long.
     replica_penalty_s: Annotated[float, Field(ge=0)] = 10.0
 
+    # Shutdown (SIGTERM, contracts §6 "Shutdown"): in-flight requests get this long to
+    # finish on their own; then open streams are cut (an error chunk and [DONE], billed
+    # for the tokens streamed, status aborted) and anything else still running is
+    # cancelled (settled, releasing its reservation). The process exits within about
+    # this + SHUTDOWN_SETTLE_S + 2 s; the orchestrator's stop timeout must be longer.
+    shutdown_grace_s: Annotated[float, Field(ge=0)] = 10.0
+
     redis_max_connections: Annotated[int, Field(gt=0)] = 256
     pg_pool_max: Annotated[int, Field(gt=0)] = 10
 

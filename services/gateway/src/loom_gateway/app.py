@@ -31,7 +31,15 @@ from starlette.responses import JSONResponse, Response
 from loom_bench.registry import ModelSpec, Registry, load_registry
 from loom_gateway.authn import Authenticator
 from loom_gateway.metrics import GatewayMetrics
-from loom_gateway.proxy import Proxy, RequestCtx, StreamResponse, error_response, shielded
+from loom_gateway.proxy import (
+    SHUTDOWN_SETTLE_S,
+    Proxy,
+    RequestCtx,
+    StreamResponse,
+    error_response,
+    shielded,
+    wait_background,
+)
 from loom_gateway.request_body import Endpoint, Prepared, model_field, parse_json_object, prepare
 from loom_gateway.routing import Router, upstream_client
 from loom_gateway.settings import GatewaySettings
@@ -76,6 +84,7 @@ class Gateway:
             m.id: (m, Price.of(m)) for m in servable(registry)
         }
         self._listener: asyncio.Task[None] | None = None
+        self._calls = 0  # generate() calls in progress (a stream's ends at its first byte)
 
     async def start(self) -> None:
         s = self.settings
@@ -102,7 +111,30 @@ class Gateway:
             except TimeoutError:
                 log.warning("auth listener not ready; revocation relies on the cache TTL")
 
+    async def drain(self, grace_s: float) -> None:
+        """SIGTERM (the listener is already closed): give in-flight requests `grace_s` to
+        finish on their own, then cut the open streams; each is billed for the tokens it
+        streamed (`aborted`) and releases its reservation and in-flight counts now rather
+        than at the reservation's TTL. Requests still running after this are cancelled by
+        the server and settle `error` (contracts §6 "Shutdown")."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + grace_s
+        while loop.time() < deadline:
+            if not (self.proxy.live or self._calls):
+                break
+            await asyncio.sleep(0.05)
+        cut = await self.proxy.abort_streams()
+        log.warning(
+            "shutdown: drained",
+            extra={"fields": {"streams_cut": cut, "requests_running": self._calls}},
+        )
+
     async def stop(self) -> None:
+        # Lifespan end: nothing may still hold a reservation when Redis closes.
+        await self.proxy.abort_streams()
+        left = await wait_background(SHUTDOWN_SETTLE_S)
+        if left:
+            log.error("shutdown: settles still running at close", extra={"fields": {"n": left}})
         if self._listener is not None:
             self._listener.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -191,6 +223,20 @@ class Gateway:
         t0 = time.perf_counter()
         received_at = dt.datetime.now(dt.UTC)
         request_id = uuid.uuid4()
+        self._calls += 1
+        try:
+            return await self._generate(request, endpoint, t0, received_at, request_id)
+        finally:
+            self._calls -= 1
+
+    async def _generate(
+        self,
+        request: Request,
+        endpoint: Endpoint,
+        t0: float,
+        received_at: dt.datetime,
+        request_id: uuid.UUID,
+    ) -> Response:
         headers = {"X-Loom-Request-Id": str(request_id)}
         model_label = "-"
         try:

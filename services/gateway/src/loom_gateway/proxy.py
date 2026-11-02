@@ -58,6 +58,8 @@ log = logging.getLogger("loom_gateway.request")
 PATHS = {"chat": "/v1/chat/completions", "completions": "/v1/completions"}
 _PASS_THROUGH = (400, 413, 422)  # engine statuses that are the client's fault
 _BACKGROUND: set[asyncio.Task[Any]] = set()
+# How long shutdown waits for the settles it started (each retries Redis briefly).
+SHUTDOWN_SETTLE_S = 5.0
 
 
 async def shielded[T](coro: Coroutine[Any, Any, T]) -> T:
@@ -66,6 +68,16 @@ async def shielded[T](coro: Coroutine[Any, Any, T]) -> T:
     _BACKGROUND.add(task)
     task.add_done_callback(_BACKGROUND.discard)
     return await asyncio.shield(task)
+
+
+async def wait_background(timeout_s: float) -> int:
+    """Wait for shielded work (settles) still running; returns how many did not finish.
+    Shutdown calls it before closing Redis, so no settle is cut off by the close."""
+    pending = {t for t in _BACKGROUND if not t.done()}
+    if not pending:
+        return 0
+    _, still = await asyncio.wait(pending, timeout=timeout_s)
+    return len(still)
 
 
 def cost_headers(cost: int) -> dict[str, str]:
@@ -137,6 +149,28 @@ class Proxy:
         self.router = router
         self.client = client
         self.metrics = metrics
+        # Open streams, so shutdown can cut and settle them (abort_streams).
+        self.live: set[StreamResponse] = set()
+        self.shutting_down = False
+
+    async def abort_streams(self, timeout_s: float = SHUTDOWN_SETTLE_S) -> int:
+        """Shutdown: cut every open stream (error chunk and [DONE] to the client, the
+        tokens streamed billed as `aborted`, reservation released) and wait for them to
+        finish. Streams that start afterwards are cut at once. Returns how many were cut."""
+        self.shutting_down = True
+        streams = list(self.live)
+        for st in streams:
+            st.abort()
+        deadline = time.perf_counter() + timeout_s
+        while self.live and time.perf_counter() < deadline:
+            if all(not st.started for st in self.live):
+                break
+            await asyncio.sleep(0.02)
+        # Never started (the response was created but not sent): settle it here.
+        for st in [st for st in self.live if not st.started]:
+            with contextlib.suppress(Exception):
+                await shielded(st._finish())
+        return len(streams)
 
     # ------------------------------------------------------------ settle
 
@@ -439,24 +473,45 @@ class StreamResponse(Response):
         self.saw_done = False
         self.engine_error = False
         self.client_gone = False
-        self.lost: str | None = None  # upstream_lost | timeout
+        self.lost: str | None = None  # upstream_lost | timeout | shutdown
         self.first_token_at: float | None = None
+        self._abort = asyncio.Event()
+        self._finished = False
+        self.started = False
+        # Registered from creation: it owns the replica and the upstream from here on.
+        proxy.live.add(self)
+        if proxy.shutting_down:
+            self._abort.set()
+
+    def abort(self) -> None:
+        """Cut this stream (gateway shutdown)."""
+        self._abort.set()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         pump: asyncio.Task[None] | None = None
         watch: asyncio.Task[None] | None = None
+        abort: asyncio.Task[bool] | None = None
+        self.started = True
         try:
             await send({"type": "http.response.start", "status": 200, "headers": self.raw_headers})
             pump = asyncio.create_task(self._pump(send))
             watch = asyncio.create_task(_wait_disconnect(receive))
-            await asyncio.wait({pump, watch}, return_when=asyncio.FIRST_COMPLETED)
+            abort = asyncio.create_task(self._abort.wait())
+            await asyncio.wait({pump, watch, abort}, return_when=asyncio.FIRST_COMPLETED)
         finally:
+            shutdown = False
             if pump is not None and not pump.done():
-                self.client_gone = True
+                if abort is not None and abort.done() and not (watch and watch.done()):
+                    self.lost = "shutdown"
+                    shutdown = True
+                else:
+                    self.client_gone = True
                 pump.cancel()
-            if watch is not None:
-                watch.cancel()
-            results = await asyncio.gather(*(t for t in (pump, watch) if t), return_exceptions=True)
+            for t in (watch, abort):
+                if t is not None:
+                    t.cancel()
+            tasks = [t for t in (pump, watch, abort) if t]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
                 if isinstance(r, Exception):
                     self.lost = self.lost or "upstream_lost"
@@ -465,7 +520,19 @@ class StreamResponse(Response):
                         exc_info=r,
                         extra={"fields": {"request_id": str(self.ctx.request_id)}},
                     )
+            if shutdown:
+                await self._send_shutdown(send)
             await shielded(self._finish())
+
+    async def _send_shutdown(self, send: Send) -> None:
+        """Tell the client why the stream ends (unless it already saw [DONE]); bounded,
+        since a client that stopped reading must not hold up the shutdown."""
+        body = b"" if self.saw_done else errors.server_shutdown().sse_chunk() + DONE_EVENT
+        with contextlib.suppress(Exception):
+            async with asyncio.timeout(1.0):
+                if body:
+                    await send({"type": "http.response.body", "body": body, "more_body": True})
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
 
     async def _pump(self, send: Send) -> None:
         remaining = self.ctx.t0 + self.proxy.settings.request_timeout_s - time.perf_counter()
@@ -521,11 +588,17 @@ class StreamResponse(Response):
         return await self.proxy.settle(self.ctx, self.usage.usage, self._status(), ttft)
 
     async def _finish(self) -> None:
+        if self._finished:
+            return
+        self._finished = True
         proxy, ctx, m = self.proxy, self.ctx, self.ctx.model_id
-        with contextlib.suppress(Exception):
-            await self.upstream.aclose()
-        proxy.router.release(self.replica, failed=self.lost == "upstream_lost")
-        await self._settle()
+        try:
+            with contextlib.suppress(Exception):
+                await self.upstream.aclose()
+            proxy.router.release(self.replica, failed=self.lost == "upstream_lost")
+            await self._settle()
+        finally:
+            proxy.live.discard(self)
         if self.client_gone:
             proxy.metrics.aborts.labels(m, "client_gone").inc()
         elif self.lost:
