@@ -906,6 +906,7 @@ class _Executor:
             scrape_interval_s=load.scrape_interval_s,
             sample_gpu=self.exp.provider.kind in GPU_SAMPLING_PROVIDERS,
             extra_body=_extra_body(cell, profile),
+            keep_output=cell.store_output_text,
         )
 
     def provenance(

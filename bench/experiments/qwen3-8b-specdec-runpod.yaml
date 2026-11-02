@@ -1,9 +1,9 @@
 # PROPOSED 2026-11-01, NOT APPROVED: do not run without the user's approval of the cap.
 # Run runpod-smoke-specdec.yaml first. docs/perf/speculative-decoding.md explains the
-# study and has the plan and quote; docs/benchmark-lab.md lists it with the others.
+# study and has the plan, quote and post-run steps; docs/benchmark-lab.md lists it.
 #
-# Speculative decoding on Qwen3-8B, one RunPod Secure 1x L40S pod per host group, vLLM
-# v0.30.0, three rows:
+# Speculative decoding on Qwen3-8B, one RunPod Secure 1x L40S pod, vLLM v0.30.0, three
+# rows:
 #
 # - bf16: no speculation (the registry row as shipped; reference and gate baseline);
 # - bf16-ngram: n-gram prompt lookup, 3 draft tokens, n-gram windows of 2 to 4 tokens
@@ -12,7 +12,9 @@
 # - bf16-eagle3: RedHatAI's Qwen3-8B EAGLE3 head (Apache-2.0, trained on ShareGPT and
 #   UltraChat with thinking disabled, as these runs serve Qwen3: enable_thinking false),
 #   3 draft tokens as its card and 55102ddb's 70B head use. Pinned to the commit
-#   runpod-smoke-h200 already pins (the repo's head on 2026-11-01). ~2.0 GB.
+#   runpod-smoke-h200 already pins (the repo's head on 2026-11-01). ~2.0 GB. Its load
+#   runs keep the generated text (`store_output_text`), so `bench draft-misses` can show
+#   what the draft failed to predict (its 32,000-token vocabulary, loops, ...).
 #
 # Same draft length on both, so the two methods differ only in where drafts come from.
 #
@@ -20,13 +22,15 @@
 # measured at every load and the speed-up is read at equal load. Chat-sharegpt (the
 # leading, realistic workload): 0.25 req/s (~2 requests decoding at once), 1, 2 (bf16's
 # goodput in 7a8237d0 is 2.213 req/s, failing at 2.449) and 3 (past bf16's knee).
-# code-completion-256: the repo's templated Python, 1.5k-token prompts, 256-token
-# continuations (overridden from 48 so decode matters): the closest profile to "output
-# repeats the prompt", where n-gram lookup should work. No profile has real edits or
-# copied text; see the doc. 0.25, 1 and 2 req/s.
+# code-edit: real commits from CommitPackFT (Python, permissive licenses only): the file
+# and the commit message in, the whole edited file out, so the output copies long spans
+# of the prompt (median 87% of the new file's characters are in the old one), the case
+# n-gram lookup is built for. Prompts ~250 tokens, outputs ~225 (capped at 512 so the
+# 30 s drain covers a passing request); lighter than the templated code it replaces, so
+# its rates go higher: 0.5, 2 and 4 req/s.
 #
-# Windows: chat 180 s after 30 s of warmup (7a8237d0 used 255/45 for a 5% search; fixed
-# points need fewer requests), 60 s drain; code the same. 3 repetitions.
+# Windows: 180 s after 30 s of warmup (7a8237d0 used 255/45 for a 5% search; fixed points
+# need fewer requests), drain 60 s on chat and 30 s on code-edit. 3 repetitions.
 #
 # Quality: each speculative row gated in-run against bf16 on phase0-strict, 3 replicated
 # passes a side (IFEval's 2-point margin needs them, quality-gate.md). Speculation is
@@ -34,16 +38,16 @@
 # argmax), but the verify pass runs the target on 1 + k tokens per sequence, a different
 # kernel shape, so near-tie tokens can flip like batch noise: measured, not assumed.
 #
-# Budget (proposed, not approved): `bench plan` (2026-11-01) puts the pod at 7.32 h of the
-# 8 h TTL (RunPod's limit), estimate $8.06; the worst case to TTL is $8.81, under a $9 cap.
-# Past RunPod runs came in at 30-80% of plan, so expect ~$5-6.
+# Budget (proposed, not approved): `bench plan` (2026-11-02, overall cap $249.75) puts
+# the pod at 7.39 h of the 8 h TTL (RunPod's limit), estimate $8.14; the worst case to TTL
+# is $8.81, under a $9 cap. Past RunPod runs came in at 30-80% of plan: expect ~$5-6.
 name: qwen3-8b-specdec-runpod
-description: "Qwen3-8B on RunPod Secure 1x L40S, vLLM v0.30.0: no speculation vs n-gram vs EAGLE3 (3 draft tokens), chat and templated code at fixed loads, gated vs BF16."
+description: "Qwen3-8B on RunPod Secure 1x L40S, vLLM v0.30.0: no speculation vs n-gram vs EAGLE3 (3 draft tokens), chat and real code edits at fixed loads, gated vs BF16."
 model: qwen3-8b
 provider:
   kind: runpod
   # The BF16 checkpoint (16.4 GB) and the EAGLE3 head (2.0 GB) plus 35 GB of engine
-  # headroom; the dataset (0.7 GB) fits in the rest.
+  # headroom; the datasets (0.7 + 0.14 GB) fit in the rest.
   container_disk_gb: 80
 variants:
   - name: bf16
@@ -56,6 +60,7 @@ variants:
           prompt_lookup_max: 4
           prompt_lookup_min: 2
   - name: bf16-eagle3
+    store_output_text: true
     engine:
       args:
         speculative_config:
@@ -71,15 +76,15 @@ workloads:
       duration_s: 180
       warmup_s: 30
       drain_timeout_s: 60
-  - profile: code-completion
-    label: code-completion-256
-    overrides: {output_len: 256}
+  - profile: code-edit-commitpackft
+    label: code-edit
+    overrides: {max_output_len: 512}
     load:
       mode: open_loop
-      values: [0.25, 1, 2]
+      values: [0.5, 2, 4]
       duration_s: 180
       warmup_s: 30
-      # 256 tokens at the 50 ms TPOT target take ~13 s; 30 s drains any passing load.
+      # 512 tokens at the 50 ms TPOT target take ~26 s; 30 s drains any passing load.
       drain_timeout_s: 30
 repetitions: 3
 slo:

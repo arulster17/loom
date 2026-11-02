@@ -119,6 +119,24 @@ class ChatDatasetProfile(_Profile):
     ignore_eos: bool = True
 
 
+class EditDatasetProfile(_Profile):
+    """Code edits from CommitPackFT-format JSON lines (`old_contents`, `new_contents`,
+    `message`, `old_file`, `license`): the prompt gives the file and the commit message
+    and asks for the whole edited file; the new file sets the output length. A real edit
+    keeps most of the file, so the output copies long spans of the prompt (what n-gram
+    speculation needs, and what random or templated text cannot show)."""
+
+    kind: Literal["edit_dataset"] = "edit_dataset"
+    endpoint: Literal["chat"] = "chat"
+    path: str  # user-supplied; `~` and `$VARS` expanded
+    download: DatasetDownload | None = None  # how a remote host gets the file at `path`
+    licenses: list[str] | None = None  # keep only records whose `license` is listed
+    max_input_len: PositiveInt | None = None  # skip longer prompts
+    min_output_len: PositiveInt = 32  # skip tiny files
+    max_output_len: PositiveInt = 1024
+    ignore_eos: bool = True
+
+
 class NeedleProfile(_Profile):
     """Haystack of `context_len` tokens with one retrievable fact per request."""
 
@@ -169,6 +187,7 @@ WorkloadProfile = Annotated[
     SyntheticProfile
     | SharedPrefixProfile
     | ChatDatasetProfile
+    | EditDatasetProfile
     | NeedleProfile
     | CodeCompletionProfile
     | LongGenerationProfile

@@ -1007,6 +1007,67 @@ def waitlist_count_cmd(
         console.print(f"recorded in {record_count(docs, count, source)}")
 
 
+@app.command("draft-misses")
+def draft_misses_cmd(
+    experiment: Annotated[str, typer.Argument(help="Experiment id or unique prefix.")],
+    cell: Annotated[str, typer.Option(help="Cell key of a speculating config.")],
+    workload: Annotated[str | None, typer.Option(help="Only this workload label.")] = None,
+    threshold: Annotated[
+        float, typer.Option(help="Tokens per chunk at or below which a request counts as low.")
+    ] = 1.2,
+    out: Annotated[Path | None, typer.Option("--out", help="Write draft_misses.md/json.")] = None,
+    db: DbOpt = None,
+) -> None:
+    """Which outputs the EAGLE3 draft could not predict: per request, tokens per chunk
+    against the share of output tokens outside the draft head's vocabulary and how
+    repetitive the output is. Needs runs stored with the variant's `store_output_text`.
+    The head (repo, revision) is read from the runs' speculative config; its vocabulary
+    and the target's tokenizer are fetched from Hugging Face (a few hundred KB)."""
+    from huggingface_hub import hf_hub_download
+    from tokenizers import Tokenizer as HfTok
+
+    from loom_bench.report.draft_misses import analyze_outputs, draft_vocab_from_hub, markdown
+    from loom_bench.store import repo
+    from loom_bench.store.db import session_scope
+    from loom_bench.store.parquet import read_requests
+
+    with session_scope(_db(db)) as s:
+        (exp_id,) = _experiment_ids(s, [experiment])
+        runs = [
+            r
+            for r in repo.list_runs(s, experiment_id=exp_id)
+            if r.cell_key == cell
+            and (workload is None or r.workload == workload)
+            and r.status == "completed"
+            and r.requests_uri
+        ]
+    if not runs:
+        err.print(f"[red]no completed runs of cell {cell!r} in {exp_id}")
+        raise typer.Exit(EXIT_INVALID)
+    prov = runs[0].provenance
+    spec = (prov.get("engine") or {}).get("args", {}).get("speculative_config") or {}
+    if not spec.get("model") or not spec.get("revision"):
+        err.print(f"[red]cell {cell!r} has no draft model in its speculative config: {spec}")
+        raise typer.Exit(EXIT_INVALID)
+    model = prov["model"]
+    tok_path = hf_hub_download(model["repo"], "tokenizer.json", revision=model["revision"])
+    tok = HfTok.from_file(tok_path)
+    report = analyze_outputs(
+        ((str(r.id), rec) for r in runs for rec in read_requests(str(r.requests_uri))),
+        encode=lambda text: tok.encode(text, add_special_tokens=False).ids,
+        decode_token=lambda i: tok.decode([i]),
+        draft_vocab=draft_vocab_from_hub(spec["model"], spec["revision"]),
+        threshold=threshold,
+    )
+    text = markdown(report)
+    console.print(Markdown(text))
+    if out is not None:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "draft_misses.md").write_text(text + "\n")
+        (out / "draft_misses.json").write_text(report.model_dump_json(indent=2))
+        console.print(f"wrote {out / 'draft_misses.md'}, {out / 'draft_misses.json'}")
+
+
 # `bench roofline` and `bench profile ...` live in their own package.
 from loom_bench.profile.cli import register as _register_profile  # noqa: E402
 

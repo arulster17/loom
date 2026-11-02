@@ -32,6 +32,7 @@ KNOWN = {
     "long-context-needle": "ac455171c8511f6a7c523c233e4e1c034f0e00d68fc31073676601a093d11ad2",
     "long-generation": "f26ab19b2febd5efd2a0fe29002ba1702d248bb9cfc079fa1a6703076df4c70d",
     "trace-azure-code": "7feca782b47aa13bd634bf510d73de3b1162c77d3a03af0a7e2b16670250dfd6",
+    "code-edit-commitpackft": "105ee636a5e539707f46fc286dcc5adda59eb4939bab726dc50760e7cd19e6a8",
 }
 
 STORED_RUNS = (

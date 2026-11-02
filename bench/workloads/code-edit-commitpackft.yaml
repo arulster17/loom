@@ -1,0 +1,38 @@
+name: code-edit-commitpackft
+description: >-
+  Real code edits: a Python file from a GitHub commit and its commit message, asking for
+  the whole updated file; the file after the commit sets the output length. Edits keep
+  most of the file, so the output copies long spans of the prompt (the case where n-gram
+  speculation works). Permissively licensed repositories only.
+kind: edit_dataset
+content: realistic
+endpoint: chat
+path: ${LOOM_DATA_DIR}/commitpackft/data/python/data.jsonl
+# Pinned copy a remote GPU host downloads (public, ungated). sha256 is the file's Git LFS
+# oid, checked on download; 2026-11-02 the HF API listed this commit as the repo's head.
+# 56,025 Python commits; the licenses below keep 50,152. Shapes with the Qwen3-8B
+# tokenizer (1,500 sampled, 1,495 usable): prompt mean ~207 tokens (p10 49, p90 353),
+# output mean ~241 (p10 103, p90 367); the new file shares a median 87% of its characters
+# with the old one (mean 65%).
+download:
+  hf_dataset: bigcode/commitpackft
+  revision: fc56fe33c030c6daa414c2b112c932b8eed085e6
+  filename: data/python/data.jsonl
+  sha256: d167da37e1058371c48e057cd8815d03700c867dd8bcf58e61420d4dcd288d73
+  size_bytes: 135858935
+licenses: [mit, apache-2.0, bsd-3-clause, bsd-2-clause, isc, unlicense, cc0-1.0]
+max_input_len: 3072
+min_output_len: 32
+max_output_len: 1024
+ignore_eos: true
+seed: 0
+dataset:
+  name: CommitPackFT, Python (data/python/data.jsonl)
+  source: https://huggingface.co/datasets/bigcode/commitpackft
+  revision: fc56fe33c030c6daa414c2b112c932b8eed085e6
+  license: >-
+    HF card: MIT. Each record keeps its repository's license; this profile uses only MIT,
+    Apache-2.0, BSD-2/3-Clause, ISC, Unlicense and CC0 records. Loom uses them only as
+    request text for load (prompt in, lengths out), never ships or trains on them, and
+    publishes only latency and cost.
+  license_url: https://huggingface.co/datasets/bigcode/commitpackft
