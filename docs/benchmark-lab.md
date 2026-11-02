@@ -190,7 +190,7 @@ prefix-cache hits from repeated prompts). Arrivals and prompts both use it.
 Phase 0 has $150 of GPU money in total and $50 per experiment. Five independent rails keep
 it there.
 
-1. **Caps** (`bench/budget.yaml`): `per_experiment_cap` $50, `overall_cap` $149.75 (lowered
+1. **Caps** (`bench/budget.yaml`): `per_experiment_cap` $50, `overall_cap` $249.75 (raised from $149.75 on 2026-11-02; lowered
    by hand for spend made outside the results DB). An experiment's `budget.max_spend` may
    be lower, never higher. The effective cap is
    `min(max_spend, per_experiment_cap, overall_cap - billable spend already in the DB)`.
