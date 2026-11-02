@@ -1,0 +1,87 @@
+# PROPOSED 2026-11-01, NOT APPROVED, NOT RUN: run runpod-smoke-trtllm.yaml first.
+#
+# TensorRT-LLM against vLLM on Qwen3-8B BF16, RunPod Secure 1x L40S, on the Lab's realistic
+# chat workload (leading) and fixed-1k-1k, at the same SLO, windows and search shape as the
+# config sweep (qwen3-8b-config-sweep-runpod, 7a8237d0), so both rows compare with that
+# sweep's bf16 row point for point. Explainer: docs/perf/tensorrt-llm.md.
+#
+# - vllm-bf16: vLLM v0.30.0 at the registry defaults, the reference row and the gate's
+#   baseline (it captures the divergence reference). Its config hash is the sweep's bf16
+#   cell (7a203a3f...; bench/tests/runner/test_trtllm_plan.py), so this is also a
+#   same-config repeat of 7a8237d0's chat 2.213 / 1k-1k 1.0 req/s, on a fresh pod on the
+#   same day as the candidate: pod-to-pod variation stays out of the engine comparison.
+# - trtllm-bf16: TensorRT-LLM 1.2.1 (latest stable, 2026-04-20), `trtllm-serve` on its
+#   default PyTorch backend, which loads the HF checkpoint directly (no TensorRT engine
+#   build), at engine defaults, plus what Loom always sets: xgrammar for response_format
+#   (vLLM's default too), the Prometheus endpoint (return_perf_metrics, as SGLang always
+#   gets --enable-metrics), the Qwen3 tool parser and the 32768 context cap.
+#   Image nvcr.io/nvidia/tensorrt-llm/release:1.2.1, multi-arch index digest below
+#   (anonymous pull, no NGC key; CUDA 13.1, needs driver >= 580: the default
+#   allowedCudaVersions ["13.0"] hosts qualify through CUDA minor-version compatibility).
+#
+# Engine defaults that differ, recorded not tuned (docs/perf/tensorrt-llm.md): TRT-LLM
+# admits a request only when its whole KV budget (prompt + max_tokens) is free
+# (GUARANTEED_NO_EVICT; vLLM admits optimistically and preempts), does not chunk prefills
+# (vLLM always does), caps a step at 8192 tokens (vLLM: 2048 on this GPU) and sizes its
+# KV cache from 90% of the memory left after the weights (vLLM: 90% of the GPU).
+#
+# Quality: phase0, not phase0-strict, with three replicated passes per cell as the sweep.
+# TRT-LLM 1.2.1 rejects a tool's `strict` field (extra="forbid" in its request schema), so
+# tool_calling_strict would fail every item and with it the whole eval job; phase0's four
+# tasks pair item for item with the sweep's. What the gate will say, before paying:
+# - divergence cannot be measured: 1.2.1's /v1/completions rejects `logprobs` (and no
+#   version returns prompt logprobs, which the teacher-forced check needs), so the scoring
+#   half fails (`divergence_failed`) and the gate comes out INCONCLUSIVE, blocked, whatever
+#   the task scores. The task scores and samples are stored, so the gate can be re-decided
+#   (`bench quality gate`) if the policy for engines without prompt logprobs changes.
+# - json_schema: 1.2.1 passes response_format.json_schema to xgrammar as the schema
+#   itself, OpenAI's {name, schema, strict} wrapper included (fixed in 1.4.0rc2), so its
+#   constraint is not the item's schema; the score measures what an OpenAI client gets.
+#
+# Budget (`bench plan`, prices.yaml $1.1010/h with disk): see max_spend below.
+name: qwen3-8b-trtllm-vs-vllm-runpod
+description: Qwen3-8B BF16 on RunPod Secure 1x L40S, TensorRT-LLM 1.2.1 (PyTorch backend) vs vLLM v0.30.0, chat and 1k/1k at SLO, gated vs vLLM BF16.
+model: qwen3-8b
+provider:
+  kind: runpod
+  container_disk_gb: 80
+variants:
+  - name: vllm-bf16
+  - name: trtllm-bf16
+    engine:
+      name: trtllm
+      version: "1.2.1"
+      image: nvcr.io/nvidia/tensorrt-llm/release@sha256:33cd085b772947bd22b7273886539331420404e5d2a4a039945241945ff927b9
+workloads:
+  # Searches start just above vLLM BF16's measured knees (chat 2.213, failing at 2.449;
+  # 1k-1k 1.0, failing at 1.107) and step by 1.5x, so vLLM brackets its knee in a step or
+  # two and TRT-LLM climbs or descends from the same place.
+  - profile: chat-sharegpt
+    load:
+      mode: open_loop
+      search: {lo: 2.25, hi: 16, rel_tol: 0.05, max_points: 5, scale: geometric, step: 1.5, descend: 3}
+      duration_s: 255
+      warmup_s: 45
+      drain_timeout_s: 60
+  - profile: fixed-1k-1k
+    load:
+      mode: open_loop
+      search: {lo: 1.0, hi: 6, rel_tol: 0.05, max_points: 4, scale: geometric, step: 1.5, descend: 2}
+      duration_s: 240
+      warmup_s: 60
+      drain_timeout_s: 60
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+quality:
+  suite: qwen3-8b
+  subset: phase0
+  baseline_variant: vllm-bf16
+  replicates: 3
+budget:
+  max_spend: "$11"
+  ttl_minutes: 285
+  accrual_interval_s: 15
+seed: 0
