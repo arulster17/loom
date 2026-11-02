@@ -29,8 +29,6 @@ smoke: true
 provider:
   kind: runpod
   container_disk_gb: 80
-  # L40S Secure stock sits on 13.0-13.2 drivers; vLLM's CUDA 13.0 userspace runs on all three.
-  allowed_cuda_versions: ["13.0", "13.1", "13.2"]
 variants:
   - name: bf16
     engine:
