@@ -2,24 +2,26 @@
 #
 # The speculative-decoding study's paths at smoke scale on the same pod shape (RunPod
 # Secure 1x L40S): the same provider block, variants (so the same config hashes and
-# launches), workload profiles and overrides, repetitions, SLO and quality section
-# (phase0-strict, 3 replicated passes, both speculative rows gated in-run vs bf16), with
-# tasks capped at 4 items and 10 s windows.
+# launches, and the EAGLE3 row's stored output text), workload profiles and overrides,
+# repetitions, SLO and quality section (phase0-strict, 3 replicated passes, both
+# speculative rows gated in-run vs bf16), with tasks capped at 4 items and 10 s windows.
 #
 # What it runs that no earlier run has: vLLM's n-gram proposer; EAGLE3 on Qwen3-8B on an
 # L40S (the 70B EAGLE3 runs were TP=4) with its head downloaded on a warm restart; the
 # speculative-decoding Prometheus counters scraped into the run summary (check that no
 # run lists `spec_decode` in `server.missing`, and that the two speculative rows show
 # accepted tokens per step); the replicated phase0-strict passes and divergence scoring
-# against a speculating engine; code-completion with 256-token continuations on a pod.
+# against a speculating engine; the CommitPackFT edit dataset (its pinned download on the
+# pod, the edit prompts); load runs that keep output text (the EAGLE3 row's Parquet rows
+# carry `output_text`; `bench draft-misses <id> --cell bf16-eagle3` reads them).
 #
 # Chat at 12 req/s with full-length replies overloads every row, so each speculating
 # engine also has requests cancelled at the drain timeout (vLLM aborting requests that
 # hold drafts), as the real run's 3 req/s point may; 0.5 req/s is a passing-scale point.
 # The real run is fixed loads (no search), so neither is this smoke.
 #
-# Budget (proposed, not approved): `bench plan` (2026-11-01) puts the pod at 1.47 h of a
-# 100 min TTL, estimate $1.62; the worst case to TTL is $1.83, under a $2 cap.
+# Budget (proposed, not approved): `bench plan` (2026-11-02) puts the pod at 1.49 h of a
+# 100 min TTL, estimate $1.64; the worst case to TTL is $1.83, under a $2 cap.
 name: runpod-smoke-specdec
 description: "The Qwen3-8B speculative decoding study at smoke scale on 1x L40S: bf16, n-gram and EAGLE3, every code path once."
 model: qwen3-8b
@@ -38,6 +40,7 @@ variants:
           prompt_lookup_max: 4
           prompt_lookup_min: 2
   - name: bf16-eagle3
+    store_output_text: true
     engine:
       args:
         speculative_config:
@@ -53,12 +56,12 @@ workloads:
       duration_s: 10
       warmup_s: 2
       drain_timeout_s: 15
-  - profile: code-completion
-    label: code-completion-256
-    overrides: {output_len: 256}
+  - profile: code-edit-commitpackft
+    label: code-edit
+    overrides: {max_output_len: 512}
     load:
       mode: open_loop
-      values: [1]
+      values: [2]
       duration_s: 10
       warmup_s: 2
       drain_timeout_s: 15

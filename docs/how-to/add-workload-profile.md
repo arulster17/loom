@@ -15,6 +15,7 @@ set per experiment.
 | `synthetic` | completions or chat | `input_len`, `output_len`, `range_ratio` (lengths uniform in [len·(1−r), len·(1+r)], 0 ≤ r < 1), `ignore_eos` |
 | `shared_prefix` | chat | `input_len`, `output_len`, `range_ratio`, `prefix_share` (0-0.95 of the prompt shared), `num_prefix_groups`, `ignore_eos` |
 | `chat_dataset` | chat | `path` (ShareGPT format), `max_input_len`, `min_output_len`, `max_output_len`, `ignore_eos` |
+| `edit_dataset` | chat | `path` (CommitPackFT JSON lines: `old_file`, `old_contents`, `new_contents`, `message`, `license`), `licenses` (keep only these), `max_input_len`, `min_output_len`, `max_output_len`, `ignore_eos`; the prompt asks for the whole edited file, the new file sets the output length |
 | `long_context_needle` | completions or chat | `context_len` (≥ 128), `depths` (0-1), `output_len` |
 | `code_completion` | completions | `input_len`, `output_len`, `range_ratio`, `ignore_eos` |
 | `long_generation` | completions or chat | `input_len` (≥ 32), `output_len`, `range_ratio`, `ignore_eos` |
@@ -49,7 +50,7 @@ seed: 0
 Keep `input_len + output_len` within the smallest `max_context` you will run it against
 (see `fixed-32k-1k.yaml`, which leaves 32 tokens of slack for special tokens).
 
-**Datasets.** Profiles that read files (`chat_dataset`, `trace`) never ship the data.
+**Datasets.** Profiles that read files (`chat_dataset`, `edit_dataset`, `trace`) never ship the data.
 Use `${LOOM_DATA_DIR}/...` in `path` (`~` and environment variables are expanded) and
 record where it comes from and its license:
 
@@ -65,7 +66,7 @@ dataset:
 Check the license allows benchmarking and publishing derived numbers before any result
 is published.
 
-A cloud GPU host has no `${LOOM_DATA_DIR}`. For a `chat_dataset` profile on RunPod, add a
+A cloud GPU host has no `${LOOM_DATA_DIR}`. For a `chat_dataset` or `edit_dataset` profile on RunPod, add a
 `download:` block naming a public Hugging Face file pinned to a commit and its sha256 (the
 LFS oid in `https://huggingface.co/api/datasets/<org>/<name>/tree/<revision>`); the pod
 fetches and checks it before the first job (`chat-sharegpt.yaml` is the example), and the

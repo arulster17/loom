@@ -100,16 +100,42 @@ def test_every_speculative_row_is_gated_against_bf16_in_run_on_three_passes():
     assert (q.suite, q.subset, q.replicates, q.limit) == ("qwen3-8b", "phase0-strict", 3, None)
 
 
-def test_fixed_loads_on_chat_and_templated_code():
+def test_fixed_loads_on_chat_and_real_code_edits():
     exp = load_experiment(REAL)
     chat, code = exp.workloads
     assert chat.profile == "chat-sharegpt" and chat.load.search is None
     assert chat.load.values == [0.25, 1, 2, 3]  # bf16's 7a8237d0 knee is 2.213 req/s
-    assert code.profile == "code-completion" and code.label == "code-completion-256"
-    assert code.overrides == {"output_len": 256} and code.load.values == [0.25, 1, 2]
+    assert code.profile == "code-edit-commitpackft" and code.label == "code-edit"
+    assert code.overrides == {"max_output_len": 512} and code.load.values == [0.5, 2, 4]
     for w in (chat, code):
         assert w.load.mode.value == "open_loop"
         assert (w.load.duration_s, w.load.warmup_s) == (180, 30)
+    # A passing request's 512 tokens at the 50 ms TPOT target finish inside the drain.
+    assert code.load.drain_timeout_s > 512 * 0.050
+    profile = code.resolve()
+    assert profile.download is not None and profile.dataset is not None
+    assert profile.download.revision == profile.dataset.revision
+    assert set(profile.licenses or ()) <= {
+        "mit",
+        "apache-2.0",
+        "bsd-3-clause",
+        "bsd-2-clause",
+        "isc",
+        "unlicense",
+        "cc0-1.0",
+    }
+
+
+def test_only_the_eagle3_row_stores_output_text_and_it_moves_no_hash():
+    exp = load_experiment(REAL)
+    cells = expand(exp, REGISTRY)
+    assert [c.store_output_text for c in cells] == [False, False, True]
+    plain = exp.model_copy(
+        update={
+            "variants": [v.model_copy(update={"store_output_text": False}) for v in exp.variants]
+        }
+    )
+    assert [c.config_hash for c in expand(plain, REGISTRY)] == [c.config_hash for c in cells]
     assert exp.repetitions == 3
     assert exp.slo.model_dump(exclude_none=True) == {
         "ttft_ms": {"p95": 1000.0},
@@ -164,6 +190,29 @@ def test_the_smoke_runs_every_path_of_the_real_run():
     (s_chat, _), (r_chat, _) = smoke.workloads, real.workloads
     assert max(s_chat.load.values) > 3 * max(r_chat.load.values)
     assert s_chat.overrides == r_chat.overrides == {}  # full-length replies
+
+
+def test_a_pod_fetches_the_pinned_edit_dataset_and_reads_it_there():
+    from loom_bench.providers.runpod import RunpodProvider
+
+    (_, code) = load_experiment(SMOKE).workloads
+    profile = code.resolve()
+    workload, data = RunpodProvider._pod_dataset(profile.model_dump(mode="json"))
+    assert data["DATA_URL"] == (
+        "https://huggingface.co/datasets/bigcode/commitpackft/resolve/"
+        "fc56fe33c030c6daa414c2b112c932b8eed085e6/data/python/data.jsonl"
+    )
+    assert data["DATA_SHA256"] == profile.download.sha256
+    assert workload["path"] == data["DATA_PATH"] and workload["path"].endswith("/data.jsonl")
+    # The planner charges the download once and each run's dataset read.
+    from loom_bench.plan import EDIT_DATASET_JOB_S, RUNPOD_TIMING
+
+    (host,) = _plan(SMOKE).hosts
+    fetch = [s for s in host.steps if s.kind == "dataset" and s.label.endswith("/ code-edit")]
+    assert len(fetch) == 1 and fetch[0].seconds > 0
+    (bf16_code, *_) = [s for s in host.steps if s.label == "bf16 / code-edit: 1 pts x 3 reps"]
+    per_run = 10 + 15 + RUNPOD_TIMING.run_overhead_s + EDIT_DATASET_JOB_S
+    assert bf16_code.seconds == pytest.approx(3 * per_run)
 
 
 def test_the_smoke_fits_its_cap_to_ttl():

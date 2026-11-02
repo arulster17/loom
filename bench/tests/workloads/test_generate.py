@@ -189,3 +189,52 @@ def test_every_generative_shipped_profile_builds():
                  "long-context-needle", "code-completion", "long-generation"]:  # fmt: skip
         reqs = build_requests(load_profile(name), TOK, 2)
         assert all(prompt_tokens(r) == r.expected_prompt_tokens for r in reqs)
+
+
+def write_commitpack(path):
+    rows = [
+        {"old_file": "a.py", "message": "Rename x to y", "license": "mit",
+         "old_contents": "x = 1\nprint(x)\n" * 4, "new_contents": "y = 1\nprint(y)\n" * 4},
+        {"old_file": "b.py", "message": "Add a docstring", "license": "apache-2.0",
+         "old_contents": "def f():\n    return 1\n",
+         "new_contents": 'def f():\n    """One."""\n    return 1\n'},
+        {"old_file": "c.py", "message": "Unchanged", "license": "mit",
+         "old_contents": "z = 2\n", "new_contents": "z = 2\n"},  # no edit: skipped
+        {"old_file": "d.py", "message": "Copyleft", "license": "agpl-3.0",
+         "old_contents": "q = 3\nq = 3\n", "new_contents": "q = 4\nq = 4\n"},  # filtered
+        {"old_file": "e.py", "message": "", "license": "mit",
+         "old_contents": "r = 1\n", "new_contents": "r = 2\n"},  # no message: skipped
+    ]  # fmt: skip
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+
+def test_edit_dataset_prompts_and_reference_lengths(tmp_path):
+    f = tmp_path / "data.jsonl"
+    write_commitpack(f)
+    p = load_profile("code-edit-commitpackft", {"path": str(f), "min_output_len": 4})
+    reqs = build_requests(p, TOK, 2)
+    by_file = {r.payload["messages"][0]["content"].split("`")[1]: r for r in reqs}
+    assert set(by_file) == {"a.py", "b.py"}
+    a = by_file["a.py"]
+    text = a.payload["messages"][0]["content"]
+    assert text.startswith("Apply this change to the file `a.py`: Rename x to y")
+    assert "x = 1\nprint(x)" in text and text.endswith("```")
+    assert a.max_tokens == TOK.count("y = 1\nprint(y)\n" * 4)
+    assert a.expected_prompt_tokens == TOK.count(text) and a.payload["ignore_eos"] is True
+    assert a.endpoint == "chat" and set(a.meta) == {"edit_index"}
+    with pytest.raises(ValueError, match="only 2 usable edits"):
+        build_requests(p, TOK, 3)
+    # Without the license filter the copyleft edit is usable too.
+    assert len(build_requests(p.model_copy(update={"licenses": None}), TOK, 3)) == 3
+
+
+def test_edit_dataset_skips_files_too_long_and_a_missing_file(tmp_path):
+    f = tmp_path / "data.jsonl"
+    write_commitpack(f)
+    over = {"path": str(f), "min_output_len": 4, "max_output_len": 20}
+    (r,) = build_requests(load_profile("code-edit-commitpackft", over), TOK, 1)
+    # The longer edit's file is skipped, never cut short.
+    assert r.payload["messages"][0]["content"].split("`")[1] == "b.py"
+    missing = load_profile("code-edit-commitpackft", {"path": "/nonexistent/data.jsonl"})
+    with pytest.raises(FileNotFoundError, match="nonexistent"):
+        build_requests(missing, TOK, 1)

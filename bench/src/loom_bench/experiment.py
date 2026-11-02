@@ -119,6 +119,14 @@ RUNPOD_GPU_TYPE_IDS: dict[str, str] = {
 }
 
 
+# The values RunPod's REST API accepts in a pod's `allowedCudaVersions` (its schema enum,
+# from a 400 on 2026-11-02 that rejected "13.1"/"13.2": "value must be one of '13.0',
+# '12.9', ... '11.8'"). Hosts whose drivers report a newer CUDA still fall under "13.0".
+RunpodCudaVersion = Literal[
+    "13.0", "12.9", "12.8", "12.7", "12.6", "12.5", "12.4", "12.3", "12.2", "12.1", "12.0", "11.8"
+]
+
+
 class RunpodProviderSpec(_Strict):
     """RunPod pods, always on-demand (uninterruptible). The engine runs as the pod's
     own container, so each engine image gets its own pod (see `hardware_for`)."""
@@ -129,8 +137,10 @@ class RunpodProviderSpec(_Strict):
     gpu_type_id: str | None = None  # default: RUNPOD_GPU_TYPE_IDS[hardware.gpu]
     container_disk_gb: PositiveInt = 80
     # CUDA versions the host driver must support; the pinned vLLM image needs 13.0.
-    allowed_cuda_versions: Annotated[list[str], Field(min_length=1)] = Field(
-        default_factory=lambda: ["13.0"]
+    # RunPod's REST API accepts only `RunpodCudaVersion` values here (newest "13.0", which
+    # hosts with newer drivers fall under): anything else is a 400 at pod create.
+    allowed_cuda_versions: Annotated[list[RunpodCudaVersion], Field(min_length=1)] = Field(
+        default_factory=lambda: list[RunpodCudaVersion](["13.0"])
     )
     data_center_ids: Annotated[list[str], Field(min_length=1)] | None = None  # None: any
     # Set in the engine's environment (validated: no secret names). It is part of the
@@ -215,6 +225,10 @@ class Variant(_Strict):
     # one host's TTL limit is split this way. Only the host key changes, never the
     # config hash, so a cell's results compare with the same config run elsewhere.
     host_group: Slug | None = None
+    # Keep each load request's generated text in its per-request Parquet row
+    # (`output_text`), e.g. to see what a speculative draft failed to predict. Not
+    # serving config: the config hash does not move; runs record it in the spec.
+    store_output_text: bool = False
 
 
 class Sample(_Strict):
@@ -554,6 +568,8 @@ class Cell(BaseModel):
     tokenizer: TokenizerSpec
     config: dict[str, Any]
     config_hash: str
+    # The variant's `store_output_text`: load jobs keep generated text (not hashed).
+    store_output_text: bool = False
 
     @property
     def gpus(self) -> int:
@@ -600,7 +616,9 @@ def apply_variant(base: ModelSpec, variant: Variant) -> dict[str, Any]:
     args; an arg set to null is removed; the registry's max_context is a cap.
     """
     doc = base.model_dump(mode="json")
-    patch = variant.model_dump(exclude_none=True, exclude={"name", "model", "mock", "host_group"})
+    patch = variant.model_dump(
+        exclude_none=True, exclude={"name", "model", "mock", "host_group", "store_output_text"}
+    )
     engine = patch.pop("engine", {})
     args = (variant.engine.args if variant.engine else None) or {}
     if "name" in engine and engine["name"] != base.engine.name:
@@ -811,6 +829,7 @@ def build_cell(
     spec: ModelSpec,
     mock: MockConfig | None,
     host_group: str | None = None,
+    store_output_text: bool = False,
 ) -> Cell:
     launch = _launch(exp, spec, mock)
     host_key, hardware = hardware_for(exp, spec)
@@ -833,6 +852,7 @@ def build_cell(
         tokenizer=tokenizer_for(exp, spec),
         config=config,
         config_hash=config_hash(config),
+        store_output_text=store_output_text,
     )
 
 
@@ -871,6 +891,7 @@ def expand(exp: Experiment, registry: Registry) -> list[Cell]:
                         spec=spec,
                         mock=mock,
                         host_group=variant.host_group,
+                        store_output_text=variant.store_output_text,
                     )
                 )
             except ExpansionError as e:  # already names the problem

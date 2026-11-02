@@ -1,36 +1,40 @@
-# PROPOSED 2026-11-01, NOT APPROVED, NOT RUN: run before qwen3-8b-trtllm-vs-vllm-runpod.
+# PROPOSED 2026-11-02, NOT APPROVED, NOT RUN: run before qwen3-8b-trtllm-vs-vllm-runpod.
 #
-# The TensorRT-LLM vs vLLM run at smoke scale: the same model, provider block, both
-# engine images by the same digests (one Secure 1x L40S pod each), both workloads
-# (chat-sharegpt with its pinned dataset download, fixed-1k-1k) under the same geometric
-# search shape with a descent, the same 3 repetitions and SLO, the same quality subset
-# (phase0) with 3 replicated passes, every task capped at 4 items, and the same gate
-# (trtllm-bf16 vs vllm-bf16). bench/tests/runner/test_trtllm_plan.py fails if the two
-# drift apart.
+# The TensorRT-LLM vs vLLM run at smoke scale: the same model, provider block, the same
+# three variants (vLLM BF16, TRT-LLM 1.4.0rc2 BF16, TRT-LLM FP8 ModelOpt) on the same three
+# pods with the same image digests, both workloads (chat-sharegpt with its pinned dataset
+# download, fixed-1k-1k) under the same geometric search shape with a descent, the same 3
+# repetitions and SLO, the same quality subset (phase0-strict) with 3 replicated passes,
+# every task capped at 4 items, and the same gates (both TRT-LLM cells vs vllm-bf16).
+# bench/tests/runner/test_trtllm_plan.py fails if the two drift apart.
 #
 # What only this can prove before the run pays for hours (docs/perf/tensorrt-llm.md):
-# - the 20.9 GB TensorRT-LLM image pulls on RunPod without an NGC key, its CUDA 13.1
+# - the 17.3 GB TensorRT-LLM image pulls on RunPod without an NGC key, its CUDA 13.4
 #   userspace runs on the pod's driver (CUDA 13.0 hosts, minor-version compatibility),
 #   and its python3 downloads the weights (huggingface_hub);
-# - the launcher writes the options file and trtllm-serve 1.2.1 starts on the PyTorch
-#   backend from the HF snapshot directory, offline, on sm_89 (an open issue, NVIDIA
-#   TensorRT-LLM #16330, reports FlashInfer's PDL path failing on an sm_89 L20 with
-#   1.2.0; if it hits, `provider.engine_env: {TRTLLM_ENABLE_PDL: "0"}` goes into both
-#   specs), answers /health and a first completion, and serves /prometheus/metrics;
-# - load jobs stream from it (chat and completions, ignore_eos, chat_template_kwargs,
-#   per-chunk usage) and the rate search runs;
-# - the eval tasks run against it: gsm8k and ifeval through lm-eval, tool_calling through
-#   its qwen3 tool parser, json_schema through xgrammar; the divergence score is expected
-#   to fail (`divergence_failed`: 1.2.1 rejects completions logprobs) and the gate to come
-#   out INCONCLUSIVE with that reason, not with a failed eval job.
+# - the launcher writes the options file and starts trtllm-serve through Loom's
+#   prompt-logprobs wrapper (`python3 -c` with loom_bench/trtllm_scorer.py) on the
+#   PyTorch backend from the HF snapshot directory, offline, on sm_89, for BF16 and for
+#   the ModelOpt FP8 checkpoint with its FP8 KV cache (TRT-LLM's docs mark per-tensor FP8
+#   supported on Ada but also say its FP8 targets Hopper and Blackwell: this settles it);
+#   it answers /health and a first completion and serves /prometheus/metrics with gauges;
+# - load jobs stream from it and the rate search runs;
+# - every eval task runs against it: gsm8k and ifeval through lm-eval, tool_calling and
+#   tool_calling_strict through its qwen3 parser (strict via structural tags),
+#   json_schema through xgrammar; and the divergence check scores both TRT-LLM cells
+#   through the prompt-logprobs route against vLLM's captured reference, including the
+#   two hard prompts whose characters split across byte-level tokens.
 #
-# Check after it: both pods' `engine_started` with `job_isolation ok`; TRT-LLM's cold-start
-# stages (image_pulled time is the number to put in plan.ENGINE_START_EXTRA_S); every
-# load run ok and a second search point per workload; `server.missing` for trtllm lists
-# exactly running, waiting, kv_usage, preemptions and prefix_cache_hit_rate (queue_time
-# present, so the Prometheus path works); a `quality` event per cell naming gsm8k, ifeval,
-# tool_calling and json_schema with 3 replicates, no `quality_failed`; trtllm's
-# `divergence_failed` names "logprobs is not supported"; a `gate` event for trtllm-bf16.
+# Check after it: three pods' `engine_started` with `job_isolation ok`; TRT-LLM's
+# cold-start stages (image_pulled is the number for plan.ENGINE_START_EXTRA_S); every load
+# run ok and a second search point per workload; `server.missing` for trtllm lists only
+# preemptions (running, waiting, kv_usage, prefix_cache_hit_rate and queue_time present);
+# a `quality` event per cell with all five phase0-strict tasks and 3 replicates; no
+# `quality_failed` or `divergence_failed`; a `gate` event for trtllm-bf16 and trtllm-fp8
+# whose divergence reads "KL ... nats, top-1 ...%" (inconclusive at 4 items is expected).
+# If an engine start fails with FlashInfer's "requires .target sm_90" (TRT-LLM issue
+# #16330, seen on an sm_89 L20 with 1.2.0), add `provider.engine_env: {TRTLLM_ENABLE_PDL:
+# "0"}` to both specs.
 name: runpod-smoke-trtllm
 description: The Qwen3-8B TensorRT-LLM vs vLLM RunPod run at smoke scale, every code path once.
 model: qwen3-8b
@@ -43,8 +47,11 @@ variants:
   - name: trtllm-bf16
     engine:
       name: trtllm
-      version: "1.2.1"
-      image: nvcr.io/nvidia/tensorrt-llm/release@sha256:33cd085b772947bd22b7273886539331420404e5d2a4a039945241945ff927b9
+      version: "1.4.0rc2"
+      image: nvcr.io/nvidia/tensorrt-llm/release@sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a
+  - name: trtllm-fp8
+    model: qwen3-8b-fp8-modelopt
+    host_group: b
 workloads:
   - profile: chat-sharegpt
     overrides: {max_output_len: 64}
@@ -69,14 +76,14 @@ slo:
   max_error_rate: 0.01
 quality:
   suite: qwen3-8b
-  subset: phase0
+  subset: phase0-strict
   baseline_variant: vllm-bf16
   replicates: 3
   limit: 4
 # Each pod's TTL holds `bench plan`'s estimate with margin; max_spend holds the worst
-# case of both pods living to their TTL.
+# case of all three pods living to their TTL.
 budget:
-  max_spend: "$2.75"
+  max_spend: "$4"
   ttl_minutes: 70
   accrual_interval_s: 15
 seed: 0

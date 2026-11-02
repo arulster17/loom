@@ -15,9 +15,11 @@ from typing import Any
 from loom_bench.client.openai_stream import Endpoint, PreparedRequest
 from loom_bench.loadgen.arrivals import read_trace
 from loom_bench.tokenize import Tokenizer
+from loom_bench.workloads.commitpack import read_edits
 from loom_bench.workloads.profiles import (
     ChatDatasetProfile,
     CodeCompletionProfile,
+    EditDatasetProfile,
     LongGenerationProfile,
     NeedleProfile,
     SharedPrefixProfile,
@@ -151,6 +153,31 @@ def _chat_dataset(
     raise ValueError(f"{p.name}: only {len(out)} usable conversations in {p.path}, need {n}")
 
 
+def _edit_dataset(
+    p: EditDatasetProfile, tok: Tokenizer, n: int, rng: random.Random
+) -> list[PreparedRequest]:
+    if n == 0:
+        return []
+    edits = read_edits(p.path, p.licenses)
+    order = list(range(len(edits)))
+    rng.shuffle(order)
+    out = []
+    for idx in order:
+        edit = edits[idx]
+        prompt = edit.prompt
+        in_len = tok.count(prompt)
+        ref_len = tok.count(edit.new)
+        if (p.max_input_len and in_len > p.max_input_len) or ref_len < p.min_output_len:
+            continue
+        if ref_len > p.max_output_len:
+            continue  # a cut-off file would not be the edit; skip rather than truncate
+        meta = {"edit_index": idx}
+        out.append(_request(p, "chat", prompt, in_len, ref_len, p.ignore_eos, meta))
+        if len(out) == n:
+            return out
+    raise ValueError(f"{p.name}: only {len(out)} usable edits in {p.path}, need {n}")
+
+
 _NEEDLE_ADJ = ("amber", "cobalt", "crimson", "golden", "silver", "violet", "emerald", "scarlet")
 _NEEDLE_NOUN = ("falcon", "harbor", "lantern", "meadow", "orchid", "summit", "tiger", "willow")
 
@@ -268,6 +295,7 @@ _BUILDERS: dict[type, Callable[..., list[PreparedRequest]]] = {
     SyntheticProfile: _synthetic,
     SharedPrefixProfile: _shared_prefix,
     ChatDatasetProfile: _chat_dataset,
+    EditDatasetProfile: _edit_dataset,
     NeedleProfile: _needle,
     CodeCompletionProfile: _code_completion,
     LongGenerationProfile: _long_generation,

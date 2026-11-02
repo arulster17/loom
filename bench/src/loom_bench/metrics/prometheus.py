@@ -188,8 +188,9 @@ SGLANG_METRICS = EngineMetricNames(
 
 # TensorRT-LLM, scraped at /prometheus/metrics (engines.METRICS_PATHS). v1.2.1
 # (tensorrt_llm/metrics/collector.py) exports only request histograms: of these, the
-# queue-time histogram. The gauges are 1.4.0rc2's names (same file at that tag), so a
-# later pin fills them in; on 1.2.1 they are listed in `missing`. There is no preemption
+# queue-time histogram. The gauges are 1.4.0rc2's names (same file at that tag), fed from
+# iteration stats (engines.trtllm_options sets enable_iter_perf_stats); on 1.2.1 they are
+# listed in `missing`. There is no preemption
 # counter: trtllm-serve schedules GUARANTEED_NO_EVICT, which never preempts. Prefix reuse
 # is counted in KV blocks, not tokens, so only the hit-rate gauge is used.
 TRTLLM_METRICS = EngineMetricNames(

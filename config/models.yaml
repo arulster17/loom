@@ -221,3 +221,52 @@ models:
     routing_tier: 1
     status: preview
     base_model: qwen3-8b  # quantization of qwen3-8b: compared with its list prices
+
+  # Qwen3-8B FP8 for TensorRT-LLM: NVIDIA's ModelOpt checkpoint, its own labeled row,
+  # gated against the BF16 entry (qwen3-8b, served by vLLM: the reference row). RedHat's
+  # compressed-tensors checkpoint (qwen3-8b-fp8) does not load in TensorRT-LLM, and TRT-LLM
+  # does not quantize BF16 weights on load, so its FP8 path needs this checkpoint. FP8
+  # weights and FP8 activations with static per-tensor scales (`quant_algo: FP8`, the
+  # format TRT-LLM 1.4.0rc2's quantization matrix marks supported on Ada), lm_head in
+  # BF16, and a calibrated FP8 KV cache (`kv_cache_quant_algo: FP8`), so the row serves an
+  # FP8 KV cache too and says so (`kv_cache_dtype: fp8`); the sweep's vLLM FP8-KV cells had
+  # no calibrated scales. Only commit is the pin (2025-09-09); 2 safetensors shards, no
+  # .bin/.pt/pickle. tokenizer.json and the chat template (chat_template.jinja) are
+  # identical to the BF16 pin's; tokenizer_config.json names <|endoftext|> as EOS where
+  # BF16's names <|im_end|>, and generation_config.json lists both (151645, 151643) as
+  # stop tokens, as BF16's does.
+  - id: qwen3-8b-fp8-modelopt
+    display_name: Qwen3 8B FP8 (ModelOpt, FP8 KV)
+    hf:
+      repo: nvidia/Qwen3-8B-FP8
+      revision: 2cebc4c89e25abc17668c81b01dceaf3d8b914d5
+      license: apache-2.0
+      gated: false
+      size_bytes: 9451782787
+      quant_method: modelopt  # config.json quantization_config.quant_method
+      trust_remote_code: false
+    engine:
+      name: trtllm
+      version: "1.4.0rc2"
+      # nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc2 multi-arch index digest (CUDA 13.4,
+      # driver >= 580 through minor-version compatibility; anonymous pull).
+      image: nvcr.io/nvidia/tensorrt-llm/release@sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a
+      args: {}
+      chat_template_kwargs: {enable_thinking: false}
+    hardware:
+      gpu: L40S
+      gpus_per_replica: 1
+      nodes_per_replica: 1
+      instance_types: {aws: g6e.xlarge, runpod: l40s-x1}
+    parallelism: {tp: 1, pp: 1, ep: 1}
+    max_context: 32768
+    quantization: fp8
+    kv_cache_dtype: fp8
+    pricing: null  # not shipped: no gate yet
+    scaling: {min_replicas: 0, max_replicas: 1}
+    clouds: [aws, runpod]
+    capabilities: {tools: true, json_schema: true, vision: false, reasoning: true}
+    tool_call_parsers: {vllm: hermes, sglang: qwen25, trtllm: qwen3}
+    routing_tier: 1
+    status: preview
+    base_model: qwen3-8b  # quantization of qwen3-8b: compared with its list prices

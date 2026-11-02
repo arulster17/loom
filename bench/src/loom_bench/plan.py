@@ -36,7 +36,7 @@ from loom_bench.quality.suite import SuiteTask
 from loom_bench.records import LoadMode, Market
 from loom_bench.registry import Cloud, ModelSpec
 from loom_bench.workloads import WorkloadProfile
-from loom_bench.workloads.profiles import ChatDatasetProfile
+from loom_bench.workloads.profiles import ChatDatasetProfile, EditDatasetProfile
 
 
 @dataclass(frozen=True)
@@ -98,12 +98,12 @@ LOCAL_TIMING = Timing(
     eval_job_s=1.0,
 )
 # Extra (image pull, engine init) seconds per engine on top of the provider's Timing,
-# for engines much slower to start than vLLM. TensorRT-LLM 1.2.1's image is 20.9 GB
+# for engines much slower to start than vLLM. TensorRT-LLM 1.4.0rc2's image is 17.3 GB
 # compressed (registry manifest, amd64) against vLLM 0.30.0's 8.7 GB and SGLang
-# 0.5.21's 15.2 GB, whose pull took 226 s on RunPod (b97dea4c): at that rate ~310 s,
-# so +180 s over the shared 240 s leaves margin. Its init adds an autotuner pass and
-# CUDA-graph capture for more batch sizes (no measured start yet): +120 s.
-ENGINE_START_EXTRA_S: dict[str, tuple[float, float]] = {"trtllm": (180.0, 120.0)}
+# 0.5.21's 15.2 GB, whose pull took 226 s on RunPod (b97dea4c): at that rate ~257 s,
+# so +120 s over the shared 240 s leaves margin. Its init adds an autotuner pass and
+# CUDA-graph capture (no measured start yet): +120 s.
+ENGINE_START_EXTRA_S: dict[str, tuple[float, float]] = {"trtllm": (120.0, 120.0)}
 # The mock starts a uvicorn thread, then waits startup_delay_s * time_scale.
 MOCK_SERVER_START_S = 0.5
 MOCK_RUN_OVERHEAD_S = 0.3
@@ -117,6 +117,16 @@ ASSUMED_DECODE_S_PER_TOKEN = 0.05
 # first request: the pinned 673 MB ShareGPT file and 3000 Qwen3 requests took ~17 s on a
 # laptop (bench/workloads/chat-sharegpt.yaml).
 DATASET_JOB_S = 30.0
+# An edit_dataset job reads its JSON lines and tokenizes the edits it keeps: the pinned
+# 136 MB CommitPackFT Python file and 500 Qwen3 requests took 1.0 s on a laptop
+# (bench/workloads/code-edit-commitpackft.yaml); 10 s leaves a slow pod CPU 10x.
+EDIT_DATASET_JOB_S = 10.0
+# Profiles whose job reads a dataset file before the first request, with that allowance.
+DATASET_JOB_ALLOWANCE: dict[type, float] = {
+    ChatDatasetProfile: DATASET_JOB_S,
+    EditDatasetProfile: EDIT_DATASET_JOB_S,
+}
+DATASET_PROFILES = tuple(DATASET_JOB_ALLOWANCE)
 # Shape used when a profile gives no length (datasets, traces without clamps).
 DEFAULT_INPUT_TOKENS = 1024
 DEFAULT_OUTPUT_TOKENS = 512
@@ -312,10 +322,10 @@ class Estimator:
     def run_overhead_s(self, profile: WorkloadProfile | None = None) -> float:
         """Per run, beyond its duration and drain: staging and, for a dataset profile on a
         real host, reading the dataset and tokenizing its conversations before the first
-        request is sent (DATASET_JOB_S)."""
+        request is sent (DATASET_JOB_ALLOWANCE)."""
         if self.timing is None:
             return MOCK_RUN_OVERHEAD_S
-        dataset = DATASET_JOB_S if isinstance(profile, ChatDatasetProfile) else 0.0
+        dataset = DATASET_JOB_ALLOWANCE.get(type(profile), 0.0)
         return self.timing.run_overhead_s + dataset
 
     def dataset_fetch_s(self, profile: WorkloadProfile) -> float:
@@ -619,7 +629,7 @@ def _remote_dataset_problem(kind: str, name: str, profile: WorkloadProfile) -> s
     fix = (
         "give the profile a pinned `download:` block (Hugging Face dataset, revision, file, "
         "sha256), which the host fetches itself"
-        if isinstance(profile, ChatDatasetProfile)
+        if isinstance(profile, DATASET_PROFILES)
         else f"the {kind} provider cannot fetch this profile's file yet; run it with a "
         "pinned `download:` block, or locally"
     )

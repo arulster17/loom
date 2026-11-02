@@ -45,6 +45,12 @@ class FakeRunpod:
         # Each entry is a status, or (status, error message) to imitate a specific refusal.
         self.fail: dict[tuple[str, str], list[int | tuple[int, str]]] = {}
         self.rest_delete_status: int | None = None
+        # GraphQL `dataCenters` availability, one entry per query (the last repeats): the
+        # datacenter ids listing the GPU as available, or "error" for a failed query.
+        # None: the query is unsupported (it errors), as before this fake knew it.
+        self.stock: list[list[str] | str] | None = None
+        self.stock_gpu = "NVIDIA L40S"
+        self.stock_queries = 0
         self.cost_per_hr = cost_per_hr
         self.created_at = "2026-10-06 07:03:35.426 +0000 UTC"
         # GETs of a pod before RunPod assigns its public IP and 22/tcp mapping (None:
@@ -155,6 +161,31 @@ class FakeRunpod:
             pod_id = (body.get("variables") or {}).get("podId")
             self.pods.pop(str(pod_id), None)
             return httpx.Response(200, json={"data": {"podTerminate": None}})
+        if "dataCenters" in query and self.stock is not None:
+            self.stock_queries += 1
+            entry = self.stock.pop(0) if len(self.stock) > 1 else self.stock[0]
+            if entry == "error":
+                return httpx.Response(200, json={"errors": [{"message": "upstream timeout"}]})
+            all_dcs = ["US-TX-3", "US-TX-4", "OC-AU-1", "EUR-IS-2", "EU-NL-1"]
+            centers = [
+                {
+                    "id": dc,
+                    "gpuAvailability": [
+                        {
+                            "gpuTypeId": self.stock_gpu,
+                            "stockStatus": "Low" if dc in entry else None,
+                            "available": dc in entry,
+                        },
+                        {
+                            "gpuTypeId": "NVIDIA H100 80GB HBM3",
+                            "stockStatus": "High",
+                            "available": True,
+                        },
+                    ],
+                }
+                for dc in all_dcs
+            ]
+            return httpx.Response(200, json={"data": {"dataCenters": centers}})
         return httpx.Response(200, json={"errors": [{"message": "unsupported query"}]})
 
 
@@ -184,10 +215,17 @@ def script_var(script: str, name: str) -> str:
 
 
 def script_array(script: str, name: str) -> list[str]:
-    """An array variable as rendered into a pod script (`NAME=('a' 'b')`)."""
-    m = re.search(rf"^{name}=\((.*)\)$", script, re.MULTILINE)
+    """An array variable as rendered into a pod script (`NAME=('a' 'b')`). An element may
+    span lines inside its quotes (TensorRT-LLM's wrapper source): the array ends at the
+    first `)` closing a line outside any quote."""
+    m = re.search(rf"^{name}=\(", script, re.MULTILINE)
     assert m, name
-    return shlex.split(m.group(1))
+    for end in re.finditer(r"\)$", script[m.end() :], re.MULTILINE):
+        try:
+            return shlex.split(script[m.end() : m.end() + end.start()])
+        except ValueError:  # that `)` sits inside a quoted element
+            continue
+    raise AssertionError(f"{name}: unterminated array")
 
 
 def script_pairs(script: str, name: str) -> list[tuple[str, str]]:

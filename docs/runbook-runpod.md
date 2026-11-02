@@ -80,6 +80,7 @@ Run through all of it before every real run.
   | `ssh_online_timeout_s` | 600 | until sshd answers |
   | `max_price_ratio` | 1.25 | refuse a pod whose API price is above prices.yaml × this |
   | `capacity_wait_s` | 1800 | how long to keep retrying a create refused for lack of stock (0: fail at once) |
+  | `availability_poll_s` | 30 | during that wait, how often to read per-datacenter GPU availability; creates go out only when stock shows |
   | `engine_stall_s` | 600 | fail an engine start whose log has not grown for this long before it is healthy |
 
 - [ ] **OpenSSH** on the laptop (`ssh`, `ssh-keygen`): the runner drives pods over SSH.
@@ -108,8 +109,8 @@ Run through all of it before every real run.
   `llama-3.3-70b-fp8-tp4-runpod` $11.05, $14.24, $15 (plan it against the real results
   DB: it loads BF16 run cf4d1614's stored samples and reference, and is refused without
   them); `runpod-smoke-fp8` $0.93, $1.19, $1.25; proposed, not approved:
-  `runpod-smoke-trtllm` $1.57, $2.57, $2.75 and `qwen3-8b-trtllm-vs-vllm-runpod` $8.07,
-  $10.46, $11 ([perf/tensorrt-llm.md](perf/tensorrt-llm.md)). Exit 3 means refused: lower the load
+  `runpod-smoke-trtllm` $2.35, $3.85, $4 and `qwen3-8b-trtllm-vs-vllm-runpod` $11.90,
+  $15.69, $16 (three pods each; [perf/tensorrt-llm.md](perf/tensorrt-llm.md)). Exit 3 means refused: lower the load
   points or `budget.ttl_minutes`, never the caps.
 
 ## 2. Running an experiment
@@ -204,9 +205,24 @@ the console price, update `bench/prices.yaml` (and its `last_checked`), plan aga
 A failed create surfaces as `RunPod POST /pods failed (...)`. If the request failed
 without a clear answer from RunPod, the provider terminates any pod created under that
 name anyway. When RunPod refuses for lack of stock (`There are no instances currently
-available`), the provider waits 30, 60, 120, then every 240 s and retries, for up to
-`capacity_wait_s` (1800 s). Each attempt gets a fresh name and TTL, and nothing is billed
-while waiting. Other refusals are not retried. A pod without an SSH address after `pod_ready_timeout_s` (900 s), or whose
+available`), the provider keeps trying for up to `capacity_wait_s` (1800 s). Each attempt
+gets a fresh name and TTL, and nothing is billed while waiting. Other refusals are not
+retried.
+
+How it waits: it reads RunPod's per-datacenter GPU availability (GraphQL
+`dataCenters.gpuAvailability`) every `availability_poll_s` (30 s). It sends the next
+create only when an allowed datacenter shows stock, and aims that create at those
+datacenters (`dataCenterIds`). Each change in availability is logged with the time
+waited (`RunPod NVIDIA L40S stock: US-TX-3 (waited 312 s)`).
+
+- **A create refused while the same datacenters still show stock** waits out the backoff
+  (30, 60, 120, then 240 s) before the next attempt. A datacenter that newly shows stock
+  is tried at once.
+- **If the availability query fails,** the provider falls back to blind creates on that
+  backoff schedule.
+- **Why this signal:** on 2026-11-02 the global `gpuTypes.lowestPrice` kept reporting
+  L40S "Low" through about 11 h of refused creates, while the per-datacenter list showed
+  no stock. The per-datacenter list matched the refusals; the global indicator did not. A pod without an SSH address after `pod_ready_timeout_s` (900 s), or whose
 sshd does not answer within `ssh_online_timeout_s` (600 s), fails the experiment and is
 terminated. L40S Secure stock varies by datacenter and over the day: retry later, or pin
 `provider.data_center_ids` to one with stock.
