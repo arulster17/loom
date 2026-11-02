@@ -483,26 +483,30 @@ async def _chat_completions(server: MockServer, request: Request) -> Response:
         return envelope.sse([choice])
 
     async def events() -> AsyncIterator[str]:
+        sent = 0
         try:
+            # One chunk per engine step, as vLLM streams: several tokens when a step
+            # accepted speculative drafts.
             async for n in server.engine.tokens(seq):
-                i = n - 1
-                if i == abort_at:
+                first, sent = sent, n
+                if abort_at is not None and first <= abort_at < n:
                     raise StreamAborted
-                if i == 0:
+                if first == 0:
                     # vLLM sends the role with the first token, not before prefill.
                     if tool is None:
                         yield chunk({"role": "assistant", "content": ""})
                     else:
                         header = {"index": 0, **_tool_call(call_id, tool.name, "")}
                         yield chunk({"role": "assistant", "content": None, "tool_calls": [header]})
+                text = "".join(pieces[first:n])
                 if tool is None:
-                    delta: dict[str, Any] = {"content": pieces[i]}
+                    delta: dict[str, Any] = {"content": text}
                 else:
-                    delta = {"tool_calls": [{"index": 0, "function": {"arguments": pieces[i]}}]}
-                entry = logprobs[i] if logprobs is not None else None
+                    delta = {"tool_calls": [{"index": 0, "function": {"arguments": text}}]}
+                entries = [e for e in logprobs[first:n] if e] if logprobs is not None else []
                 yield chunk(
                     delta,
-                    logprobs={"content": [_chat_logprob(entry)]} if entry else None,
+                    logprobs={"content": [_chat_logprob(e) for e in entries]} if entries else None,
                     finish_reason=gen.finish_reason if n == len(pieces) else None,
                 )
             if req.include_usage:
@@ -568,15 +572,17 @@ async def _completions(server: MockServer, request: Request) -> Response:
 
     async def events() -> AsyncIterator[str]:
         offset = 0
+        sent = 0
         try:
+            # One chunk per engine step (several tokens after accepted drafts).
             async for n in server.engine.tokens(seq):
-                i = n - 1
-                if i == abort_at:
+                start, sent = sent, n
+                if abort_at is not None and start <= abort_at < n:
                     raise StreamAborted
-                if i == 0 and req.echo:
-                    tokens, first = [*gen.prompt_pieces, pieces[0]], 0
+                if start == 0 and req.echo:
+                    tokens, first = [*gen.prompt_pieces, *pieces[:n]], 0
                 else:
-                    tokens, first = [pieces[i]], base + i
+                    tokens, first = list(pieces[start:n]), base + start
                 text = "".join(tokens)
                 choice = {
                     "index": 0,

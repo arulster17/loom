@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import bisect
 import hashlib
+import random
 from collections import OrderedDict, deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -92,6 +93,8 @@ class SimSequence:
     first_token_s: float | None = None
     finished_s: float | None = None
     preemptions: int = 0
+    # Output tokens the last step emitted (more than one under speculative decoding).
+    num_new: int = 0
     # KV blocks held: shared content-addressed prompt blocks, then private ones.
     hashed_blocks: list[bytes] = field(default_factory=list)
     private_blocks: int = 0
@@ -134,6 +137,12 @@ class SimStats:
     generation_tokens: int = 0
     request_success: dict[str, int] = field(default_factory=dict)  # by finish reason
     queue_time: Histogram = field(default_factory=lambda: Histogram(QUEUE_TIME_BUCKETS))
+    # Speculative decoding, as vLLM V1 counts it: a draft is one sequence's non-empty
+    # proposal in one step.
+    spec_drafts: int = 0
+    spec_draft_tokens: int = 0
+    spec_accepted_tokens: int = 0
+    spec_accepted_per_pos: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +151,11 @@ class StepPlan:
     num_decode_seqs: int
     num_prefill_tokens: int
     duration_s: float
+    # Draft tokens per scheduled entry (aligned with `scheduled`); empty when none.
+    drafts: tuple[int, ...] = ()
+
+    def draft_of(self, index: int) -> int:
+        return self.drafts[index] if self.drafts else 0
 
 
 class KVCache:
@@ -227,7 +241,8 @@ class Simulator:
         self.config = config
         self.clock = clock
         self.kv = KVCache(config.num_kv_blocks)
-        self.stats = SimStats()
+        self.stats = SimStats(spec_accepted_per_pos=[0] * config.spec_tokens)
+        self._rng = random.Random(config.seed)
         self._waiting: deque[SimSequence] = deque()
         self._running: list[SimSequence] = []
         self._next_id = 0
@@ -266,12 +281,15 @@ class Simulator:
         """Pick the work for the next step; None when idle."""
         budget = self.config.max_batched_tokens
         scheduled: list[tuple[SimSequence, int]] = []
+        drafts: dict[int, int] = {}  # seq_id -> draft tokens this step
         preempted = False
 
         idx = 0
         while idx < len(self._running) and budget > 0:
             seq = self._running[idx]
             n = min(seq.num_tokens - seq.num_computed, budget)
+            d = self._draft(seq, n, budget)
+            n += d
             need = self._blocks_needed(seq, n)
             while not self.kv.can_allocate(need):
                 victim = self._running.pop()
@@ -282,6 +300,8 @@ class Simulator:
             else:
                 self.kv.allocate(seq, need)
                 scheduled.append((seq, n))
+                if d:
+                    drafts[seq.seq_id] = d
                 budget -= n
                 idx += 1
 
@@ -294,31 +314,54 @@ class Simulator:
         num_decode = 0
         num_prefill = 0
         for seq, n in scheduled:
-            if n == 1 and seq.num_computed >= seq.request.prompt_tokens:
+            if n - drafts.get(seq.seq_id, 0) == 1 and seq.num_computed >= seq.request.prompt_tokens:
                 num_decode += 1
             else:
                 num_prefill += n
         cfg = self.config
+        num_drafted = sum(drafts.values())
         ms = (
             cfg.step_base_ms
-            + cfg.decode_ms_per_seq * num_decode
+            + cfg.decode_ms_per_seq * (num_decode + num_drafted)
             + cfg.prefill_ms_per_token * num_prefill
+            + (cfg.spec_overhead_ms if num_drafted else 0.0)
         )
-        return StepPlan(tuple(scheduled), num_decode, num_prefill, ms / 1000 * cfg.time_scale)
+        return StepPlan(
+            tuple(scheduled),
+            num_decode,
+            num_prefill,
+            ms / 1000 * cfg.time_scale,
+            tuple(drafts.get(seq.seq_id, 0) for seq, _ in scheduled) if drafts else (),
+        )
+
+    def _draft(self, seq: SimSequence, n: int, budget: int) -> int:
+        """Draft tokens for `seq` this step: only a decode (one token to compute), never
+        past the request's last output token, within the step's token budget."""
+        cfg = self.config
+        if cfg.spec_tokens == 0 or n != 1 or seq.num_computed < seq.request.prompt_tokens:
+            return 0
+        room = min(cfg.spec_tokens, seq.request.output_tokens - seq.num_output - 1, budget - 1)
+        if room <= 0 or self._rng.random() >= cfg.spec_draft_rate:
+            return 0
+        return room
 
     def finish_step(self, plan: StepPlan) -> list[SimSequence]:
         """Apply a step's results; returns sequences that sampled a token."""
         now = self.clock()
         emitted: list[SimSequence] = []
-        for seq, n in plan.scheduled:
+        for i, (seq, n) in enumerate(plan.scheduled):
             if seq.status is not SeqStatus.RUNNING:
                 continue  # aborted while the step ran
-            seq.num_computed += n
+            d = plan.draft_of(i)
+            accepted = self._verify(d)
+            # Rejected drafts roll back: the KV keeps the computed token and the accepted.
+            seq.num_computed += n - d + accepted
             self._cache_full_blocks(seq)
             if seq.num_computed < seq.num_tokens:
                 continue  # chunked prefill not done yet
-            seq.num_output += 1
-            self.stats.generation_tokens += 1
+            seq.num_new = 1 + accepted
+            seq.num_output += seq.num_new
+            self.stats.generation_tokens += seq.num_new
             if seq.first_token_s is None:
                 seq.first_token_s = now
                 self.stats.prompt_tokens += seq.request.prompt_tokens
@@ -326,6 +369,22 @@ class Simulator:
                 self._finish(seq, now)
             emitted.append(seq)
         return emitted
+
+    def _verify(self, drafted: int) -> int:
+        """Accepted draft tokens: each accepted with `spec_acceptance` while every earlier
+        one was; recorded under vLLM's counters."""
+        if drafted == 0:
+            return 0
+        accepted = 0
+        while accepted < drafted and self._rng.random() < self.config.spec_acceptance:
+            accepted += 1
+        stats = self.stats
+        stats.spec_drafts += 1
+        stats.spec_draft_tokens += drafted
+        stats.spec_accepted_tokens += accepted
+        for pos in range(accepted):
+            stats.spec_accepted_per_pos[pos] += 1
+        return accepted
 
     def _admit(self, budget: int, scheduled: list[tuple[SimSequence, int]]) -> int:
         bs = self.config.block_size

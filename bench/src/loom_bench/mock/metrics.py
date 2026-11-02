@@ -15,7 +15,8 @@ from prometheus_client.registry import Collector
 
 from loom_bench.mock.sim import Simulator
 
-# The only place exposed names live; counters carry their `_total` sample suffix.
+# The only place exposed names live. Counters named with `_total` keep it; the spec-decode
+# ones are family names, as vLLM registers them, and get `_total` on exposition.
 METRIC_NAMES = {
     "num_running": "vllm:num_requests_running",
     "num_waiting": "vllm:num_requests_waiting",
@@ -27,8 +28,14 @@ METRIC_NAMES = {
     "generation_tokens": "vllm:generation_tokens_total",
     "request_success": "vllm:request_success_total",
     "queue_time": "vllm:request_queue_time_seconds",
+    # vLLM v0.30.0 SpecDecodingProm, registered only when the engine speculates.
+    "spec_drafts": "vllm:spec_decode_num_drafts",
+    "spec_draft_tokens": "vllm:spec_decode_num_draft_tokens",
+    "spec_accepted_tokens": "vllm:spec_decode_num_accepted_tokens",
+    "spec_accepted_per_pos": "vllm:spec_decode_num_accepted_tokens_per_pos",
 }
 MODEL_LABEL = "model_name"
+POSITION_LABEL = "position"
 FINISH_REASON_LABEL = "finished_reason"
 
 CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
@@ -73,6 +80,24 @@ class _SimCollector(Collector):
         for reason, count in sorted(stats.request_success.items()):
             success.add_metric([self.model_name, reason], count)
         yield success
+
+        if sim.config.spec_tokens:
+            for key, doc, value in (
+                ("spec_drafts", "Number of spec decoding drafts.", stats.spec_drafts),
+                ("spec_draft_tokens", "Number of draft tokens.", stats.spec_draft_tokens),
+                ("spec_accepted_tokens", "Number of accepted tokens.", stats.spec_accepted_tokens),
+            ):
+                counter = CounterMetricFamily(METRIC_NAMES[key], doc, labels=[MODEL_LABEL])
+                counter.add_metric(labels, value)
+                yield counter
+            per_pos = CounterMetricFamily(
+                METRIC_NAMES["spec_accepted_per_pos"],
+                "Accepted tokens per draft position.",
+                labels=[MODEL_LABEL, POSITION_LABEL],
+            )
+            for pos, count in enumerate(stats.spec_accepted_per_pos):
+                per_pos.add_metric([self.model_name, str(pos)], count)
+            yield per_pos
 
         hist = stats.queue_time
         cumulative, buckets = 0, []
