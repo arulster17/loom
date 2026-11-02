@@ -67,7 +67,7 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 |---|---|---|
 | `LOOM_ENV` | unset = `prod`; compose: `dev` | all services: `dev` or `prod` (anything else refuses to start). Outside dev a service refuses to start on a missing secret or a compose dev default: gateway and billing (a `LOOM_REDIS_URL` without a password or not `rediss://`; Redis `maxmemory-policy` other than `noeviction` when `CONFIG GET` is permitted, a warning when it is not), gateway (DB password, `LOOM_SETTLE_SPOOL_PATH`, `LOOM_POD_CA_CERT`, client certificate, `LOOM_CORS_ORIGINS`; and it never uses an `http://` replica), billing (DB password, `LOOM_STRIPE_MODE=stub`, internal token missing or the compose value), web (`AUTH_SECRET` missing or the compose value, `AUTH_URL` missing, internal token missing or the compose value) |
 | `LOOM_DATABASE_URL` | `postgresql://loom:loom@localhost:5432/loom_platform` | all (web: as `DATABASE_URL`) |
-| `LOOM_REDIS_URL` | `redis://localhost:6379/0` | gateway, billing, poolsim |
+| `LOOM_REDIS_URL` | `redis://localhost:6379/0` | gateway, billing, poolsim, web (model status fallback; sign-in rate limit) |
 | `LOOM_MODELS_YAML` | repo `config/models.yaml` | gateway, billing |
 | `LOOM_USAGE_STREAM` | `loom:usage` | gateway, billing |
 | `LOOM_AUTH_CACHE_TTL_S` | 4 | gateway |
@@ -87,6 +87,7 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `AUTH_SECRET`, `AUTH_URL`, `AUTH_GOOGLE_ID` / `_SECRET`, `EMAIL_SERVER` | none | web (Auth.js); `AUTH_URL` is required outside `LOOM_ENV=dev` |
 | `LOOM_GOOGLE_EMAIL_LINKING` | `true` | web: a Google sign-in may link to an existing user with the same email; Google sign-in always requires `email_verified` |
 | `LOOM_ADMIN_EMAILS` | empty | web: dev bootstrap of the first admin (§4) |
+| `LOOM_SIGNIN_EMAIL_LIMIT` / `LOOM_SIGNIN_IP_LIMIT` / `LOOM_SIGNIN_WINDOW_S` | 5 / 20 / 900 | web: magic-link emails per address and per client IP (right-most `X-Forwarded-For`) per fixed window; Redis keys `loom:web:signin:{email,ip}:<hmac>:<window>`; fails open when Redis is down |
 | `LOOM_INTERNAL_TOKEN` / `LOOM_BILLING_INTERNAL_TOKEN` | compose: one shared dev value | web / billing: bearer token of billing's internal API |
 | `LOOM_STRIPE_MODE` | `stripe`; compose: `stub` | billing: real Stripe (test keys required) or the local stub (explicit opt-in, never a fallback) |
 | `LOOM_STRIPE_STUB_WEBHOOK_SECRET` / `_FILE` | none; compose: `.dev/certs/stripe-stub-webhook.secret` from `loom-devcerts --secret` | billing and stripe-stub in stub mode |
