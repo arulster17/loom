@@ -416,6 +416,7 @@ def _server(o: Observation, key: str) -> float | None:
 
 # Below this KV usage the cached-tokens / usage ratio is too noisy to size the cache.
 MIN_KV_USAGE_FOR_CAPACITY = 0.15
+MAX_PREFIX_HIT_FOR_CAPACITY = 0.05
 
 
 def _capacity(o: Observation) -> float | None:
@@ -426,6 +427,14 @@ def _capacity(o: Observation) -> float | None:
     fill the cache, so this reads low."""
     usage = _server(o, "kv_usage_max")
     if usage is None or usage < MIN_KV_USAGE_FOR_CAPACITY:
+        return None
+    # A preempted sequence still looks like it is decoding from the client's side
+    # while its cache blocks are freed, so a run with preemptions overcounts.
+    if _server(o, "preemptions"):
+        return None
+    # Shared prefixes share cache blocks, so the cache holds fewer blocks than the
+    # sequences' summed contexts: such runs would overstate its size.
+    if (_server(o, "prefix_cache_hit_rate") or 0.0) > MAX_PREFIX_HIT_FOR_CAPACITY:
         return None
     return o.kv_tokens_max / usage
 

@@ -434,9 +434,9 @@ def render_svg(points: Sequence[PointSummary]) -> str:
     """Horizontal stacked bars: a typical decode step (ITL p50) split into the floor's
     parts and the remainder, one bar per config at its goodput."""
     rows = [p for p in points if not p.speculative]
-    label_w, bar_w, row_h, top = 300, 460, 30, 56
+    label_w, bar_w, row_h, top = 350, 460, 30, 56
     height = top + row_h * len(rows) + 40
-    width = label_w + bar_w + 70
+    width = label_w + bar_w + 160
     scale_max = max((p.itl_p50_ms for p in rows), default=1.0)
     x_of = lambda ms: label_w + ms / scale_max * bar_w  # noqa: E731
     out = [
@@ -455,14 +455,14 @@ def render_svg(points: Sequence[PointSummary]) -> str:
         lx += 14 + 7 * len(name) + 18
     for i, p in enumerate(rows):
         y = top + i * row_h
-        label = f"{p.cell} · {p.workload} @ {p.load_value:.3g}"
+        label = f"{p.experiment[:8]} {p.cell} · {p.workload} @ {p.load_value:.3g}"
         out.append(
             f'<text class="t1" x="{label_w - 8}" y="{y + 15}" text-anchor="end">{escape(label)}</text>'  # noqa: E501
         )
         parts = dict(p.floor_parts)
         floor_mem = parts["weights_ms"] + parts["kv_ms"] + parts["comm_ms"]
         parts["over"] = max(0.0, p.itl_p50_ms - floor_mem)
-        x = label_w
+        x = float(label_w)
         for key, cls, name in _PARTS:
             w = parts[key] / scale_max * bar_w
             if w <= 0.2:
