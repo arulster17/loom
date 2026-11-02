@@ -139,7 +139,7 @@ def test_ratio_explanation_and_report(store) -> None:
     assert "Why fp8-kv8 serves 2.00x bf16 on fixed-1k-1k" in md
     assert "**G**" in md
     svg = render_svg(rep.at_goodput())
-    assert svg.startswith("<svg") and "bf16 · fixed-1k-1k @ 16" in svg
+    assert svg.startswith("<svg") and "bf16 · fixed-1k-1k @ 16" in svg  # cell · workload @ load
 
 
 def test_cli_roofline_writes_the_report(store, tmp_path) -> None:
