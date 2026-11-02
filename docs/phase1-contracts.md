@@ -115,6 +115,7 @@ Every table of the accepted PLAN.md draft exists as drafted, with these addition
 | `usage_events` primary key `(id, created_at)` | A partitioned table's key must hold the partition column. The gateway fixes `created_at` once per request, so `ON CONFLICT (id, created_at) DO NOTHING` de-duplicates redeliveries exactly. |
 | `ledger_transactions` is append-only too | It is half of the ledger; corrections are new transactions. |
 | `admin_audit_log.actor_user_id` has no foreign key | Deleting a user must not need an UPDATE of the log. |
+| `usage_posted_org`, `usage_posted_key` (migration 0008) | Per org / key, the cost of events linked to a ledger transaction, kept by trigger; the usage-total functions read them instead of summing all history |
 | `stripe_payments` (migration 0007): PaymentIntent -> session, org, purchase, amount, cumulative refunded and clawed-back micros | Refund and dispute events name the PaymentIntent; this maps them to the org and keeps clawbacks cumulative-safe and capped at the purchase. |
 
 Invariants enforced in the database:
@@ -148,7 +149,10 @@ promo_expense `...0003` (`loom_platform.ledger`).
 Balance functions: `loom_org_balance(org)` (posted ledger balance),
 `loom_org_credit_total(org)` (all org_credit entries except usage),
 `loom_org_usage_total(org)` and `loom_key_usage_total(key)` (sum of `usage_events.cost_micros`,
-posted or not). Dashboard balance = `credit_total - usage_total` (or the Redis figure, §6).
+posted or not). Since migration 0008 they no longer re-sum all history: posted usage
+comes from rollup rows (`usage_posted_org`, `usage_posted_key`, kept by a trigger on
+`usage_events` in the batch's own transaction) plus the unposted events through partial
+indexes; results are identical. Dashboard balance = `credit_total - usage_total` (or the Redis figure, §6).
 
 `usage_events` is partitioned by month (UTC). Migration 0004 creates last month through
 12 months ahead; the billing worker calls `loom_ensure_usage_partitions(current_date, 3)`
