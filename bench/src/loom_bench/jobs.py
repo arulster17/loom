@@ -13,6 +13,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, PositiveInt, model_validator
 
+from loom_bench.profile.spec import ProfileCapture
 from loom_bench.quality.divergence import DivergenceResult, ReferenceLogprobs
 from loom_bench.quality.sanity import SanityResult
 from loom_bench.quality.suite import Suite
@@ -79,6 +80,9 @@ class LoadJob(BaseModel):
     sample_gpu: bool = False  # run nvidia-smi alongside (only meaningful on a GPU host)
     keep_output: bool = False  # keep output text for sanity checks (synthetic prompts only)
     extra_body: dict[str, Any] = Field(default_factory=dict)  # e.g. chat_template_kwargs
+    # A profile window (loom_bench.profile): switch the engine's profiler on and off
+    # during this job. Such a job is never recorded as a load run.
+    profile: ProfileCapture | None = None
 
 
 class LoadJobResult(BaseModel):

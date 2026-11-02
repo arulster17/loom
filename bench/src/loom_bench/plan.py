@@ -635,6 +635,7 @@ def build_plan(
 ) -> Plan:
     est = Estimator(exp)
     profiles = [(w, w.resolve()) for w in exp.workloads]
+    profiles_by_name = [(w.name, (w, p)) for w, p in profiles]
     ttl_s = exp.budget.ttl_s
     refusals = caps.violations()
     if isinstance(exp.provider, AwsEc2ProviderSpec):
@@ -700,6 +701,16 @@ def build_plan(
             )
             host.steps.append(Step("workload", label, est.workload_s(cell, entry, profile)))
             n_runs += load_points(entry.load) * exp.repetitions
+        if exp.profile is not None:
+            # Profile windows (loom_bench.profile): one short job each, then the trace.
+            by_name = dict(profiles_by_name)
+            for w in exp.profile.windows:
+                entry, profile = by_name[w.workload]
+                n = len(w.load_values or entry.load.values or [])
+                seconds = n * exp.profile.window_s(est.run_overhead_s(profile))
+                host.steps.append(
+                    Step("profile", f"{cell.key} / {w.workload}: {n} windows", seconds)
+                )
         if exp.quality is not None:
             q = exp.quality
             label = f"{cell.key} / {q.suite}" + (f" [{q.subset}]" if q.subset else "")

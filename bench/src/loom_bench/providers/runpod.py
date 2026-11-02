@@ -112,6 +112,9 @@ LMEVAL_EXTRA = "lmeval"
 _SAFE_ID = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 SafeId = Annotated[str, StringConstraints(pattern=_SAFE_ID)]
 _SAFE_ID_RE = re.compile(_SAFE_ID)
+# A profile window's trace collection: archive, upload (traces are capped in size).
+PROFILE_COLLECT_TIMEOUT_S = 600
+_TRACE_DIR_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
 _PREFIX = r"^[a-z0-9][a-z0-9-]{0,63}$"
 _SECRET_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 _HF_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -881,6 +884,29 @@ class RunpodProvider:
         self._check_job_output(host, stdout)
         raw = await asyncio.to_thread(self._read, prefix + "result.json")
         return EvalJobResult.model_validate_json(raw)
+
+    async def collect_profile(
+        self, host: Host, run_id: str, trace_dir: str, max_bytes: int
+    ) -> bytes:
+        """The trace files a profile window left in `trace_dir`, as one .tar.gz: a root
+        script archives them, uploads the archive to the run's S3 prefix through a
+        presigned URL and deletes them (loom_bench.profile.capture)."""
+        if not _TRACE_DIR_RE.match(trace_dir) or ".." in trace_dir:
+            raise ValueError(f"trace_dir must be an absolute plain path, got {trace_dir!r}")
+        key = self.job_prefix(host, run_id) + "trace.tar.gz"
+        script = render_script(
+            "collect_profile",
+            template_dir=TEMPLATE_DIR,
+            TRACE_DIR=trace_dir,
+            MAX_BYTES=int(max_bytes),
+            UPLOAD_URL=self._presign("put_object", key),
+        )
+        stdout = await self._run(
+            host, script, timeout_s=PROFILE_COLLECT_TIMEOUT_S, what=f"collect profile {run_id}"
+        )
+        if "loom-profile-done" not in stdout:
+            raise RuntimeError(f"{host.host_id}: trace collection for {run_id} did not finish")
+        return await asyncio.to_thread(self._read, key)
 
     # -- teardown -------------------------------------------------------------------
 
