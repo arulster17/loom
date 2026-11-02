@@ -3,6 +3,7 @@ several tokens per step, counts it under vLLM v0.30.0's names, and the server st
 chunk per step, so the whole spec-decode measurement path runs offline."""
 
 import json
+import random
 import statistics
 
 import httpx
@@ -19,6 +20,7 @@ from loom_bench.tokenize import SimpleTokenizer
 
 TOK = SimpleTokenizer()
 MODEL = "mock-model"
+MESSAGE = {"role": "user", "content": "Write a story."}
 
 
 def run_one(sim: Simulator, clock: VirtualClock, request: SimRequest) -> SimSequence:
@@ -225,3 +227,33 @@ def test_tokens_per_chunk_reads_acceptance_from_the_client_side():
     assert s.tokens_per_chunk.min == pytest.approx(1.0)  # a request no draft helped
     assert s.tokens_per_chunk.max == pytest.approx(3.0)
     assert s.tokens_per_chunk.p50 == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/completions"])
+def test_an_abort_inside_a_multi_token_step_streams_exactly_the_tokens_before_it(make_client, path):
+    """The injected abort cuts the step's chunk at `abort_at`, so the client receives
+    exactly `abort_at` tokens, as with one token per chunk. `abort_at` is replayed from the
+    server's fault RNG: per request, inject_error draws once, abort_index twice."""
+    seed, max_tokens = 4, 40
+    c = make_client(spec_tokens=3, spec_acceptance=0.9, seed=seed, abort_rate=1.0)
+    prompt = {"prompt": "hi"} if path == "/v1/completions" else {"messages": [MESSAGE]}
+    body = {"model": MODEL, **prompt, "max_tokens": max_tokens, "ignore_eos": True}
+    faults = random.Random(seed)
+    multi = False
+    for _ in range(12):
+        faults.random()  # inject_error
+        faults.random()  # abort_index: abort_rate 1.0 always aborts
+        abort_at = faults.randrange(max_tokens)
+        texts: list[str] = []
+        with (
+            pytest.raises(httpx.RemoteProtocolError),
+            c.stream("POST", path, json={**body, "stream": True}) as response,
+        ):
+            for line in response.iter_lines():
+                if line.startswith("data: {"):
+                    (choice,) = json.loads(line[6:])["choices"]
+                    texts.append((choice.get("delta") or {}).get("content") or choice.get("text"))
+        counts = [TOK.count(t or "") for t in texts]
+        multi |= any(n > 1 for n in counts)
+        assert sum(counts) == abort_at
+    assert multi  # the cut happened under multi-token steps

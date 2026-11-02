@@ -490,9 +490,15 @@ async def _chat_completions(server: MockServer, request: Request) -> Response:
             # One chunk per engine step, as vLLM streams: several tokens when a step
             # accepted speculative drafts.
             async for n in server.engine.tokens(seq):
-                first, sent = sent, n
-                if abort_at is not None and first <= abort_at < n:
+                # An injected abort drops the stream right before token `abort_at`. A step
+                # that crosses it is cut there, so exactly `abort_at` tokens reach the
+                # client, as with one token per chunk.
+                first = sent
+                cut = abort_at is not None and first <= abort_at < n
+                end = abort_at if cut and abort_at is not None else n
+                if cut and end == first:
                     raise StreamAborted
+                sent = end
                 if first == 0:
                     # vLLM sends the role with the first token, not before prefill.
                     if tool is None:
@@ -500,17 +506,19 @@ async def _chat_completions(server: MockServer, request: Request) -> Response:
                     else:
                         header = {"index": 0, **_tool_call(call_id, tool.name, "")}
                         yield chunk({"role": "assistant", "content": None, "tool_calls": [header]})
-                text = "".join(pieces[first:n])
+                text = "".join(pieces[first:end])
                 if tool is None:
                     delta: dict[str, Any] = {"content": text}
                 else:
                     delta = {"tool_calls": [{"index": 0, "function": {"arguments": text}}]}
-                entries = [e for e in logprobs[first:n] if e] if logprobs is not None else []
+                entries = [e for e in logprobs[first:end] if e] if logprobs is not None else []
                 yield chunk(
                     delta,
                     logprobs={"content": [_chat_logprob(e) for e in entries]} if entries else None,
-                    finish_reason=gen.finish_reason if n == len(pieces) else None,
+                    finish_reason=gen.finish_reason if end == len(pieces) else None,
                 )
+                if cut:
+                    raise StreamAborted
             if req.include_usage:
                 yield envelope.sse([], usage=_usage([(gen, seq)]))
             yield _DONE
@@ -580,19 +588,23 @@ async def _completions(server: MockServer, request: Request) -> Response:
         try:
             # One chunk per engine step (several tokens after accepted drafts).
             async for n in server.engine.tokens(seq):
-                start, sent = sent, n
-                if abort_at is not None and start <= abort_at < n:
+                # As in chat: a step crossing `abort_at` is cut there, then the stream drops.
+                start = sent
+                cut = abort_at is not None and start <= abort_at < n
+                end = abort_at if cut and abort_at is not None else n
+                if cut and end == start:
                     raise StreamAborted
+                sent = end
                 if start == 0 and req.echo:
-                    tokens, first = [*gen.prompt_pieces, *pieces[:n]], 0
+                    tokens, first = [*gen.prompt_pieces, *pieces[:end]], 0
                 else:
-                    tokens, first = list(pieces[start:n]), base + start
+                    tokens, first = list(pieces[start:end]), base + start
                 text = "".join(tokens)
                 choice = {
                     "index": 0,
                     "text": text,
                     "logprobs": None,
-                    "finish_reason": gen.finish_reason if n == len(pieces) else None,
+                    "finish_reason": gen.finish_reason if end == len(pieces) else None,
                 }
                 if lps is not None:
                     entries = lps[first : first + len(tokens)]
@@ -601,6 +613,8 @@ async def _completions(server: MockServer, request: Request) -> Response:
                     )
                 yield envelope.sse([choice])
                 offset += len(text)
+                if cut:
+                    raise StreamAborted
             if req.include_usage:
                 yield envelope.sse([], usage=_usage([(gen, seq)]))
             yield _DONE
