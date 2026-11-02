@@ -7,8 +7,9 @@ the **$ per 1M input and output tokens** that goodput implies, with 95% confiden
 intervals over repeated runs, and **quality non-inferiority against BF16** (a paired
 statistical gate on GSM8K, IFEval, tool calling and JSON-schema tasks, plus logprob
 divergence). A config that is faster but does not pass the gate does not ship. The
-platform half is an OpenAI-compatible gateway with prepaid, double-entry billing; it is
-built and tested locally on a mock GPU backend, not yet serving real traffic.
+platform half (an OpenAI-compatible gateway with prepaid, double-entry billing, and a web
+app) is being built on branch `phase1-m1` and is not in this branch; it is tested locally
+on a mock GPU backend, not yet serving real traffic.
 
 All results below come from real GPU runs on RunPod and AWS, $96.57 of recorded GPU
 spend in total.
@@ -109,7 +110,7 @@ flowchart LR
     EV --> DB
     DB --> RE["reports, compare, reproduce"]
   end
-  subgraph Platform["Platform (Phase 1 M1, local)"]
+  subgraph Platform["Platform (Phase 1 M1, branch phase1-m1, not in this branch)"]
     CL["OpenAI SDK client"] --> GW["gateway: keys, rate limits, balance reserve"]
     GW -->|mTLS| PP["pod proxy"]
     PP --> PD["engine pod"]
@@ -121,20 +122,22 @@ flowchart LR
   RE -.->|prices from measured cost at SLO| GW
 ```
 
-The platform's M1 acceptance runs on the local compose stack with mock pods
-([docs/phase1-m1-acceptance.md](docs/phase1-m1-acceptance.md)): gateway p50 added
-overhead 4.9 ms, 0 micro-dollars of balance overshoot under 64 concurrent requests, a
-revoked key refused 3 ms after the revoke commits, and usage in the ledger equal to the
-engine's token counts, including aborted streams and a killed pod.
+The platform code (gateway, billing, web) is on branch `phase1-m1`, not in this branch.
+Its M1 acceptance runs on the local compose stack with mock pods
+(`docs/phase1-m1-acceptance.md` on that branch): gateway p50 added overhead 4.9 ms,
+0 micro-dollars of balance overshoot under 64 concurrent requests, a revoked key refused
+3 ms after the revoke commits, and usage in the ledger equal to the engine's token counts,
+including aborted streams and a killed pod.
 
 ## Status
 
 - **Phase 0, Benchmark Lab: done and accepted** (2026-10-31). Checklist:
   [docs/phase0-acceptance.md](docs/phase0-acceptance.md).
-- **Phase 1, M1 (whole platform locally, mock backend): done.** Real pods on RunPod are
-  the next milestone.
-- **In progress, no results yet:** profiling and roofline analysis of the measured
-  configs, TensorRT-LLM as a third engine, and a speculative-decoding study.
+- **Phase 1, M1 (whole platform locally, mock backend): built on branch `phase1-m1`,
+  paused.** It is not in this branch. Real pods on RunPod are the next milestone.
+- **In progress on this branch (`perf-track`), no results yet:** profiling and roofline
+  analysis of the measured configs, TensorRT-LLM as a third engine, and a
+  speculative-decoding study.
 - The public results site is built but not published.
 
 **GPU spend:** $96.57 recorded in the results database across 27 experiments, smokes and
@@ -155,7 +158,7 @@ uv run bench site build                              # results site in site/_bui
 
 `uv run pytest -q` runs the test suite. With Docker, `docker compose up -d postgres`
 gives the default results database instead of SQLite (unset `LOOM_DATABASE_URL`). The
-platform stack and its acceptance run: [docs/phase1-m1-acceptance.md](docs/phase1-m1-acceptance.md#how-to-reproduce).
+platform stack and its acceptance run are on branch `phase1-m1`.
 
 ## Docs
 
