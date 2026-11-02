@@ -15,6 +15,11 @@ Population and denominators:
   usage are counted in `requests_missing_usage` and contribute no tokens.
 - Output tok/s per GPU = output tok/s / `gpus` (GPUs of the replica under test).
 - Per-request output tok/s = completion tokens / E2E latency of that request.
+- Tokens per chunk (per request) = completion tokens / streamed chunks that carried
+  output (len(itl_s) + 1). An engine streams once per step, so without speculative
+  decoding this is ~1, and with it the tokens a request gained per verify step: a
+  per-request view of acceptance that the server's counters average away (one request
+  the draft never predicts is invisible in the mean but sets the TPOT p95).
 - Cached-prompt fraction = Σ cached prompt tokens / Σ prompt tokens over successful
   requests that report cached tokens.
 - SLO attainment = good requests / (ok + error + timeout), where "good" is
@@ -92,6 +97,8 @@ class RunSummary(BaseModel):
     queue_delay_ms: Distribution
     per_request_output_tok_s: Distribution
     throughput: Throughput
+    # None on runs stored before it existed.
+    tokens_per_chunk: Distribution | None = None
     cached_prompt_fraction: float | None
     requests_missing_usage: int
     slo: Slo | None
@@ -164,6 +171,12 @@ def summarize_run(
         if r.completion_tokens is not None and (e2e := r.e2e_s) is not None and e2e > 0
     ]
 
+    tokens_per_chunk = [
+        r.completion_tokens / (len(r.itl_s) + 1)
+        for r in ok
+        if r.completion_tokens and r.first_token_at_s is not None
+    ]
+
     goodput: RequestGoodput | None = None
     if slo is not None:
         good = [r for r in ok if slo.request_meets(r)]
@@ -187,6 +200,7 @@ def summarize_run(
         e2e_ms=Distribution.of(_ms(r.e2e_s for r in ok)),
         queue_delay_ms=Distribution.of(_ms(r.queue_delay_s for r in ok)),
         per_request_output_tok_s=Distribution.of(per_request_tps),
+        tokens_per_chunk=Distribution.of(tokens_per_chunk),
         throughput=Throughput(
             request_rate=len(ok) / window,
             output_tok_s=out_tokens / window,

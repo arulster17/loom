@@ -9,7 +9,7 @@ import math
 import random
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +49,10 @@ class _Body(BaseModel):
 
 class StreamOptions(_Body):
     include_usage: bool = False
+    # vLLM: a usage block on every chunk (prompt tokens, completion tokens so far), only
+    # together with include_usage. A client that drops the stream mid-way knows exactly
+    # how many tokens it was sent, which is how the gateway bills aborted streams.
+    continuous_usage_stats: bool = False
 
 
 class JsonSchemaFormat(_Body):
@@ -78,9 +82,15 @@ class ChatMessage(_Body):
     tool_calls: list[dict[str, Any]] | None = None
 
 
+# Choices per prompt. vLLM generates them as sibling sequences of one request: usage
+# counts the prompt once and sums completion tokens over the choices, and with
+# `continuous_usage_stats` each chunk carries only its own choice's running count.
+MAX_N = 16
+
+
 class _GenerateRequest(_Body):
     model: str
-    n: int = Field(1, ge=1, le=1)
+    n: int = Field(1, ge=1, le=MAX_N)
     stream: bool = False
     stream_options: StreamOptions | None = None
     min_tokens: int = Field(0, ge=0)
@@ -90,6 +100,12 @@ class _GenerateRequest(_Body):
     @property
     def include_usage(self) -> bool:
         return self.stream_options is not None and self.stream_options.include_usage
+
+    @property
+    def continuous_usage(self) -> bool:
+        return self.include_usage and bool(
+            self.stream_options and self.stream_options.continuous_usage_stats
+        )
 
 
 class ChatCompletionRequest(_GenerateRequest):
@@ -201,7 +217,10 @@ class MockServer:
         request: _GenerateRequest,
         tool: FunctionDef | None = None,
         continuation: bool = False,
+        choice: int = 0,
     ) -> Generation:
+        """One choice's output; choices after the first are seeded apart from it, so
+        siblings differ in text and length as sampled choices do."""
         cfg = self.config
         pieces = tuple(TOKENIZER.pieces(prompt))
         if max_tokens is None:
@@ -218,14 +237,15 @@ class MockServer:
         if request.min_tokens > max_tokens:
             raise ApiError(400, "min_tokens must not exceed max_tokens.", param="min_tokens")
 
-        text = self._natural_text(prompt, question, request.response_format, tool)
+        key = prompt if choice == 0 else f"{prompt}\x00choice={choice}"
+        text = self._natural_text(key, question, request.response_format, tool)
         if continuation:
             # Completions continue the prompt; the space joins the first token, adding none.
             text = " " + text
         output = fit_output(
             text,
             seed=cfg.seed,
-            prompt=prompt,
+            prompt=key,
             max_tokens=max_tokens,
             min_tokens=request.min_tokens,
             ignore_eos=request.ignore_eos,
@@ -306,17 +326,30 @@ class MockServer:
         return entries
 
 
-def _usage(requests: Iterable[tuple[Generation, SimSequence]]) -> dict[str, Any]:
+def _usage(prompts: Iterable[Sequence[tuple[Generation, SimSequence]]]) -> dict[str, Any]:
+    """vLLM's usage over prompts, each given as its choices: a prompt (and its cached
+    tokens) counts once, completion tokens are summed over every choice."""
     prompt = completion = cached = 0
-    for gen, seq in requests:
-        prompt += gen.prompt_tokens
-        completion += gen.completion_tokens
-        cached += seq.num_cached_tokens or 0
+    for choices in prompts:
+        first_gen, first_seq = choices[0]
+        prompt += first_gen.prompt_tokens
+        cached += first_seq.num_cached_tokens or 0
+        completion += sum(gen.completion_tokens for gen, _ in choices)
     return {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": prompt + completion,
         "prompt_tokens_details": {"cached_tokens": cached},
+    }
+
+
+def _running_usage(gen: Generation, completion_tokens: int) -> dict[str, Any]:
+    """Per-chunk usage under `continuous_usage_stats`, as vLLM sends it: no
+    `prompt_tokens_details` (vLLM reports cached tokens only in the final usage)."""
+    return {
+        "prompt_tokens": gen.prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": gen.prompt_tokens + completion_tokens,
     }
 
 
@@ -436,6 +469,39 @@ def _tool_call(call_id: str, name: str, arguments: str) -> dict[str, Any]:
     return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
 
 
+async def _interleave(
+    server: MockServer, seqs: list[SimSequence]
+) -> AsyncIterator[tuple[int, int]]:
+    """(choice, output tokens so far) each time one of the sibling sequences samples a
+    token, in engine-step order, until all of them finish."""
+    if len(seqs) == 1:
+        async for n in server.engine.tokens(seqs[0]):
+            yield 0, n
+        return
+    queue: asyncio.Queue[tuple[int, int] | None] = asyncio.Queue()
+
+    async def pump(choice: int, seq: SimSequence) -> None:
+        try:
+            async for n in server.engine.tokens(seq):
+                queue.put_nowait((choice, n))
+        finally:
+            queue.put_nowait(None)
+
+    tasks = [asyncio.create_task(pump(c, s)) for c, s in enumerate(seqs)]
+    try:
+        running = len(tasks)
+        while running:
+            item = await queue.get()
+            if item is None:
+                running -= 1
+            else:
+                yield item
+    finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def _chat_completions(server: MockServer, request: Request) -> Response:
     server.check_ready()
     req = await _parse(request, ChatCompletionRequest)
@@ -443,75 +509,109 @@ async def _chat_completions(server: MockServer, request: Request) -> Response:
     tool = _select_tool(req)
     tools = [t.model_dump(by_alias=True, exclude_none=True) for t in req.tools or []]
     prompt = render_chat_prompt([m.model_dump(exclude_none=True) for m in req.messages], tools)
-    gen = server.generate(
-        prompt,
-        question=_last_user_text(req.messages),
-        max_tokens=req.max_completion_tokens or req.max_tokens,
-        request=req,
-        tool=tool,
-    )
-    logprobs = server.logprobs(gen, k=req.top_logprobs or 0) if req.logprobs else None
+    gens = [
+        server.generate(
+            prompt,
+            question=_last_user_text(req.messages),
+            max_tokens=req.max_completion_tokens or req.max_tokens,
+            request=req,
+            tool=tool,
+            choice=c,
+        )
+        for c in range(req.n)
+    ]
+    logprobs = [server.logprobs(g, k=req.top_logprobs or 0) if req.logprobs else None for g in gens]
     server.inject_error()
-    seq = server.submit(gen)
+    seqs = [server.submit(g) for g in gens]
     response_id = f"chatcmpl-{uuid.uuid4().hex}"
-    call_id = f"call_{uuid.uuid4().hex[:24]}"
+    call_ids = [f"call_{uuid.uuid4().hex[:24]}" for _ in gens]
+
+    def usage() -> dict[str, Any]:
+        return _usage([list(zip(gens, seqs, strict=True))])
 
     if not req.stream:
-        await server.run_to_completion(seq)
-        message: dict[str, Any] = {"role": "assistant", "content": gen.output.text}
-        if tool is not None:
-            message = {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [_tool_call(call_id, tool.name, gen.output.text)],
+        try:
+            await asyncio.gather(*(server.run_to_completion(s) for s in seqs))
+        finally:
+            for seq in seqs:
+                server.engine.abort(seq)
+        choices = []
+        for c, (gen, lps) in enumerate(zip(gens, logprobs, strict=True)):
+            message: dict[str, Any] = {"role": "assistant", "content": gen.output.text}
+            if tool is not None:
+                message = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [_tool_call(call_ids[c], tool.name, gen.output.text)],
+                }
+            choice = {
+                "index": c,
+                "message": message,
+                "logprobs": None,
+                "finish_reason": gen.finish_reason,
             }
-        choice = {
-            "index": 0,
-            "message": message,
-            "logprobs": None,
-            "finish_reason": gen.finish_reason,
-        }
-        if logprobs is not None:
-            choice["logprobs"] = {"content": [_chat_logprob(e) for e in logprobs if e]}
+            if lps is not None:
+                choice["logprobs"] = {"content": [_chat_logprob(e) for e in lps if e]}
+            choices.append(choice)
         envelope = _Envelope(response_id, "chat.completion", req.model)
-        return JSONResponse(envelope.body([choice], usage=_usage([(gen, seq)])))
+        return JSONResponse(envelope.body(choices, usage=usage()))
 
     envelope = _Envelope(response_id, "chat.completion.chunk", req.model)
-    pieces = gen.output.pieces
-    abort_at = server.abort_index(len(pieces))
+    abort_at = server.abort_index(len(gens[0].output.pieces))
 
-    def chunk(delta: dict[str, Any], **extra: Any) -> str:
-        choice = {"index": 0, "delta": delta, "logprobs": None, "finish_reason": None, **extra}
+    def chunk(c: int, delta: dict[str, Any], sent: int, **extra: Any) -> str:
+        choice = {"index": c, "delta": delta, "logprobs": None, "finish_reason": None, **extra}
+        if req.continuous_usage:
+            # vLLM: the running count of this chunk's own choice, not of the request.
+            return envelope.sse([choice], usage=_running_usage(gens[c], sent))
         return envelope.sse([choice])
 
     async def events() -> AsyncIterator[str]:
+        sent = [0] * len(gens)  # tokens streamed so far, per choice
         try:
-            async for n in server.engine.tokens(seq):
-                i = n - 1
-                if i == abort_at:
+            # One chunk per engine step and choice, as vLLM streams: several tokens when
+            # a step accepted speculative drafts.
+            async for c, n in _interleave(server, seqs):
+                gen, lps = gens[c], logprobs[c]
+                pieces = gen.output.pieces
+                first = sent[c]
+                # An injected abort drops choice 0's stream right before token `abort_at`.
+                # A step that crosses it is cut there, so exactly `abort_at` tokens reach
+                # the client (and the last usage says so), as with one token per chunk.
+                cut = c == 0 and abort_at is not None and first <= abort_at < n
+                end = abort_at if cut and abort_at is not None else n
+                if cut and end == first:
                     raise StreamAborted
-                if i == 0:
+                sent[c] = end
+                if first == 0:
                     # vLLM sends the role with the first token, not before prefill.
                     if tool is None:
-                        yield chunk({"role": "assistant", "content": ""})
+                        yield chunk(c, {"role": "assistant", "content": ""}, 0)
                     else:
-                        header = {"index": 0, **_tool_call(call_id, tool.name, "")}
-                        yield chunk({"role": "assistant", "content": None, "tool_calls": [header]})
+                        header = {"index": 0, **_tool_call(call_ids[c], tool.name, "")}
+                        role = {"role": "assistant", "content": None, "tool_calls": [header]}
+                        yield chunk(c, role, 0)
+                text = "".join(pieces[first:end])
                 if tool is None:
-                    delta: dict[str, Any] = {"content": pieces[i]}
+                    delta: dict[str, Any] = {"content": text}
                 else:
-                    delta = {"tool_calls": [{"index": 0, "function": {"arguments": pieces[i]}}]}
-                entry = logprobs[i] if logprobs is not None else None
+                    delta = {"tool_calls": [{"index": 0, "function": {"arguments": text}}]}
+                entries = [e for e in lps[first:end] if e] if lps is not None else []
                 yield chunk(
+                    c,
                     delta,
-                    logprobs={"content": [_chat_logprob(entry)]} if entry else None,
-                    finish_reason=gen.finish_reason if n == len(pieces) else None,
+                    end,
+                    logprobs={"content": [_chat_logprob(e) for e in entries]} if entries else None,
+                    finish_reason=gen.finish_reason if end == len(pieces) else None,
                 )
+                if cut:
+                    raise StreamAborted
             if req.include_usage:
-                yield envelope.sse([], usage=_usage([(gen, seq)]))
+                yield envelope.sse([], usage=usage())
             yield _DONE
         finally:
-            server.engine.abort(seq)
+            for seq in seqs:
+                server.engine.abort(seq)
 
     return StreamingResponse(events(), media_type="text/event-stream")
 
@@ -525,9 +625,13 @@ async def _completions(server: MockServer, request: Request) -> Response:
         raise ApiError(400, "prompt must not be empty.", param="prompt")
     if req.stream and len(prompts) > 1:
         raise ApiError(400, "Streaming supports a single prompt.", param="prompt")
+    # vLLM's order: prompt by prompt, each prompt's n choices together (index p * n + c).
     gens = [
-        server.generate(p, question=p, max_tokens=req.max_tokens, request=req, continuation=True)
+        server.generate(
+            p, question=p, max_tokens=req.max_tokens, request=req, continuation=True, choice=c
+        )
         for p in prompts
+        for c in range(req.n)
     ]
     k = req.logprobs
     # With echo, logprobs cover the prompt tokens first, then the output tokens.
@@ -537,6 +641,10 @@ async def _completions(server: MockServer, request: Request) -> Response:
     server.inject_error()
     seqs = [server.submit(g) for g in gens]
     envelope = _Envelope(f"cmpl-{uuid.uuid4().hex}", "text_completion", req.model)
+    pairs = list(zip(gens, seqs, strict=True))
+
+    def usage() -> dict[str, Any]:
+        return _usage(pairs[i : i + req.n] for i in range(0, len(pairs), req.n))
 
     if not req.stream:
         try:
@@ -546,7 +654,8 @@ async def _completions(server: MockServer, request: Request) -> Response:
                 server.engine.abort(seq)
         known = server.config.text_offsets
         choices = []
-        for i, (prompt, gen, lps) in enumerate(zip(prompts, gens, logprobs, strict=True)):
+        for i, (gen, lps) in enumerate(zip(gens, logprobs, strict=True)):
+            prompt = prompts[i // req.n]
             tokens = [*gen.prompt_pieces, *gen.output.pieces] if req.echo else [*gen.output.pieces]
             rendered = None
             if lps is not None and server.config.byte_level:
@@ -561,43 +670,55 @@ async def _completions(server: MockServer, request: Request) -> Response:
                     "finish_reason": gen.finish_reason,
                 }
             )
-        return JSONResponse(envelope.body(choices, usage=_usage(zip(gens, seqs, strict=True))))
+        return JSONResponse(envelope.body(choices, usage=usage()))
 
-    gen, seq, lps = gens[0], seqs[0], logprobs[0]
-    pieces = gen.output.pieces
-    abort_at = server.abort_index(len(pieces))
-    base = gen.prompt_tokens if req.echo else 0
+    abort_at = server.abort_index(len(gens[0].output.pieces))
+    offsets = [0] * len(gens)
 
     async def events() -> AsyncIterator[str]:
-        offset = 0
+        sent = [0] * len(gens)  # tokens streamed so far, per choice
         try:
-            async for n in server.engine.tokens(seq):
-                i = n - 1
-                if i == abort_at:
+            # One chunk per engine step and choice (several tokens after accepted drafts).
+            async for c, n in _interleave(server, seqs):
+                gen, lps = gens[c], logprobs[c]
+                pieces = gen.output.pieces
+                base = gen.prompt_tokens if req.echo else 0
+                start = sent[c]
+                # As in chat: a step crossing `abort_at` is cut there, then the stream drops.
+                cut = c == 0 and abort_at is not None and start <= abort_at < n
+                end = abort_at if cut and abort_at is not None else n
+                if cut and end == start:
                     raise StreamAborted
-                if i == 0 and req.echo:
-                    tokens, first = [*gen.prompt_pieces, pieces[0]], 0
+                sent[c] = end
+                if start == 0 and req.echo:
+                    tokens, first = [*gen.prompt_pieces, *pieces[:end]], 0
                 else:
-                    tokens, first = [pieces[i]], base + i
+                    tokens, first = list(pieces[start:end]), base + start
                 text = "".join(tokens)
                 choice = {
-                    "index": 0,
+                    "index": c,
                     "text": text,
                     "logprobs": None,
-                    "finish_reason": gen.finish_reason if n == len(pieces) else None,
+                    "finish_reason": gen.finish_reason if end == len(pieces) else None,
                 }
                 if lps is not None:
                     entries = lps[first : first + len(tokens)]
                     choice["logprobs"] = _completion_logprobs(
-                        tokens, entries, offset, known=server.config.text_offsets
+                        tokens, entries, offsets[c], known=server.config.text_offsets
                     )
-                yield envelope.sse([choice])
-                offset += len(text)
+                if req.continuous_usage:
+                    yield envelope.sse([choice], usage=_running_usage(gen, end))
+                else:
+                    yield envelope.sse([choice])
+                offsets[c] += len(text)
+                if cut:
+                    raise StreamAborted
             if req.include_usage:
-                yield envelope.sse([], usage=_usage([(gen, seq)]))
+                yield envelope.sse([], usage=usage())
             yield _DONE
         finally:
-            server.engine.abort(seq)
+            for seq in seqs:
+                server.engine.abort(seq)
 
     return StreamingResponse(events(), media_type="text/event-stream")
 
@@ -682,6 +803,31 @@ def create_app(config: MockConfig | None = None) -> FastAPI:
             raise ApiError(404 if config.profile_dir is None else 409, "no profiling session")
         recorder.write(Path(config.profile_dir))
         return Response(status_code=200)
+
+    @app.post("/tokenize")
+    async def tokenize(request: Request) -> dict[str, Any]:
+        """vLLM's `POST /tokenize` (chat form: `messages`, optional `tools`), counting the
+        prompt exactly as generation would. The Loom gateway uses it to fit an omitted
+        chat `max_tokens` to a long prompt (docs/phase1-contracts.md §6)."""
+        server.check_ready()
+        body = await request.json()
+        if not isinstance(body, dict) or not isinstance(body.get("model"), str):
+            raise ApiError(400, "model: Field required", param="model")
+        server.check_model(body["model"])
+        if "messages" in body:
+            try:
+                req = ChatCompletionRequest.model_validate({**body, "stream": False})
+            except ValidationError as e:
+                raise ApiError(400, f"invalid tokenize request: {e.error_count()} errors") from e
+            tools = [t.model_dump(by_alias=True, exclude_none=True) for t in req.tools or []]
+            msgs = [m.model_dump(exclude_none=True) for m in req.messages]
+            prompt = render_chat_prompt(msgs, tools)
+        elif isinstance(body.get("prompt"), str):
+            prompt = body["prompt"]
+        else:
+            raise ApiError(400, "messages or prompt is required", param="messages")
+        count = len(tuple(TOKENIZER.pieces(prompt)))
+        return {"count": count, "max_model_len": config.max_model_len, "tokens": []}
 
     @app.get("/metrics")
     async def metrics() -> Response:

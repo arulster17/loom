@@ -15,6 +15,7 @@ from pydantic import (
     ConfigDict,
     Field,
     NonNegativeFloat,
+    NonNegativeInt,
     PositiveFloat,
     PositiveInt,
     model_validator,
@@ -40,6 +41,20 @@ class MockConfig(BaseModel):
     step_base_ms: NonNegativeFloat = 6.0
     decode_ms_per_seq: NonNegativeFloat = 0.15
     prefill_ms_per_token: NonNegativeFloat = 0.06
+
+    # Speculative decoding (off at 0 draft tokens). Each decode step a running sequence
+    # drafts `spec_tokens` tokens (with probability `spec_draft_rate`, below 1 for an
+    # n-gram lookup that finds no match), the step verifies them at `decode_ms_per_seq`
+    # per drafted token on top of the sequence's own, and drafting adds
+    # `spec_overhead_ms` to a step that drafted anything. A draft token is accepted with
+    # probability `spec_acceptance` when every earlier one was, and the step emits the
+    # accepted tokens plus one (the target's own). So at a small batch, where the fixed
+    # step cost dominates, a step yields more tokens for about the same time; at a large
+    # batch the extra verify work grows with every sequence and the gain fades.
+    spec_tokens: NonNegativeInt = 0
+    spec_acceptance: Probability = 0.7
+    spec_draft_rate: Probability = 1.0
+    spec_overhead_ms: NonNegativeFloat = 0.0
     # Real seconds per simulated second; applies to every simulated wait (steps, startup).
     time_scale: PositiveFloat = 1.0
 

@@ -138,10 +138,25 @@ class EngineMetricNames:
     prefix_hits: tuple[str, ...]  # counter, of which hit
     prefix_hit_rate: tuple[str, ...]  # gauge fallback when the counters are absent
     queue_time: tuple[str, ...]  # histogram base name, seconds
+    # Speculative decoding counters. A "draft" is one request's proposal in one engine
+    # step (only steps that proposed at least one token count); draft tokens are the
+    # tokens proposed, accepted tokens those the target model kept. The per-position
+    # counter carries a `position` label 0..k-1: drafts whose token at that position was
+    # accepted (so position i counts only when 0..i-1 were accepted too).
+    spec_drafts: tuple[str, ...] = ()
+    spec_draft_tokens: tuple[str, ...] = ()
+    spec_accepted_tokens: tuple[str, ...] = ()
+    spec_accepted_per_position: tuple[str, ...] = ()
 
+
+# Label of the per-position acceptance counter.
+SPEC_POSITION_LABEL = "position"
 
 # Names verified against vllm/v1/metrics/loggers.py at v0.30.0 and
-# sglang/srt/observability/metrics_collector.py at v0.5.21.
+# sglang/srt/observability/metrics_collector.py at v0.5.21. The speculative-decoding
+# counters are vllm/v1/spec_decode/metrics.py's `SpecDecodingProm` at v0.30.0
+# (prometheus_client Counters, so the samples carry `_total`); vLLM only registers them
+# when the engine runs with a speculative config.
 VLLM_METRICS = EngineMetricNames(
     running=("vllm:num_requests_running",),
     waiting=("vllm:num_requests_waiting",),
@@ -151,8 +166,14 @@ VLLM_METRICS = EngineMetricNames(
     prefix_hits=("vllm:prefix_cache_hits_total",),
     prefix_hit_rate=(),
     queue_time=("vllm:request_queue_time_seconds",),
+    spec_drafts=("vllm:spec_decode_num_drafts_total",),
+    spec_draft_tokens=("vllm:spec_decode_num_draft_tokens_total",),
+    spec_accepted_tokens=("vllm:spec_decode_num_accepted_tokens_total",),
+    spec_accepted_per_position=("vllm:spec_decode_num_accepted_tokens_per_pos_total",),
 )
 
+# SGLang's speculative-decoding metrics are not mapped (not verified at v0.5.21, and no
+# SGLang speculative config has run), so an SGLang run's spec fields stay None.
 SGLANG_METRICS = EngineMetricNames(
     running=("sglang:num_running_reqs",),
     waiting=("sglang:num_queue_reqs",),
@@ -194,6 +215,19 @@ class ServerMetrics(BaseModel):
     prefix_cache_hit_rate: float | None
     queue_time_mean_ms: float | None
     missing: list[str]
+    # Speculative decoding over the window (None when the engine exposes no spec
+    # counters, i.e. it was not speculating). Defaults keep runs stored before these
+    # existed valid.
+    spec_drafts: float | None = None
+    spec_draft_tokens: float | None = None
+    spec_accepted_tokens: float | None = None
+    # accepted / drafted tokens: the share of proposed tokens the target kept.
+    spec_acceptance_rate: float | None = None
+    # 1 + accepted / drafts: tokens a request gains per verify step that drafted,
+    # counting the target's own (bonus) token, as vLLM's log line defines it.
+    spec_mean_accepted_length: float | None = None
+    # Position ("0", "1", ...) -> drafts whose token there was accepted / drafts.
+    spec_acceptance_by_position: dict[str, float] | None = None
 
 
 def _pick(scrapes: Sequence[Scrape], candidates: tuple[str, ...]) -> str | None:
@@ -233,8 +267,68 @@ def _counter_increase(scrapes: Sequence[Scrape], candidates: tuple[str, ...]) ->
     return _increase(values)
 
 
-def summarize_scrapes(engine: str, scrapes: Sequence[tuple[float, str]]) -> ServerMetrics:
-    """Summarise `(t, exposition text)` scrapes of one engine taken during a run."""
+def _labelled_increase(
+    scrapes: Sequence[Scrape], candidates: tuple[str, ...], label: str
+) -> dict[str, float] | None:
+    """Counter increase per value of `label` (other labels summed); None when absent."""
+    name = _pick(scrapes, candidates)
+    if name is None:
+        return None
+    series: dict[str, list[float]] = {}
+    for s in scrapes:
+        totals: dict[str, float] = {}
+        for labels, v in s.samples.get(name, []):
+            if label in labels and not math.isnan(v):
+                totals[labels[label]] = totals.get(labels[label], 0.0) + v
+        for key, v in totals.items():
+            series.setdefault(key, []).append(v)
+    out = {k: _increase(vs) for k, vs in series.items() if len(vs) >= 2}
+    return out or None
+
+
+def _position_key(position: str) -> tuple[int, str]:
+    return (int(position), position) if position.isdigit() else (1 << 30, position)
+
+
+@dataclass(frozen=True, slots=True)
+class _Spec:
+    drafts: float | None
+    draft_tokens: float | None
+    accepted: float | None
+    acceptance_rate: float | None
+    mean_accepted_length: float | None
+    by_position: dict[str, float] | None
+
+    @property
+    def complete(self) -> bool:
+        """Every counter was scraped (a window with no draft has no per-position rates)."""
+        counters = (self.drafts, self.draft_tokens, self.accepted)
+        return None not in counters and (self.by_position is not None or self.drafts == 0)
+
+
+def _spec(parsed: Sequence[Scrape], names: EngineMetricNames) -> _Spec:
+    drafts = _counter_increase(parsed, names.spec_drafts)
+    draft_tokens = _counter_increase(parsed, names.spec_draft_tokens)
+    accepted = _counter_increase(parsed, names.spec_accepted_tokens)
+    per_pos = _labelled_increase(parsed, names.spec_accepted_per_position, SPEC_POSITION_LABEL)
+    rate = accepted / draft_tokens if accepted is not None and draft_tokens else None
+    length = 1 + accepted / drafts if accepted is not None and drafts else None
+    by_pos = (
+        {p: per_pos[p] / drafts for p in sorted(per_pos, key=_position_key)}
+        if per_pos is not None and drafts
+        else None
+    )
+    return _Spec(drafts, draft_tokens, accepted, rate, length, by_pos)
+
+
+def summarize_scrapes(
+    engine: str, scrapes: Sequence[tuple[float, str]], *, speculative: bool = False
+) -> ServerMetrics:
+    """Summarise `(t, exposition text)` scrapes of one engine taken during a run.
+
+    With `speculative` (the engine was launched with a speculative config), absent
+    speculative-decoding counters are listed in `missing` as "spec_decode"; without it
+    they are reported when present and otherwise left None silently."""
     if engine not in ENGINE_METRICS:
         raise ValueError(f"unknown engine {engine!r}; known: {sorted(ENGINE_METRICS)}")
     names = ENGINE_METRICS[engine]
@@ -276,6 +370,9 @@ def summarize_scrapes(engine: str, scrapes: Sequence[tuple[float, str]]) -> Serv
     ):
         if value is None:
             missing.append(label)
+    spec = _spec(parsed, names)
+    if speculative and not spec.complete:
+        missing.append("spec_decode")
 
     return ServerMetrics(
         engine=engine,
@@ -291,4 +388,10 @@ def summarize_scrapes(engine: str, scrapes: Sequence[tuple[float, str]]) -> Serv
         prefix_cache_hit_rate=hit_rate,
         queue_time_mean_ms=queue_ms,
         missing=missing,
+        spec_drafts=spec.drafts,
+        spec_draft_tokens=spec.draft_tokens,
+        spec_accepted_tokens=spec.accepted,
+        spec_acceptance_rate=spec.acceptance_rate,
+        spec_mean_accepted_length=spec.mean_accepted_length,
+        spec_acceptance_by_position=spec.by_position,
     )

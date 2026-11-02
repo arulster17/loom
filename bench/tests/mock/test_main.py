@@ -40,3 +40,18 @@ def test_module_entry_point_serves(tmp_path):
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+def test_cli_models_and_overrides(tmp_path):
+    from loom_bench.mock.__main__ import _override, build_config
+
+    path = tmp_path / "mock.yaml"
+    path.write_text("models: [a]\nstep_base_ms: 3\n")
+    config = build_config(
+        path, ["x", "y"], [_override("step_base_ms=20"), _override("byte_level=true")]
+    )
+    assert config.models == ["x", "y"]
+    assert config.step_base_ms == 20 and config.byte_level is True
+    assert build_config(None, None, []).models == ["mock-model"]
+    with pytest.raises(ValueError):
+        build_config(None, None, [_override("no_such_field=1")])

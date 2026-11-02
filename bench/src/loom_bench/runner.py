@@ -988,7 +988,15 @@ class _Executor:
         )
 
     def _summarize(self, cell: Cell, endpoint: Endpoint, result: LoadJobResult) -> RunSummary:
-        server = summarize_scrapes(endpoint.engine, result.scrapes) if result.scrapes else None
+        server = (
+            summarize_scrapes(
+                endpoint.engine,
+                result.scrapes,
+                speculative="--speculative-config" in cell.launch.args,
+            )
+            if result.scrapes
+            else None
+        )
         gpu = (
             summarize_gpu(parse_nvidia_smi(result.nvidia_smi_csv))
             if result.nvidia_smi_csv
