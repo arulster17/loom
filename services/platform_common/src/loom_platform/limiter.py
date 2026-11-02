@@ -27,8 +27,14 @@ from loom_platform.usage import UsageEvent
 
 KEY_ROOT = "loom"
 UNLIMITED = -1
-# How long a settled request id is remembered, so a repeated settle is refused.
-SETTLED_TTL_S = 24 * 3600
+# How long a settled request id is remembered (`done:<request id>`), so a repeated
+# settle is refused: the reservation TTL (default 600 + 60 s; a request settles within
+# it) plus the gateway's settle-spool replay window (1 h; a spooled settle replayed
+# within it meets the marker). Older replays are made idempotent another way
+# (loom_gateway.spool; contracts §6 "Settle spool"). PlatformSettings.settled_ttl_s
+# derives the deployed value from the settings; this is the default settings' value.
+SETTLE_REPLAY_WINDOW_S = 3600
+SETTLED_TTL_S = 600 + 60 + SETTLE_REPLAY_WINDOW_S
 
 
 def org_prefix(org_id: uuid.UUID | str) -> str:
@@ -115,9 +121,16 @@ def _str(v: bytes | str) -> str:
 class Limiter:
     """Async wrappers around the scripts. One instance per process; cheap to share."""
 
-    def __init__(self, redis: Redis, *, usage_stream: str = "loom:usage") -> None:
+    def __init__(
+        self,
+        redis: Redis,
+        *,
+        usage_stream: str = "loom:usage",
+        settled_ttl_s: int = SETTLED_TTL_S,
+    ) -> None:
         self.redis = redis
         self.usage_stream = usage_stream
+        self.settled_ttl_s = settled_ttl_s
         self._reserve = redis.register_script(script_source("reserve"))
         self._settle = redis.register_script(script_source("settle"))
         self._release = redis.register_script(script_source("release"))
@@ -157,7 +170,7 @@ class Limiter:
                 str(event.api_key_id),
                 event.cost_micros,
                 event.prompt_tokens + event.completion_tokens,
-                SETTLED_TTL_S,
+                self.settled_ttl_s,
                 *event.to_stream_fields(),
             ],
         )

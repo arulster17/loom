@@ -72,6 +72,7 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_USAGE_STREAM` | `loom:usage` | gateway, billing |
 | `LOOM_AUTH_CACHE_TTL_S` | 4 | gateway |
 | `LOOM_REQUEST_TIMEOUT_S` / `LOOM_RESERVATION_GRACE_S` | 600 / 60 | gateway (reservation TTL = their sum) |
+| `LOOM_SETTLE_REPLAY_WINDOW_S` | 3600 | gateway: the `done:` marker lives the reservation TTL plus this; a spooled settle replayed within it is refused as a repeat by the marker (§6 "Settle spool") |
 | `LOOM_MAX_BODY_BYTES` | 1048576 | gateway (413 above) |
 | `LOOM_MAX_TOKENS_CAP` | 16384 | gateway |
 | `LOOM_DEFAULT_KEY_RPM` / `_TPM` / `_CONCURRENCY` | 60 / 200000 / 8 | gateway |
@@ -233,7 +234,7 @@ without also discarding the stream (both are one state).
 | `loom:org:<org>:rsum` | int | reserve, settle | Sum of live reservations |
 | `loom:org:<org>:rsv` | hash | reserve, settle | request id -> `<max cost>|<key id>|<tpm estimate>` |
 | `loom:org:<org>:rsv:exp` | zset | reserve, settle | request id -> expiry (ms); its size is the org's in-flight count |
-| `loom:org:<org>:done:<request>` | string | settle | Settled marker, 24 h |
+| `loom:org:<org>:done:<request>` | string | settle | Settled marker, kept the reservation TTL + `LOOM_SETTLE_REPLAY_WINDOW_S` (660 + 3600 = 4,260 s by default; was 24 h, ~1.5 GB per 100 req/s under `noeviction`, now ~40 MB) |
 | `loom:org:<org>:tb:rpm`, `:tb:tpm` | hash `{t, ts, c}` | reserve, settle | Org token buckets |
 | `loom:org:<org>:key:<key>:usage` | int | init, settle | Key's cumulative cost (spend cap) |
 | `loom:org:<org>:key:<key>:rsum`, `:inflight` | int | reserve, settle | Key's reservations and in-flight count |
@@ -359,8 +360,10 @@ nor the disk accepted (usage lost: alert at once).
 
 Replay is idempotent: `settle.lua` refuses a request id whose `done:` marker exists, so a
 settle that did run although its reply was lost is not charged twice. The marker lives
-`LOOM_REQUEST_TIMEOUT_S + LOOM_RESERVATION_GRACE_S + 3600` s (§6 key table); a spooled
-entry older than that is first looked up in `usage_events` (dropped if billing already
+`LOOM_REQUEST_TIMEOUT_S + LOOM_RESERVATION_GRACE_S + LOOM_SETTLE_REPLAY_WINDOW_S`
+(4,260 s, §6 key table): every settle happens within the reservation TTL, and a spooled
+one replayed within the window still meets its marker. A spooled entry older than the
+marker's lifetime (minus a minute) is first looked up in `usage_events` (dropped if billing already
 stored it), and Postgres stores an event at most once anyway (`ON CONFLICT (id,
 created_at)`). The remaining gap (an entry that did reach Redis, older than the marker,
 not yet consumed by billing) can only double Redis `usage` for it, never the ledger:

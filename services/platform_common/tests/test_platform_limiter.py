@@ -115,6 +115,27 @@ async def test_settle_charges_releases_and_appends_event(limiter, org, stream):
     assert (await reserve(limiter, org_id, key_id, rid=rid)).reason == "duplicate_request"
 
 
+async def test_settled_marker_lives_the_reservation_ttl_plus_the_replay_window(
+    limiter, org, stream
+):
+    """Not 24 h (~1.5 GB of markers per 100 req/s under noeviction): long enough to
+    outlive the reservation and the settle spool's replay window, and no longer."""
+    from loom_platform.settings import PlatformSettings
+
+    s = PlatformSettings()
+    assert s.settled_ttl_s == s.request_timeout_s + s.reservation_grace_s + 3600 == 4260
+    assert limiter.settled_ttl_s == s.settled_ttl_s
+    org_id, key_id = org
+    rid = uuid.uuid4()
+    await limiter.settle(event(org_id, key_id, rid))
+    ttl = await limiter.redis.ttl(org_key(org_id, f"done:{rid}"))
+    assert s.settled_ttl_s - 5 <= ttl <= s.settled_ttl_s
+    short = Limiter(limiter.redis, usage_stream=stream, settled_ttl_s=30)
+    rid = uuid.uuid4()
+    await short.settle(event(org_id, key_id, rid))
+    assert 0 < await limiter.redis.ttl(org_key(org_id, f"done:{rid}")) <= 30
+
+
 async def test_settle_without_reservation_still_charges(limiter, org, stream):
     org_id, key_id = org
     res = await limiter.settle(event(org_id, key_id, uuid.uuid4(), prompt=0, completion=1000))

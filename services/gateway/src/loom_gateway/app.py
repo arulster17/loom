@@ -49,7 +49,7 @@ from loom_platform import errors
 from loom_platform.auth import AuthRecord
 from loom_platform.db import open_pool
 from loom_platform.errors import ApiError
-from loom_platform.limiter import SETTLED_TTL_S, Limiter
+from loom_platform.limiter import Limiter
 from loom_platform.pricing import Price, servable
 from loom_platform.usage import UsageEvent
 
@@ -104,7 +104,9 @@ class Gateway:
         self.pg: AsyncConnectionPool = await open_pool(
             s.database_url, min_size=1, max_size=s.pg_pool_max
         )
-        self.limiter = Limiter(self.redis, usage_stream=s.usage_stream)
+        self.limiter = Limiter(
+            self.redis, usage_stream=s.usage_stream, settled_ttl_s=s.settled_ttl_s
+        )
         self.auth = Authenticator(
             self.redis, self.pg, redis_ttl_s=s.auth_cache_ttl_s, local_ttl_s=s.auth_local_ttl_s
         )
@@ -114,7 +116,7 @@ class Gateway:
             Path(s.settle_spool_path) if s.settle_spool_path else default_spool_path(),
             self.limiter,
             self.metrics,
-            settled_ttl_s=SETTLED_TTL_S,
+            settled_ttl_s=s.settled_ttl_s,
             settled_check=self._in_postgres,
         )
         self.spool.open()

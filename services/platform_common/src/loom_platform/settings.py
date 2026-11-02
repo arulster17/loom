@@ -48,6 +48,9 @@ class PlatformSettings(BaseSettings):
     # Hard upper bound on one request's duration; reservations live a minute longer.
     request_timeout_s: PositiveInt = 600
     reservation_grace_s: PositiveInt = 60
+    # How long a spooled settle may wait for Redis and still be refused as a repeat by
+    # its `done:` marker (the marker lives the reservation TTL plus this).
+    settle_replay_window_s: PositiveInt = 3600
 
     # Free credit posted when an admin approves a signup ($5).
     signup_promo_micros: Annotated[int, Field(ge=0)] = 5_000_000
@@ -67,6 +70,12 @@ class PlatformSettings(BaseSettings):
     @property
     def reservation_ttl_ms(self) -> int:
         return (self.request_timeout_s + self.reservation_grace_s) * 1000
+
+    @property
+    def settled_ttl_s(self) -> int:
+        """Lifetime of a `done:<request id>` marker: the reservation TTL plus the settle
+        replay window (contracts §6)."""
+        return self.request_timeout_s + self.reservation_grace_s + self.settle_replay_window_s
 
     def production_problems(self) -> list[str]:
         """Why this process must not start outside LOOM_ENV=dev (empty in dev). Services
