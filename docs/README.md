@@ -14,6 +14,7 @@
 - [load-generators.md](load-generators.md): the native load generator and the `vllm bench` / `sglang` wrappers.
 - [quality-gate.md](quality-gate.md): eval suites, the gate's decision rule, sample sizes, logprob divergence, sanity checks.
 - [cost-model.md](cost-model.md): $/1M tokens at SLO: goodput, allocation, CIs, what the hourly price includes, margins.
+- [perf/tensorrt-llm.md](perf/tensorrt-llm.md): TensorRT-LLM as a third engine: what it does differently from vLLM, the pinned version and its API gaps, the proposed comparison and its quote.
 - [site.md](site.md): the public results site: snapshot export, build, deployment, waitlist form.
 
 ## Operations
