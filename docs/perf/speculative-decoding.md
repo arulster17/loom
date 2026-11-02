@@ -149,7 +149,7 @@ v0.30.0, Qwen3-8B BF16, non-thinking mode.
 
 | Row | Speculation |
 |---|---|
-| `bf16` | none: the registry row, reference and gate baseline (7a8237d0's bf16 config, except the pod may land on CUDA 13.0-13.2 drivers: L40S stock sat on 13.1/13.2 hosts on 2026-11-02) |
+| `bf16` | none: the registry row, reference and gate baseline (same config hash as 7a8237d0's bf16) |
 | `bf16-ngram` | n-gram, 3 draft tokens, match windows of 2 to 4 tokens |
 | `bf16-eagle3` | EAGLE3, 3 draft tokens, `RedHatAI/Qwen3-8B-speculator.eagle3` |
 

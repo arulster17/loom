@@ -81,18 +81,10 @@ def test_three_rows_on_one_pod_differing_only_by_the_speculative_config():
     assert len({c.config_hash for c in cells}) == 3
 
 
-def test_the_reference_is_the_registry_bf16_row_as_7a8237d0_ran_it_but_for_the_cuda_list():
+def test_the_reference_is_the_registry_bf16_row_as_7a8237d0_ran_it():
     (bf16, *_) = expand(load_experiment(REAL), REGISTRY)
     sweep_bf16 = expand(load_experiment(SWEEP), REGISTRY)[0]
-    assert sweep_bf16.variant == "bf16"
-    # Same model, launch and pod shape; only the drivers the pod may land on differ (L40S
-    # stock sat on 13.1/13.2 hosts on 2026-11-02), which is hardware, so a new hash.
-    assert bf16.spec == sweep_bf16.spec and bf16.launch == sweep_bf16.launch
-    diff = {k for k in bf16.hardware if bf16.hardware[k] != sweep_bf16.hardware.get(k)}
-    assert diff == {"allowed_cuda_versions"}
-    assert bf16.hardware["allowed_cuda_versions"] == ["13.0", "13.1", "13.2"]
-    assert sweep_bf16.hardware["allowed_cuda_versions"] == ["13.0"]
-    assert bf16.config_hash != sweep_bf16.config_hash
+    assert sweep_bf16.variant == "bf16" and bf16.config_hash == sweep_bf16.config_hash
     # Qwen3 runs non-thinking, as the EAGLE3 head was trained.
     assert bf16.spec.engine.chat_template_kwargs == {"enable_thinking": False}
 
