@@ -37,6 +37,7 @@ from loom_gateway.metrics import GatewayMetrics
 from loom_gateway.request_body import Prepared
 from loom_gateway.routing import Router
 from loom_gateway.settings import GatewaySettings
+from loom_gateway.spool import SettleSpool
 from loom_gateway.sse import (
     DONE_EVENT,
     ChunkRewriter,
@@ -143,12 +144,14 @@ class Proxy:
         router: Router,
         client: httpx.AsyncClient,
         metrics: GatewayMetrics,
+        spool: SettleSpool | None = None,
     ) -> None:
         self.settings = settings
         self.limiter = limiter
         self.router = router
         self.client = client
         self.metrics = metrics
+        self.spool = spool
         # Open streams, so shutdown can cut and settle them (abort_streams).
         self.live: set[StreamResponse] = set()
         self.shutting_down = False
@@ -228,11 +231,7 @@ class Proxy:
                 break
             except (RedisError, OSError) as e:
                 if attempt == 2:
-                    self.metrics.settle_failures.inc()
-                    log.error(
-                        "settle failed: usage not recorded",
-                        extra={"fields": {"request_id": str(ctx.request_id), "error": repr(e)}},
-                    )
+                    await self._spool(event, e)
                 else:
                     await asyncio.sleep(0.05 * 2**attempt)
         self.metrics.overhead.labels("settle").observe(time.perf_counter() - now)
@@ -264,6 +263,19 @@ class Proxy:
             },
         )
         return cost
+
+    async def _spool(self, event: UsageEvent, error: Exception) -> None:
+        """Redis refused the settle: keep it on disk for replay (loom_gateway.spool)."""
+        fields = {"request_id": str(event.id), "error": repr(error)}
+        if self.spool is not None:
+            try:
+                await self.spool.append(event)
+                log.error("settle spooled: Redis unavailable", extra={"fields": fields})
+                return
+            except OSError as e:
+                fields["spool_error"] = repr(e)
+        self.metrics.settle_failures.inc()
+        log.error("settle failed: usage not recorded", extra={"fields": fields})
 
     # ------------------------------------------------------------ upstream
 

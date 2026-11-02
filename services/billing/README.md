@@ -106,6 +106,7 @@ Shared `LOOM_*` variables are in the contracts (§2). Billing adds:
 | `LOOM_USAGE_DEAD_STREAM` | `loom:usage:dead` | dead letters |
 | `LOOM_BILLING_CONSUMER` | `billing-<hostname>` | consumer name; keep it stable across restarts so a restart recovers its own pending entries |
 | `LOOM_USAGE_READ_COUNT` / `_BLOCK_MS` / `_CLAIM_IDLE_MS` | 500 / 2000 / 60000 | |
+| `LOOM_REDIS_SOCKET_TIMEOUT_S` / `LOOM_REDIS_CONNECT_TIMEOUT_S` | 2 / 1 | Redis client timeouts; the read timeout is raised to `_BLOCK_MS` + 3 s so a blocking read is not mistaken for a frozen Redis |
 | `LOOM_BATCH_INTERVAL_S` / `LOOM_RECONCILE_INTERVAL_S` | 60 / 60 | |
 | `LOOM_PARTITION_INTERVAL_S` / `LOOM_PARTITION_MONTHS_AHEAD` | 86400 / 3 | |
 | `LOOM_BILLING_HOST` / `_PORT` / `_METRICS_PORT` | `0.0.0.0` / 8090 / 9101 | metrics port 0 = off |

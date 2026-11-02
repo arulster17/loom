@@ -80,6 +80,8 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_CLOUD` / `LOOM_REGION` | `local` / empty | gateway (usage events) |
 | `LOOM_GATEWAY_CLIENT_CERT` / `_KEY`, `LOOM_POD_CA_CERT` | none | gateway (mTLS to pods; required outside `LOOM_ENV=dev`) |
 | `LOOM_CORS_ORIGINS` | `http://localhost:3000` | gateway |
+| `LOOM_REDIS_SOCKET_TIMEOUT_S` / `LOOM_REDIS_CONNECT_TIMEOUT_S` | 2 / 1 | gateway, billing: a frozen or unreachable Redis fails a call within this (gateway: 503 `service_unavailable`, `/ready` 503); billing raises the read timeout to its blocking read + 3 s |
+| `LOOM_SETTLE_SPOOL_PATH` | unset: a per-process temp file; image: `/var/lib/loom-gateway/settle-spool.jsonl` (a volume) | gateway: settles Redis refused, replayed until accepted (§6 "Settle spool"); required outside `LOOM_ENV=dev` |
 | `LOOM_SHUTDOWN_GRACE_S` | 10 | gateway: on SIGTERM, how long in-flight requests may finish before open streams are cut (§6 "Shutdown") |
 | `AUTH_SECRET`, `AUTH_URL`, `AUTH_GOOGLE_ID` / `_SECRET`, `EMAIL_SERVER` | none | web (Auth.js); `AUTH_URL` is required outside `LOOM_ENV=dev` |
 | `LOOM_GOOGLE_EMAIL_LINKING` | `true` | web: a Google sign-in may link to an existing user with the same email; Google sign-in always requires `email_verified` |
@@ -325,6 +327,37 @@ reservation expires, the tokens go unbilled (under-charge, never overshoot), and
 reservation and its in-flight counts are held until the reservation TTL. A **shutdown**
 (SIGTERM) does not lose them, below.
 
+### Settle spool
+
+A settle Redis does not accept (three tries over ~150 ms: down, failing over, or frozen
+past `LOOM_REDIS_SOCKET_TIMEOUT_S`) is not lost: the gateway appends the usage event as
+one JSON line to `LOOM_SETTLE_SPOOL_PATH` (flushed and fsynced) and a background task
+replays the file into `settle.lua` with backoff (0.5 s doubling to 30 s) until Redis
+accepts each entry, then drops the replayed lines (rewrite, fsync, rename). The request
+ends normally for the client meanwhile; its reservation stays held in Redis until the
+replayed settle releases it. Metrics: `loom_gateway_settle_spool_depth` (alert when above
+0 for 5 minutes), `loom_gateway_settle_spooled_total`, `loom_gateway_settle_replayed_total
+{result}`; `loom_gateway_settle_failures_total` now counts only settles that neither Redis
+nor the disk accepted (usage lost: alert at once).
+
+Replay is idempotent: `settle.lua` refuses a request id whose `done:` marker exists, so a
+settle that did run although its reply was lost is not charged twice. The marker lives
+`LOOM_REQUEST_TIMEOUT_S + LOOM_RESERVATION_GRACE_S + 3600` s (§6 key table); a spooled
+entry older than that is first looked up in `usage_events` (dropped if billing already
+stored it), and Postgres stores an event at most once anyway (`ON CONFLICT (id,
+created_at)`). The remaining gap (an entry that did reach Redis, older than the marker,
+not yet consumed by billing) can only double Redis `usage` for it, never the ledger:
+reconcile reports it as `missing_in_postgres` drift and the balance shows lower, never
+higher.
+
+The file is held with an exclusive `flock` (one gateway process per file) and replayed
+at the next start when a process stops with entries left. **M3**: put it on a volume
+that outlives the task, or accept that a task stopped during a Redis outage longer than
+its shutdown loses the spooled settles (logged at error with the count).
+
+While Redis is unavailable new requests are refused fast: any Redis error during auth,
+reserve or the pool check is a 503 `service_unavailable` with `Retry-After: 1` (§11).
+
 ### Shutdown
 
 On SIGTERM the gateway (`python -m loom_gateway`, `GatewayServer`):
@@ -563,6 +596,7 @@ Clients branch on the status; `code` gives the reason.
 | 502 | `server_error` | `upstream_lost` | Pod lost before any byte reached the client, retry used up; *(wave 2)* also no answer within `LOOM_REQUEST_TIMEOUT_S` of receipt. Billed nothing (usage event `error`) |
 | 503 | `server_error` | `model_unavailable` | §10; `Retry-After` in seconds |
 | 503 | `server_error` | `balance_unavailable` | *(wave 2)* the org's balance could not be loaded into Redis (§8 step 3); `Retry-After: 1`; no reservation, no usage event |
+| 503 | `server_error` | `service_unavailable` | Redis unreachable or frozen past `LOOM_REDIS_SOCKET_TIMEOUT_S` during auth, reserve or the pool check (§6 "Settle spool"); `Retry-After: 1`; nothing reserved |
 | 503 | `server_error` | `server_shutdown` | Only as a stream's last error chunk: the gateway is shutting down (§6 "Shutdown"); the tokens streamed are billed; retry |
 
 Mid-stream failures end the stream with `data: {"error": {... "code": "upstream_lost"}}`

@@ -17,6 +17,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -43,12 +44,14 @@ from loom_gateway.proxy import (
 from loom_gateway.request_body import Endpoint, Prepared, model_field, parse_json_object, prepare
 from loom_gateway.routing import Router, upstream_client
 from loom_gateway.settings import GatewaySettings
+from loom_gateway.spool import SettleSpool, default_spool_path
 from loom_platform import errors
 from loom_platform.auth import AuthRecord
 from loom_platform.db import open_pool
 from loom_platform.errors import ApiError
-from loom_platform.limiter import Limiter
+from loom_platform.limiter import SETTLED_TTL_S, Limiter
 from loom_platform.pricing import Price, servable
+from loom_platform.usage import UsageEvent
 
 log = logging.getLogger("loom_gateway")
 
@@ -91,7 +94,11 @@ class Gateway:
         # Blocking: the default pool raises MaxConnectionsError under bursts.
         self.redis = Redis(
             connection_pool=BlockingConnectionPool.from_url(
-                s.redis_url, max_connections=s.redis_max_connections, timeout=5
+                s.redis_url,
+                max_connections=s.redis_max_connections,
+                timeout=5,
+                socket_timeout=s.redis_socket_timeout_s,
+                socket_connect_timeout=s.redis_connect_timeout_s,
             )
         )
         self.pg: AsyncConnectionPool = await open_pool(
@@ -103,7 +110,16 @@ class Gateway:
         )
         self.router = Router(self.redis, s, self.metrics, self.cold_start_s)
         self.client: httpx.AsyncClient = upstream_client(s)
-        self.proxy = Proxy(s, self.limiter, self.router, self.client, self.metrics)
+        self.spool = SettleSpool(
+            Path(s.settle_spool_path) if s.settle_spool_path else default_spool_path(),
+            self.limiter,
+            self.metrics,
+            settled_ttl_s=SETTLED_TTL_S,
+            settled_check=self._in_postgres,
+        )
+        self.spool.open()
+        self.spool.start()
+        self.proxy = Proxy(s, self.limiter, self.router, self.client, self.metrics, self.spool)
         if s.auth_listen:
             self._listener = asyncio.create_task(self.auth.listen_forever(s.database_url))
             try:
@@ -135,6 +151,7 @@ class Gateway:
         left = await wait_background(SHUTDOWN_SETTLE_S)
         if left:
             log.error("shutdown: settles still running at close", extra={"fields": {"n": left}})
+        await self.spool.stop()
         if self._listener is not None:
             self._listener.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -144,6 +161,15 @@ class Gateway:
         await self.redis.aclose()
 
     # ------------------------------------------------------------ helpers
+
+    async def _in_postgres(self, event: UsageEvent) -> bool:
+        """Whether billing already stored this event (spool replay of an old entry)."""
+        async with self.pg.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT 1 FROM usage_events WHERE id = %s AND created_at = %s",
+                (event.id, event.created_at),
+            )
+            return await cur.fetchone() is not None
 
     def lookup_model(self, model_id: str) -> tuple[ModelSpec, Price]:
         hit = self.models.get(model_id)
@@ -271,6 +297,11 @@ class Gateway:
             headers["X-Loom-Max-Cost-Micros"] = str(prep.max_cost_micros)
         except ApiError as e:
             return self.rejected(e, headers, endpoint, model_label, t0)
+        except (RedisError, OSError) as e:
+            # Redis down or frozen past its socket timeout: refuse fast, nothing reserved
+            # (a reservation made before the failure is released or expires).
+            log.warning("redis unavailable", extra={"fields": {"error": type(e).__name__}})
+            return self.rejected(errors.service_unavailable(), headers, endpoint, model_label, t0)
 
         ctx = RequestCtx(
             request_id=request_id,

@@ -36,6 +36,11 @@ class PlatformSettings(BaseSettings):
     models_yaml: str | None = None
 
     usage_stream: str = "loom:usage"
+    # Redis client timeouts, so a frozen or unreachable Redis fails a call quickly (the
+    # gateway answers 503 and /ready fails) instead of hanging it. Billing raises the
+    # read timeout above its blocking XREADGROUP wait.
+    redis_socket_timeout_s: Annotated[float, Field(gt=0)] = 2.0
+    redis_connect_timeout_s: Annotated[float, Field(gt=0)] = 1.0
 
     # Gateway auth cache: Redis TTL of a cached key record. Revocation and suspension
     # reach every gateway within this bound even if no invalidation is delivered.

@@ -322,6 +322,62 @@ class FakeEngine:
 # ------------------------------------------------------------------ servers
 
 
+class TcpProxy:
+    """A TCP forwarder in front of the shared Redis, to simulate an outage without
+    touching the server: `stop()` refuses and drops every connection (Redis down),
+    `freeze()` accepts and forwards nothing (Redis frozen), `start()` restores it on the
+    same port."""
+
+    def __init__(self, host: str, port: int) -> None:
+        self.target = (host, port)
+        self.port = 0
+        self.frozen = False
+        self._server: asyncio.Server | None = None
+        self._writers: set[asyncio.StreamWriter] = set()
+
+    async def start(self) -> None:
+        self.frozen = False
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", self.port)
+        self.port = self._server.sockets[0].getsockname()[1]
+
+    def freeze(self) -> None:
+        self.frozen = True
+
+    async def stop(self) -> None:
+        if self._server is not None:
+            self._server.close()
+        for w in list(self._writers):
+            w.close()
+        self._writers.clear()
+        if self._server is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self._server.wait_closed(), 2)
+            self._server = None
+
+    async def _handle(self, r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+        self._writers.add(w)
+        try:
+            ur, uw = await asyncio.open_connection(*self.target)
+        except OSError:
+            w.close()
+            return
+        self._writers.add(uw)
+
+        async def pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
+            try:
+                while data := await src.read(65536):
+                    if self.frozen:
+                        continue  # swallowed: the caller waits until its socket timeout
+                    dst.write(data)
+                    await dst.drain()
+            except (OSError, asyncio.IncompleteReadError):
+                pass
+            finally:
+                dst.close()
+
+        await asyncio.gather(pipe(r, uw), pipe(ur, w), return_exceptions=True)
+
+
 @contextlib.asynccontextmanager
 async def serve(app: Any, **config: Any) -> AsyncIterator[int]:
     """Run an ASGI app with uvicorn in this event loop on a free port."""

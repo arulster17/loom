@@ -28,12 +28,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --package loom-gateway --no-editable
 
 FROM python:3.12-slim
-RUN useradd --system --uid 10001 --no-create-home loom
+RUN useradd --system --uid 10001 --no-create-home loom \
+    && mkdir -p /var/lib/loom-gateway && chown loom /var/lib/loom-gateway
 COPY --from=build /opt/venv /opt/venv
 COPY config/models.yaml /app/config/models.yaml
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
-    LOOM_MODELS_YAML=/app/config/models.yaml
+    LOOM_MODELS_YAML=/app/config/models.yaml \
+    LOOM_SETTLE_SPOOL_PATH=/var/lib/loom-gateway/settle-spool.jsonl
+# The settle spool (contracts §6): mount a volume here so it survives a restart.
+VOLUME /var/lib/loom-gateway
 WORKDIR /app
 USER loom
 EXPOSE 8080 9100

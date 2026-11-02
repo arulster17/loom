@@ -331,6 +331,7 @@ PROD_OK = {
     "gateway_client_cert": "/certs/gateway.crt",
     "gateway_client_key": "/certs/gateway.key",
     "cors_origins": "https://loom.example",
+    "settle_spool_path": "/var/lib/loom-gateway/settle-spool.jsonl",
 }
 
 
@@ -342,6 +343,7 @@ PROD_OK = {
         ("gateway_client_key", "LOOM_GATEWAY_CLIENT_CERT"),
         ("cors_origins", "LOOM_CORS_ORIGINS"),
         ("database_url", "LOOM_DATABASE_URL"),
+        ("settle_spool_path", "LOOM_SETTLE_SPOOL_PATH"),
     ],
 )
 def test_gateway_refuses_dev_defaults_outside_dev(unset, problem):

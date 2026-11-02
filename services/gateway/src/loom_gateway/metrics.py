@@ -95,7 +95,23 @@ class GatewayMetrics:
         )
         self.settle_failures = Counter(
             "loom_gateway_settle_failures",
-            "Settle calls that failed after retries (usage lost: alert)",
+            "Settles neither accepted by Redis nor written to the spool (usage lost: alert)",
+            registry=r,
+        )
+        self.settle_spooled = Counter(
+            "loom_gateway_settle_spooled",
+            "Settles Redis refused, written to the local spool for replay",
+            registry=r,
+        )
+        self.settle_replayed = Counter(
+            "loom_gateway_settle_replayed",
+            "Spooled settles replayed, by result (settled | duplicate | already_billed | corrupt)",
+            ["result"],
+            registry=r,
+        )
+        self.settle_spool_depth = Gauge(
+            "loom_gateway_settle_spool_depth",
+            "Settles waiting in the spool for Redis (alert when above 0 for minutes)",
             registry=r,
         )
         self.wakes = Counter(

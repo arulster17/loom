@@ -195,7 +195,11 @@ services:
       LOOM_POD_CA_CERT: /certs/ca.crt
       LOOM_CORS_ORIGINS: http://localhost:${LOOM_WEB_PORT:-3000}
       LOOM_CLOUD: local
-    volumes: [*certs-volume, *config-volume]
+    volumes:
+      - *certs-volume
+      - *config-volume
+      # Settles Redis refused, replayed when it is back; kept across restarts.
+      - gatewayspool:/var/lib/loom-gateway
     ports:
       - "${LOOM_GATEWAY_PORT:-8080}:8080"
       - "${LOOM_GATEWAY_METRICS_PORT:-9100}:9100"
@@ -328,3 +332,4 @@ services:
 volumes:
   pgdata:
   redisdata:
+  gatewayspool:

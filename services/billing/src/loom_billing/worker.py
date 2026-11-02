@@ -36,7 +36,13 @@ log = logging.getLogger("loom_billing.worker")
 
 
 def redis_from_settings(settings: BillingSettings) -> Redis:
-    pool = BlockingConnectionPool.from_url(settings.redis_url, max_connections=16, timeout=10)
+    pool = BlockingConnectionPool.from_url(
+        settings.redis_url,
+        max_connections=16,
+        timeout=10,
+        socket_timeout=settings.redis_read_timeout_s,
+        socket_connect_timeout=settings.redis_connect_timeout_s,
+    )
     return Redis(connection_pool=pool)
 
 
