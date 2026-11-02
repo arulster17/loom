@@ -119,6 +119,14 @@ RUNPOD_GPU_TYPE_IDS: dict[str, str] = {
 }
 
 
+# The values RunPod's REST API accepts in a pod's `allowedCudaVersions` (its schema enum,
+# from a 400 on 2026-11-02 that rejected "13.1"/"13.2": "value must be one of '13.0',
+# '12.9', ... '11.8'"). Hosts whose drivers report a newer CUDA still fall under "13.0".
+RunpodCudaVersion = Literal[
+    "13.0", "12.9", "12.8", "12.7", "12.6", "12.5", "12.4", "12.3", "12.2", "12.1", "12.0", "11.8"
+]
+
+
 class RunpodProviderSpec(_Strict):
     """RunPod pods, always on-demand (uninterruptible). The engine runs as the pod's
     own container, so each engine image gets its own pod (see `hardware_for`)."""
@@ -129,8 +137,10 @@ class RunpodProviderSpec(_Strict):
     gpu_type_id: str | None = None  # default: RUNPOD_GPU_TYPE_IDS[hardware.gpu]
     container_disk_gb: PositiveInt = 80
     # CUDA versions the host driver must support; the pinned vLLM image needs 13.0.
-    allowed_cuda_versions: Annotated[list[str], Field(min_length=1)] = Field(
-        default_factory=lambda: ["13.0"]
+    # RunPod's REST API accepts only `RunpodCudaVersion` values here (newest "13.0", which
+    # hosts with newer drivers fall under): anything else is a 400 at pod create.
+    allowed_cuda_versions: Annotated[list[RunpodCudaVersion], Field(min_length=1)] = Field(
+        default_factory=lambda: list[RunpodCudaVersion](["13.0"])
     )
     data_center_ids: Annotated[list[str], Field(min_length=1)] | None = None  # None: any
     # Set in the engine's environment (validated: no secret names). It is part of the

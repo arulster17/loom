@@ -112,3 +112,16 @@ def test_the_smoke_covers_every_code_path_of_the_real_run():
     # The divergence path runs on the smoke's hard prompts, as on the full set.
     div = smoke.quality.load().divergence
     assert div is not None and div.hard_prompts
+
+
+@pytest.mark.parametrize("version", ["13.1", "13.2", "14.0"])
+def test_runpod_cuda_versions_outside_runpods_list_fail_at_load(version):
+    # RunPod's REST API refused "13.1"/"13.2" with a 400 at pod create (2b2b18f6,
+    # 2026-11-02); the spec now refuses them before anything is created.
+    from pydantic import ValidationError
+
+    from loom_bench.experiment import RunpodProviderSpec
+
+    with pytest.raises(ValidationError):
+        RunpodProviderSpec(kind="runpod", allowed_cuda_versions=["13.0", version])
+    assert RunpodProviderSpec(kind="runpod").allowed_cuda_versions == ["13.0"]
