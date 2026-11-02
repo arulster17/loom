@@ -605,6 +605,8 @@ async def _completions(server: MockServer, request: Request) -> Response:
     server.check_ready()
     req = await _parse(request, CompletionRequest)
     server.check_model(req.model)
+    if req.logprobs and not server.config.completions_logprobs:
+        raise ApiError(400, "logprobs is not supported", param="logprobs")
     prompts = [req.prompt] if isinstance(req.prompt, str) else req.prompt
     if not prompts:
         raise ApiError(400, "prompt must not be empty.", param="prompt")

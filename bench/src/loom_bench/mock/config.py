@@ -61,6 +61,9 @@ class MockConfig(BaseModel):
     # them as vLLM does ("" then the whole character) with text_offsets on, or as SGLang
     # does (each token alone, a fragment as latin-1 bytes) with it off.
     byte_level: bool = False
+    # False rejects `logprobs` on /v1/completions with a 400, as TensorRT-LLM 1.2.1 does
+    # ("logprobs is not supported"): the divergence check cannot score such an engine.
+    completions_logprobs: bool = True
 
     # Faults.
     error_rate: Probability = 0.0

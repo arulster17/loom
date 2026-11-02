@@ -99,8 +99,12 @@ class HFSource(StrictModel):
         return self
 
 
+# Serving engines with a launch renderer (`engines.ARG_RENDERERS`).
+EngineName = Literal["vllm", "sglang", "trtllm"]
+
+
 class Engine(StrictModel):
-    name: Literal["vllm", "sglang"]
+    name: EngineName
     version: Annotated[str, StringConstraints(pattern=r"^\d+\.\d+\.\d+([.+-][\w.]+)?$")]
     image: PinnedImage
     args: dict[str, Any] = Field(default_factory=dict)
@@ -178,10 +182,11 @@ class ModelSpec(StrictModel):
     scaling: Scaling
     clouds: Annotated[list[Cloud], Field(min_length=1)]
     capabilities: Capabilities
-    # Tool-call parser per engine (vLLM `--tool-call-parser`, SGLang `--tool-call-parser`).
-    # Model-level, not under `engine`, so it survives a variant switching engines.
-    # `capabilities.tools` needs one: without it the engine rejects `tool_choice: auto`.
-    tool_call_parsers: dict[Literal["vllm", "sglang"], NonEmptyStr] = Field(default_factory=dict)
+    # Tool-call parser per engine (vLLM `--tool-call-parser`, SGLang `--tool-call-parser`,
+    # TensorRT-LLM `--tool_parser`). Model-level, not under `engine`, so it survives a
+    # variant switching engines. `capabilities.tools` needs one: without it the engine
+    # rejects `tool_choice: auto` (or, TensorRT-LLM, returns the call as plain text).
+    tool_call_parsers: dict[EngineName, NonEmptyStr] = Field(default_factory=dict)
     routing_tier: Annotated[int, Field(ge=0)]
     status: Status
     # The registry entry this one is a quantization of: the same model served at another

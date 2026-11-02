@@ -226,4 +226,55 @@ def test_counters_need_two_scrapes_and_progress():
 
 def test_unknown_engine():
     with pytest.raises(ValueError):
-        summarize_scrapes("trtllm", [])
+        summarize_scrapes("tgi", [])
+
+
+# TensorRT-LLM /prometheus/metrics (prometheus_client multiprocess output). Constructed
+# from tensorrt_llm/metrics/collector.py at v1.2.1 (request histograms only, labelled
+# model_name/engine_type) and v1.4.0rc2 (adds the gauges); not captured from a server.
+TRTLLM_LABELS = 'model_name="undefined",engine_type="undefined"'
+
+
+def trtllm_scrape(queue_sum: float, queue_count: float, gauges: dict[str, float] | None = None):
+    text = f"""\
+# HELP trtllm_request_success_total Count of successfully processed requests.
+# TYPE trtllm_request_success_total counter
+trtllm_request_success_total{{{TRTLLM_LABELS},finished_reason="length"}} {queue_count}
+# HELP trtllm_time_to_first_token_seconds Histogram of time to first token in seconds.
+# TYPE trtllm_time_to_first_token_seconds histogram
+trtllm_time_to_first_token_seconds_sum{{{TRTLLM_LABELS}}} 1.5
+trtllm_time_to_first_token_seconds_bucket{{{TRTLLM_LABELS},le="+Inf"}} {queue_count}
+trtllm_time_to_first_token_seconds_count{{{TRTLLM_LABELS}}} {queue_count}
+# HELP trtllm_request_queue_time_seconds Histogram of time spent in WAITING phase for request.
+# TYPE trtllm_request_queue_time_seconds histogram
+trtllm_request_queue_time_seconds_sum{{{TRTLLM_LABELS}}} {queue_sum}
+trtllm_request_queue_time_seconds_bucket{{{TRTLLM_LABELS},le="0.3"}} {queue_count}
+trtllm_request_queue_time_seconds_bucket{{{TRTLLM_LABELS},le="+Inf"}} {queue_count}
+trtllm_request_queue_time_seconds_count{{{TRTLLM_LABELS}}} {queue_count}
+"""
+    for name, value in (gauges or {}).items():
+        text += f"# TYPE {name} gauge\n{name}{{{TRTLLM_LABELS}}} {value}\n"
+    return text
+
+
+def test_trtllm_1_2_1_reports_queue_time_and_lists_the_rest_missing():
+    m = summarize_scrapes("trtllm", [(0.0, trtllm_scrape(1.0, 10)), (5.0, trtllm_scrape(3.0, 14))])
+    assert m.queue_time_mean_ms == pytest.approx(500)
+    assert m.running_mean is None and m.kv_usage_mean is None
+    assert set(m.missing) == {
+        "running", "waiting", "kv_usage", "preemptions", "prefix_cache_hit_rate"
+    }  # fmt: skip
+
+
+def test_trtllm_gauges_of_later_versions_are_read():
+    gauges = {
+        "trtllm_num_requests_running": 30,
+        "trtllm_num_requests_waiting": 2,
+        "trtllm_kv_cache_utilization": 0.6,
+        "trtllm_kv_cache_hit_rate": 0.25,
+    }
+    m = summarize_scrapes("trtllm", [(0.0, trtllm_scrape(0.0, 0, gauges))])
+    assert (m.running_mean, m.waiting_mean) == (30, 2)
+    assert m.kv_usage_mean == pytest.approx(0.6)
+    assert m.prefix_cache_hit_rate == pytest.approx(0.25)
+    assert "preemptions" in m.missing  # GUARANTEED_NO_EVICT never preempts

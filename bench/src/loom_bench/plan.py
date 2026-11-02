@@ -97,6 +97,13 @@ LOCAL_TIMING = Timing(
     eval_setup_s=0.0,
     eval_job_s=1.0,
 )
+# Extra (image pull, engine init) seconds per engine on top of the provider's Timing,
+# for engines much slower to start than vLLM. TensorRT-LLM 1.2.1's image is 20.9 GB
+# compressed (registry manifest, amd64) against vLLM 0.30.0's 8.7 GB and SGLang
+# 0.5.21's 15.2 GB, whose pull took 226 s on RunPod (b97dea4c): at that rate ~310 s,
+# so +180 s over the shared 240 s leaves margin. Its init adds an autotuner pass and
+# CUDA-graph capture for more batch sizes (no measured start yet): +120 s.
+ENGINE_START_EXTRA_S: dict[str, tuple[float, float]] = {"trtllm": (180.0, 120.0)}
 # The mock starts a uvicorn thread, then waits startup_delay_s * time_scale.
 MOCK_SERVER_START_S = 0.5
 MOCK_RUN_OVERHEAD_S = 0.3
@@ -253,13 +260,22 @@ class Estimator:
         if self.timing is None:
             return self._mock_start_s(cell)
         t, size = self.timing, cell.spec.hf.size_bytes
+        pull, init = self._engine_extra_s(cell)
         return (
             t.boot_s
             + t.image_pull_s
+            + pull
             + size / t.download_bytes_per_s
             + size / t.load_bytes_per_s
             + t.engine_init_s
+            + init
         )
+
+    def _engine_extra_s(self, cell: Cell) -> tuple[float, float]:
+        """`ENGINE_START_EXTRA_S` for a cell on a provisioned host (not `local`)."""
+        if self.timing is None or self.timing is LOCAL_TIMING:
+            return 0.0, 0.0
+        return ENGINE_START_EXTRA_S.get(cell.launch.engine, (0.0, 0.0))
 
     def download_bytes(self, cell: Cell, held: Collection[tuple[str, str]] = ()) -> int:
         """Bytes a start of `cell` downloads onto a host whose cache holds `held`: its
@@ -275,9 +291,10 @@ class Estimator:
         if self.timing is None:
             return self._mock_start_s(cell)
         t, size = self.timing, cell.spec.hf.size_bytes
-        seconds = size / t.load_bytes_per_s + t.engine_init_s
+        pull, init = self._engine_extra_s(cell)
+        seconds = size / t.load_bytes_per_s + t.engine_init_s + init
         if not started or started[-1].launch.image != cell.launch.image:
-            seconds += t.image_pull_s
+            seconds += t.image_pull_s + pull
         held = {w for c in started for w in launch_weights(c.launch)}
         return seconds + self.download_bytes(cell, held) / t.download_bytes_per_s
 

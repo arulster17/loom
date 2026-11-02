@@ -48,7 +48,7 @@ from typing import Annotated, Any
 import boto3  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
-from loom_bench.engines import engine_process_argv
+from loom_bench.engines import engine_process_argv, metrics_path
 from loom_bench.experiment import RUNPOD_GPU_TYPE_IDS, RunpodProviderSpec
 from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult, TokenizerSpec
 from loom_bench.money import Micros
@@ -610,7 +610,9 @@ class RunpodProvider:
             LOG_DIR=runpod_layout.LOG_DIR,
             STAGE_FILE=runpod_layout.STAGE_FILE,
             ENGINE_ENV=[f"{k}={v}" for k, v in sorted(launch.env.items())],
-            ENGINE_CMD=engine_process_argv(launch, host=ENGINE_HOST),
+            ENGINE_CMD=engine_process_argv(
+                launch, host=ENGINE_HOST, weights_dir=runpod_layout.WEIGHTS_DIR
+            ),
             ENGINE_PIDFILE=runpod_layout.ENGINE_PIDFILE,
             PROC1_ENVIRON=runpod_layout.PROC1_ENVIRON,
             JOB_UID=runpod_layout.JOB_UID,
@@ -689,7 +691,7 @@ class RunpodProvider:
         base = f"http://{ENGINE_HOST}:{launch.port}"
         return Endpoint(
             base_url=f"{base}/v1",
-            metrics_url=f"{base}/metrics",
+            metrics_url=f"{base}{metrics_path(launch.engine)}",
             engine=launch.engine,
             served_model=launch.served_model,
             start_stages=stages,
