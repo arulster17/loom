@@ -1005,3 +1005,9 @@ def waitlist_count_cmd(
     console.print(f"{count} signups")
     if record:
         console.print(f"recorded in {record_count(docs, count, source)}")
+
+
+# `bench roofline` and `bench profile ...` live in their own package.
+from loom_bench.profile.cli import register as _register_profile  # noqa: E402
+
+_register_profile(app)
