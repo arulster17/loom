@@ -329,6 +329,38 @@ added to the list. At the end, `docker logs` of all 12 containers of the project
 lines, including the gateway's per-request lines, billing, web, the pods and the stub)
 contained **none** of the 28 strings.
 
+## Checks added after the second review (items j-m)
+
+A second, independent review of the merged M1 code (2026-11-01) found defects in
+failure handling, compatibility and hardening; each is fixed with a regression test
+(see the commit log of that branch). `loom-m1-acceptance` gained four items that check
+the fixes on the real compose stack; they run after `d` and before the log scan `i`,
+and `m` is destructive for Redis (it ends by setting both pools `ready` again).
+
+| # | Item | What the run checks |
+|---|---|---|
+| j | Compatibility and hardening | A 20,000-word prompt (over 16,384 tokens) **without `max_tokens`** on `qwen3-8b` (32k) succeeds, reserves no more than before and is billed within its reservation; a request-supplied `chat_template` is a 400 naming the parameter; an unknown key with a 1 MB `Content-Length` and no body gets its 401 at once (refused before the body is read); `api_keys.last_used_at` is set; the web app sends a nonce CSP with `frame-ancestors 'none'`, `X-Frame-Options: DENY`, `nosniff` and a `Referrer-Policy`; a Stripe `charge.refunded` delivered **before** its purchase is stored unapplied and applied in the purchase's transaction (signed with the stub's secret, as Stripe signs) |
+| k | Gateway SIGTERM mid-stream | `docker stop` of the gateway 10 chunks into a long stream: the stream ends with a `server_shutdown` error chunk and `[DONE]` within the 10 s grace, the usage row is `aborted` with exactly the tokens streamed, the org's reservations are back to 0 at once, and the gateway comes back healthy |
+| l | Redis outage mid-stream | `docker stop` of Redis 10 chunks into a long stream: a new request gets 503 `service_unavailable` fast; the stream completes and its settle is spooled (`loom_gateway_settle_spool_depth` = 1); after `docker start` the event lands in Postgres exactly once, Redis `usage` moved by its cost once, the spool drains to 0 and the reservation is released |
+| m | Redis FLUSHALL | After billing has consumed the stream, `FLUSHALL`: requests get 503 while the pool hash is gone, the wake brings the model back, the org's balance reloads from Postgres, billing recreates its consumer group, the request's usage row lands, and Redis `usage` equals Postgres |
+
+Also new in CI: an `acceptance` job runs this whole script on the compose stack built
+from the commit (ports moved), uploads the JSON, the run log and the compose logs, and
+tears the stack down (`.github/workflows/ci.yml`). Running the script repeatedly within
+15 minutes on one stack can hit the web app's magic-link limits (5 per email, 20 per IP
+per 15 min; one run signs in about 7 times): raise `LOOM_SIGNIN_IP_LIMIT` /
+`LOOM_SIGNIN_EMAIL_LIMIT` for the web service if needed.
+
+**Status of j-m: not yet run on a compose stack.** The run for this change could not be
+made: Docker Desktop's host file sharing hung on bind mounts (every container with a
+bind mount stuck in "Starting", including a plain `docker run -v`), and Docker Desktop
+then stopped with "Docker Desktop is unable to start" before the stack came up. The
+items are linted, type-checked and their helpers unit-tested; the same behaviours are
+covered by the regression tests of each fix (`test_gateway_shutdown.py` with a real
+gateway subprocess, `test_gateway_spool.py`, `test_billing_redis_loss.py`,
+`test_gateway_long_prompt.py` through the real mock, `test_gateway_hardening.py`,
+`test_billing_webhook.py`). The new CI job runs them on every push.
+
 ## Defects found
 
 Fixed, each with a regression test:
@@ -367,7 +399,9 @@ lint clean, typecheck clean, 51 unit and 32 integration tests passed.
 2. **Chat requests without `max_tokens` reserve the 16,384-token cap**: up to $0.022 on
    the 70B (contracts §6). An org with less than that cannot make such a request even if
    it would cost a fraction of a cent, and gets a 402. A smaller default reservation (or
-   a default `max_tokens`) would change user-facing behaviour.
+   a default `max_tokens`) would change user-facing behaviour. (The second review's fix
+   for long prompts without `max_tokens` lowers only what is sent to the engine, never
+   the reservation, so this question is unchanged.)
 3. **Aborted streams bill the tokens forwarded, not the tokens generated.** The brief
    says "bill tokens actually generated"; the contracts bill the last chunk forwarded. In
    this run the two were equal; on a real GPU, tokens generated after the last forwarded

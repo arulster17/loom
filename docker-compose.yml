@@ -315,6 +315,10 @@ services:
       LOOM_PUBLIC_API_URL: http://localhost:${LOOM_GATEWAY_PORT:-8080}/v1
       LOOM_BILLING_URL: http://billing:8090
       LOOM_INTERNAL_TOKEN: *internal-token
+      # Magic-link sends per client IP / per email per 15 min (apps/web/README.md). One
+      # loom-m1-acceptance run signs in ~7 times from one IP; raise these to repeat runs.
+      LOOM_SIGNIN_IP_LIMIT: ${LOOM_SIGNIN_IP_LIMIT:-20}
+      LOOM_SIGNIN_EMAIL_LIMIT: ${LOOM_SIGNIN_EMAIL_LIMIT:-5}
     volumes: [*config-volume]
     ports:
       - "${LOOM_WEB_PORT:-3000}:3000"
