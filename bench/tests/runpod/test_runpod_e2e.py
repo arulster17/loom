@@ -95,8 +95,15 @@ def _started_server(cfg: MockConfig) -> Any:
 
 def engine_checkpoint(script: str) -> tuple[str, str]:
     """(repo, revision) the rendered ENGINE_CMD loads (vLLM `serve <repo>`, SGLang
-    `--model-path <repo>`, both `--revision <rev>`)."""
+    `--model-path <repo>`, both `--revision <rev>`; TensorRT-LLM the pod cache's
+    `.../hub/models--<org>--<name>/snapshots/<rev>`)."""
     cmd = script_array(script, "ENGINE_CMD")
+    for arg in cmd:
+        m = re.fullmatch(
+            r"/opt/loom/hf/hub/models--([^/]+?)--([^/]+)/snapshots/([0-9a-f]{40})", arg
+        )
+        if m:
+            return f"{m[1]}/{m[2]}", m[3]
     repo = cmd[cmd.index("--model-path") + 1] if "--model-path" in cmd else cmd[2]
     return repo, cmd[cmd.index("--revision") + 1]
 

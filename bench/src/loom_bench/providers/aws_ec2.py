@@ -34,7 +34,7 @@ import boto3  # type: ignore[import-untyped]
 from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from loom_bench.engines import docker_run_argv
+from loom_bench.engines import docker_run_argv, metrics_path
 from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult, TokenizerSpec
 from loom_bench.money import MICROS_PER_USD, Micros
 from loom_bench.prices import HOURS_PER_MONTH, PriceBook, load_prices
@@ -640,7 +640,7 @@ class AwsEc2Provider:
         base = f"http://127.0.0.1:{launch.port}"
         return Endpoint(
             base_url=f"{base}/v1",
-            metrics_url=f"{base}/metrics",
+            metrics_url=f"{base}{metrics_path(launch.engine)}",
             engine=launch.engine,
             served_model=launch.served_model,
             start_stages=stages,

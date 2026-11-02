@@ -91,7 +91,7 @@ class LocalProviderSpec(_Strict):
     kind: Literal["local"]
     base_url: str  # including the API prefix, e.g. http://127.0.0.1:8000/v1
     metrics_url: str | None = None
-    engine: Literal["vllm", "sglang", "mock"]
+    engine: Literal["vllm", "sglang", "trtllm", "mock"]
     served_model: str
     tokenizer: Literal["hf", "simple"] = "hf"
     hourly_price: HourlyPrice | None = None
@@ -786,8 +786,21 @@ def serving_model_doc(spec: ModelSpec) -> dict[str, Any]:
     null. A price says nothing about how the model is served, and it changes for business
     reasons; every config hash stored before prices existed has `pricing: null` in it, so
     pricing a row (or repricing it) never moves its cells' config hashes. Reports and the
-    competitiveness view read prices from the registry by model id."""
-    return {**spec.model_dump(mode="json"), "pricing": None}
+    competitiveness view read prices from the registry by model id.
+
+    `tool_call_parsers` keeps the engines every stored hash already recorded (vLLM and
+    SGLang) and the cell's own engine: a parser for an engine added later (TensorRT-LLM)
+    says nothing about how a vLLM cell is served, and recording it would move every
+    stored hash of that model (7a8237d0's bf16 cell, the stored baselines)."""
+    doc = {**spec.model_dump(mode="json"), "pricing": None}
+    keep = HASHED_PARSER_ENGINES | {spec.engine.name}
+    doc["tool_call_parsers"] = {k: v for k, v in doc["tool_call_parsers"].items() if k in keep}
+    return doc
+
+
+# Engines whose tool-call parsers every cell's config records (they were in the registry
+# before any later engine; see `serving_model_doc`).
+HASHED_PARSER_ENGINES = frozenset({"vllm", "sglang"})
 
 
 def build_cell(
