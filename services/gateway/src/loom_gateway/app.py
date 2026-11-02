@@ -17,6 +17,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -31,16 +32,33 @@ from starlette.responses import JSONResponse, Response
 from loom_bench.registry import ModelSpec, Registry, load_registry
 from loom_gateway.authn import Authenticator
 from loom_gateway.metrics import GatewayMetrics
-from loom_gateway.proxy import Proxy, RequestCtx, StreamResponse, error_response, shielded
-from loom_gateway.request_body import Endpoint, Prepared, model_field, parse_json_object, prepare
+from loom_gateway.proxy import (
+    SHUTDOWN_SETTLE_S,
+    Proxy,
+    RequestCtx,
+    StreamResponse,
+    error_response,
+    shielded,
+    wait_background,
+)
+from loom_gateway.request_body import (
+    Endpoint,
+    Prepared,
+    check_params,
+    model_field,
+    parse_json_object,
+    prepare,
+)
 from loom_gateway.routing import Router, upstream_client
 from loom_gateway.settings import GatewaySettings
+from loom_gateway.spool import SettleSpool, default_spool_path
 from loom_platform import errors
 from loom_platform.auth import AuthRecord
 from loom_platform.db import open_pool
 from loom_platform.errors import ApiError
 from loom_platform.limiter import Limiter
 from loom_platform.pricing import Price, servable
+from loom_platform.usage import UsageEvent
 
 log = logging.getLogger("loom_gateway")
 
@@ -76,25 +94,41 @@ class Gateway:
             m.id: (m, Price.of(m)) for m in servable(registry)
         }
         self._listener: asyncio.Task[None] | None = None
+        self._calls = 0  # generate() calls in progress (a stream's ends at its first byte)
 
     async def start(self) -> None:
         s = self.settings
         # Blocking: the default pool raises MaxConnectionsError under bursts.
         self.redis = Redis(
             connection_pool=BlockingConnectionPool.from_url(
-                s.redis_url, max_connections=s.redis_max_connections, timeout=5
+                s.redis_url,
+                max_connections=s.redis_max_connections,
+                timeout=5,
+                socket_timeout=s.redis_socket_timeout_s,
+                socket_connect_timeout=s.redis_connect_timeout_s,
             )
         )
         self.pg: AsyncConnectionPool = await open_pool(
             s.database_url, min_size=1, max_size=s.pg_pool_max
         )
-        self.limiter = Limiter(self.redis, usage_stream=s.usage_stream)
+        self.limiter = Limiter(
+            self.redis, usage_stream=s.usage_stream, settled_ttl_s=s.settled_ttl_s
+        )
         self.auth = Authenticator(
             self.redis, self.pg, redis_ttl_s=s.auth_cache_ttl_s, local_ttl_s=s.auth_local_ttl_s
         )
         self.router = Router(self.redis, s, self.metrics, self.cold_start_s)
         self.client: httpx.AsyncClient = upstream_client(s)
-        self.proxy = Proxy(s, self.limiter, self.router, self.client, self.metrics)
+        self.spool = SettleSpool(
+            Path(s.settle_spool_path) if s.settle_spool_path else default_spool_path(),
+            self.limiter,
+            self.metrics,
+            settled_ttl_s=s.settled_ttl_s,
+            settled_check=self._in_postgres,
+        )
+        self.spool.open()
+        self.spool.start()
+        self.proxy = Proxy(s, self.limiter, self.router, self.client, self.metrics, self.spool)
         if s.auth_listen:
             self._listener = asyncio.create_task(self.auth.listen_forever(s.database_url))
             try:
@@ -102,7 +136,31 @@ class Gateway:
             except TimeoutError:
                 log.warning("auth listener not ready; revocation relies on the cache TTL")
 
+    async def drain(self, grace_s: float) -> None:
+        """SIGTERM (the listener is already closed): give in-flight requests `grace_s` to
+        finish on their own, then cut the open streams; each is billed for the tokens it
+        streamed (`aborted`) and releases its reservation and in-flight counts now rather
+        than at the reservation's TTL. Requests still running after this are cancelled by
+        the server and settle `error` (contracts §6 "Shutdown")."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + grace_s
+        while loop.time() < deadline:
+            if not (self.proxy.live or self._calls):
+                break
+            await asyncio.sleep(0.05)
+        cut = await self.proxy.abort_streams()
+        log.warning(
+            "shutdown: drained",
+            extra={"fields": {"streams_cut": cut, "requests_running": self._calls}},
+        )
+
     async def stop(self) -> None:
+        # Lifespan end: nothing may still hold a reservation when Redis closes.
+        await self.proxy.abort_streams()
+        left = await wait_background(SHUTDOWN_SETTLE_S)
+        if left:
+            log.error("shutdown: settles still running at close", extra={"fields": {"n": left}})
+        await self.spool.stop()
         if self._listener is not None:
             self._listener.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -113,13 +171,23 @@ class Gateway:
 
     # ------------------------------------------------------------ helpers
 
+    async def _in_postgres(self, event: UsageEvent) -> bool:
+        """Whether billing already stored this event (spool replay of an old entry)."""
+        async with self.pg.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT 1 FROM usage_events WHERE id = %s AND created_at = %s",
+                (event.id, event.created_at),
+            )
+            return await cur.fetchone() is not None
+
     def lookup_model(self, model_id: str) -> tuple[ModelSpec, Price]:
         hit = self.models.get(model_id)
         if hit is None:
             raise errors.model_not_found(model_id)
         return hit
 
-    async def read_body(self, request: Request) -> bytes:
+    def check_declared_length(self, request: Request) -> None:
+        """413 on a declared Content-Length over the cap, before anything is read."""
         limit = self.settings.max_body_bytes
         declared = request.headers.get("content-length")
         if declared is not None:
@@ -128,6 +196,10 @@ class Gateway:
                     raise errors.request_too_large(limit)
             except ValueError:
                 raise errors.invalid_request("Bad Content-Length.") from None
+
+    async def read_body(self, request: Request) -> bytes:
+        limit = self.settings.max_body_bytes
+        self.check_declared_length(request)
         body = bytearray()
         async for chunk in request.stream():
             body += chunk
@@ -191,13 +263,31 @@ class Gateway:
         t0 = time.perf_counter()
         received_at = dt.datetime.now(dt.UTC)
         request_id = uuid.uuid4()
+        self._calls += 1
+        try:
+            return await self._generate(request, endpoint, t0, received_at, request_id)
+        finally:
+            self._calls -= 1
+
+    async def _generate(
+        self,
+        request: Request,
+        endpoint: Endpoint,
+        t0: float,
+        received_at: dt.datetime,
+        request_id: uuid.UUID,
+    ) -> Response:
         headers = {"X-Loom-Request-Id": str(request_id)}
         model_label = "-"
         try:
-            body = await self.read_body(request)
+            # The key before the body: an unknown or malformed key is refused without
+            # reading (and buffering) up to LOOM_MAX_BODY_BYTES first.
+            self.check_declared_length(request)
             record = await self.auth.authenticate(request.headers.get("authorization"))
+            body = await self.read_body(request)
             data = parse_json_object(body)
             model_id = model_field(data)
+            check_params(endpoint, data)
             spec, price = self.lookup_model(model_id)
             model_label = model_id
             headers["X-Loom-Price-Version"] = price.version
@@ -225,6 +315,11 @@ class Gateway:
             headers["X-Loom-Max-Cost-Micros"] = str(prep.max_cost_micros)
         except ApiError as e:
             return self.rejected(e, headers, endpoint, model_label, t0)
+        except (RedisError, OSError) as e:
+            # Redis down or frozen past its socket timeout: refuse fast, nothing reserved
+            # (a reservation made before the failure is released or expires).
+            log.warning("redis unavailable", extra={"fields": {"error": type(e).__name__}})
+            return self.rejected(errors.service_unavailable(), headers, endpoint, model_label, t0)
 
         ctx = RequestCtx(
             request_id=request_id,

@@ -75,7 +75,11 @@ def create_app(
             yield
             return
         app.state.pool = await open_pool(settings.database_url, max_size=5)
-        app.state.redis = Redis.from_url(settings.redis_url)
+        app.state.redis = Redis.from_url(
+            settings.redis_url,
+            socket_timeout=settings.redis_read_timeout_s,
+            socket_connect_timeout=settings.redis_connect_timeout_s,
+        )
         app.state.limiter = Limiter(app.state.redis, usage_stream=settings.usage_stream)
         try:
             yield

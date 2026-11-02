@@ -462,3 +462,59 @@ async def test_oversized_bodies_are_refused_before_buffering(client):
     auth = {"Authorization": f"Bearer {TOKEN}"}
     r = await client.post("/internal/checkout-sessions", content=big, headers=auth)
     assert r.status_code == 413
+
+
+# ------------------------------------------------------------ out-of-order delivery
+
+
+async def test_refund_and_dispute_before_the_purchase_are_applied_with_it(
+    client, pool, redis_client, make_tenant
+):
+    """Stripe does not order deliveries: a refund (and a dispute) can arrive before the
+    checkout event. They must not leave the customer refunded and still credited."""
+    t = await make_tenant()
+    pi = f"pi_test_{secrets.token_hex(8)}"
+    refund = charge_event(pi, amount_refunded=500)
+    dispute = dispute_event(pi, 300, "dp_test_early")
+    assert (await deliver(client, refund)).json()["result"] == "unapplied"
+    assert (await deliver(client, dispute)).json()["result"] == "unapplied"
+
+    r = await deliver(client, checkout_event(t.org_id, 2000, payment_intent=pi))
+    assert r.json()["result"] == "credited"
+    assert await refunds(pool, t.org_id) == [-5_000_000, -3_000_000]
+    assert await stripe_row(pool, refund["id"]) == ("charge.refunded", True)
+    assert await stripe_row(pool, dispute["id"]) == ("charge.dispute.created", True)
+    async with pool.connection() as conn:
+        assert await org_balance(conn, t.org_id) == 12_000_000
+        assert await ledger_is_balanced(conn)
+    # Replays change nothing.
+    assert (await deliver(client, refund)).json()["result"] == "duplicate"
+    assert (await deliver(client, dispute)).json()["result"] == "duplicate"
+
+
+async def test_retry_job_applies_a_clawback_that_raced_its_purchase(client, pool, make_tenant):
+    """Both commit at once: the purchase did not see the refund yet, the refund did not
+    see the purchase. The minute job applies it."""
+    from loom_billing import metrics
+    from loom_billing.webhooks import retry_unapplied
+
+    t = await make_tenant()
+    pi = f"pi_test_{secrets.token_hex(8)}"
+    await deliver(client, checkout_event(t.org_id, 2000, payment_intent=pi))
+    refund = charge_event(pi, amount_refunded=700)
+    async with pool.connection() as conn:  # stored unapplied, as by the racing delivery
+        await conn.execute(
+            "INSERT INTO stripe_events (id, type, payload) VALUES (%s, %s, %s)",
+            (refund["id"], refund["type"], json.dumps(refund)),
+        )
+        await conn.commit()
+    unknown = charge_event("pi_test_never_paid", 100)
+    assert (await deliver(client, unknown)).json()["result"] == "unapplied"
+
+    assert await retry_unapplied(pool) >= 1
+    assert await refunds(pool, t.org_id) == [-7_000_000]
+    assert await stripe_row(pool, refund["id"]) == ("charge.refunded", True)
+    assert await stripe_row(pool, unknown["id"]) == ("charge.refunded", False)
+    assert metrics.STRIPE_UNAPPLIED._value.get() >= 1
+    await retry_unapplied(pool)
+    assert await refunds(pool, t.org_id) == [-7_000_000]  # once

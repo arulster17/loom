@@ -37,6 +37,7 @@ from loom_gateway.metrics import GatewayMetrics
 from loom_gateway.request_body import Prepared
 from loom_gateway.routing import Router
 from loom_gateway.settings import GatewaySettings
+from loom_gateway.spool import SettleSpool
 from loom_gateway.sse import (
     DONE_EVENT,
     ChunkRewriter,
@@ -58,6 +59,8 @@ log = logging.getLogger("loom_gateway.request")
 PATHS = {"chat": "/v1/chat/completions", "completions": "/v1/completions"}
 _PASS_THROUGH = (400, 413, 422)  # engine statuses that are the client's fault
 _BACKGROUND: set[asyncio.Task[Any]] = set()
+# How long shutdown waits for the settles it started (each retries Redis briefly).
+SHUTDOWN_SETTLE_S = 5.0
 
 
 async def shielded[T](coro: Coroutine[Any, Any, T]) -> T:
@@ -66,6 +69,16 @@ async def shielded[T](coro: Coroutine[Any, Any, T]) -> T:
     _BACKGROUND.add(task)
     task.add_done_callback(_BACKGROUND.discard)
     return await asyncio.shield(task)
+
+
+async def wait_background(timeout_s: float) -> int:
+    """Wait for shielded work (settles) still running; returns how many did not finish.
+    Shutdown calls it before closing Redis, so no settle is cut off by the close."""
+    pending = {t for t in _BACKGROUND if not t.done()}
+    if not pending:
+        return 0
+    _, still = await asyncio.wait(pending, timeout=timeout_s)
+    return len(still)
 
 
 def cost_headers(cost: int) -> dict[str, str]:
@@ -92,6 +105,7 @@ class RequestCtx:
     # Dispatch state, so a timeout can release what an interrupted attempt held.
     held: Replica | None = None
     upstream: httpx.Response | None = None
+    fitted: bool = False  # an omitted max_tokens was fitted to the prompt (once)
 
     @property
     def model_id(self) -> str:
@@ -131,12 +145,36 @@ class Proxy:
         router: Router,
         client: httpx.AsyncClient,
         metrics: GatewayMetrics,
+        spool: SettleSpool | None = None,
     ) -> None:
         self.settings = settings
         self.limiter = limiter
         self.router = router
         self.client = client
         self.metrics = metrics
+        self.spool = spool
+        # Open streams, so shutdown can cut and settle them (abort_streams).
+        self.live: set[StreamResponse] = set()
+        self.shutting_down = False
+
+    async def abort_streams(self, timeout_s: float = SHUTDOWN_SETTLE_S) -> int:
+        """Shutdown: cut every open stream (error chunk and [DONE] to the client, the
+        tokens streamed billed as `aborted`, reservation released) and wait for them to
+        finish. Streams that start afterwards are cut at once. Returns how many were cut."""
+        self.shutting_down = True
+        streams = list(self.live)
+        for st in streams:
+            st.abort()
+        deadline = time.perf_counter() + timeout_s
+        while self.live and time.perf_counter() < deadline:
+            if all(not st.started for st in self.live):
+                break
+            await asyncio.sleep(0.02)
+        # Never started (the response was created but not sent): settle it here.
+        for st in [st for st in self.live if not st.started]:
+            with contextlib.suppress(Exception):
+                await shielded(st._finish())
+        return len(streams)
 
     # ------------------------------------------------------------ settle
 
@@ -194,11 +232,7 @@ class Proxy:
                 break
             except (RedisError, OSError) as e:
                 if attempt == 2:
-                    self.metrics.settle_failures.inc()
-                    log.error(
-                        "settle failed: usage not recorded",
-                        extra={"fields": {"request_id": str(ctx.request_id), "error": repr(e)}},
-                    )
+                    await self._spool(event, e)
                 else:
                     await asyncio.sleep(0.05 * 2**attempt)
         self.metrics.overhead.labels("settle").observe(time.perf_counter() - now)
@@ -231,6 +265,19 @@ class Proxy:
         )
         return cost
 
+    async def _spool(self, event: UsageEvent, error: Exception) -> None:
+        """Redis refused the settle: keep it on disk for replay (loom_gateway.spool)."""
+        fields = {"request_id": str(event.id), "error": repr(error)}
+        if self.spool is not None:
+            try:
+                await self.spool.append(event)
+                log.error("settle spooled: Redis unavailable", extra={"fields": fields})
+                return
+            except OSError as e:
+                fields["spool_error"] = repr(e)
+        self.metrics.settle_failures.inc()
+        log.error("settle failed: usage not recorded", extra={"fields": fields})
+
     # ------------------------------------------------------------ upstream
 
     async def _send(self, ctx: RequestCtx, replica: Replica, *, stream: bool) -> httpx.Response:
@@ -250,6 +297,64 @@ class Proxy:
             extensions={"sni_hostname": replica.server_name},
         )
         return await self.client.send(request, stream=stream)
+
+    async def _send_fitting(
+        self, ctx: RequestCtx, replica: Replica, *, stream: bool
+    ) -> httpx.Response:
+        """`_send`, plus: a chat request whose max_tokens the gateway filled in (the cap)
+        that the engine refuses for the context (prompt + cap > context) is resent once
+        with max_tokens = context - prompt tokens, counted by the engine's `/tokenize`.
+        OpenAI fills an omitted max_tokens up to the context, so a long prompt must not
+        fail; the reservation (made for the cap) still bounds the cost."""
+        resp = await self._send(ctx, replica, stream=stream)
+        if resp.status_code != 400 or not ctx.prep.default_max_tokens or ctx.fitted:
+            return resp
+        body = await resp.aread()
+        if _engine_error(400, body).code != "context_length_exceeded":
+            return resp
+        ctx.fitted = True
+        fitted = await self._fitted_max_tokens(ctx, replica)
+        if fitted is None:
+            return resp
+        await resp.aclose()
+        ctx.prep = ctx.prep.with_max_tokens(fitted)
+        self.metrics.max_tokens_fitted.labels(ctx.model_id).inc()
+        return await self._send(ctx, replica, stream=stream)
+
+    async def _fitted_max_tokens(self, ctx: RequestCtx, replica: Replica) -> int | None:
+        """min(current max_tokens, context - prompt tokens), or None if the prompt alone
+        fills the context or the count is unavailable (the engine's 400 then stands)."""
+        sent = json.loads(ctx.prep.upstream_body)
+        keep = (
+            "model",
+            "messages",
+            "tools",
+            "add_generation_prompt",
+            "continue_final_message",
+            "chat_template_kwargs",
+            "documents",
+        )
+        req = self.client.build_request(
+            "POST",
+            replica.url.rstrip("/") + "/tokenize",
+            json={k: sent[k] for k in keep if k in sent},
+            headers={"X-Loom-Pod-Token": replica.token, "Accept": "application/json"},
+            extensions={"sni_hostname": replica.server_name},
+        )
+        try:
+            r = await self.client.send(req)
+            data = r.json() if r.status_code == 200 else None
+        except (httpx.HTTPError, ValueError):
+            return None
+        count = data.get("count") if isinstance(data, dict) else None
+        context = data.get("max_model_len") if isinstance(data, dict) else None
+        if not isinstance(count, int) or count < 0:
+            return None
+        limit = ctx.prep.max_context
+        if isinstance(context, int) and context > 0:
+            limit = min(limit, context)
+        fitted = min(ctx.prep.max_tokens, limit - count)
+        return fitted if fitted >= 1 else None
 
     def _release(self, ctx: RequestCtx, replica: Replica, *, failed: bool = False) -> None:
         ctx.held = None
@@ -330,7 +435,7 @@ class Proxy:
         tried: set[str] = set()
         while (replica := self._next_replica(ctx, tried)) is not None:
             try:
-                resp = await self._send(ctx, replica, stream=False)
+                resp = await self._send_fitting(ctx, replica, stream=False)
             except httpx.HTTPError as e:
                 self._failed(ctx, replica, type(e).__name__)
                 continue
@@ -363,7 +468,7 @@ class Proxy:
         tried: set[str] = set()
         while (replica := self._next_replica(ctx, tried)) is not None:
             try:
-                resp = ctx.upstream = await self._send(ctx, replica, stream=True)
+                resp = ctx.upstream = await self._send_fitting(ctx, replica, stream=True)
             except httpx.HTTPError as e:
                 self._failed(ctx, replica, type(e).__name__)
                 continue
@@ -439,24 +544,45 @@ class StreamResponse(Response):
         self.saw_done = False
         self.engine_error = False
         self.client_gone = False
-        self.lost: str | None = None  # upstream_lost | timeout
+        self.lost: str | None = None  # upstream_lost | timeout | shutdown
         self.first_token_at: float | None = None
+        self._abort = asyncio.Event()
+        self._finished = False
+        self.started = False
+        # Registered from creation: it owns the replica and the upstream from here on.
+        proxy.live.add(self)
+        if proxy.shutting_down:
+            self._abort.set()
+
+    def abort(self) -> None:
+        """Cut this stream (gateway shutdown)."""
+        self._abort.set()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         pump: asyncio.Task[None] | None = None
         watch: asyncio.Task[None] | None = None
+        abort: asyncio.Task[bool] | None = None
+        self.started = True
         try:
             await send({"type": "http.response.start", "status": 200, "headers": self.raw_headers})
             pump = asyncio.create_task(self._pump(send))
             watch = asyncio.create_task(_wait_disconnect(receive))
-            await asyncio.wait({pump, watch}, return_when=asyncio.FIRST_COMPLETED)
+            abort = asyncio.create_task(self._abort.wait())
+            await asyncio.wait({pump, watch, abort}, return_when=asyncio.FIRST_COMPLETED)
         finally:
+            shutdown = False
             if pump is not None and not pump.done():
-                self.client_gone = True
+                if abort is not None and abort.done() and not (watch and watch.done()):
+                    self.lost = "shutdown"
+                    shutdown = True
+                else:
+                    self.client_gone = True
                 pump.cancel()
-            if watch is not None:
-                watch.cancel()
-            results = await asyncio.gather(*(t for t in (pump, watch) if t), return_exceptions=True)
+            for t in (watch, abort):
+                if t is not None:
+                    t.cancel()
+            tasks = [t for t in (pump, watch, abort) if t]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
                 if isinstance(r, Exception):
                     self.lost = self.lost or "upstream_lost"
@@ -465,7 +591,19 @@ class StreamResponse(Response):
                         exc_info=r,
                         extra={"fields": {"request_id": str(self.ctx.request_id)}},
                     )
+            if shutdown:
+                await self._send_shutdown(send)
             await shielded(self._finish())
+
+    async def _send_shutdown(self, send: Send) -> None:
+        """Tell the client why the stream ends (unless it already saw [DONE]); bounded,
+        since a client that stopped reading must not hold up the shutdown."""
+        body = b"" if self.saw_done else errors.server_shutdown().sse_chunk() + DONE_EVENT
+        with contextlib.suppress(Exception):
+            async with asyncio.timeout(1.0):
+                if body:
+                    await send({"type": "http.response.body", "body": body, "more_body": True})
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
 
     async def _pump(self, send: Send) -> None:
         remaining = self.ctx.t0 + self.proxy.settings.request_timeout_s - time.perf_counter()
@@ -521,11 +659,17 @@ class StreamResponse(Response):
         return await self.proxy.settle(self.ctx, self.usage.usage, self._status(), ttft)
 
     async def _finish(self) -> None:
+        if self._finished:
+            return
+        self._finished = True
         proxy, ctx, m = self.proxy, self.ctx, self.ctx.model_id
-        with contextlib.suppress(Exception):
-            await self.upstream.aclose()
-        proxy.router.release(self.replica, failed=self.lost == "upstream_lost")
-        await self._settle()
+        try:
+            with contextlib.suppress(Exception):
+                await self.upstream.aclose()
+            proxy.router.release(self.replica, failed=self.lost == "upstream_lost")
+            await self._settle()
+        finally:
+            proxy.live.discard(self)
         if self.client_gone:
             proxy.metrics.aborts.labels(m, "client_gone").inc()
         elif self.lost:

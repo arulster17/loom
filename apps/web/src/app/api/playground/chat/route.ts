@@ -2,6 +2,7 @@ import { AuthzError, isOrgActive } from "@/lib/authz";
 import { getPlaygroundKey } from "@/lib/data/playground";
 import { gatewayBody, playgroundRequest } from "@/lib/playground";
 import { readBodyLimited } from "@/lib/request-body";
+import { sameOrigin } from "@/lib/same-origin";
 import { gatewayUrl } from "@/lib/services";
 import { currentOrgContext } from "@/lib/session";
 
@@ -13,17 +14,6 @@ function error(status: number, message: string, code: string) {
   return Response.json({ error: { message, type: "invalid_request_error", param: null, code } }, { status });
 }
 
-function sameOrigin(req: Request): boolean {
-  const origin = req.headers.get("origin");
-  if (!origin) return true; // same-origin fetches from older browsers; the cookie is SameSite=Lax anyway
-  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
-  try {
-    return new URL(origin).host === host;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Playground chat: the browser posts here with its session cookie; this handler checks
  * the session and org, then streams from the gateway with the user's server-side
@@ -31,7 +21,7 @@ function sameOrigin(req: Request): boolean {
  * logged.
  */
 export async function POST(req: Request) {
-  if (!sameOrigin(req)) return error(403, "Cross-site request refused.", "forbidden");
+  if (!sameOrigin(req.headers)) return error(403, "Cross-site request refused.", "forbidden");
   const ctx = await currentOrgContext();
   if (!ctx) return error(401, "Sign in first.", "unauthenticated");
   if (!isOrgActive(ctx)) return error(403, "This account is not active.", "org_not_active");

@@ -33,6 +33,17 @@ DRIFT_DETECTED = Counter(P + "usage_drift_detected_total", "Drift findings", ["d
 DRIFT_CHECK_SKIPPED = Counter(
     P + "usage_drift_check_skipped_total", "Reconciles that skipped the drift check (lagging)"
 )
+GROUP_RECREATED = Counter(
+    P + "usage_group_recreated_total",
+    "Consumer group found missing (Redis lost its data) and recreated: alert",
+)
+GROUP_MISSING = Counter(
+    P + "usage_group_missing_total",
+    "Reconciles that found the usage stream or its consumer group missing: alert",
+)
+DRIFT_HEALED_MICROS = Counter(
+    P + "usage_drift_healed_micros_total", "Usage added back to Redis for redis_behind drift"
+)
 CREDIT_NOTIFICATIONS = Counter(
     P + "credit_notifications_total", "loom_credit_changed notifications applied"
 )
@@ -44,6 +55,10 @@ WEBHOOKS = Counter(P + "stripe_webhooks_total", "Stripe webhooks", ["result"])
 CREDITED_MICROS = Counter(P + "stripe_credited_micros_total", "Purchase credit posted")
 CLAWED_BACK_MICROS = Counter(
     P + "stripe_clawed_back_micros_total", "Credit taken back for Stripe refunds and disputes"
+)
+STRIPE_UNAPPLIED = Gauge(
+    P + "stripe_unapplied_events",
+    "Stored Stripe events not applied yet (e.g. a refund before its purchase): alert if it stays",
 )
 CHECKOUT_SESSIONS = Counter(P + "checkout_sessions_total", "Checkout sessions", ["result"])
 

@@ -1,12 +1,15 @@
 "use server";
 
 import { AuthError } from "next-auth";
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 
 import { signIn, signOut } from "@/auth";
 import { revokePlaygroundKeys } from "@/lib/data/playground";
+import { redisCounterStore } from "@/lib/redis";
 import { sessionUserId } from "@/lib/session";
+import { checkSigninLimit, clientIp, signinLimits } from "@/lib/signin-limit";
 
 export type SignInState = { error?: string } | undefined;
 
@@ -15,6 +18,14 @@ const emailSchema = z.email().max(254);
 export async function signInWithEmail(_prev: SignInState, form: FormData): Promise<SignInState> {
   const email = emailSchema.safeParse(String(form.get("email") ?? "").trim());
   if (!email.success) return { error: "Enter a valid email address." };
+  // Per email and per client IP (src/lib/signin-limit.ts); fails open if Redis is down.
+  const limit = await checkSigninLimit(redisCounterStore, {
+    email: email.data,
+    ip: clientIp(await headers()),
+    secret: process.env.AUTH_SECRET ?? "loom-signin-limit",
+    limits: signinLimits(),
+  });
+  if (!limit.allowed) return { error: "Too many sign-in emails. Try again in a few minutes." };
   try {
     await signIn("nodemailer", { email: email.data, redirectTo: "/dashboard" });
   } catch (e) {

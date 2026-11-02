@@ -28,6 +28,18 @@ f  cold model: 503 model_unavailable + Retry-After, then ready
 g  Stripe stub checkout credits exactly once (and a replayed event does not)
 h  cross-tenant spot checks, web and API
 i  no prompt or completion text (or API key) in any container's logs
+
+Checks added with the second review's fixes (docs/phase1-m1-acceptance.md):
+
+j  a 20k-token prompt without max_tokens succeeds; chat_template refused; an unknown key
+   refused before its body; last_used_at written; web security headers; a Stripe refund
+   delivered before its purchase is applied with it
+k  gateway SIGTERM mid-stream: server_shutdown chunk + [DONE], streamed tokens billed,
+   reservation released, container back healthy
+l  Redis stopped mid-stream: new requests get a fast 503, the settle is spooled and lands
+   exactly once when Redis is back
+m  Redis FLUSHALL: the stack heals by itself (pool woken, balance reloaded, billing's
+   consumer group recreated, Redis usage = Postgres)
 """
 
 from __future__ import annotations
@@ -42,8 +54,10 @@ import json
 import os
 import re
 import secrets
+import socket
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator
@@ -56,9 +70,10 @@ import httpx
 import psycopg
 import redis
 
+from loom_platform.ledger import STRIPE_CLEARING
 from loom_platform.limiter import org_key
 
-ITEMS = "0abcdefghi"
+ITEMS = "0abcdefghijklm"
 MODELS = ("qwen3-8b", "llama-3.3-70b-instruct-fp8")
 POD_OF = {"qwen3-8b": "mock-pod-1", "llama-3.3-70b-instruct-fp8": "mock-pod-2"}
 RAISED_LIMITS = {"rpm_limit": 100_000, "tpm_limit": 1_000_000_000, "concurrency_limit": 256}
@@ -86,6 +101,8 @@ class Stack:
     project: str
     admin_email: str
     gateway_metrics: str
+    billing: str = "http://localhost:8090"
+    stub_secret_file: str = ".dev/certs/stripe-stub-webhook.secret"
 
     @property
     def gateway_root(self) -> str:
@@ -112,6 +129,10 @@ def stack_from_env(args: argparse.Namespace | None = None) -> Stack:
         "admin_email": "admin@m1.test",
         "gateway_metrics": env("LOOM_ACCEPT_GATEWAY_METRICS_URL")
         or f"http://localhost:{port('LOOM_GATEWAY_METRICS_PORT', 9100)}/metrics",
+        "billing": env("LOOM_ACCEPT_BILLING_URL")
+        or f"http://localhost:{port('LOOM_BILLING_PORT', 8090)}",
+        "stub_secret_file": env("LOOM_ACCEPT_STUB_SECRET_FILE")
+        or ".dev/certs/stripe-stub-webhook.secret",
     }
     if args is not None:
         for k in defaults:
@@ -1354,6 +1375,365 @@ class Acceptance:
         )
         check(not hits, f"prompt/completion/key text found in logs: {hits}")
 
+    # -- item j: review fixes on the stack (compatibility and hardening)
+
+    def item_j(self, res: ItemResult) -> None:
+        key, org = self.alice_key, self.alice_org
+        hdr = {"Authorization": f"Bearer {key}"}
+        url = f"{self.stack.gateway}/chat/completions"
+        with httpx.Client(timeout=120, trust_env=False) as http:
+            # 1. A long prompt without max_tokens, as OpenAI clients send it: on a 32k
+            # model the old explicit 16,384 made any prompt over ~16k tokens a 400.
+            words = 20_000
+            body = {
+                "model": MODELS[0],
+                "messages": [{"role": "user", "content": " ".join(["word"] * words)}],
+            }
+            r = http.post(url, json=body, headers=hdr)
+            check(r.status_code == 200, f"long prompt: {r.status_code} {r.text[:200]}")
+            usage = r.json()["usage"]
+            check(usage["prompt_tokens"] > 16_384, f"long prompt: {usage['prompt_tokens']}")
+            row = self.db.usage([r.headers["x-loom-request-id"]])[r.headers["x-loom-request-id"]]
+            check(row["status"] == "ok", f"long prompt: status {row['status']}")
+            check(
+                int(r.headers["x-loom-max-cost-micros"]) >= row["cost_micros"],
+                "long prompt: cost above its reservation",
+            )
+            res.numbers["long_prompt"] = {
+                "prompt_tokens": usage["prompt_tokens"],
+                "completion_tokens": usage["completion_tokens"],
+                "reserved_micros": int(r.headers["x-loom-max-cost-micros"]),
+                "cost_micros": row["cost_micros"],
+            }
+
+            # 2. vLLM extras outside the allowlist never reach the engine.
+            bad = {**body, "messages": [{"role": "user", "content": "hi"}], "chat_template": "x"}
+            r = http.post(url, json=bad, headers=hdr)
+            err = r.json().get("error", {})
+            check(
+                r.status_code == 400 and err.get("param") == "chat_template",
+                f"chat_template: {r.status_code} {err}",
+            )
+            res.numbers["chat_template_refused"] = err.get("code")
+
+        # 3. An unknown key is refused before its (never sent) 1 MB body.
+        root = httpx.URL(self.stack.gateway_root)
+        unknown = "loom_sk_" + "A" * 12 + "_" + "B" * 40
+        with socket.create_connection((root.host, root.port or 80), timeout=10) as s:
+            s.sendall(
+                b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+                b"Authorization: Bearer " + unknown.encode() + b"\r\n"
+                b"Content-Type: application/json\r\nContent-Length: 1000000\r\n\r\n{"
+            )
+            t0 = time.monotonic()
+            head = s.recv(64)
+            took = time.monotonic() - t0
+        check(head.startswith(b"HTTP/1.1 401"), f"unknown key before body: {head[:30]!r}")
+        res.numbers["unknown_key_refused_before_body_ms"] = round(took * 1000, 1)
+
+        # 4. api_keys.last_used_at is written (at most once a minute).
+        used = self.db.one("SELECT last_used_at FROM api_keys WHERE id = %s", self.db.key_id(key))
+        check(used is not None, "api_keys.last_used_at never written")
+
+        # 5. Security headers on the web app.
+        with httpx.Client(timeout=30, trust_env=False) as http:
+            h = http.get(f"{self.stack.web}/signin").headers
+        csp = h.get("content-security-policy", "")
+        check("frame-ancestors 'none'" in csp, f"CSP: {csp!r}")
+        check("'nonce-" in csp and "default-src 'self'" in csp, f"CSP: {csp!r}")
+        check(h.get("x-frame-options") == "DENY", "X-Frame-Options")
+        check(h.get("x-content-type-options") == "nosniff", "X-Content-Type-Options")
+        check(bool(h.get("referrer-policy")), "Referrer-Policy")
+        res.numbers["web_headers"] = {
+            "x-frame-options": h.get("x-frame-options"),
+            "referrer-policy": h.get("referrer-policy"),
+        }
+
+        # 6. Stripe: a refund delivered before its purchase is applied with the purchase.
+        pi = f"pi_accept_{secrets.token_hex(6)}"
+        refund = {
+            "id": f"evt_accept_{secrets.token_hex(6)}",
+            "object": "event",
+            "type": "charge.refunded",
+            "livemode": False,
+            "data": {
+                "object": {
+                    "id": f"ch_accept_{secrets.token_hex(4)}",
+                    "object": "charge",
+                    "amount": 500,
+                    "amount_refunded": 100,
+                    "currency": "usd",
+                    "payment_intent": pi,
+                }
+            },
+        }
+        check(self.stripe_event(refund) == "unapplied", "early refund should wait")
+        session = {
+            "id": f"cs_accept_{secrets.token_hex(6)}",
+            "object": "checkout.session",
+            "amount_total": 500,
+            "currency": "usd",
+            "client_reference_id": org,
+            "metadata": {"org_id": org, "purpose": "loom_credits"},
+            "payment_status": "paid",
+            "payment_intent": pi,
+        }
+        checkout = {
+            "id": f"evt_accept_{secrets.token_hex(6)}",
+            "object": "event",
+            "type": "checkout.session.completed",
+            "livemode": False,
+            "data": {"object": session},
+        }
+        check(self.stripe_event(checkout) == "credited", "out-of-order purchase not credited")
+        clawed = self.db.one(
+            "SELECT -e.amount_micros FROM ledger_transactions t JOIN ledger_entries e"
+            " ON e.transaction_id = t.id WHERE t.kind = 'refund' AND t.external_ref = %s"
+            " AND e.account_id <> %s",
+            pi,
+            STRIPE_CLEARING,
+        )
+        check(clawed == 1_000_000, f"early refund not applied with the purchase: {clawed}")
+        processed = self.db.one(
+            "SELECT processed_at IS NOT NULL FROM stripe_events WHERE id = %s", refund["id"]
+        )
+        check(processed, "early refund still unapplied")
+        res.numbers["stripe_refund_before_purchase"] = {"purchase": 5_000_000, "clawed": clawed}
+
+    def stripe_event(self, event: dict[str, Any]) -> str:
+        """Deliver a webhook signed with the stub's secret, as Stripe signs."""
+        import hashlib
+        import hmac
+
+        secret = Path(self.stack.stub_secret_file).read_text().strip()
+        body = json.dumps(event).encode()
+        ts = int(time.time())
+        sig = hmac.new(secret.encode(), f"{ts}.".encode() + body, hashlib.sha256).hexdigest()
+        with httpx.Client(timeout=30, trust_env=False) as http:
+            r = http.post(
+                f"{self.stack.billing}/stripe/webhook",
+                content=body,
+                headers={
+                    "Stripe-Signature": f"t={ts},v1={sig}",
+                    "Content-Type": "application/json",
+                },
+            )
+        check(r.status_code == 200, f"webhook: {r.status_code} {r.text[:200]}")
+        return str(r.json()["result"])
+
+    # -- items k-m: failures (stream helpers)
+
+    def long_stream(self, max_tokens: int) -> dict[str, Any]:
+        return {
+            "model": MODELS[0],
+            "messages": [{"role": "user", "content": self.prompt()}],
+            "max_tokens": max_tokens,
+            "ignore_eos": True,
+            "stream": True,
+            "stream_options": {"include_usage": True, "continuous_usage_stats": True},
+        }
+
+    def reservations(self, org: str) -> tuple[int, int]:
+        rsum = int(self.redis.get(org_key(org, "rsum")) or 0)
+        return rsum, int(self.redis.zcard(org_key(org, "rsv:exp")))
+
+    def metric(self, name: str) -> float | None:
+        try:
+            text = httpx.get(self.stack.gateway_metrics, timeout=5, trust_env=False).text
+        except httpx.HTTPError:
+            return None
+        for line in text.splitlines():
+            if line.startswith(name + " ") or line.startswith(name + "{"):
+                return float(line.rsplit(" ", 1)[1])
+        return None
+
+    # -- item k: gateway SIGTERM mid-stream
+
+    def item_k(self, res: ItemResult) -> None:
+        key, org = self.alice_key, self.alice_org
+        gw = container(self.stack, "gateway")
+        events: list[dict[str, Any] | str] = []
+        stopper: threading.Thread | None = None
+        stopped_at = 0.0
+        with (
+            httpx.Client(timeout=120, trust_env=False) as http,
+            http.stream(
+                "POST",
+                f"{self.stack.gateway}/chat/completions",
+                json=self.long_stream(8000),
+                headers={"Authorization": f"Bearer {key}"},
+            ) as r,
+        ):
+            check(r.status_code == 200, f"stream: {r.status_code}")
+            rid = r.headers["x-loom-request-id"]
+            content = 0
+            for ev in sse_events(r.iter_lines()):
+                events.append(ev)
+                if isinstance(ev, dict) and ev.get("choices"):
+                    if ev["choices"][0].get("delta", {}).get("content"):
+                        content += 1
+                    if content == 10 and stopper is None:
+                        stopped_at = time.monotonic()
+                        stopper = threading.Thread(target=docker, args=("stop", "-t", "30", gw))
+                        stopper.start()
+            ended = time.monotonic() - stopped_at
+        assert stopper is not None
+        stopper.join(60)
+        stop_took = time.monotonic() - stopped_at
+        try:
+            check(events and events[-1] == "[DONE]", "SIGTERM: stream did not end with [DONE]")
+            errs = [e for e in events if isinstance(e, dict) and "error" in e]
+            check(
+                errs and errs[-1]["error"]["code"] == "server_shutdown",
+                f"SIGTERM: no server_shutdown chunk: {errs}",
+            )
+            usages = [e["usage"] for e in events if isinstance(e, dict) and e.get("usage")]
+            row = self.db.usage([rid], timeout_s=60)[rid]
+            check(row["status"] == "aborted", f"SIGTERM: status {row['status']}")
+            got = (row["prompt_tokens"], row["completion_tokens"])
+            want = (usages[-1]["prompt_tokens"], usages[-1]["completion_tokens"])
+            check(got == want, f"SIGTERM: billed {got} != streamed {want}")
+            check(self.reservations(org) == (0, 0), "SIGTERM: reservation still held")
+            exit_code = int(docker("inspect", "-f", "{{.State.ExitCode}}", gw).strip())
+        finally:
+            docker("start", gw)
+            back = wait_healthy(gw)
+        res.numbers.update(
+            streamed_completion_tokens=row["completion_tokens"],
+            billed_cost_micros=row["cost_micros"],
+            stream_cut_after_s=round(ended, 1),
+            container_stopped_after_s=round(stop_took, 1),
+            exit_code=exit_code,
+            healthy_again_after_s=round(back, 1),
+        )
+
+    # -- item l: Redis outage mid-stream
+
+    def item_l(self, res: ItemResult) -> None:
+        key, org = self.alice_key, self.alice_org
+        hdr = {"Authorization": f"Bearer {key}"}
+        rds = container(self.stack, "redis")
+        before_usage = int(self.redis.get(org_key(org, "usage")) or 0)
+        events: list[dict[str, Any] | str] = []
+        outage: dict[str, Any] = {}
+        try:
+            with (
+                httpx.Client(timeout=120, trust_env=False) as http,
+                http.stream(
+                    "POST",
+                    f"{self.stack.gateway}/chat/completions",
+                    json=self.long_stream(4000),
+                    headers=hdr,
+                ) as r,
+            ):
+                check(r.status_code == 200, f"stream: {r.status_code}")
+                rid = r.headers["x-loom-request-id"]
+                content = 0
+                for ev in sse_events(r.iter_lines()):
+                    events.append(ev)
+                    if isinstance(ev, dict) and ev.get("choices"):
+                        if ev["choices"][0].get("delta", {}).get("content"):
+                            content += 1
+                        if content == 10 and not outage:
+                            docker("stop", "-t", "10", rds)
+                            outage["stopped"] = True
+                            # A new request while Redis is down: a fast 503.
+                            with httpx.Client(timeout=30, trust_env=False) as h2:
+                                t0 = time.monotonic()
+                                r2 = h2.post(
+                                    f"{self.stack.gateway}/chat/completions",
+                                    json={
+                                        "model": MODELS[0],
+                                        "messages": [{"role": "user", "content": "hi"}],
+                                        "max_tokens": 4,
+                                    },
+                                    headers=hdr,
+                                )
+                                outage["new_request_status"] = r2.status_code
+                                outage["new_request_code"] = r2.json()["error"]["code"]
+                                outage["new_request_ms"] = round((time.monotonic() - t0) * 1000)
+            check(events and events[-1] == "[DONE]", "outage: stream did not end with [DONE]")
+            depth = self.metric("loom_gateway_settle_spool_depth")
+            outage["spool_depth_while_down"] = depth
+        finally:
+            docker("start", rds)
+            wait_healthy(rds)
+        check(outage.get("new_request_status") == 503, f"outage: {outage}")
+        check(outage.get("new_request_code") == "service_unavailable", f"outage: {outage}")
+        check(outage.get("spool_depth_while_down") == 1, f"settle not spooled: {outage}")
+        usages = [e["usage"] for e in events if isinstance(e, dict) and e.get("usage")]
+        row = self.db.usage([rid], timeout_s=120)[rid]
+        check(row["status"] == "ok", f"outage: status {row['status']}")
+        check(
+            row["completion_tokens"] == usages[-1]["completion_tokens"],
+            f"outage: billed {row['completion_tokens']} != {usages[-1]['completion_tokens']}",
+        )
+        deadline = time.monotonic() + 30
+        while self.metric("loom_gateway_settle_spool_depth") != 0 and time.monotonic() < deadline:
+            time.sleep(0.5)
+        check(self.metric("loom_gateway_settle_spool_depth") == 0, "spool not drained")
+        after_usage = int(self.redis.get(org_key(org, "usage")) or 0)
+        check(after_usage - before_usage == row["cost_micros"], "outage: usage counted != once")
+        check(
+            self.db.one("SELECT count(*) FROM usage_events WHERE id = %s", rid) == 1,
+            "outage: event stored more than once",
+        )
+        check(self.reservations(org) == (0, 0), "outage: reservation still held")
+        outage.update(billed_cost_micros=row["cost_micros"])
+        res.numbers.update(outage)
+
+    # -- item m: Redis loses everything (FLUSHALL)
+
+    def item_m(self, res: ItemResult) -> None:
+        key, org = self.alice_key, self.alice_org
+        hdr = {"Authorization": f"Bearer {key}"}
+        body = {
+            "model": MODELS[0],
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 4,
+        }
+        # Let billing consume what is in the stream first: the flush would lose it.
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            g = [
+                x
+                for x in self.redis.xinfo_groups("loom:usage")
+                if x["name"] in (b"billing", "billing")
+            ]
+            if g and not g[0]["pending"] and not g[0].get("lag"):
+                break
+            time.sleep(0.5)
+        self.redis.flushall()
+        t0 = time.monotonic()
+        statuses: list[int] = []
+        try:
+            with httpx.Client(timeout=30, trust_env=False) as http:
+                while time.monotonic() - t0 < 120:
+                    r = http.post(f"{self.stack.gateway}/chat/completions", json=body, headers=hdr)
+                    statuses.append(r.status_code)
+                    if r.status_code == 200:
+                        break
+                    # Pool state is gone: the model looks cold, a wake brings it back.
+                    time.sleep(min(int(r.headers.get("retry-after", "1")), 2))
+            check(r.status_code == 200, f"after FLUSHALL: never served ({statuses[-5:]})")
+            served_after = time.monotonic() - t0
+            rid = r.headers["x-loom-request-id"]
+            row = self.db.usage([rid], timeout_s=60)[rid]  # billing recreated its group
+            check(row["status"] == "ok", f"after FLUSHALL: status {row['status']}")
+            _, pg_usage, _ = self.db.balance(org)
+            redis_usage = int(self.redis.get(org_key(org, "usage")) or -1)
+            check(redis_usage == pg_usage, f"after FLUSHALL: Redis {redis_usage} != PG {pg_usage}")
+            groups = [g["name"] for g in self.redis.xinfo_groups("loom:usage")]
+            check(b"billing" in groups or "billing" in groups, f"group not recreated: {groups}")
+        finally:
+            for m in MODELS:
+                poolsim(self.stack, "set", m, "ready")
+        res.numbers.update(
+            served_again_after_s=round(served_after, 1),
+            statuses_until_served=sorted(set(statuses)),
+            redis_usage_equals_postgres=redis_usage,
+        )
+
 
 def run(stack: Stack, only: str, report: Report) -> None:
     acc = Acceptance(stack, report)
@@ -1368,8 +1748,12 @@ def run(stack: Stack, only: str, report: Report) -> None:
         "g": "Stripe stub checkout credits once",
         "h": "Cross-tenant spot checks (web + API)",
         "i": "No prompt/completion/key text in container logs",
+        "j": "Long prompt, param allowlist, key before body, web headers, Stripe order",
+        "k": "Gateway SIGTERM mid-stream: cut, billed, released",
+        "l": "Redis outage mid-stream: fast 503, settle spooled, lands once",
+        "m": "Redis FLUSHALL: the stack heals by itself",
     }
-    order = "0ahgbfcedi"
+    order = "0ahgbfcedjklmi"
     wanted = set(only) | {"0"}
     try:
         for item in order:

@@ -65,7 +65,10 @@ web app and the registry.
 | `LOOM_PUBLIC_API_URL` | `http://localhost:8080/v1` | API base shown in code samples |
 | `LOOM_BILLING_URL` | `http://localhost:8090` | Billing service (compose: `http://billing:8090`) |
 | `LOOM_BILLING_INTERNAL_TOKEN` (or `LOOM_INTERNAL_TOKEN`, as compose sets it) | none, **required for Add credit** | Shared with billing; sent as `Authorization: Bearer` |
-| `LOOM_REDIS_URL` | `redis://localhost:6379/0` | Read-only fallback for model status when the gateway is down (the Models page and playground normally read the gateway's public `GET /v1/models`) |
+| `LOOM_REDIS_URL` | `redis://localhost:6379/0` | Read-only fallback for model status when the gateway is down (the Models page and playground normally read the gateway's public `GET /v1/models`); and the sign-in rate limit's counters (below). Optional: if it is down, model status reads "unknown" and the rate limit lets emails through |
+| `LOOM_SIGNIN_EMAIL_LIMIT` | `5` | Magic-link emails per address per window |
+| `LOOM_SIGNIN_IP_LIMIT` | `20` | Magic-link emails per client IP per window |
+| `LOOM_SIGNIN_WINDOW_S` | `900` | Sign-in rate-limit window, seconds (fixed windows) |
 | `LOOM_MODELS_YAML` | `../../config/models.yaml` (image: `/app/config/models.yaml`) | Model registry |
 | `LOOM_PLAYGROUND_KEY_SECRET` | derived from `AUTH_SECRET` | Optional separate secret for playground keys |
 | `LOOM_PLAYGROUND_KEY_TTL_S` | `3600` | Playground key lifetime (min 600) |
@@ -80,7 +83,8 @@ admin role) inside their transaction. Admin pages answer 404 to non-admins. Ever
 action writes `admin_audit_log` in the same transaction.
 
 **Playground keys** (the contracts did not define this). The browser never holds an API
-key. It posts to `/api/playground/chat` with its session cookie (same-origin checked);
+key. It posts to `/api/playground/chat` with its session cookie (same-origin checked in `src/lib/same-origin.ts`: a cross-site,
+`null`, empty or malformed `Origin` is a 403 before any session lookup);
 the handler checks the session and that the org is active, then streams from the gateway
 with the user's *playground key*: an ordinary `api_keys` row (`scopes = {playground}`,
 name "Playground", one per org and user) whose plaintext is never stored. Its secret half
@@ -97,6 +101,36 @@ redirects the browser to the `url` in the answer (locally the Stripe stub's pay 
 :12111). Amounts are whole cents, $5 to $500. Credit appears only when the signed
 webhook posts it: the return page shows it as pending and refreshes itself for a minute.
 Auto-recharge settings are stored; billing does not charge saved cards yet.
+
+**Sign-in rate limit** (`src/lib/signin-limit.ts`). `signInWithEmail` counts each
+magic-link email in Redis per normalised address (trimmed, lowercased) and per client IP,
+in fixed windows (`loom:web:signin:email:<hmac>:<window>`, `loom:web:signin:ip:<hmac>:<window>`;
+the HMAC key is `AUTH_SECRET`, so no email or IP is stored in a key name), and answers
+"Too many sign-in emails" over either limit without sending. The client IP is the
+right-most `X-Forwarded-For` entry, the one our own proxy or load balancer appended (the
+left-most entries come from the client); without a proxy Next.js sets the header to the
+socket address. So the app must be reached either directly or through a proxy that
+appends to `X-Forwarded-For`. Else `X-Real-IP`, else one shared "unknown" bucket. If
+Redis is down or does not answer within 1.5 s, the email is sent and a warning logged
+(fail open: an outage must not lock everyone out).
+
+**Security headers** (`src/lib/security-headers.ts`). Every response gets
+`X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and
+`Referrer-Policy: strict-origin-when-cross-origin` (other sites see our origin, never a
+path or query) from `next.config.ts`. Pages, actions and API routes also get a
+`Content-Security-Policy` from `src/proxy.ts` with a fresh nonce per request:
+`script-src 'self' 'nonce-…' 'strict-dynamic'` (no `'unsafe-inline'`: Next.js puts the
+nonce on its own inline and chunk scripts, so an injected script does not run; `next
+dev` adds `'unsafe-eval'` and `ws:` for HMR), `default-src`/`connect-src 'self'`,
+`img-src 'self' data:`, `style-src 'self' 'unsafe-inline'`, `object-src 'none'`,
+`base-uri 'self'`, `frame-ancestors 'none'`, and `form-action 'self'
+https://checkout.stripe.com https://accounts.google.com` (Chrome applies form-action to
+the redirect after a submission, e.g. to Checkout when JavaScript is off), plus
+`http://localhost:*` with `LOOM_ENV=dev` for the Stripe stub. A nonce only reaches
+pages rendered per request, so the root layout awaits `connection()` (every page was
+dynamic already, for the session). The CSP is set at request time rather than in
+`next.config.ts` because `headers()` there is fixed at build time, and the one image
+runs both as dev (compose) and prod.
 
 **Model disable.** The contracts have no runtime switch: a model is disabled with
 `status: disabled` in `config/models.yaml`. The admin page says so.

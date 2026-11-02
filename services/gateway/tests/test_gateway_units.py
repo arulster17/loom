@@ -327,10 +327,12 @@ def test_json_log_lines():
 PROD_OK = {
     "env": "prod",
     "database_url": "postgresql://loom:s3cret@db:5432/loom_platform",
+    "redis_url": "rediss://:r3dis@cache:6380/0",
     "pod_ca_cert": "/certs/ca.crt",
     "gateway_client_cert": "/certs/gateway.crt",
     "gateway_client_key": "/certs/gateway.key",
     "cors_origins": "https://loom.example",
+    "settle_spool_path": "/var/lib/loom-gateway/settle-spool.jsonl",
 }
 
 
@@ -342,6 +344,7 @@ PROD_OK = {
         ("gateway_client_key", "LOOM_GATEWAY_CLIENT_CERT"),
         ("cors_origins", "LOOM_CORS_ORIGINS"),
         ("database_url", "LOOM_DATABASE_URL"),
+        ("settle_spool_path", "LOOM_SETTLE_SPOOL_PATH"),
     ],
 )
 def test_gateway_refuses_dev_defaults_outside_dev(unset, problem):
@@ -372,3 +375,16 @@ def test_router_never_picks_a_plain_http_replica_outside_dev():
     assert prod.pick(pool, {"s"}) is None
     dev = Router(None, GatewaySettings(env="dev"), GatewayMetrics())  # type: ignore[arg-type]
     assert dev.pick(pool, set()) == http
+
+
+def test_gateway_main_refuses_an_evicting_redis(monkeypatch, capsys):
+    import loom_gateway.__main__ as entry
+
+    for k, v in PROD_OK.items():
+        monkeypatch.setenv(f"LOOM_{k.upper()}", v)
+    monkeypatch.setattr(entry, "redis_policy_problems", lambda url: ["Redis evicts"])
+    monkeypatch.setattr(entry, "create_app", lambda s: pytest.fail("started"))
+    with pytest.raises(SystemExit) as e:
+        entry.main()
+    assert e.value.code == 2
+    assert "Redis evicts" in capsys.readouterr().err

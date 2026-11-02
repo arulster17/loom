@@ -757,6 +757,31 @@ def create_app(config: MockConfig | None = None) -> FastAPI:
     async def completions(request: Request) -> Response:
         return await _completions(server, request)
 
+    @app.post("/tokenize")
+    async def tokenize(request: Request) -> dict[str, Any]:
+        """vLLM's `POST /tokenize` (chat form: `messages`, optional `tools`), counting the
+        prompt exactly as generation would. The Loom gateway uses it to fit an omitted
+        chat `max_tokens` to a long prompt (docs/phase1-contracts.md §6)."""
+        server.check_ready()
+        body = await request.json()
+        if not isinstance(body, dict) or not isinstance(body.get("model"), str):
+            raise ApiError(400, "model: Field required", param="model")
+        server.check_model(body["model"])
+        if "messages" in body:
+            try:
+                req = ChatCompletionRequest.model_validate({**body, "stream": False})
+            except ValidationError as e:
+                raise ApiError(400, f"invalid tokenize request: {e.error_count()} errors") from e
+            tools = [t.model_dump(by_alias=True, exclude_none=True) for t in req.tools or []]
+            msgs = [m.model_dump(exclude_none=True) for m in req.messages]
+            prompt = render_chat_prompt(msgs, tools)
+        elif isinstance(body.get("prompt"), str):
+            prompt = body["prompt"]
+        else:
+            raise ApiError(400, "messages or prompt is required", param="messages")
+        count = len(tuple(TOKENIZER.pieces(prompt)))
+        return {"count": count, "max_model_len": config.max_model_len, "tokens": []}
+
     @app.get("/metrics")
     async def metrics() -> Response:
         return Response(

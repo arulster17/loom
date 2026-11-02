@@ -36,6 +36,11 @@ class PlatformSettings(BaseSettings):
     models_yaml: str | None = None
 
     usage_stream: str = "loom:usage"
+    # Redis client timeouts, so a frozen or unreachable Redis fails a call quickly (the
+    # gateway answers 503 and /ready fails) instead of hanging it. Billing raises the
+    # read timeout above its blocking XREADGROUP wait.
+    redis_socket_timeout_s: Annotated[float, Field(gt=0)] = 2.0
+    redis_connect_timeout_s: Annotated[float, Field(gt=0)] = 1.0
 
     # Gateway auth cache: Redis TTL of a cached key record. Revocation and suspension
     # reach every gateway within this bound even if no invalidation is delivered.
@@ -43,6 +48,9 @@ class PlatformSettings(BaseSettings):
     # Hard upper bound on one request's duration; reservations live a minute longer.
     request_timeout_s: PositiveInt = 600
     reservation_grace_s: PositiveInt = 60
+    # How long a spooled settle may wait for Redis and still be refused as a repeat by
+    # its `done:` marker (the marker lives the reservation TTL plus this).
+    settle_replay_window_s: PositiveInt = 3600
 
     # Free credit posted when an admin approves a signup ($5).
     signup_promo_micros: Annotated[int, Field(ge=0)] = 5_000_000
@@ -63,6 +71,12 @@ class PlatformSettings(BaseSettings):
     def reservation_ttl_ms(self) -> int:
         return (self.request_timeout_s + self.reservation_grace_s) * 1000
 
+    @property
+    def settled_ttl_s(self) -> int:
+        """Lifetime of a `done:<request id>` marker: the reservation TTL plus the settle
+        replay window (contracts §6)."""
+        return self.request_timeout_s + self.reservation_grace_s + self.settle_replay_window_s
+
     def production_problems(self) -> list[str]:
         """Why this process must not start outside LOOM_ENV=dev (empty in dev). Services
         extend it with their own secrets and dev defaults."""
@@ -72,6 +86,11 @@ class PlatformSettings(BaseSettings):
         url = urllib.parse.urlsplit(self.database_url)
         if url.password is None or url.password == DEV_DATABASE_PASSWORD:
             problems.append("LOOM_DATABASE_URL has no password or the docker-compose one")
+        rurl = urllib.parse.urlsplit(self.redis_url)
+        if not rurl.password:
+            problems.append("LOOM_REDIS_URL has no password (Redis AUTH)")
+        if rurl.scheme != "rediss":
+            problems.append("LOOM_REDIS_URL is not TLS (rediss://)")
         return problems
 
 
@@ -89,6 +108,39 @@ def enforce_environment(
             file=sys.stderr,
         )
         raise SystemExit(2)
+
+
+def redis_policy_problems(redis_url: str, *, timeout_s: float = 3.0) -> list[str]:
+    """Outside dev, at start: Redis must never evict (a balance, reservation or stream
+    key evicted is wrong, not slow). A problem when `maxmemory-policy` is anything but
+    `noeviction`; only a warning on stderr when CONFIG GET is not permitted (managed
+    Redis often disables it: check the parameter group instead) or Redis is
+    unreachable (the service's readiness check covers that)."""
+    import redis
+
+    client = redis.Redis.from_url(
+        redis_url, socket_timeout=timeout_s, socket_connect_timeout=timeout_s
+    )
+    try:
+        policy = client.config_get("maxmemory-policy").get("maxmemory-policy")
+    except redis.exceptions.ResponseError as e:
+        print(
+            f"warning: cannot read Redis maxmemory-policy ({e}); make sure it is noeviction",
+            file=sys.stderr,
+        )
+        return []
+    except redis.exceptions.RedisError as e:
+        print(
+            f"warning: Redis unreachable at start ({type(e).__name__}); "
+            "maxmemory-policy not checked",
+            file=sys.stderr,
+        )
+        return []
+    finally:
+        client.close()
+    if policy != "noeviction":
+        return [f"Redis maxmemory-policy is {policy!r}, not 'noeviction'"]
+    return []
 
 
 @lru_cache(maxsize=1)

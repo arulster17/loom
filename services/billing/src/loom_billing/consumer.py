@@ -37,6 +37,7 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 from redis.asyncio import Redis
+from redis.exceptions import ResponseError
 
 from loom_billing import metrics
 from loom_billing.logs import fields
@@ -143,6 +144,24 @@ class UsageConsumer:
         """One round. `block_ms` None uses the configured block; 0 means don't block."""
         if not self._group_ready:
             await self.setup()
+        try:
+            return await self._round(block_ms)
+        except ResponseError as e:
+            if "NOGROUP" not in str(e):
+                raise
+            # Redis lost its data (FLUSHALL, a failover without AOF): the gateway's next
+            # XADD recreated the stream without the group. Recreate it from the start
+            # of the stream (entries already stored are duplicates, ON CONFLICT) and go on.
+            metrics.GROUP_RECREATED.inc()
+            log.error(
+                "consumer.group_recreated",
+                extra=fields(stream=self.stream, group=self.group),
+            )
+            await self.setup()
+            self._recovery_cursor = None  # nothing of ours is pending in a new group
+            return await self._round(block_ms)
+
+    async def _round(self, block_ms: int | None) -> RoundResult:
         result = RoundResult()
         old: list[Entry] = []
         if self._recovery_cursor is not None:

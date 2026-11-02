@@ -276,8 +276,17 @@ async def test_chat_through_proxy_with_continuous_usage(certs, mock_engine, star
     async with gateway_client(certs, port) as http:
         models = await http.get("/v1/models", headers=auth(certs), extensions=pod_ext())
         health = await http.get("/health", headers=auth(certs), extensions=pod_ext())
+        tok = await http.post(
+            "/tokenize",
+            json={"model": "qwen3-8b", "messages": body["messages"]},
+            headers=auth(certs),
+            extensions=pod_ext(),
+        )
     assert [m["id"] for m in models.json()["data"]] == ["qwen3-8b"]
     assert health.status_code == 200
+    # The gateway's count for fitting an omitted max_tokens (contracts §6, §9).
+    assert tok.status_code == 200
+    assert tok.json()["count"] == final["prompt_tokens"]
 
 
 async def test_client_abort_cancels_the_engine_request(certs, mock_engine, start_proxy):

@@ -80,3 +80,17 @@ async def test_every_runs_on_the_tick_and_survives_errors():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert len(calls) >= 3  # 8 ticks of 50 ms; the failing first run did not stop it
+
+
+async def test_redis_timeouts_cover_the_blocking_read():
+    """A frozen Redis fails calls within the socket timeout, but an idle XREADGROUP
+    (blocking `usage_block_ms`) must not count as frozen."""
+    from loom_billing.worker import redis_from_settings
+
+    s = BillingSettings(env="dev", usage_block_ms=2000, redis_socket_timeout_s=2.0)
+    assert s.redis_read_timeout_s == 5.0
+    r = redis_from_settings(s)
+    kw = r.connection_pool.connection_kwargs
+    assert kw["socket_timeout"] == 5.0
+    assert kw["socket_connect_timeout"] == s.redis_connect_timeout_s == 1.0
+    await r.aclose()

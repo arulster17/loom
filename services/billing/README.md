@@ -28,6 +28,7 @@ and reconcile are safe to race.
 | Batch | each minute, :05 | per org: lock unposted events, post one `usage` transaction for their exact sum keyed `usage:<org>:<minute>`, link the events |
 | Reconcile | each minute, :35 | Redis `credit` <- `loom_org_credit_total`; drift check of Redis `usage` vs Postgres; low-balance and auto-recharge hooks |
 | Credit listener | continuous | `LISTEN loom_credit_changed` -> `set_credit` for that org |
+| Stripe retry | each minute, :50 | re-run unapplied Stripe events (out-of-order refunds and disputes) and set `loom_billing_stripe_unapplied_events` |
 | Partitions | start, then daily | `loom_ensure_usage_partitions(today, LOOM_PARTITION_MONTHS_AHEAD)` |
 
 **Drift check.** In one MULTI read each org's Redis `usage` (U1) and the stream's last
@@ -35,14 +36,22 @@ id; check the group has acked everything up to that id (else skip: billing is be
 not wrong); read Postgres usage (P); read Redis `usage` again (U2). A healthy system has
 U1 <= P <= U2. `P < U1` (`missing_in_postgres`) means events were lost or
 dead-lettered; `P > U2` (`redis_behind`) means Redis lost usage. Both are logged at
-error with the org id and counted (`loom_billing_usage_drift_detected_total{direction}`);
-reconcile does not rewrite `usage`.
+error with the org id and counted (`loom_billing_usage_drift_detected_total{direction}`).
+`redis_behind` is healed by adding the difference back to Redis `usage` (INCRBY, only
+while the org is loaded; `loom_billing_usage_drift_healed_micros_total`), since an
+under-count would let the org overspend; `missing_in_postgres` is not rewritten.
+
+**Redis data loss.** After a FLUSHALL or a failover without AOF the gateway's next
+settle recreates `loom:usage` without the consumer group. The consumer answers NOGROUP
+by recreating the group at id 0 and carrying on
+(`loom_billing_usage_group_recreated_total`, alert); a reconcile that finds the group
+missing logs `reconcile.usage_group_missing` (`loom_billing_usage_group_missing_total`).
 
 ## HTTP API (port 8090)
 
 | Endpoint | Auth | Notes |
 |---|---|---|
-| `POST /stripe/webhook` | `Stripe-Signature` (HMAC-SHA256 of `t.body`, 300 s tolerance) | Stores the event in `stripe_events` and, for a paid Loom credits Checkout session, posts a `purchase` keyed `stripe:<event id>`. A replay answers 200 `duplicate`; a session is credited at most once even across event ids. `charge.refunded` and `charge.dispute.created` post a `refund` (org credit -X) found through the payment's PaymentIntent (`stripe_payments`): refunds by the charge's cumulative `amount_refunded` minus what was already taken back, disputes once per dispute id, never more than the purchase in total; the balance may go negative. Events that cannot be applied (unknown org or payment, not USD) answer 200 and stay `processed_at IS NULL` for an admin. Live-mode events are refused. |
+| `POST /stripe/webhook` | `Stripe-Signature` (HMAC-SHA256 of `t.body`, 300 s tolerance) | Stores the event in `stripe_events` and, for a paid Loom credits Checkout session, posts a `purchase` keyed `stripe:<event id>`. A replay answers 200 `duplicate`; a session is credited at most once even across event ids. `charge.refunded` and `charge.dispute.created` post a `refund` (org credit -X) found through the payment's PaymentIntent (`stripe_payments`): refunds by the charge's cumulative `amount_refunded` minus what was already taken back, disputes once per dispute id, never more than the purchase in total; the balance may go negative. Events that cannot be applied (unknown org or payment, not USD) answer 200 and stay `processed_at IS NULL`. A refund or dispute that arrives before its purchase is applied when the purchase is credited (same transaction), and the worker re-runs unapplied events of the last 30 days every minute (`loom_billing_stripe_unapplied_events` gauge; what stays is for an admin). Live-mode events are refused. |
 | `POST /internal/checkout-sessions` | `Authorization: Bearer $LOOM_BILLING_INTERNAL_TOKEN` | Called by the web app's server (never the browser) after it has checked the user belongs to the org. Body `{"org_id", "amount_micros", "success_url", "cancel_url", "customer_email"?}`, whole cents within [`LOOM_CHECKOUT_MIN_MICROS`, `LOOM_CHECKOUT_MAX_MICROS`], org `active`. Answers `{"id", "url", "amount_micros"}`; redirect the user to `url`. `success_url` may contain `{CHECKOUT_SESSION_ID}`. 401 bad token, 503 token unset, 400 bad body/amount, 404 unknown org, 409 org not active, 502 Stripe error. |
 | `GET /health` | none | Postgres and Redis reachable; `stripe_mode` |
 
@@ -106,6 +115,7 @@ Shared `LOOM_*` variables are in the contracts (§2). Billing adds:
 | `LOOM_USAGE_DEAD_STREAM` | `loom:usage:dead` | dead letters |
 | `LOOM_BILLING_CONSUMER` | `billing-<hostname>` | consumer name; keep it stable across restarts so a restart recovers its own pending entries |
 | `LOOM_USAGE_READ_COUNT` / `_BLOCK_MS` / `_CLAIM_IDLE_MS` | 500 / 2000 / 60000 | |
+| `LOOM_REDIS_SOCKET_TIMEOUT_S` / `LOOM_REDIS_CONNECT_TIMEOUT_S` | 2 / 1 | Redis client timeouts; the read timeout is raised to `_BLOCK_MS` + 3 s so a blocking read is not mistaken for a frozen Redis |
 | `LOOM_BATCH_INTERVAL_S` / `LOOM_RECONCILE_INTERVAL_S` | 60 / 60 | |
 | `LOOM_PARTITION_INTERVAL_S` / `LOOM_PARTITION_MONTHS_AHEAD` | 86400 / 3 | |
 | `LOOM_BILLING_HOST` / `_PORT` / `_METRICS_PORT` | `0.0.0.0` / 8090 / 9101 | metrics port 0 = off |
@@ -124,7 +134,7 @@ Shared `LOOM_*` variables are in the contracts (§2). Billing adds:
 | `LOOM_STRIPE_STUB_WEBHOOK_SECRET` / `_FILE` | unset (required in `stub` mode) | shared by stub and billing, at least 24 characters; compose: the file from `loom-devcerts --secret stripe-stub-webhook` |
 | `LOOM_STRIPE_STUB_HOST` / `_PORT` | `0.0.0.0` / 12111 | |
 | `LOOM_LOG_LEVEL` | `INFO` | |
-| `LOOM_ENV` | unset = `prod` (compose: `dev`) | outside dev every command refuses to start with compose's database password or `LOOM_STRIPE_MODE=stub`, and `all`/`api` also without a non-default `LOOM_BILLING_INTERNAL_TOKEN` |
+| `LOOM_ENV` | unset = `prod` (compose: `dev`) | outside dev every command refuses to start with compose's database password, a `LOOM_REDIS_URL` without a password or TLS (`rediss://`), a Redis `maxmemory-policy` other than `noeviction` (checked with `CONFIG GET`; a warning where managed Redis forbids it), or `LOOM_STRIPE_MODE=stub`, and `all`/`api` also without a non-default `LOOM_BILLING_INTERNAL_TOKEN` |
 
 ## Observability
 

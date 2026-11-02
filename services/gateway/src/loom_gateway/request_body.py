@@ -1,11 +1,18 @@
 """Request validation and rewriting for the engine (docs/phase1-contracts.md §6 step 2,
 §8 step 2, §9 "Request rewriting").
 
-Everything the gateway does not need to understand (tools, response_format, sampling
-parameters, logprobs) passes through unchanged. What it does change:
+Only parameters on an explicit allowlist reach the engine (`check_params`): OpenAI's
+own, plus a few vLLM sampling extras. Anything else, notably vLLM's `chat_template`,
+guided decoding, logits processors and `chat_template_kwargs` keys other than
+`enable_thinking`, is a 400 naming the parameter. Allowed parameters the gateway does
+not need to understand (tools, response_format, sampling, logprobs) pass through
+unchanged. What it does change:
 
 - `max_tokens` is always explicit, at most LOOM_MAX_TOKENS_CAP, so the engine cannot
-  generate more than was reserved;
+  generate more than was reserved. A chat request without one gets the cap, and if the
+  engine then refuses it for the context (a long prompt), the proxy asks the engine for
+  the prompt's token count and resends once with `context - prompt`, still under the
+  cap and under the same reservation (`Prepared.with_max_tokens`, contracts §6);
 - streams always ask for usage on every chunk (`include_usage`, `continuous_usage_stats`)
   so a stream cut at any point is billed the engine's own token counts;
 - `stream_options` is dropped from non-streaming requests (vLLM refuses it there).
@@ -13,6 +20,7 @@ parameters, logprobs) passes through unchanged. What it does change:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -29,6 +37,72 @@ _REFUSED = ("best_of", "use_beam_search")
 # Chat fields the template renders through `tojson` (re-serialised, possibly much longer
 # than in the body) or that change the template itself: the prompt bound is the context.
 _TEMPLATE_JSON_FIELDS = ("tools", "functions", "documents", "chat_template", "chat_template_kwargs")
+
+
+# OpenAI's request parameters (chat / legacy completions). The engine ignores the few
+# it does not implement (metadata, store, service_tier, ...), as OpenAI-compatible
+# servers do.
+_OPENAI_CHAT = frozenset(
+    {
+        "model", "messages", "frequency_penalty", "function_call", "functions",
+        "logit_bias", "logprobs", "max_completion_tokens", "max_tokens", "metadata", "n",
+        "parallel_tool_calls", "presence_penalty", "prompt_cache_key", "reasoning_effort",
+        "response_format", "safety_identifier", "seed", "service_tier", "stop", "store",
+        "stream", "stream_options", "temperature", "tool_choice", "tools", "top_logprobs",
+        "top_p", "user",
+    }
+)  # fmt: skip
+_OPENAI_COMPLETIONS = frozenset(
+    {
+        "model", "prompt", "best_of", "echo", "frequency_penalty", "logit_bias",
+        "logprobs", "max_tokens", "n", "presence_penalty", "seed", "stop", "stream",
+        "stream_options", "suffix", "temperature", "top_p", "user",
+    }
+)  # fmt: skip
+# vLLM extras that only shape sampling within max_tokens: safe to pass.
+_ENGINE_EXTRAS = frozenset(
+    {
+        "top_k", "min_p", "repetition_penalty", "min_tokens", "ignore_eos",
+        "stop_token_ids", "skip_special_tokens", "spaces_between_special_tokens",
+        "include_stop_str_in_output",
+    }
+)  # fmt: skip
+# Chat only: the template switches a client may set (Qwen3's thinking mode).
+CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
+_ALLOWED: dict[str, frozenset[str]] = {
+    "chat": _OPENAI_CHAT | _ENGINE_EXTRAS | {"chat_template_kwargs", *_REFUSED},
+    "completions": _OPENAI_COMPLETIONS | _ENGINE_EXTRAS | set(_REFUSED),
+}
+
+
+def _unsupported(name: str) -> errors.ApiError:
+    return errors.invalid_request(
+        f"Unsupported parameter: '{name}'.", name, code="unsupported_parameter"
+    )
+
+
+def check_params(endpoint: Endpoint, data: dict[str, Any]) -> None:
+    """400 `unsupported_parameter` for any top-level parameter, or `chat_template_kwargs`
+    key, not on the allowlist (contracts §8 step 2). A request-supplied `chat_template`,
+    guided decoding or logits processor never reaches the engine."""
+    allowed = _ALLOWED[endpoint]
+    for name in sorted(data):
+        if name not in allowed:
+            raise _unsupported(name)
+    kwargs = data.get("chat_template_kwargs")
+    if kwargs is None:
+        return
+    if not isinstance(kwargs, dict):
+        raise errors.invalid_request(
+            "'chat_template_kwargs' must be an object.", "chat_template_kwargs"
+        )
+    for key in sorted(kwargs):
+        if key not in CHAT_TEMPLATE_KWARGS:
+            raise _unsupported(f"chat_template_kwargs.{key}")
+        if not isinstance(kwargs[key], bool):
+            raise errors.invalid_request(
+                f"'chat_template_kwargs.{key}' must be a boolean.", f"chat_template_kwargs.{key}"
+            )
 
 
 def _template_json(data: dict[str, Any]) -> bool:
@@ -53,6 +127,20 @@ class Prepared:
     tpm_estimate: int
     max_cost_micros: int
     upstream_body: bytes
+    max_context: int = 0
+    # Chat without max_tokens / max_completion_tokens: the cap was filled in by the
+    # gateway, so it may be lowered to fit a long prompt into the context.
+    default_max_tokens: bool = False
+
+    def with_max_tokens(self, max_tokens: int) -> Prepared:
+        """The same request with a lower max_tokens (an omitted one fitted to the
+        context). The reservation stays: it was made for the higher value."""
+        if not 1 <= max_tokens <= self.max_tokens:
+            raise ValueError("max_tokens may only be lowered")
+        out = json.loads(self.upstream_body)
+        out["max_tokens"] = max_tokens
+        body = json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode()
+        return dataclasses.replace(self, max_tokens=max_tokens, upstream_body=body)
 
 
 def parse_json_object(body: bytes) -> dict[str, Any]:
@@ -194,4 +282,6 @@ def prepare(
         tpm_estimate=estimate * prompts,
         max_cost_micros=max_cost,
         upstream_body=json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode(),
+        max_context=max_context,
+        default_max_tokens=endpoint == "chat" and not requested,
     )

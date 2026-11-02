@@ -15,17 +15,24 @@ order, §9 pod contract, §10 pools, §11 errors, §12 cost headers).
 
 Run: `python -m loom_gateway` (settings from `LOOM_*`, see `settings.py`), or the image:
 `docker build -f services/gateway/Dockerfile -t loom-gateway .` from the repository root.
-Outside `LOOM_ENV=dev` (unset means prod) it refuses to start without `LOOM_POD_CA_CERT`,
+Outside `LOOM_ENV=dev` (unset means prod) it refuses to start with a Redis URL without a
+password or TLS, a Redis that may evict (`maxmemory-policy` not `noeviction`, when
+`CONFIG GET` is allowed), without `LOOM_SETTLE_SPOOL_PATH`, without `LOOM_POD_CA_CERT`,
 the client certificate and key, a non-default `LOOM_CORS_ORIGINS` and a database password
 other than compose's, and it never dispatches to an `http://` replica.
 
 ## Per request
 
-1. 413 body cap, 401 key format, auth record: in-process copy (at most 1 s and never past
-   its Redis entry), Redis (`LOOM_AUTH_CACHE_TTL_S`), Postgres. `LISTEN loom_auth_changed`
-   drops cached records on commit, so revocation and suspension take milliseconds; the TTL
-   alone bounds them at 4 s.
-2. 404 model, 400 validation (`max_tokens` over `LOOM_MAX_TOKENS_CAP`, `n`, `best_of`, ...).
+1. 413 declared body size, 401 key format, auth record: in-process copy (at most 1 s and
+   never past its Redis entry), Redis (`LOOM_AUTH_CACHE_TTL_S`, unknown keys too),
+   Postgres (at most 4 lookups at a time). `LISTEN loom_auth_changed` drops cached records
+   on commit, so revocation and suspension take milliseconds; the TTL alone bounds them at
+   4 s. Only then is the body read (413 over the cap). `last_used_at` is written in the
+   background, at most once a minute per key.
+2. 404 model, 400 validation (`max_tokens` over `LOOM_MAX_TOKENS_CAP`, `n`, `best_of`, ...),
+   400 `unsupported_parameter` for anything outside the parameter allowlist (OpenAI's
+   parameters plus a few vLLM sampling extras; `chat_template_kwargs` only
+   `enable_thinking`).
 3. One `reserve.lua` call (402/429), loading the org from Postgres and retrying once on
    `noinit`.
 4. 503 `model_unavailable` with `Retry-After` unless the model's pool is `ready` (a cold
@@ -40,6 +47,19 @@ other than compose's, and it never dispatches to an `http://` replica.
    ask the engine for usage on every chunk and bill what was forwarded (the prompt plus
    each choice's last running count, as vLLM counts per choice with `n > 1`), so a client
    abort or a lost pod bills exactly the tokens streamed.
+
+A chat request without `max_tokens` is sent the cap; if the engine refuses that for the
+context (a long prompt), it is resent once with `max_tokens = context - prompt tokens`
+from the engine's `/tokenize`, under the same reservation.
+
+Redis outages: a settle Redis refuses is fsynced to `LOOM_SETTLE_SPOOL_PATH` and replayed
+until Redis accepts it (idempotent by request id; `loom_gateway_settle_spool_depth`); new
+requests get 503 `service_unavailable` within `LOOM_REDIS_SOCKET_TIMEOUT_S` (2 s).
+
+Shutdown (SIGTERM): stop accepting, give in-flight requests `LOOM_SHUTDOWN_GRACE_S`
+(10 s), then cut open streams with a `server_shutdown` error chunk and `[DONE]`, billing
+the tokens streamed and releasing their reservations at once; exits within about the
+grace + 8 s. Orchestrator stop timeout: 30 s (contracts §6 "Shutdown").
 
 Cost: `X-Loom-Request-Id`, `X-Loom-Price-Version`, `X-Loom-Max-Cost-Micros` on every
 admitted response; `X-Loom-Cost-Micros` / `X-Loom-Cost-USD` on non-streaming ones;

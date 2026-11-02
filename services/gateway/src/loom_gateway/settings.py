@@ -59,6 +59,18 @@ class GatewaySettings(PlatformSettings):
     # A replica that failed is tried last for this long.
     replica_penalty_s: Annotated[float, Field(ge=0)] = 10.0
 
+    # Shutdown (SIGTERM, contracts §6 "Shutdown"): in-flight requests get this long to
+    # finish on their own; then open streams are cut (an error chunk and [DONE], billed
+    # for the tokens streamed, status aborted) and anything else still running is
+    # cancelled (settled, releasing its reservation). The process exits within about
+    # this + SHUTDOWN_SETTLE_S + 2 s; the orchestrator's stop timeout must be longer.
+    shutdown_grace_s: Annotated[float, Field(ge=0)] = 10.0
+
+    # Append-only file for settles Redis refused, replayed until it accepts them
+    # (loom_gateway.spool). Unset: a per-process temp file, which survives a Redis
+    # outage but not a restart; production puts it on a volume.
+    settle_spool_path: str | None = None
+
     redis_max_connections: Annotated[int, Field(gt=0)] = 256
     pg_pool_max: Annotated[int, Field(gt=0)] = 10
 
@@ -72,6 +84,11 @@ class GatewaySettings(PlatformSettings):
             problems.append("LOOM_GATEWAY_CLIENT_CERT / _KEY are not set (no mTLS to pods)")
         if self.cors_origins == DEV_CORS_ORIGINS:
             problems.append("LOOM_CORS_ORIGINS is the docker-compose default (localhost)")
+        if not self.settle_spool_path:
+            problems.append(
+                "LOOM_SETTLE_SPOOL_PATH is not set (settles spooled during a Redis outage "
+                "would not survive a restart)"
+            )
         return problems
 
     @property

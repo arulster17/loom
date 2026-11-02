@@ -160,6 +160,12 @@ class BillingSettings(PlatformSettings):
         return problems
 
     @property
+    def redis_read_timeout_s(self) -> float:
+        """LOOM_REDIS_SOCKET_TIMEOUT_S, raised above the consumer's blocking read so an
+        idle XREADGROUP is not mistaken for a frozen Redis."""
+        return max(self.redis_socket_timeout_s, self.usage_block_ms / 1000 + 3)
+
+    @property
     def consumer_name(self) -> str:
         return self.billing_consumer or f"billing-{socket.gethostname()}"
 
