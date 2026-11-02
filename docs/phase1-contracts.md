@@ -517,8 +517,16 @@ by the signed `checkout.session.completed` webhook, as a `purchase` keyed
 
 ## 8. Gateway request order
 
-1. Body size (413), bearer token format (401), auth record (401 unknown/revoked, 403 org
-   not active).
+1. Declared body size (413, from `Content-Length`), bearer token format (401), auth
+   record (401 unknown/revoked, 403 org not active), and only then the body is read
+   (413 when a body without `Content-Length` passes the cap): an unknown key is refused
+   without reading or buffering up to 1 MiB. Unknown keys are cached like known ones
+   (`{"found":false}`, §6), so one invalid key costs one Postgres lookup per 4 s; Postgres
+   key lookups are capped at 4 concurrent per gateway, so a flood of distinct random keys
+   cannot starve balance loads of connections. **M3**: put a per-IP request limit (ALB +
+   WAF rate rule) in front of the gateway for such floods; the gateway has no per-IP
+   limit. `api_keys.last_used_at` is written off the request path, at most once a minute
+   per key.
 2. Model: registry id, priced and not disabled (`pricing.servable`), else 404. Request
    validation (400), including `max_tokens` above the cap.
    *(wave 2)* `/v1/completions` without `max_tokens` gets OpenAI's default of **16**,
@@ -526,6 +534,14 @@ by the signed `checkout.session.completed` webhook, as a `purchase` keyed
    fit a long prompt, §6 step 2).
    At most 16 choices per request (`n` x prompts); `best_of` and `use_beam_search` are
    refused (the engine would generate more than the reservation covers).
+   **Parameter allowlist** (`request_body.check_params`): OpenAI's own parameters for the
+   endpoint, plus the vLLM sampling extras `top_k`, `min_p`, `repetition_penalty`,
+   `min_tokens`, `ignore_eos`, `stop_token_ids`, `skip_special_tokens`,
+   `spaces_between_special_tokens`, `include_stop_str_in_output`; and for chat
+   `chat_template_kwargs` with only `enable_thinking` (a boolean). Anything else (vLLM's
+   `chat_template`, `documents`, guided decoding, `structured_outputs`,
+   `logits_processors`, `mm_processor_kwargs`, ...) is a 400 `unsupported_parameter`
+   naming it, before reserve.
 3. Reserve (402/429). If the org's balance cannot be loaded from Postgres into Redis
    (`noinit` again after the load), 503 `balance_unavailable` with `Retry-After: 1`
    *(wave 2)*.
@@ -626,7 +642,7 @@ Clients branch on the status; `code` gives the reason.
 
 | Status | type | code | When |
 |---|---|---|---|
-| 400 | `invalid_request_error` | `invalid_request`, `context_length_exceeded`, `duplicate_request` | Bad body, over the caps, engine 4xx passed through |
+| 400 | `invalid_request_error` | `invalid_request`, `context_length_exceeded`, `duplicate_request`, `unsupported_parameter` | Bad body, over the caps, a parameter outside the allowlist (§8 step 2, `param` names it), engine 4xx passed through |
 | 401 | `invalid_request_error` | `invalid_api_key` | Missing, malformed, unknown or revoked key |
 | 402 | `insufficient_quota` | `insufficient_balance`, `key_spend_limit` | Reservation refused for money |
 | 403 | `permission_error` | `org_pending_approval`, `org_suspended` | Org not active |

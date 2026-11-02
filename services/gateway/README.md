@@ -21,11 +21,16 @@ other than compose's, and it never dispatches to an `http://` replica.
 
 ## Per request
 
-1. 413 body cap, 401 key format, auth record: in-process copy (at most 1 s and never past
-   its Redis entry), Redis (`LOOM_AUTH_CACHE_TTL_S`), Postgres. `LISTEN loom_auth_changed`
-   drops cached records on commit, so revocation and suspension take milliseconds; the TTL
-   alone bounds them at 4 s.
-2. 404 model, 400 validation (`max_tokens` over `LOOM_MAX_TOKENS_CAP`, `n`, `best_of`, ...).
+1. 413 declared body size, 401 key format, auth record: in-process copy (at most 1 s and
+   never past its Redis entry), Redis (`LOOM_AUTH_CACHE_TTL_S`, unknown keys too),
+   Postgres (at most 4 lookups at a time). `LISTEN loom_auth_changed` drops cached records
+   on commit, so revocation and suspension take milliseconds; the TTL alone bounds them at
+   4 s. Only then is the body read (413 over the cap). `last_used_at` is written in the
+   background, at most once a minute per key.
+2. 404 model, 400 validation (`max_tokens` over `LOOM_MAX_TOKENS_CAP`, `n`, `best_of`, ...),
+   400 `unsupported_parameter` for anything outside the parameter allowlist (OpenAI's
+   parameters plus a few vLLM sampling extras; `chat_template_kwargs` only
+   `enable_thinking`).
 3. One `reserve.lua` call (402/429), loading the org from Postgres and retrying once on
    `noinit`.
 4. 503 `model_unavailable` with `Retry-After` unless the model's pool is `ready` (a cold

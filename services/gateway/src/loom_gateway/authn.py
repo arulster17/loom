@@ -6,6 +6,15 @@ Redis entry's own expiry), then `loom:apikey:<sha256 hex>` in Redis (TTL
 revoked key or a suspended org is therefore refused within the Redis TTL with no other
 mechanism; the `loom_auth_changed` listener deletes cached records as soon as Postgres
 commits the change, so in practice it takes milliseconds.
+
+Unknown keys are cached the same way (`{"found":false}` in Redis for the TTL, and the
+in-process copy), so repeating one invalid key costs one Postgres lookup per TTL. A
+flood of distinct random keys still misses every cache; Postgres lookups are capped at
+`PG_LOOKUPS` at a time so it cannot take the pool from balance loads (a per-IP limit or
+WAF in front of the gateway is the M3 answer, contracts §8).
+
+`api_keys.last_used_at` is written off the request path, at most once a minute per key
+per gateway (and the UPDATE itself skips a row touched in the last minute).
 """
 
 from __future__ import annotations
@@ -30,6 +39,12 @@ log = logging.getLogger("loom_gateway.auth")
 
 AUTH_CHANNEL = "loom_auth_changed"
 _LOCAL_MAX = 100_000
+PG_LOOKUPS = 4  # concurrent Postgres key lookups per gateway (cache misses only)
+LAST_USED_INTERVAL_S = 60.0
+_TOUCH = (
+    "UPDATE api_keys SET last_used_at = now() WHERE id = %s "
+    "AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute')"
+)
 
 
 class Authenticator:
@@ -51,6 +66,10 @@ class Authenticator:
         # local copy (it may have read the record just before it was dropped).
         self._epoch = 0
         self.listening = asyncio.Event()
+        self._pg_lookups = asyncio.Semaphore(PG_LOOKUPS)
+        # key id -> monotonic time of the last last_used_at write from this process
+        self._touched: dict[uuid.UUID, float] = {}
+        self._touch_tasks: set[asyncio.Task[None]] = set()
 
     async def authenticate(self, authorization: str | None) -> AuthRecord:
         """The key's record, or ApiError 401 (malformed, unknown, revoked) / 403 (org not
@@ -64,7 +83,28 @@ class Authenticator:
             raise errors.invalid_api_key()
         if record.org_status != "active":
             raise errors.org_not_active(record.org_status)
+        self._touch(record.key_id)
         return record
+
+    def _touch(self, key_id: uuid.UUID) -> None:
+        """Schedule a `last_used_at` write, at most once per LAST_USED_INTERVAL_S."""
+        now = time.monotonic()
+        last = self._touched.get(key_id)
+        if last is not None and now - last < LAST_USED_INTERVAL_S:
+            return
+        if len(self._touched) >= _LOCAL_MAX:
+            self._touched.clear()
+        self._touched[key_id] = now
+        task = asyncio.create_task(self._write_last_used(key_id))
+        self._touch_tasks.add(task)
+        task.add_done_callback(self._touch_tasks.discard)
+
+    async def _write_last_used(self, key_id: uuid.UUID) -> None:
+        try:
+            async with self.pg_pool.connection() as conn:
+                await conn.execute(_TOUCH, (key_id,))
+        except Exception as e:  # best effort: never affects the request
+            log.debug("last_used_at not written", extra={"fields": {"error": type(e).__name__}})
 
     async def lookup(self, key_hash: bytes) -> AuthRecord | None:
         now = time.monotonic()
@@ -81,7 +121,7 @@ class Authenticator:
             # Never keep the copy past the Redis entry: that is what bounds revocation.
             ttl = min(self.local_ttl_s, max(int(pttl), 0) / 1000)
         else:
-            async with self.pg_pool.connection() as conn:
+            async with self._pg_lookups, self.pg_pool.connection() as conn:
                 record = await load_auth_record(conn, key_hash)
             await put_cached(self.redis, key_hash, record, self.redis_ttl_s)
             ttl = self.local_ttl_s

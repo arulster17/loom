@@ -41,7 +41,14 @@ from loom_gateway.proxy import (
     shielded,
     wait_background,
 )
-from loom_gateway.request_body import Endpoint, Prepared, model_field, parse_json_object, prepare
+from loom_gateway.request_body import (
+    Endpoint,
+    Prepared,
+    check_params,
+    model_field,
+    parse_json_object,
+    prepare,
+)
 from loom_gateway.routing import Router, upstream_client
 from loom_gateway.settings import GatewaySettings
 from loom_gateway.spool import SettleSpool, default_spool_path
@@ -179,7 +186,8 @@ class Gateway:
             raise errors.model_not_found(model_id)
         return hit
 
-    async def read_body(self, request: Request) -> bytes:
+    def check_declared_length(self, request: Request) -> None:
+        """413 on a declared Content-Length over the cap, before anything is read."""
         limit = self.settings.max_body_bytes
         declared = request.headers.get("content-length")
         if declared is not None:
@@ -188,6 +196,10 @@ class Gateway:
                     raise errors.request_too_large(limit)
             except ValueError:
                 raise errors.invalid_request("Bad Content-Length.") from None
+
+    async def read_body(self, request: Request) -> bytes:
+        limit = self.settings.max_body_bytes
+        self.check_declared_length(request)
         body = bytearray()
         async for chunk in request.stream():
             body += chunk
@@ -268,10 +280,14 @@ class Gateway:
         headers = {"X-Loom-Request-Id": str(request_id)}
         model_label = "-"
         try:
-            body = await self.read_body(request)
+            # The key before the body: an unknown or malformed key is refused without
+            # reading (and buffering) up to LOOM_MAX_BODY_BYTES first.
+            self.check_declared_length(request)
             record = await self.auth.authenticate(request.headers.get("authorization"))
+            body = await self.read_body(request)
             data = parse_json_object(body)
             model_id = model_field(data)
+            check_params(endpoint, data)
             spec, price = self.lookup_model(model_id)
             model_label = model_id
             headers["X-Loom-Price-Version"] = price.version
