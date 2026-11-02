@@ -18,6 +18,11 @@
 - [perf/speculative-decoding.md](perf/speculative-decoding.md): speculative decoding in plain words, the Qwen3-8B n-gram vs EAGLE3 study (proposed) and why EAGLE3 did not help the 70B on 4x L40S.
 - [site.md](site.md): the public results site: snapshot export, build, deployment, waitlist form.
 
+## Write-ups
+
+- [writeups/70b-fp8-on-h100.md](writeups/70b-fp8-on-h100.md): serving Llama 3.3 70B under a 50 ms TPOT SLO: the cross-socket 4x L40S dead end, FP8 on 2x H100 SXM, and making the quality gate decide.
+- README charts: drawn by [`scripts/readme_charts.py`](../scripts/readme_charts.py) from the committed report CSVs into [img/](img/).
+
 ## Operations
 
 - [aws-setup.md](aws-setup.md): one-time AWS account setup: quotas, HF token secret, Terraform, runner policy, settings.
