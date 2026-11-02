@@ -355,6 +355,74 @@
       "tokens_out": null,
       "quantization": null,
       "market_model_id": "qwen3-8b"
+    },
+    {
+      "model_id": "qwen3-8b-fp8-modelopt",
+      "display_name": "Qwen3 8B FP8 (ModelOpt, FP8 KV)",
+      "workload": null,
+      "load_mode": null,
+      "best_config": null,
+      "best_config_hash": null,
+      "cost_input": null,
+      "cost_output": null,
+      "price": null,
+      "margin_input": null,
+      "margin_output": null,
+      "competitors": [
+        {
+          "provider": "Fireworks AI",
+          "provider_model": null,
+          "aggregator": false,
+          "availability": "unverified",
+          "input_per_mtok": 200000,
+          "output_per_mtok": 200000,
+          "quantization": null,
+          "source": "https://docs.fireworks.ai/serverless/pricing",
+          "last_checked": "2026-10-04",
+          "notes": "Size-bucket price for models of 4B-16B parameters.",
+          "in_comparison": false,
+          "blended_at_mix": null
+        },
+        {
+          "provider": "OpenRouter",
+          "provider_model": "qwen/qwen3-8b",
+          "aggregator": true,
+          "availability": "listed",
+          "input_per_mtok": 117000,
+          "output_per_mtok": 455000,
+          "quantization": null,
+          "source": "https://openrouter.ai/qwen/qwen3-8b",
+          "last_checked": "2026-10-04",
+          "notes": null,
+          "in_comparison": false,
+          "blended_at_mix": null
+        }
+      ],
+      "flags": [
+        {
+          "kind": "no_price_set",
+          "side": null,
+          "message": "qwen3-8b-fp8-modelopt: no price set"
+        },
+        {
+          "kind": "no_cost_measurement",
+          "side": null,
+          "message": "qwen3-8b-fp8-modelopt: no measured cost at SLO"
+        },
+        {
+          "kind": "no_public_comparison",
+          "side": null,
+          "message": "qwen3-8b-fp8-modelopt: no eligible public list price"
+        }
+      ],
+      "cost_blended": null,
+      "basis": "not benchmarked",
+      "slo": null,
+      "alternative_slo": false,
+      "tokens_in": null,
+      "tokens_out": null,
+      "quantization": null,
+      "market_model_id": "qwen3-8b"
     }
   ],
   "not_offered": [
@@ -418,12 +486,16 @@
         "method": "geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0"
       },
       {
-        "metrics": "server queue time, measurement window",
+        "metrics": "tokens per decode step (speculative decoding) and per streamed chunk",
         "method": "geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0"
       },
       {
         "metrics": "error rate, SLO attainment, cache fractions and hit rates",
         "method": "arithmetic mean of per-run proportions, Student-t interval clipped to [0, 1] (t_clipped)"
+      },
+      {
+        "metrics": "server queue time, measurement window",
+        "method": "geometric mean, Student-t interval on the log scale (log_t); arithmetic interval clipped at 0 if a repetition is 0"
       },
       {
         "metrics": "GPU utilization (%)",
@@ -438,8 +510,8 @@
         "method": "arithmetic mean, Student-t interval (t)"
       }
     ],
-    "price_book_last_checked": "2026-10-09",
+    "price_book_last_checked": "2026-10-31",
     "configs": [],
-    "split": "Headline $/1M input and $/1M output use the prefill_time split, measured at the goodput point: input tokens pay for the share φ of the replica's time spent prefilling prompts, output tokens for the rest (decode steps, and any idle headroom the SLO needs). φ is the mean number of requests in their prefill phase, request rate × mean TTFT (Little's law), per repetition, combined like a throughput (geometric mean, log-t CI) and capped at 1. Input = φ × hourly price / input tok/s; output = (1 − φ) × hourly price / output tok/s; at the measured mix they bill exactly the replica's hourly price. TTFT includes queueing and the first decode step and concurrent prefills are each counted, so φ tends to overstate prefill time (input high, output low); idle headroom is charged to output (output high). The price CIs combine the φ and throughput CIs at the ends that push each price the same way, an outer bound. Blended $/1M is the hourly price over all tokens at the workload's own input:output mix and needs no split. The ranking still uses the declared cost allocation, shown in its own column."
+    "split": "Headline $/1M input and $/1M output use the prefill_time split, measured at the goodput point: input tokens pay for the share φ of the replica's time spent prefilling prompts, output tokens for the rest (decode steps, and any idle headroom the SLO needs). φ is the mean number of requests in their prefill phase, request rate × mean TTFT (Little's law), per repetition, combined like a throughput (geometric mean, log-t CI) and capped at 1. Input = φ × hourly price / input tok/s; output = (1 − φ) × hourly price / output tok/s; at the measured mix they bill exactly the replica's hourly price. TTFT includes queueing and the first decode step and concurrent prefills are each counted, so φ tends to overstate prefill time (input high, output low); idle headroom is charged to output (output high). The price CIs combine the φ and throughput CIs at the ends that push each price the same way, an outer bound. When φ is high (prefill-heavy traffic, e.g. long shared prompts or chat at high load) its CI can reach 1, the cap: the measurements then cannot rule out that prefill takes all of the replica's time, so the output price's low end is $0 and is marked as such. That $0 is a property of the split, not a measured free token; the point estimate and the high end are unaffected. Blended $/1M is the hourly price over all tokens at the workload's own input:output mix and needs no split. The ranking still uses the declared cost allocation, shown in its own column."
   }
 }

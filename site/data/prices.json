@@ -1,5 +1,5 @@
 {
-  "last_checked": "2026-10-09",
+  "last_checked": "2026-10-31",
   "clouds": {
     "aws": {
       "us-east-1": {
@@ -387,6 +387,24 @@
             "memory_gib": 502,
             "local_nvme_gb": 0,
             "on_demand_per_hour": 7980000,
+            "spot_per_hour": null,
+            "committed_1y_per_hour": null
+          },
+          "h200-x1": {
+            "sources": [
+              "https://www.runpod.io/pricing",
+              "https://docs.runpod.io/pods/pricing"
+            ],
+            "last_checked": "2026-10-31",
+            "verified": true,
+            "note": null,
+            "gpu": "H200",
+            "gpu_count": 1,
+            "gpu_memory_gb": 141,
+            "vcpus": 12,
+            "memory_gib": 188,
+            "local_nvme_gb": 0,
+            "on_demand_per_hour": 5290000,
             "spot_per_hour": null,
             "committed_1y_per_hour": null
           }
