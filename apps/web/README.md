@@ -80,7 +80,8 @@ admin role) inside their transaction. Admin pages answer 404 to non-admins. Ever
 action writes `admin_audit_log` in the same transaction.
 
 **Playground keys** (the contracts did not define this). The browser never holds an API
-key. It posts to `/api/playground/chat` with its session cookie (same-origin checked);
+key. It posts to `/api/playground/chat` with its session cookie (same-origin checked in `src/lib/same-origin.ts`: a cross-site,
+`null`, empty or malformed `Origin` is a 403 before any session lookup);
 the handler checks the session and that the org is active, then streams from the gateway
 with the user's *playground key*: an ordinary `api_keys` row (`scopes = {playground}`,
 name "Playground", one per org and user) whose plaintext is never stored. Its secret half
