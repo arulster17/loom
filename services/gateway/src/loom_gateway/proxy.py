@@ -105,6 +105,7 @@ class RequestCtx:
     # Dispatch state, so a timeout can release what an interrupted attempt held.
     held: Replica | None = None
     upstream: httpx.Response | None = None
+    fitted: bool = False  # an omitted max_tokens was fitted to the prompt (once)
 
     @property
     def model_id(self) -> str:
@@ -297,6 +298,64 @@ class Proxy:
         )
         return await self.client.send(request, stream=stream)
 
+    async def _send_fitting(
+        self, ctx: RequestCtx, replica: Replica, *, stream: bool
+    ) -> httpx.Response:
+        """`_send`, plus: a chat request whose max_tokens the gateway filled in (the cap)
+        that the engine refuses for the context (prompt + cap > context) is resent once
+        with max_tokens = context - prompt tokens, counted by the engine's `/tokenize`.
+        OpenAI fills an omitted max_tokens up to the context, so a long prompt must not
+        fail; the reservation (made for the cap) still bounds the cost."""
+        resp = await self._send(ctx, replica, stream=stream)
+        if resp.status_code != 400 or not ctx.prep.default_max_tokens or ctx.fitted:
+            return resp
+        body = await resp.aread()
+        if _engine_error(400, body).code != "context_length_exceeded":
+            return resp
+        ctx.fitted = True
+        fitted = await self._fitted_max_tokens(ctx, replica)
+        if fitted is None:
+            return resp
+        await resp.aclose()
+        ctx.prep = ctx.prep.with_max_tokens(fitted)
+        self.metrics.max_tokens_fitted.labels(ctx.model_id).inc()
+        return await self._send(ctx, replica, stream=stream)
+
+    async def _fitted_max_tokens(self, ctx: RequestCtx, replica: Replica) -> int | None:
+        """min(current max_tokens, context - prompt tokens), or None if the prompt alone
+        fills the context or the count is unavailable (the engine's 400 then stands)."""
+        sent = json.loads(ctx.prep.upstream_body)
+        keep = (
+            "model",
+            "messages",
+            "tools",
+            "add_generation_prompt",
+            "continue_final_message",
+            "chat_template_kwargs",
+            "documents",
+        )
+        req = self.client.build_request(
+            "POST",
+            replica.url.rstrip("/") + "/tokenize",
+            json={k: sent[k] for k in keep if k in sent},
+            headers={"X-Loom-Pod-Token": replica.token, "Accept": "application/json"},
+            extensions={"sni_hostname": replica.server_name},
+        )
+        try:
+            r = await self.client.send(req)
+            data = r.json() if r.status_code == 200 else None
+        except (httpx.HTTPError, ValueError):
+            return None
+        count = data.get("count") if isinstance(data, dict) else None
+        context = data.get("max_model_len") if isinstance(data, dict) else None
+        if not isinstance(count, int) or count < 0:
+            return None
+        limit = ctx.prep.max_context
+        if isinstance(context, int) and context > 0:
+            limit = min(limit, context)
+        fitted = min(ctx.prep.max_tokens, limit - count)
+        return fitted if fitted >= 1 else None
+
     def _release(self, ctx: RequestCtx, replica: Replica, *, failed: bool = False) -> None:
         ctx.held = None
         self.router.release(replica, failed=failed)
@@ -376,7 +435,7 @@ class Proxy:
         tried: set[str] = set()
         while (replica := self._next_replica(ctx, tried)) is not None:
             try:
-                resp = await self._send(ctx, replica, stream=False)
+                resp = await self._send_fitting(ctx, replica, stream=False)
             except httpx.HTTPError as e:
                 self._failed(ctx, replica, type(e).__name__)
                 continue
@@ -409,7 +468,7 @@ class Proxy:
         tried: set[str] = set()
         while (replica := self._next_replica(ctx, tried)) is not None:
             try:
-                resp = ctx.upstream = await self._send(ctx, replica, stream=True)
+                resp = ctx.upstream = await self._send_fitting(ctx, replica, stream=True)
             except httpx.HTTPError as e:
                 self._failed(ctx, replica, type(e).__name__)
                 continue

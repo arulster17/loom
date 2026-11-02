@@ -6,9 +6,9 @@ phase1-runpod-plan.md §4 and docs/phase1-contracts.md §9. One process per pod:
   the TLS handshake, so anyone else never reaches the TLS stack;
 - TLS 1.3 only, and the client must present a certificate signed by Loom's CA;
 - every request needs `X-Loom-Pod-Token` (403 otherwise);
-- forwards only `POST /v1/chat/completions`, `POST /v1/completions`, `GET /v1/models`,
-  `GET /health`, `GET /metrics` (404 otherwise) to the engine on loopback, with only the
-  `Content-Type` and `Accept` request headers;
+- forwards only `POST /v1/chat/completions`, `POST /v1/completions`, `POST /tokenize`,
+  `GET /v1/models`, `GET /health`, `GET /metrics` (404 otherwise) to the engine on
+  loopback, with only the `Content-Type` and `Accept` request headers;
 - streams the engine's response body through byte for byte, each chunk written and
   flushed as it arrives;
 - when the client goes away mid-response, closes the engine connection at once, so the
@@ -53,6 +53,7 @@ ROUTES: frozenset[tuple[bytes, bytes]] = frozenset(
     {
         (b"POST", b"/v1/chat/completions"),
         (b"POST", b"/v1/completions"),
+        (b"POST", b"/tokenize"),  # the gateway fits an omitted chat max_tokens (§6)
         (b"GET", b"/v1/models"),
         (b"GET", b"/health"),
         (b"GET", b"/metrics"),

@@ -41,6 +41,10 @@ other than compose's, and it never dispatches to an `http://` replica.
    each choice's last running count, as vLLM counts per choice with `n > 1`), so a client
    abort or a lost pod bills exactly the tokens streamed.
 
+A chat request without `max_tokens` is sent the cap; if the engine refuses that for the
+context (a long prompt), it is resent once with `max_tokens = context - prompt tokens`
+from the engine's `/tokenize`, under the same reservation.
+
 Redis outages: a settle Redis refuses is fsynced to `LOOM_SETTLE_SPOOL_PATH` and replayed
 until Redis accepts it (idempotent by request id; `loom_gateway_settle_spool_depth`); new
 requests get 503 `service_unavailable` within `LOOM_REDIS_SOCKET_TIMEOUT_S` (2 s).

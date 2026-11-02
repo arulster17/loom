@@ -282,6 +282,19 @@ Per request, after auth and model lookup, before the pool check (§8):
 2. **Dispatch** with `max_tokens` always set explicitly (the client's value, or
    `LOOM_MAX_TOKENS_CAP` when it sent none; a value above the cap is a 400 at step 2 of
    §8), so the engine cannot exceed what was reserved.
+   **Long prompt, no `max_tokens`** (chat): OpenAI fills an omitted `max_tokens` up to
+   the context, but the cap sent explicitly makes vLLM refuse any prompt longer than
+   context - cap (16,384 tokens on a 32k model) with `context_length_exceeded`. When the
+   engine refuses a request whose `max_tokens` the gateway filled in for that reason, the
+   gateway asks the same replica for the prompt's token count (vLLM's `POST /tokenize`,
+   forwarded by the pod proxy, §9; the request's `messages`, `tools`,
+   `chat_template_kwargs` and related fields) and resends once with `max_tokens =
+   min(cap, context - prompt tokens)` (`loom_gateway_max_tokens_fitted_total`). The
+   reservation is unchanged (made for the cap, which bounds the lower value), so a request
+   without `max_tokens` reserves exactly what it did before; how much a low-balance
+   account should have to reserve for one is a separate open question (§13). A prompt
+   that alone fills the context, a failed count, or a client-set `max_tokens` keeps the
+   engine's 400. Only requests that overflow pay the extra round trip.
 3. **Settle** (`settle.lua`), exactly once when the response ends (complete, client
    abort, upstream loss, engine error, or no replica answered): refuse a repeat; release the
    reservation; charge tpm buckets `actual tokens - estimate` (refunds an over-estimate,
@@ -502,7 +515,8 @@ by the signed `checkout.session.completed` webhook, as a `purchase` keyed
 2. Model: registry id, priced and not disabled (`pricing.servable`), else 404. Request
    validation (400), including `max_tokens` above the cap.
    *(wave 2)* `/v1/completions` without `max_tokens` gets OpenAI's default of **16**,
-   sent to the engine explicitly (chat completions without one get the cap, §6 step 2).
+   sent to the engine explicitly (chat completions without one get the cap, lowered to
+   fit a long prompt, §6 step 2).
    At most 16 choices per request (`n` x prompts); `best_of` and `use_beam_search` are
    refused (the engine would generate more than the reservation covers).
 3. Reserve (402/429). If the org's balance cannot be loaded from Postgres into Redis
@@ -532,7 +546,8 @@ a replica's URL host and `server_name` are the same (`https://mock-pod-1:8443`).
 - **Header** `X-Loom-Pod-Token: <replica.token>`; the proxy refuses a request without
   it (403). No client headers are forwarded except `Content-Type` and `Accept`.
 - **Paths** the proxy forwards: `POST /v1/chat/completions`, `POST /v1/completions`,
-  `GET /v1/models`, `GET /health`, `GET /metrics`; anything else is 404. Streamed chunks
+  `POST /tokenize` (§6 step 2), `GET /v1/models`, `GET /health`, `GET /metrics`;
+  anything else is 404. Streamed chunks
   are flushed immediately; request bodies are never logged.
 - **Request rewriting**: `model` stays the registry id (the engine's served model name);
   `max_tokens` is set explicitly (§6); streaming requests get `stream_options:
@@ -663,6 +678,11 @@ routable. Prices are integers in micro-dollars per 1M tokens plus 6-decimal doll
 strings. An unknown id is 404 `model_not_found`.
 
 ## 13. Open for the user or the next agents
+
+- **Reservation of a chat request without `max_tokens`** (user decision, open): it
+  reserves for the 16,384-token cap, so a low-balance account is refused such a request
+  even when its real cost would fit. Unchanged by the long-prompt fix (§6 step 2), which
+  only lowers what is sent to the engine.
 
 - **Auth.js with uuid ids**: verify on the installed `@auth/pg-adapter` (web agent).
 - **Mock `continuous_usage_stats`**: done (§9). Cached tokens of an aborted stream are

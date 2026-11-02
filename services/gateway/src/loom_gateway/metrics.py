@@ -114,6 +114,12 @@ class GatewayMetrics:
             "Settles waiting in the spool for Redis (alert when above 0 for minutes)",
             registry=r,
         )
+        self.max_tokens_fitted = Counter(
+            "loom_gateway_max_tokens_fitted",
+            "Chat requests without max_tokens resent with it fitted to a long prompt",
+            ["model"],
+            registry=r,
+        )
         self.wakes = Counter(
             "loom_gateway_pool_wakes",
             "Wake requests published for cold models",

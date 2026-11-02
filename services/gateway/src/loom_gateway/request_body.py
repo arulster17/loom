@@ -5,7 +5,10 @@ Everything the gateway does not need to understand (tools, response_format, samp
 parameters, logprobs) passes through unchanged. What it does change:
 
 - `max_tokens` is always explicit, at most LOOM_MAX_TOKENS_CAP, so the engine cannot
-  generate more than was reserved;
+  generate more than was reserved. A chat request without one gets the cap, and if the
+  engine then refuses it for the context (a long prompt), the proxy asks the engine for
+  the prompt's token count and resends once with `context - prompt`, still under the
+  cap and under the same reservation (`Prepared.with_max_tokens`, contracts §6);
 - streams always ask for usage on every chunk (`include_usage`, `continuous_usage_stats`)
   so a stream cut at any point is billed the engine's own token counts;
 - `stream_options` is dropped from non-streaming requests (vLLM refuses it there).
@@ -13,6 +16,7 @@ parameters, logprobs) passes through unchanged. What it does change:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -53,6 +57,20 @@ class Prepared:
     tpm_estimate: int
     max_cost_micros: int
     upstream_body: bytes
+    max_context: int = 0
+    # Chat without max_tokens / max_completion_tokens: the cap was filled in by the
+    # gateway, so it may be lowered to fit a long prompt into the context.
+    default_max_tokens: bool = False
+
+    def with_max_tokens(self, max_tokens: int) -> Prepared:
+        """The same request with a lower max_tokens (an omitted one fitted to the
+        context). The reservation stays: it was made for the higher value."""
+        if not 1 <= max_tokens <= self.max_tokens:
+            raise ValueError("max_tokens may only be lowered")
+        out = json.loads(self.upstream_body)
+        out["max_tokens"] = max_tokens
+        body = json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode()
+        return dataclasses.replace(self, max_tokens=max_tokens, upstream_body=body)
 
 
 def parse_json_object(body: bytes) -> dict[str, Any]:
@@ -194,4 +212,6 @@ def prepare(
         tpm_estimate=estimate * prompts,
         max_cost_micros=max_cost,
         upstream_body=json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode(),
+        max_context=max_context,
+        default_max_tokens=endpoint == "chat" and not requested,
     )
