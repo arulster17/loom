@@ -114,6 +114,24 @@ appends to `X-Forwarded-For`. Else `X-Real-IP`, else one shared "unknown" bucket
 Redis is down or does not answer within 1.5 s, the email is sent and a warning logged
 (fail open: an outage must not lock everyone out).
 
+**Security headers** (`src/lib/security-headers.ts`). Every response gets
+`X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and
+`Referrer-Policy: strict-origin-when-cross-origin` (other sites see our origin, never a
+path or query) from `next.config.ts`. Pages, actions and API routes also get a
+`Content-Security-Policy` from `src/proxy.ts` with a fresh nonce per request:
+`script-src 'self' 'nonce-…' 'strict-dynamic'` (no `'unsafe-inline'`: Next.js puts the
+nonce on its own inline and chunk scripts, so an injected script does not run; `next
+dev` adds `'unsafe-eval'` and `ws:` for HMR), `default-src`/`connect-src 'self'`,
+`img-src 'self' data:`, `style-src 'self' 'unsafe-inline'`, `object-src 'none'`,
+`base-uri 'self'`, `frame-ancestors 'none'`, and `form-action 'self'
+https://checkout.stripe.com https://accounts.google.com` (Chrome applies form-action to
+the redirect after a submission, e.g. to Checkout when JavaScript is off), plus
+`http://localhost:*` with `LOOM_ENV=dev` for the Stripe stub. A nonce only reaches
+pages rendered per request, so the root layout awaits `connection()` (every page was
+dynamic already, for the session). The CSP is set at request time rather than in
+`next.config.ts` because `headers()` there is fixed at build time, and the one image
+runs both as dev (compose) and prod.
+
 **Model disable.** The contracts have no runtime switch: a model is disabled with
 `status: disabled` in `config/models.yaml`. The admin page says so.
 
