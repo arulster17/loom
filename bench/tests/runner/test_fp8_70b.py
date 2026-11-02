@@ -271,6 +271,8 @@ def test_the_qwen_fp8_row_is_the_bf16_row_with_another_checkpoint():
 
 def test_the_qwen_suite_covers_its_fp8_row_and_nothing_else():
     suite = load_suite("qwen3-8b")
-    assert suite.also_models == ["qwen3-8b-fp8"]
+    # Its FP8 rows: vLLM's (compressed-tensors) and TensorRT-LLM's (ModelOpt).
+    assert suite.also_models == ["qwen3-8b-fp8", "qwen3-8b-fp8-modelopt"]
     assert suite.covers("qwen3-8b") and suite.covers("qwen3-8b-fp8")
+    assert suite.covers("qwen3-8b-fp8-modelopt")
     assert not suite.covers("llama-3.3-70b-instruct-fp8")
