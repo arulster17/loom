@@ -86,6 +86,11 @@ class PlatformSettings(BaseSettings):
         url = urllib.parse.urlsplit(self.database_url)
         if url.password is None or url.password == DEV_DATABASE_PASSWORD:
             problems.append("LOOM_DATABASE_URL has no password or the docker-compose one")
+        rurl = urllib.parse.urlsplit(self.redis_url)
+        if not rurl.password:
+            problems.append("LOOM_REDIS_URL has no password (Redis AUTH)")
+        if rurl.scheme != "rediss":
+            problems.append("LOOM_REDIS_URL is not TLS (rediss://)")
         return problems
 
 
@@ -103,6 +108,39 @@ def enforce_environment(
             file=sys.stderr,
         )
         raise SystemExit(2)
+
+
+def redis_policy_problems(redis_url: str, *, timeout_s: float = 3.0) -> list[str]:
+    """Outside dev, at start: Redis must never evict (a balance, reservation or stream
+    key evicted is wrong, not slow). A problem when `maxmemory-policy` is anything but
+    `noeviction`; only a warning on stderr when CONFIG GET is not permitted (managed
+    Redis often disables it: check the parameter group instead) or Redis is
+    unreachable (the service's readiness check covers that)."""
+    import redis
+
+    client = redis.Redis.from_url(
+        redis_url, socket_timeout=timeout_s, socket_connect_timeout=timeout_s
+    )
+    try:
+        policy = client.config_get("maxmemory-policy").get("maxmemory-policy")
+    except redis.exceptions.ResponseError as e:
+        print(
+            f"warning: cannot read Redis maxmemory-policy ({e}); make sure it is noeviction",
+            file=sys.stderr,
+        )
+        return []
+    except redis.exceptions.RedisError as e:
+        print(
+            f"warning: Redis unreachable at start ({type(e).__name__}); "
+            "maxmemory-policy not checked",
+            file=sys.stderr,
+        )
+        return []
+    finally:
+        client.close()
+    if policy != "noeviction":
+        return [f"Redis maxmemory-policy is {policy!r}, not 'noeviction'"]
+    return []
 
 
 @lru_cache(maxsize=1)

@@ -15,7 +15,9 @@ order, §9 pod contract, §10 pools, §11 errors, §12 cost headers).
 
 Run: `python -m loom_gateway` (settings from `LOOM_*`, see `settings.py`), or the image:
 `docker build -f services/gateway/Dockerfile -t loom-gateway .` from the repository root.
-Outside `LOOM_ENV=dev` (unset means prod) it refuses to start without `LOOM_POD_CA_CERT`,
+Outside `LOOM_ENV=dev` (unset means prod) it refuses to start with a Redis URL without a
+password or TLS, a Redis that may evict (`maxmemory-policy` not `noeviction`, when
+`CONFIG GET` is allowed), without `LOOM_SETTLE_SPOOL_PATH`, without `LOOM_POD_CA_CERT`,
 the client certificate and key, a non-default `LOOM_CORS_ORIGINS` and a database password
 other than compose's, and it never dispatches to an `http://` replica.
 

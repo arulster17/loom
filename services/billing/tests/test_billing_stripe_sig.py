@@ -200,6 +200,7 @@ def test_billing_refuses_dev_defaults_outside_dev(clean_env, capsys):
     prod = {
         "env": "prod",
         "database_url": "postgresql://loom:s3cret@db/loom_platform",
+        "redis_url": "rediss://:r3dis@cache:6380/0",
         "stripe_secret_key": "sk_test_51abc",
         "stripe_webhook_secret": "whsec_xyz",
         "billing_internal_token": "a-real-random-token",

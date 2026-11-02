@@ -11,7 +11,7 @@ from prometheus_client import start_http_server
 from loom_gateway.app import Gateway, create_app
 from loom_gateway.logs import configure_logging
 from loom_gateway.settings import GatewaySettings
-from loom_platform.settings import enforce_environment
+from loom_platform.settings import enforce_environment, redis_policy_problems
 
 # After the drain, how long the server still waits for connections to close before it
 # cancels what is left (cut streams writing their last chunk; non-streaming requests,
@@ -40,7 +40,10 @@ class GatewayServer(uvicorn.Server):
 
 def main() -> None:
     settings = GatewaySettings()
-    enforce_environment(settings, "loom-gateway")
+    problems = settings.production_problems()
+    if settings.env != "dev":
+        problems += redis_policy_problems(settings.redis_url)
+    enforce_environment(settings, "loom-gateway", problems)
     configure_logging(settings.log_level)
     app = create_app(settings)
     start_http_server(
