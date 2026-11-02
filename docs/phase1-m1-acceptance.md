@@ -351,15 +351,15 @@ tears the stack down (`.github/workflows/ci.yml`). Running the script repeatedly
 per 15 min; one run signs in about 7 times): raise `LOOM_SIGNIN_IP_LIMIT` /
 `LOOM_SIGNIN_EMAIL_LIMIT` for the web service if needed.
 
-**Status of j-m: not yet run on a compose stack.** The run for this change could not be
-made: Docker Desktop's host file sharing hung on bind mounts (every container with a
-bind mount stuck in "Starting", including a plain `docker run -v`), and Docker Desktop
-then stopped with "Docker Desktop is unable to start" before the stack came up. The
-items are linted, type-checked and their helpers unit-tested; the same behaviours are
-covered by the regression tests of each fix (`test_gateway_shutdown.py` with a real
-gateway subprocess, `test_gateway_spool.py`, `test_billing_redis_loss.py`,
-`test_gateway_long_prompt.py` through the real mock, `test_gateway_hardening.py`,
-`test_billing_webhook.py`). The new CI job runs them on every push.
+**Status of j-m: PASS** (2026-11-01, fresh compose stack `loom-m1final` at 825e3ac, all
+14 items PASS). j: 20,011-token prompt without `max_tokens` served (reserved 7,291 micros,
+cost 1,545); `chat_template` refused `unsupported_parameter`; unknown key refused in 3 ms
+before the body; web sends X-Frame-Options DENY; a refund before its purchase claws back
+$1.00 of $5.00. k: SIGTERM cut the stream at 10.1 s, 462 tokens billed (173 micros), gateway
+healthy again 10.4 s later. l: Redis stopped mid-stream: new request 503 `service_unavailable`
+in 5 ms, settle spooled (depth 1) and landed once (1,475 micros). m: after FLUSHALL the stack
+served again in 10.2 s and Redis usage equals Postgres. Same run: overhead p50 2.99 ms; logs
+of 12 containers had 0 hits for 30 marker strings.
 
 ## Defects found
 
