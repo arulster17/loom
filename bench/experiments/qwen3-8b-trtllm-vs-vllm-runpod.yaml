@@ -1,46 +1,45 @@
-# PROPOSED 2026-11-01, NOT APPROVED, NOT RUN: run runpod-smoke-trtllm.yaml first.
+# PROPOSED 2026-11-02, NOT APPROVED, NOT RUN: run runpod-smoke-trtllm.yaml first.
 #
-# TensorRT-LLM against vLLM on Qwen3-8B BF16, RunPod Secure 1x L40S, on the Lab's realistic
+# TensorRT-LLM against vLLM on Qwen3-8B, RunPod Secure 1x L40S, on the Lab's realistic
 # chat workload (leading) and fixed-1k-1k, at the same SLO, windows and search shape as the
-# config sweep (qwen3-8b-config-sweep-runpod, 7a8237d0), so both rows compare with that
+# config sweep (qwen3-8b-config-sweep-runpod, 7a8237d0), so every row compares with that
 # sweep's bf16 row point for point. Explainer: docs/perf/tensorrt-llm.md.
 #
 # - vllm-bf16: vLLM v0.30.0 at the registry defaults, the reference row and the gate's
 #   baseline (it captures the divergence reference). Its config hash is the sweep's bf16
 #   cell (7a203a3f...; bench/tests/runner/test_trtllm_plan.py), so this is also a
-#   same-config repeat of 7a8237d0's chat 2.213 / 1k-1k 1.0 req/s, on a fresh pod on the
-#   same day as the candidate: pod-to-pod variation stays out of the engine comparison.
-# - trtllm-bf16: TensorRT-LLM 1.2.1 (latest stable, 2026-04-20), `trtllm-serve` on its
-#   default PyTorch backend, which loads the HF checkpoint directly (no TensorRT engine
-#   build), at engine defaults, plus what Loom always sets: xgrammar for response_format
-#   (vLLM's default too), the Prometheus endpoint (return_perf_metrics, as SGLang always
-#   gets --enable-metrics), the Qwen3 tool parser and the 32768 context cap.
-#   Image nvcr.io/nvidia/tensorrt-llm/release:1.2.1, multi-arch index digest below
-#   (anonymous pull, no NGC key; CUDA 13.1, needs driver >= 580: the default
-#   allowedCudaVersions ["13.0"] hosts qualify through CUDA minor-version compatibility).
+#   same-config repeat of 7a8237d0's chat 2.213 / 1k-1k 1.0 req/s on a fresh pod, on the
+#   same day as the candidates: pod-to-pod drift stays out of the engine comparison.
+# - trtllm-bf16: TensorRT-LLM 1.4.0rc2, `trtllm-serve` on its PyTorch backend (no engine
+#   build), at engine defaults plus what Loom always sets: xgrammar for response_format,
+#   the Prometheus endpoint with iteration stats, the Qwen3 tool parser, the served name
+#   and the 32768 context cap. No stable release after 1.2.1 exists (GitHub releases and
+#   the NGC release repo's tags, checked 2026-11-02), and 1.2.1 rejects strict tools,
+#   mis-reads the json_schema wrapper and exports no running/waiting/KV gauges; 1.4.0rc2
+#   fixes all three, so it is pinned here and in the smoke.
+#   Image nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc2, multi-arch index digest below
+#   (anonymous pull, no NGC key; CUDA 13.4, so it relies on minor-version compatibility
+#   on the default CUDA 13.0 hosts: the smoke proves it or not).
+# - trtllm-fp8: the same engine on NVIDIA's ModelOpt FP8 checkpoint with its calibrated
+#   FP8 KV cache (registry row qwen3-8b-fp8-modelopt), on its own pod (host_group b):
+#   both TRT-LLM cells on one pod would put it past 80% of its TTL.
 #
 # Engine defaults that differ, recorded not tuned (docs/perf/tensorrt-llm.md): TRT-LLM
-# admits a request only when its whole KV budget (prompt + max_tokens) is free
-# (GUARANTEED_NO_EVICT; vLLM admits optimistically and preempts), does not chunk prefills
-# (vLLM always does), caps a step at 8192 tokens (vLLM: 2048 on this GPU) and sizes its
-# KV cache from 90% of the memory left after the weights (vLLM: 90% of the GPU).
+# admits a request only when its whole KV budget is free (GUARANTEED_NO_EVICT; vLLM
+# preempts instead), does not chunk prefills, caps a step at 8192 tokens (vLLM: 2048 on
+# this GPU) and sizes its KV cache from 90% of the memory left after the weights.
 #
-# Quality: phase0, not phase0-strict, with three replicated passes per cell as the sweep.
-# TRT-LLM 1.2.1 rejects a tool's `strict` field (extra="forbid" in its request schema), so
-# tool_calling_strict would fail every item and with it the whole eval job; phase0's four
-# tasks pair item for item with the sweep's. What the gate will say, before paying:
-# - divergence cannot be measured: 1.2.1's /v1/completions rejects `logprobs` (and no
-#   version returns prompt logprobs, which the teacher-forced check needs), so the scoring
-#   half fails (`divergence_failed`) and the gate comes out INCONCLUSIVE, blocked, whatever
-#   the task scores. The task scores and samples are stored, so the gate can be re-decided
-#   (`bench quality gate`) if the policy for engines without prompt logprobs changes.
-# - json_schema: 1.2.1 passes response_format.json_schema to xgrammar as the schema
-#   itself, OpenAI's {name, schema, strict} wrapper included (fixed in 1.4.0rc2), so its
-#   constraint is not the item's schema; the score measures what an OpenAI client gets.
+# Quality: phase0-strict with three replicated passes per cell, as the sweep, so the
+# vLLM cell pairs with 7a8237d0's evals too. Every candidate is gated against vllm-bf16
+# on the full gate, divergence included: trtllm-serve has no prompt logprobs over HTTP,
+# so the engine runs with Loom's prompt-logprobs route (loom_bench/trtllm_scorer.py),
+# which answers the divergence check's echo+logprobs requests from the served LLM object
+# itself (TRT-LLM's `prompt_logprobs`): same process, GPU, weights and precision.
 #
-# Budget (`bench plan`, prices.yaml $1.1010/h with disk): see max_spend below.
+# Budget (`bench plan`, prices.yaml $1.1010/h with disk, against a copy of the results
+# DB): see max_spend below and docs/perf/tensorrt-llm.md for the quote.
 name: qwen3-8b-trtllm-vs-vllm-runpod
-description: Qwen3-8B BF16 on RunPod Secure 1x L40S, TensorRT-LLM 1.2.1 (PyTorch backend) vs vLLM v0.30.0, chat and 1k/1k at SLO, gated vs vLLM BF16.
+description: Qwen3-8B on RunPod Secure 1x L40S, TensorRT-LLM 1.4.0rc2 BF16 and FP8 vs vLLM v0.30.0 BF16, chat and 1k/1k at SLO, gated vs vLLM BF16.
 model: qwen3-8b
 provider:
   kind: runpod
@@ -50,8 +49,11 @@ variants:
   - name: trtllm-bf16
     engine:
       name: trtllm
-      version: "1.2.1"
-      image: nvcr.io/nvidia/tensorrt-llm/release@sha256:33cd085b772947bd22b7273886539331420404e5d2a4a039945241945ff927b9
+      version: "1.4.0rc2"
+      image: nvcr.io/nvidia/tensorrt-llm/release@sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a
+  - name: trtllm-fp8
+    model: qwen3-8b-fp8-modelopt
+    host_group: b
 workloads:
   # Searches start just above vLLM BF16's measured knees (chat 2.213, failing at 2.449;
   # 1k-1k 1.0, failing at 1.107) and step by 1.5x, so vLLM brackets its knee in a step or
@@ -77,11 +79,11 @@ slo:
   max_error_rate: 0.01
 quality:
   suite: qwen3-8b
-  subset: phase0
+  subset: phase0-strict
   baseline_variant: vllm-bf16
   replicates: 3
 budget:
-  max_spend: "$11"
+  max_spend: "$16"
   ttl_minutes: 285
   accrual_interval_s: 15
 seed: 0

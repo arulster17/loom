@@ -27,29 +27,30 @@ def _plan(exp: Experiment):
     )
 
 
-@pytest.mark.parametrize(("path", "cap"), [(REAL, "$11"), (SMOKE, "$2.75")], ids=["real", "smoke"])
+@pytest.mark.parametrize(("path", "cap"), [(REAL, "$16"), (SMOKE, "$4")], ids=["real", "smoke"])
 def test_plans_fit_their_caps_even_to_ttl(path, cap):
     plan = _plan(load_experiment(path))
     assert plan.ok, plan.refusals
     assert plan.caps.effective == parse_usd(cap)
     assert plan.ttl_worst_micros <= plan.caps.effective
     assert plan.total_micros < 0.8 * plan.caps.effective
-    assert len(plan.hosts) == 2  # one pod per engine image
+    # One pod per engine image, and the FP8 cell on its own (host_group b).
+    assert len(plan.hosts) == 3
     for host in plan.hosts:
         assert host.provider == "runpod" and host.steps[0].kind == "cold_start"
         assert host.seconds < 0.8 * host.ttl_s
 
 
-def test_the_real_run_stays_under_ten_dollars_planned():
-    assert _plan(load_experiment(REAL)).total_micros < parse_usd("$10")
+def test_the_real_run_with_the_fp8_candidate_stays_under_twelve_dollars_planned():
+    assert _plan(load_experiment(REAL)).total_micros < parse_usd("$12")
 
 
 def test_the_trtllm_pod_is_planned_with_its_slower_start():
     plan = _plan(load_experiment(REAL))
-    vllm, trt = (h.steps[0].seconds for h in plan.hosts)
+    vllm, trt, _ = (h.steps[0].seconds for h in plan.hosts)  # same BF16 checkpoint
     pull, init = ENGINE_START_EXTRA_S["trtllm"]
     assert trt - vllm == pytest.approx(pull + init)
-    assert RUNPOD_TIMING.image_pull_s + pull >= 400  # 20.9 GB image
+    assert RUNPOD_TIMING.image_pull_s + pull >= 340  # 17.3 GB image
 
 
 def test_the_vllm_reference_is_the_config_sweeps_bf16_config():
@@ -58,16 +59,19 @@ def test_the_vllm_reference_is_the_config_sweeps_bf16_config():
     real, sweep = load_experiment(REAL), load_experiment(QWEN_SWEEP_RUNPOD)
     cells = {c.variant: c for c in expand(real, REGISTRY)}
     assert cells["vllm-bf16"].config_hash == SWEEP_BF16_HASH
-    assert cells["trtllm-bf16"].launch.engine == "trtllm"
-    assert cells["vllm-bf16"].host_key != cells["trtllm-bf16"].host_key
+    assert cells["trtllm-bf16"].launch.engine == cells["trtllm-fp8"].launch.engine == "trtllm"
+    assert cells["trtllm-fp8"].spec.id == "qwen3-8b-fp8-modelopt"  # precision in the row
+    assert cells["trtllm-fp8"].spec.kv_cache_dtype == "fp8"
+    assert len({c.host_key for c in cells.values()}) == 3
     assert real.slo == sweep.slo and real.repetitions == sweep.repetitions
     shape = lambda e: {  # noqa: E731
         w.profile: (w.load.duration_s, w.load.warmup_s, w.load.drain_timeout_s) for w in e.workloads
     }
     assert shape(real) == shape(sweep)
     assert real.quality is not None and real.quality.baseline_variant == "vllm-bf16"
-    # phase0, not phase0-strict: TRT-LLM 1.2.1 rejects a tool's `strict` field.
-    assert real.quality.subset == "phase0" and real.quality.replicates == 3
+    # phase0-strict, as the sweep: TRT-LLM 1.4.0rc2 accepts and enforces strict tools.
+    assert real.quality.subset == sweep.quality.subset == "phase0-strict"
+    assert real.quality.replicates == 3
 
 
 def _eval_paths(exp: Experiment) -> set[tuple[str, str]]:
