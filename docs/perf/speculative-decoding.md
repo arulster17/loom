@@ -1,7 +1,7 @@
 # Speculative decoding: what it is, when it pays, and what Loom measured
 
-Status, 2026-11-01: the Qwen3-8B study is **proposed, not run** (specs, quote and smoke
-below). The 70B findings are from runs already stored (cf4d1614, 55102ddb).
+Status, 2026-11-02: the Qwen3-8B study is **proposed, not run** (specs, quote, smoke and
+post-run steps below). The 70B findings are from runs already stored (cf4d1614, 55102ddb).
 
 ## The short version (how to explain it in an interview)
 
@@ -128,6 +128,20 @@ goodput point. The mock backend speculates too (`spec_tokens`, `spec_acceptance`
 per step, so all of this is tested offline, including the low-batch win and high-batch
 loss.
 
+**What the draft missed.** A variant with `store_output_text: true` keeps each load
+request's generated text in its Parquet row (`output_text`; the config hash does not
+move). `bench draft-misses <experiment> --cell <eagle3 row> [--workload W] [--out DIR]`
+then reads those runs, takes the head (repo, revision) from their speculative config,
+fetches its draft vocabulary (the `d2t` tensor, by ranged requests: ~256 KB, not the
+2 GB of weights) and the target's tokenizer, and lists per request: tokens per chunk, the
+share of output tokens outside the draft vocabulary (and which ones), the share of
+distinct tokens and the most common token's share (a loop). One sentence compares the
+requests at or below 1.2 tokens per chunk with the rest; `--out` writes
+`draft_misses.md/json`. For the pinned Qwen3-8B head, the 32,000-token draft vocabulary
+covers a Python snippet completely and misses 80% of the tokens of a Chinese sentence
+(checked 2026-11-02), so the vocabulary is a real way for a request to get no draft
+accepted.
+
 ## The Qwen3-8B study (proposed, not run)
 
 `bench/experiments/qwen3-8b-specdec-runpod.yaml`: one RunPod Secure 1x L40S pod, vLLM
@@ -158,12 +172,32 @@ drafted.
 **Workloads and loads.** Fixed open-loop rates, every row at every rate, so speed-ups are
 read at equal load: chat-sharegpt (the leading, realistic workload) at 0.25, 1, 2 and
 3 req/s (bf16's goodput there was 2.213 req/s in 7a8237d0, so 3 is past its knee), and
-code-completion with 256-token continuations at 0.25, 1 and 2 req/s, the case where
-n-gram should shine: its prompts are 1.5k tokens of templated Python (ten line templates,
-sixteen identifiers), so a continuation repeats spans of the prompt. **No profile in the
-repo has real edits or quoted text** (a code-edit or RAG workload with a real dataset is
-the missing piece); this templated code is the closest, and it flatters n-gram. Windows
-180 s after 30 s of warmup, 3 repetitions, the usual SLO.
+real code edits at 0.5, 2 and 4 req/s, the case n-gram is built for. Windows 180 s after
+30 s of warmup, 3 repetitions, the usual SLO. The EAGLE3 row stores its output text.
+
+**The copy-heavy workload: CommitPackFT** (`bench/workloads/code-edit-commitpackft.yaml`,
+profile kind `edit_dataset`). Each request is a real GitHub commit: the Python file
+before it and the commit message, asking for the complete updated file; the file after
+the commit sets the output length (`ignore_eos`, as every workload here). An edit keeps
+most of the file, so the reply copies long spans of the prompt: in 1,495 sampled edits
+the new file shares a median 87% of its characters with the old one (mean 65%). Prompts
+average ~250 tokens and replies ~225 (Qwen3 tokenizer; capped at 512 in the specs so the
+30 s drain covers a passing request).
+
+| Candidate | License | Why (not) |
+|---|---|---|
+| `bigcode/commitpackft`, `data/python/data.jsonl` (**chosen**) | MIT (card); each record keeps its repository's license | 56,025 real commits with before/after files and an instruction-like message; plain JSON lines (136 MB) the pod downloads and checks itself; large enough that no prompt repeats within a run |
+| `nuprl/CanItEdit` | MIT | real before/after edits, but only ~105 problems: prompts would repeat across a run and hit the prefix cache |
+| `likaixin/InstructCoder` | none declared on the card | code-edit instructions, but no license to rely on |
+| SQuAD-style extractive QA | CC BY-SA 4.0 | answers are a few tokens: nothing for decode-side speculation to win |
+
+Pinned at revision `fc56fe33c030c6daa414c2b112c932b8eed085e6` (the repo's head on
+2026-11-02), file sha256 `d167da37e1058371c48e057cd8815d03700c867dd8bcf58e61420d4dcd288d73` (its Git LFS oid,
+checked on download), 135,858,935 bytes. The profile keeps only MIT, Apache-2.0,
+BSD-2/3-Clause, ISC, Unlicense and CC0 records (50,152 of 56,025), skips edits that
+change nothing, and uses the code only as request load (lengths and latency are
+published, never the code). It replaces the templated `code-completion` stand-in in both
+specs; its lighter prompts move its rates up (0.5, 2, 4 instead of 0.25, 1, 2 req/s).
 
 **Quality.** Both speculative rows are gated in-run against bf16 on phase0-strict with
 three replicated passes, divergence included, under the standard rule: a row ships only
@@ -174,17 +208,22 @@ kernel shape, so a near-tie can flip as it does under batching noise. The 70B EA
 measured exactly that: KL 0.00022 against BF16, below either config's noise floor, with
 11 of 48 continuations flipping at near-ties (benchmark-lab.md, "70B tuning").
 
-**Quote** (`bench plan` against a copy of the results DB, 2026-11-01; $96.57 billable
-spent, $53.18 left under the overall cap):
+**Quote** (`bench plan` against a copy of the results DB, 2026-11-02; $96.57 billable
+spent, $153.18 left under the $249.75 overall cap):
 
 | Spec | Plan | Estimate | Worst case (TTL) | Cap |
 |---|---|---|---|---|
-| `runpod-smoke-specdec` | 1.47 h of a 100 min TTL | $1.62 | $1.83 | $2.00 |
-| `qwen3-8b-specdec-runpod` | 7.32 h of an 8 h TTL (RunPod's limit) | $8.06 | $8.81 | $9.00 |
+| `runpod-smoke-specdec` | 1.49 h of a 100 min TTL | $1.64 | $1.83 | $2.00 |
+| `qwen3-8b-specdec-runpod` | 7.39 h of an 8 h TTL (RunPod's limit; 7.6% margin) | $8.14 | $8.81 | $9.00 |
 
-Past RunPod runs cost 30-80% of plan (eval passes plan ~1.6x long), so expect about
-$5-6 for the run. The planner does not count the draft head's 2 GB download (~15 s). The
-caps together ($11) fit what is left even if all of option B ($40.70 of caps) runs first.
+The real code edits add 4 minutes of plan to the templated code they replace (7.32 h
+before): the 136 MB dataset's download and a 10 s allowance per run for reading it
+(measured: 1.0 s for 500 requests on a laptop). Past RunPod runs cost 30-80% of plan
+(eval passes plan ~1.6x long), so expect about $5-6. The planner does not count the draft
+head's 2 GB download (~15 s). For a wider margin: dropping chat's 3 req/s point saves
+~41 min of plan, but it is the only point past bf16's knee; or the EAGLE3 row can go on
+its own pod (`host_group`), one more cold start (~12 min, ~$0.25) for two pods well
+inside the TTL.
 
 **The smoke** (`runpod-smoke-specdec`) has the same provider, variants (so the same config
 hashes and launches), workload profiles and overrides, repetitions, SLO and quality
@@ -192,26 +231,46 @@ section, with 10 s windows and tasks capped at 4 items. It runs once what no ear
 has: vLLM's n-gram proposer, EAGLE3 on Qwen3-8B on an L40S with its head fetched on a warm
 restart, the spec-decode counters in the run summary (check `server.missing` has no
 `spec_decode` and the two speculative rows show accepted per step), replicated passes and
-divergence scoring against a speculating engine, and 256-token code continuations on a
-pod. Chat at 12 req/s with full-length replies overloads every row, so each speculating
-engine has requests cancelled at the drain timeout, as the run's 3 req/s point may. What
-it cannot show: the crossover itself (10 s windows), or whether the 8 h TTL is enough
-(the run is planned at 7.32 h; measured runs have come in at 60-75% of plan).
+divergence scoring against a speculating engine, the CommitPackFT download and edit
+prompts on a pod, and stored output text on the EAGLE3 row (check its Parquet rows have
+`output_text`, then run `bench draft-misses <smoke id> --cell bf16-eagle3`). Chat at
+12 req/s with full-length replies overloads every row, so each speculating engine has
+requests cancelled at the drain timeout, as the run's 3 req/s point may.
+
+What the smoke cannot show: the crossover itself and steady-state acceptance (10 s
+windows, a handful of requests per point); code edits at 0.5 and 4 req/s (it runs 2);
+whether 7.39 h fits the 8 h TTL on the day (measured runs came in at 60-75% of plan); and
+a draft-miss finding, which needs the run's hundreds of requests.
 `bench/tests/runpod/test_runpod_specdec.py` runs it end to end on the pod simulator,
-with an engine that speculates when its launch says so.
+with an engine that speculates when its launch says so, including the stored text and
+`bench draft-misses` (with the head's vocabulary and the tokenizer faked).
 
 **What it should answer**: the TPOT speed-up of each method at each load (and where it
 falls below 1); acceptance by method and workload; whether speculation changes goodput
-and $/1M at the declared 50 ms SLO; and `bench report --alt-slo tpot_ms.p95=20` (or
-similar, re-judged for free from the same runs) for a tight interactive SLO, where a
-latency tool should be worth more.
+and $/1M at the declared 50 ms SLO, and at a tight interactive one (20 ms TPOT p95),
+where a latency tool should be worth more; and what the EAGLE3 draft fails to predict.
+
+**After the run** (no GPU; the 20 ms view was approved on 2026-11-02):
+
+```sh
+ID=<experiment id>; OUT=reports/8b-specdec-v1
+uv run bench report -e $ID --alt-slo tpot_ms.p95=20 --out $OUT
+uv run bench draft-misses $ID --cell bf16-eagle3 --workload chat-sharegpt --out $OUT/chat
+uv run bench draft-misses $ID --cell bf16-eagle3 --workload code-edit --out $OUT/code-edit
+```
+
+The first writes the declared-SLO leaderboard (with the "Speculative decoding by load"
+tables) and next to it `leaderboard.alt-slo.*`: the same runs re-judged at TPOT p95
+20 ms, labelled as not the declared SLO (benchmark-lab.md, "Alternative SLO view").
+The other two write the draft-miss tables per workload.
 
 ## Why EAGLE3 gave no gain on Llama 3.3 70B over 4x L40S
 
 The claim to check: "EAGLE3 on the 70B over 4x L40S (55102ddb, `vllm-tp4-eagle3`) gave
 about no gain." Compared with the same model without it (cf4d1614, `vllm-tp4`), same
-pod shape, image, workloads, seeded requests and windows
-([reports/70b-final-v2](../../reports/70b-final-v2/leaderboard.md)):
+pod shape, image, workloads, seeded requests and windows (both runs and their numbers:
+[benchmark-lab.md, "70B tuning"](../benchmark-lab.md#70b-tuning); `bench report
+-e cf4d1614 -e 55102ddb` rebuilds their leaderboard from the results store):
 
 **It did speed up the typical request, about 2x.** From the stored per-request rows,
 EAGLE3 delivered 2.31-2.38 tokens per streamed chunk on average at every load, against
@@ -267,9 +326,9 @@ would still accept the odd draft, so "exactly 1.00 over 1,023 steps" points to s
 systematic. The leading hypothesis is the draft vocabulary: the head can only propose the
 32,000 most common Llama 3 tokens (of 128,256), and a greedy continuation of a
 random-word prompt that drifts into rare tokens (or a loop of one) can never be drafted.
-Load runs do not store output text, so this is unconfirmed; the next EAGLE3 run's
-tokens-per-chunk minimum will show whether chat content does it too, and storing outputs
-for one EAGLE3 load run would settle it. Not known either: how the extra 10-19 ms of a
+Those load runs did not store output text, so this is unconfirmed for the 70B. The
+Qwen3-8B study stores the EAGLE3 row's text, and `bench draft-misses` tests exactly this
+hypothesis there (and the other usual cause, a repetition loop). Not known either: how the extra 10-19 ms of a
 verify step (16-24%, both workloads) splits between the head's three sequential forward passes (each with its own
 all-reduces at TP=4) and the 4x larger verify batch; it was not profiled.
 
@@ -280,10 +339,10 @@ reach, so the SLO-based goodput, and with it the cost, did not move.
 
 ## Open questions
 
-- A real code-edit or RAG workload (outputs that quote the prompt) would be the fair test
-  for n-gram; the templated code profile is a stand-in.
-- Whether to store output text on one EAGLE3 load run to settle the zero-acceptance
-  requests (needs a small runner option; `keep_output` exists on the load job but is not
-  exposed in the experiment spec).
+- CommitPackFT covers one kind of copy-heavy text (code edits). RAG over pasted passages
+  with long extractive answers would be the other; no permissive dataset with long enough
+  answers was chosen here.
+- Settling the 70B's zero-acceptance requests needs a 70B EAGLE3 load run with
+  `store_output_text`; the Qwen3-8B run answers the question for that model only.
 - SGLang's speculative-decoding metrics are not mapped (unverified at v0.5.21); only vLLM
   rows get acceptance figures.
