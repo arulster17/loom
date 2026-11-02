@@ -33,6 +33,17 @@ DRIFT_DETECTED = Counter(P + "usage_drift_detected_total", "Drift findings", ["d
 DRIFT_CHECK_SKIPPED = Counter(
     P + "usage_drift_check_skipped_total", "Reconciles that skipped the drift check (lagging)"
 )
+GROUP_RECREATED = Counter(
+    P + "usage_group_recreated_total",
+    "Consumer group found missing (Redis lost its data) and recreated: alert",
+)
+GROUP_MISSING = Counter(
+    P + "usage_group_missing_total",
+    "Reconciles that found the usage stream or its consumer group missing: alert",
+)
+DRIFT_HEALED_MICROS = Counter(
+    P + "usage_drift_healed_micros_total", "Usage added back to Redis for redis_behind drift"
+)
 CREDIT_NOTIFICATIONS = Counter(
     P + "credit_notifications_total", "loom_credit_changed notifications applied"
 )

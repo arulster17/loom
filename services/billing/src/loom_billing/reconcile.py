@@ -17,8 +17,12 @@ Postgres:
    only after its commit, so a healthy system has U1 <= P <= U2. P < U1 means events
    counted in Redis never reached Postgres (lost or dead-lettered); P > U2 means Redis
    lost usage (e.g. AOF loss, or an org loaded while its events were still in the
-   stream). Either is logged with the org id and counted in metrics; reconcile does
-   not rewrite `usage`.
+   stream). Either is logged with the org id and counted in metrics. `redis_behind`
+   is also healed: the missing amount is added back with INCRBY (an under-counted
+   `usage` would let the org spend past its balance); `missing_in_postgres` is left
+   alone (it only makes the balance look lower). When the check is skipped because the
+   stream's consumer group is gone (Redis lost its data), that is logged at error and
+   counted (`usage_group_missing_total`); the consumer recreates the group.
 3. **Notifications**: balance = credit - U2 feeds the low-balance check and the
    auto-recharge hook (`loom_billing.notify`).
 
@@ -45,7 +49,7 @@ from redis.asyncio import Redis
 from loom_billing import metrics
 from loom_billing.logs import fields
 from loom_billing.notify import AutoRecharge, Notifier
-from loom_billing.streams import StreamId, consumed_through, parse_id, s
+from loom_billing.streams import StreamId, consumed_through, group_state, parse_id, s
 from loom_platform.db import libpq_url
 from loom_platform.ledger import org_credit_state
 from loom_platform.limiter import KEY_ROOT, Limiter, org_key
@@ -53,6 +57,13 @@ from loom_platform.limiter import KEY_ROOT, Limiter, org_key
 log = logging.getLogger("loom_billing.reconcile")
 
 CHUNK = 500
+
+_HEAL_LUA = """
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  return redis.call('INCRBY', KEYS[1], ARGV[1])
+end
+return false
+"""
 
 
 @dataclass(frozen=True)
@@ -165,6 +176,15 @@ class Reconciler:
                 run.drift_checked = True
             else:
                 metrics.DRIFT_CHECK_SKIPPED.inc()
+                group = await group_state(self.redis, self.stream, self.group)
+                if last is not None and group is None:
+                    # Not lagging: the group is gone (Redis lost its data). The consumer
+                    # recreates it; until then nothing is billed.
+                    metrics.GROUP_MISSING.inc()
+                    log.error(
+                        "reconcile.usage_group_missing",
+                        extra=fields(stream=self.stream, group=self.group),
+                    )
 
             for o, before, after in zip(orgs, u1, u2, strict=True):
                 credit, pg_usage, version = pg[o]
@@ -175,6 +195,7 @@ class Reconciler:
                     self._drift(run, o, "missing_in_postgres", before - pg_usage, before, pg_usage)
                 if drained and after is not None and pg_usage > after:
                     self._drift(run, o, "redis_behind", pg_usage - after, after, pg_usage)
+                    after = await self._heal(o, pg_usage - after)
                 if after is None:
                     continue
                 balance = credit - after
@@ -184,6 +205,19 @@ class Reconciler:
                     if await self.recharge.check(conn, o, balance):
                         run.notifications += 1
                     await conn.commit()
+
+    async def _heal(self, org: uuid.UUID, missing: int) -> int | None:
+        """Add usage Redis lost back to its counter (an org reloaded from Postgres
+        before billing stored events settled while it was not loaded, or Redis lost
+        writes): an under-counted `usage` would let the org spend past its balance.
+        INCRBY, not SET, so settles since U2 stay counted; only while the org is
+        loaded (a lone usage key would block init_org). Returns the new usage."""
+        res = await self.redis.eval(_HEAL_LUA, 1, org_key(org, "usage"), missing)  # type: ignore[misc]
+        if res is None:
+            return None
+        metrics.DRIFT_HEALED_MICROS.inc(missing)
+        log.warning("reconcile.usage_healed", extra=fields(org_id=str(org), added_micros=missing))
+        return int(res)
 
     def _drift(
         self, run: ReconcileRun, org: uuid.UUID, direction: str, micros: int, r: int, p: int

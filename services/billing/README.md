@@ -35,8 +35,16 @@ id; check the group has acked everything up to that id (else skip: billing is be
 not wrong); read Postgres usage (P); read Redis `usage` again (U2). A healthy system has
 U1 <= P <= U2. `P < U1` (`missing_in_postgres`) means events were lost or
 dead-lettered; `P > U2` (`redis_behind`) means Redis lost usage. Both are logged at
-error with the org id and counted (`loom_billing_usage_drift_detected_total{direction}`);
-reconcile does not rewrite `usage`.
+error with the org id and counted (`loom_billing_usage_drift_detected_total{direction}`).
+`redis_behind` is healed by adding the difference back to Redis `usage` (INCRBY, only
+while the org is loaded; `loom_billing_usage_drift_healed_micros_total`), since an
+under-count would let the org overspend; `missing_in_postgres` is not rewritten.
+
+**Redis data loss.** After a FLUSHALL or a failover without AOF the gateway's next
+settle recreates `loom:usage` without the consumer group. The consumer answers NOGROUP
+by recreating the group at id 0 and carrying on
+(`loom_billing_usage_group_recreated_total`, alert); a reconcile that finds the group
+missing logs `reconcile.usage_group_missing` (`loom_billing_usage_group_missing_total`).
 
 ## HTTP API (port 8090)
 

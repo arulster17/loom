@@ -358,6 +358,22 @@ its shutdown loses the spooled settles (logged at error with the count).
 While Redis is unavailable new requests are refused fast: any Redis error during auth,
 reserve or the pool check is a 503 `service_unavailable` with `Retry-After: 1` (§11).
 
+### Redis data loss
+
+FLUSHALL, or a failover to a replica without the last writes, loses everything at once.
+What happens and how it heals (tested in `services/billing/tests/test_billing_redis_loss.py`):
+
+| Lost | Effect | Heals by |
+|---|---|---|
+| `loom:usage` and its group | The next settle's `XADD` recreates the stream without the group; `XREADGROUP` answers NOGROUP | The billing consumer recreates the group at id 0 and continues (`loom_billing_usage_group_recreated_total`, alert); reconcile logs `reconcile.usage_group_missing` until then |
+| Unconsumed stream entries | Those requests are never billed (under-charge) | Not recoverable; the bound in "Worst-case overshoot" (d) |
+| Org `credit`, `credit_v`, `usage`, key `usage` | Next `reserve` answers `noinit` | `load_from_postgres` (§6 "Loading") |
+| Usage settled while the org was unloaded, then the org reloaded before billing stored it | Redis `usage` below Postgres (`redis_behind`) | Reconcile adds the difference back (INCRBY) within a minute |
+| Reservations, in-flight counts, token buckets | Limits briefly looser; settles without a reservation still charge | Nothing to do |
+| `done:` markers | A spooled settle replays normally (its original never landed) | Nothing to do |
+| `loom:apikey:*`, `lowbal` markers | Reloaded from Postgres; a low-balance notice may repeat | Nothing to do |
+| `loom:pool:*` | Model looks cold: 503 and a wake | Pool manager (M1: poolsim) brings it back |
+
 ### Shutdown
 
 On SIGTERM the gateway (`python -m loom_gateway`, `GatewayServer`):
@@ -448,7 +464,9 @@ back both; a racing second worker hits the idempotency key.
 
 **Reconcile** (billing, every minute): for each org loaded in Redis
 (`SCAN loom:org:*:credit`), `set_credit(org, credit total, version)`; also on every
-`loom_credit_changed` notification.
+`loom_credit_changed` notification. Its drift check (`services/billing/README.md`) adds
+usage Redis is missing (`redis_behind`) back to `usage` with INCRBY (§6 "Redis data
+loss").
 
 **Notifications outbox** *(wave 2, billing)*: stream `loom:notify`
 (`LOOM_NOTIFY_STREAM`), flat string entries `type`, `org_id`, `balance_micros`,
