@@ -54,19 +54,11 @@ def test_the_trtllm_pod_is_planned_with_its_slower_start():
 
 
 def test_the_vllm_reference_is_the_config_sweeps_bf16_config():
-    # This run's vLLM row serves exactly 7a8237d0's bf16 config (model, engine launch,
-    # GPU, disk); only the host CUDA allow-list is wider (RunPod hosts moved past 13.0),
-    # which moves the hash. The windows and SLO match the sweep's, so the rows compare
-    # point for point.
+    # Same config hash: this run's vLLM row is a same-config repeat of 7a8237d0's bf16,
+    # and the windows and SLO match the sweep's so the rows compare point for point.
     real, sweep = load_experiment(REAL), load_experiment(QWEN_SWEEP_RUNPOD)
     cells = {c.variant: c for c in expand(real, REGISTRY)}
-    vllm, sweep_bf16 = cells["vllm-bf16"], expand(sweep, REGISTRY)[0]
-    assert sweep_bf16.config_hash == SWEEP_BF16_HASH
-    assert vllm.config["model"] == sweep_bf16.config["model"]
-    assert vllm.config["launch"] == sweep_bf16.config["launch"]
-    differs = {k for k in vllm.hardware if vllm.hardware[k] != sweep_bf16.hardware[k]}
-    assert differs == {"allowed_cuda_versions"}
-    assert vllm.hardware["allowed_cuda_versions"] == ["13.0", "13.1", "13.2"]
+    assert cells["vllm-bf16"].config_hash == SWEEP_BF16_HASH
     assert cells["trtllm-bf16"].launch.engine == cells["trtllm-fp8"].launch.engine == "trtllm"
     assert cells["trtllm-fp8"].spec.id == "qwen3-8b-fp8-modelopt"  # precision in the row
     assert cells["trtllm-fp8"].spec.kv_cache_dtype == "fp8"

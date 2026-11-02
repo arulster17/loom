@@ -44,15 +44,6 @@ model: qwen3-8b
 provider:
   kind: runpod
   container_disk_gb: 80
-  # Hosts whose driver reports CUDA 13.0, 13.1 or 13.2. RunPod schedules only onto
-  # machines whose CUDA version is in this list; with the default ["13.0"] every create
-  # was refused for 2.5 h on 2026-11-02 (c1470fb9, 627c9916; the profiling and spec-decode
-  # smokes too) while L40S Secure stock was listed for a minimum CUDA of 13.0 up to 13.2
-  # and none from 13.3. Both images run on any of these drivers (vLLM's CUDA 13.0 userspace
-  # directly, TRT-LLM's 13.4 through minor-version compatibility, driver >= 580). The list
-  # is part of the config hash, so the vllm-bf16 cell no longer shares 7a8237d0's hash: the
-  # same engine, image, model and args, on a wider set of host drivers.
-  allowed_cuda_versions: ["13.0", "13.1", "13.2"]
 variants:
   - name: vllm-bf16
   - name: trtllm-bf16

@@ -42,8 +42,6 @@ smoke: true
 provider:
   kind: runpod
   container_disk_gb: 80
-  # The run's host CUDA allow-list (see qwen3-8b-trtllm-vs-vllm-runpod.yaml).
-  allowed_cuda_versions: ["13.0", "13.1", "13.2"]
 variants:
   - name: vllm-bf16
   - name: trtllm-bf16
