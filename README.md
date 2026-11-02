@@ -141,8 +141,9 @@ including aborted streams and a killed pod.
 - The public results site is built but not published.
 
 **GPU spend:** $96.57 recorded in the results database across 27 experiments, smokes and
-failed attempts included, against a $149.75 overall cap. A few manual diagnostic pods
-outside the runner (for example the $3.40 70B tuning pod) are not in that figure.
+failed attempts included, against a $249.75 overall cap (raised from $149.75 on
+2026-11-02). A few manual diagnostic pods outside the runner (for example the $3.40 70B
+tuning pod) are not in that figure.
 
 ## Quick start (no GPU, no cloud)
 
