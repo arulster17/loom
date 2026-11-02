@@ -1,3 +1,34 @@
+# Loom local stack (docs/local-dev.md, contracts in docs/phase1-contracts.md §2).
+#
+#   docker compose up -d postgres redis   # just the databases, for the test suite
+#   docker compose up -d --build          # the whole platform on the mock backend
+#
+# Published host ports can be moved with the *_PORT variables below (e.g. to run a second
+# stack next to the first: LOOM_PG_PORT=15432 ... docker compose -p loom2 up -d).
+# Nothing here is a production secret: the dev values are fixed or generated locally.
+# LOOM_ENV=dev is what lets the services start on them: with LOOM_ENV unset (prod) the
+# gateway, billing and web refuse dev defaults and missing secrets (contracts §2).
+
+x-devstack: &devstack
+  # Mock pods, poolsim, dev certificates and the migration (services/devstack/Dockerfile).
+  image: loom-devstack:dev
+  build:
+    context: .
+    dockerfile: services/devstack/Dockerfile
+
+x-platform-env: &platform-env
+  LOOM_ENV: dev
+  LOOM_DATABASE_URL: postgresql://loom:loom@postgres:5432/loom_platform
+  LOOM_REDIS_URL: redis://redis:6379/0
+  LOOM_MODELS_YAML: /loom-config/models.yaml
+
+x-config-volume: &config-volume ./config:/loom-config:ro
+x-certs-volume: &certs-volume ./.dev/certs:/certs:ro
+
+# Shared by billing (LOOM_BILLING_INTERNAL_TOKEN) and the web app (LOOM_INTERNAL_TOKEN):
+# the web app's bearer token for billing's internal checkout API.
+x-internal-token: &internal-token ${LOOM_INTERNAL_TOKEN:-loom-dev-internal-token}
+
 services:
   postgres:
     image: postgres:16
@@ -6,7 +37,7 @@ services:
       POSTGRES_PASSWORD: loom
       POSTGRES_DB: loom
     ports:
-      - "5432:5432"
+      - "${LOOM_PG_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -15,5 +46,294 @@ services:
       timeout: 5s
       retries: 10
 
+  # Platform cache, limits and the usage stream (docs/phase1-contracts.md). AOF with
+  # fsync every second, as in production; noeviction because evicting a balance or
+  # reservation key would be wrong, not just slow.
+  redis:
+    image: redis:7.4-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory-policy
+      - noeviction
+    ports:
+      - "${LOOM_REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: create loom_platform and apply every migration; the services start after it.
+  migrate:
+    <<: *devstack
+    command: ["loom-migrate", "--create-database"]
+    environment:
+      LOOM_DATABASE_URL: postgresql://loom:loom@postgres:5432/loom_platform
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # One-shot: dev CA, gateway client certificate, pod server certificates and pod tokens
+  # into ./.dev/certs (gitignored). Keeps what is already there and still valid.
+  devcerts:
+    <<: *devstack
+    command:
+      - loom-devcerts
+      - --out
+      - /certs
+      - --pod
+      - mock-pod-1
+      - --pod
+      - mock-pod-2
+      # The Stripe stub's webhook signing secret, random per stack, shared with billing.
+      - --secret
+      - stripe-stub-webhook
+      # Keys readable by the other containers' users; dev only.
+      - --readable-keys
+    volumes:
+      - ./.dev/certs:/certs
+    restart: "no"
+
+  # Magic-link email for the web app: SMTP on 1025, inbox UI at http://localhost:8025.
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports:
+      - "${LOOM_MAILPIT_UI_PORT:-8025}:8025"
+      - "${LOOM_MAILPIT_SMTP_PORT:-1025}:1025"
+
+  # Mock serving pods, one per servable model in config/models.yaml (contracts §9): the
+  # bench mock engine on 127.0.0.1:8000 inside, the mTLS pod proxy on 8443, reachable only
+  # on the compose network. The service name is the pod id and its certificate name.
+  mock-pod-1:
+    <<: *devstack
+    command: ["loom-mockpod"]
+    environment:
+      LOOM_MOCKPOD_ID: mock-pod-1  # also read by the healthcheck
+      LOOM_MOCKPOD_MODELS: qwen3-8b
+      LOOM_DEV_CERTS: /certs
+      LOOM_MODELS_YAML: /loom-config/models.yaml
+    volumes: [*certs-volume, *config-volume]
+    expose: ["8443"]
+    depends_on:
+      devcerts:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "loom-mockpod", "--healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  mock-pod-2:
+    <<: *devstack
+    command: ["loom-mockpod"]
+    environment:
+      LOOM_MOCKPOD_ID: mock-pod-2  # also read by the healthcheck
+      LOOM_MOCKPOD_MODELS: llama-3.3-70b-instruct-fp8
+      LOOM_DEV_CERTS: /certs
+      LOOM_MODELS_YAML: /loom-config/models.yaml
+    volumes: [*certs-volume, *config-volume]
+    expose: ["8443"]
+    depends_on:
+      devcerts:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "loom-mockpod", "--healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  # Pool state in Redis (contracts §10): every servable model ready on its mock pod, with
+  # simulated cold starts. `docker compose exec poolsim loom-poolsim set qwen3-8b cold`.
+  poolsim:
+    <<: *devstack
+    command: ["loom-poolsim", "run"]
+    environment:
+      <<: *platform-env
+      LOOM_POOLSIM_REPLICAS: >-
+        qwen3-8b=mock-pod-1@https://mock-pod-1:8443,llama-3.3-70b-instruct-fp8=mock-pod-2@https://mock-pod-2:8443
+      LOOM_POOLSIM_TOKEN_DIR: /certs
+      LOOM_POOLSIM_COLD_START_S: ${LOOM_POOLSIM_COLD_START_S:-20}
+      LOOM_POOLSIM_IDLE_STOP_S: ${LOOM_POOLSIM_IDLE_STOP_S:-0}
+    volumes: [*certs-volume, *config-volume]
+    depends_on:
+      redis:
+        condition: service_healthy
+      mock-pod-1:
+        condition: service_healthy
+      mock-pod-2:
+        condition: service_healthy
+    # Redis reachable and every servable model's pool readable.
+    healthcheck:
+      test: ["CMD", "loom-poolsim", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
+
+  # Public API at http://localhost:8080/v1, Prometheus on 9100.
+  gateway:
+    image: loom-gateway:dev
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    environment:
+      <<: *platform-env
+      LOOM_GATEWAY_CLIENT_CERT: /certs/gateway.crt
+      LOOM_GATEWAY_CLIENT_KEY: /certs/gateway.key
+      LOOM_POD_CA_CERT: /certs/ca.crt
+      LOOM_CORS_ORIGINS: http://localhost:${LOOM_WEB_PORT:-3000}
+      LOOM_CLOUD: local
+    volumes:
+      - *certs-volume
+      - *config-volume
+      # Settles Redis refused, replayed when it is back; kept across restarts.
+      - gatewayspool:/var/lib/loom-gateway
+    ports:
+      - "${LOOM_GATEWAY_PORT:-8080}:8080"
+      - "${LOOM_GATEWAY_METRICS_PORT:-9100}:9100"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      poolsim:
+        condition: service_started
+    restart: unless-stopped
+
+  # Billing (services/billing/README.md): `all` = the usage-stream worker (consumer,
+  # per-minute ledger batches, reconcile, partitions) and the HTTP API (Stripe webhooks,
+  # internal checkout API) in one process. The image's entrypoint is `loom-billing`.
+  billing:
+    image: loom-billing:dev
+    build:
+      context: .
+      dockerfile: services/billing/Dockerfile
+    command: ["all"]
+    environment:
+      <<: *platform-env
+      LOOM_BILLING_INTERNAL_TOKEN: *internal-token
+      # Stable across container re-creates, so a restart recovers its own pending entries.
+      LOOM_BILLING_CONSUMER: billing-1
+      # The local stub, by explicit opt-in. For real Stripe (test mode) set
+      # LOOM_STRIPE_MODE=stripe with both keys; a live key refuses to start.
+      LOOM_STRIPE_MODE: ${LOOM_STRIPE_MODE:-stub}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      LOOM_STRIPE_STUB_URL: http://stripe-stub:12111
+      LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE: /certs/stripe-stub-webhook.secret
+    volumes: [*config-volume, *certs-volume]
+    ports:
+      - "${LOOM_BILLING_PORT:-8090}:8090"
+      - "${LOOM_BILLING_METRICS_PORT:-9101}:9101"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      devcerts:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - /app/.venv/bin/python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  # Local stand-in for Stripe Checkout: the pay page the browser opens on 12111, then a
+  # signed checkout.session.completed webhook to billing. Not started with real keys.
+  stripe-stub:
+    image: loom-billing:dev
+    build:
+      context: .
+      dockerfile: services/billing/Dockerfile
+    command: ["stripe-stub"]
+    environment:
+      LOOM_ENV: dev
+      LOOM_STRIPE_MODE: stub
+      LOOM_STRIPE_STUB_WEBHOOK_URL: http://billing:8090/stripe/webhook
+      LOOM_STRIPE_STUB_PUBLIC_URL: http://localhost:${LOOM_STRIPE_STUB_PORT:-12111}
+      LOOM_STRIPE_STUB_WEBHOOK_SECRET_FILE: /certs/stripe-stub-webhook.secret
+    volumes: [*certs-volume]
+    depends_on:
+      devcerts:
+        condition: service_completed_successfully
+    ports:
+      - "${LOOM_STRIPE_STUB_PORT:-12111}:12111"
+    healthcheck:
+      test:
+        - CMD
+        - /app/.venv/bin/python
+        - -c
+        - "import socket; socket.create_connection(('127.0.0.1', 12111), 3).close()"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
+
+  # Dashboard, playground and admin at http://localhost:3000.
+  web:
+    image: loom-web:dev
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    environment:
+      LOOM_ENV: dev
+      DATABASE_URL: postgresql://loom:loom@postgres:5432/loom_platform
+      LOOM_DATABASE_URL: postgresql://loom:loom@postgres:5432/loom_platform
+      LOOM_REDIS_URL: redis://redis:6379/0
+      LOOM_MODELS_YAML: /loom-config/models.yaml
+      AUTH_SECRET: ${AUTH_SECRET:-loom-dev-auth-secret-not-for-production}
+      AUTH_URL: http://localhost:${LOOM_WEB_PORT:-3000}
+      AUTH_TRUST_HOST: "true"
+      AUTH_GOOGLE_ID: ${AUTH_GOOGLE_ID:-}
+      AUTH_GOOGLE_SECRET: ${AUTH_GOOGLE_SECRET:-}
+      EMAIL_SERVER: smtp://mailpit:1025
+      EMAIL_FROM: Loom <login@loom.localhost>
+      # Comma-separated emails granted admin at sign-in (contracts §4).
+      LOOM_ADMIN_EMAILS: ${LOOM_ADMIN_EMAILS:-}
+      LOOM_SIGNUP_PROMO_MICROS: "5000000"
+      # Server-side calls stay on the compose network; the browser uses the public URL.
+      LOOM_GATEWAY_URL: http://gateway:8080
+      LOOM_PUBLIC_API_URL: http://localhost:${LOOM_GATEWAY_PORT:-8080}/v1
+      LOOM_BILLING_URL: http://billing:8090
+      LOOM_INTERNAL_TOKEN: *internal-token
+      # Magic-link sends per client IP / per email per 15 min (apps/web/README.md). One
+      # loom-m1-acceptance run signs in ~7 times from one IP; raise these to repeat runs.
+      LOOM_SIGNIN_IP_LIMIT: ${LOOM_SIGNIN_IP_LIMIT:-20}
+      LOOM_SIGNIN_EMAIL_LIMIT: ${LOOM_SIGNIN_EMAIL_LIMIT:-5}
+    volumes: [*config-volume]
+    ports:
+      - "${LOOM_WEB_PORT:-3000}:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mailpit:
+        condition: service_started
+      gateway:
+        condition: service_started
+      billing:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  redisdata:
+  gatewayspool:

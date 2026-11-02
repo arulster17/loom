@@ -1,0 +1,22 @@
+# BuildKit reads <Dockerfile>.dockerignore next to the Dockerfile; the context is the
+# repo root, so keep it small.
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+.git
+.claude
+apps
+site
+reports
+results
+infra
+docs
+bench/tests
+bench/results
+bench/.cache
+services/*/tests
+**/.env
+**/.env.*

@@ -10,14 +10,31 @@ license = "Apache-2.0"
 package = false
 
 [tool.uv.workspace]
-members = ["bench"]
+members = [
+    "bench",
+    "services/platform_common",
+    "services/gateway",
+    "services/billing",
+    "services/podproxy",
+    "services/devstack",
+]
 
 [tool.uv.sources]
 loom-bench = { workspace = true }
+loom-platform = { workspace = true }
+loom-gateway = { workspace = true }
+loom-billing = { workspace = true }
+loom-podproxy = { workspace = true }
+loom-devstack = { workspace = true }
 
 [dependency-groups]
 dev = [
     "loom-bench[mock,aws]",
+    "loom-platform",
+    "loom-gateway",
+    "loom-billing",
+    "loom-podproxy",
+    "loom-devstack",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-timeout>=2.3",
@@ -26,6 +43,7 @@ dev = [
     "types-PyYAML",
     "moto[ec2,s3,ssm,secretsmanager]>=5.0",
     "pytest-xdist>=3.6",
+    "openai>=1.50",
     "scipy-stubs>=1.18.1.1",
     "pyarrow-stubs>=20.0.0.20260819",
 ]
@@ -39,19 +57,35 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
 ignore = ["RUF001", "RUF002", "RUF003", "SIM905"]
 
 [tool.pytest.ini_options]
-testpaths = ["bench/tests"]
+testpaths = [
+    "bench/tests",
+    "services/platform_common/tests",
+    "services/gateway/tests",
+    "services/billing/tests",
+    "services/podproxy/tests",
+    "services/devstack/tests",
+]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 timeout = 120
 # Under `-n auto`, tests sharing an expensive module fixture (`xdist_group`) stay on one
-# worker; without `-n` this does nothing. `network` tests are deselected unless asked for
-# with `-m network` (a later -m replaces this one).
-addopts = "--dist loadgroup -m 'not network'"
+# worker; without `-n` this does nothing. `network` and `acceptance` tests are deselected
+# unless asked for with `-m network` / `-m acceptance` (a later -m replaces this one).
+addopts = "--dist loadgroup -m 'not network and not acceptance'"
 markers = [
     "postgres: needs a Postgres database (LOOM_TEST_DATABASE_URL)",
+    "redis: needs a Redis server (LOOM_TEST_REDIS_URL, default redis://localhost:6379/15)",
     "slow: slower integration tests",
     "network: downloads packages and datasets; minutes (CI job pod-client-env)",
+    "acceptance: needs the whole compose stack up; minutes (docs/phase1-m1-acceptance.md)",
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["loom_bench"]
+known-first-party = [
+    "loom_bench",
+    "loom_platform",
+    "loom_gateway",
+    "loom_billing",
+    "loom_podproxy",
+    "loom_devstack",
+]

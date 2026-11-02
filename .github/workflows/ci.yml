@@ -18,8 +18,15 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U loom" --health-interval 5s
           --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 5s --health-retries 10
     env:
       LOOM_TEST_DATABASE_URL: postgresql+psycopg://loom:loom@localhost:5432/loom_test
+      LOOM_TEST_REDIS_URL: redis://localhost:6379/15
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -27,7 +34,98 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy bench/src
+      - run: uv run mypy services/platform_common/src services/gateway/src services/billing/src
+      - run: uv run mypy services/platform_common/src services/podproxy/src services/devstack/src
       - run: uv run pytest -q -n auto
+
+  # The Next.js web app (apps/web): lint, types, unit tests, and the integration tests
+  # against a real Postgres, migrated by the platform's own runner (uv run loom-migrate).
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: loom
+          POSTGRES_PASSWORD: loom
+          POSTGRES_DB: loom
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U loom" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      # Set, so the integration tests fail (not skip) if Postgres is unreachable.
+      LOOM_TEST_DATABASE_URL: postgresql://loom:loom@localhost:5432/loom
+      NEXT_TELEMETRY_DISABLED: "1"
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+        working-directory: .
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:integration
+      - run: npm run build
+
+  # M1 acceptance end to end: the whole compose stack (mock pods, gateway, billing, web,
+  # Stripe stub, Mailpit) built from this commit, driven from outside by
+  # `loom-m1-acceptance` (docs/phase1-m1-acceptance.md). The pytest twin of this run is
+  # marker-deselected in the `bench` job; this job is where it runs. Free: no cloud, no
+  # accounts. Ports are moved off the defaults so nothing else on the runner collides.
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      COMPOSE_PROJECT_NAME: loom-ci
+      LOOM_ADMIN_EMAILS: admin@m1.test
+      LOOM_PG_PORT: "25432"
+      LOOM_REDIS_PORT: "26379"
+      LOOM_GATEWAY_PORT: "18080"
+      LOOM_GATEWAY_METRICS_PORT: "19100"
+      LOOM_BILLING_PORT: "18090"
+      LOOM_BILLING_METRICS_PORT: "19101"
+      LOOM_STRIPE_STUB_PORT: "22111"
+      LOOM_WEB_PORT: "13000"
+      LOOM_MAILPIT_UI_PORT: "18025"
+      LOOM_MAILPIT_SMTP_PORT: "11025"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - name: Build and start the stack
+        run: docker compose up -d --build --wait --wait-timeout 600
+      - name: M1 acceptance
+        run: |
+          set -o pipefail
+          uv run loom-m1-acceptance --json m1-acceptance.json 2>&1 | tee m1-acceptance.log
+      - name: Stack state and logs
+        if: always()
+        run: |
+          docker compose ps -a
+          docker compose logs --no-color --timestamps > compose.log 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m1-acceptance
+          path: |
+            m1-acceptance.json
+            m1-acceptance.log
+            compose.log
+          if-no-files-found: ignore
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
 
   # The GPU hosts' client environment rebuilt from uv.lock exactly as RunPod and AWS
   # hosts install it, running every task of every eval suite at 2 items against the mock

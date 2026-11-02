@@ -225,3 +225,66 @@ def test_tokens_per_chunk_reads_acceptance_from_the_client_side():
     assert s.tokens_per_chunk.min == pytest.approx(1.0)  # a request no draft helped
     assert s.tokens_per_chunk.max == pytest.approx(3.0)
     assert s.tokens_per_chunk.p50 == pytest.approx(2.0)
+
+
+CONTINUOUS = {"include_usage": True, "continuous_usage_stats": True}
+
+
+@pytest.mark.parametrize("n", [1, 3])
+def test_multi_token_chunks_keep_continuous_usage_per_choice(make_client, n):
+    """Under speculation each chunk's running usage is the tokens its choice has streamed."""
+    c = make_client(spec_tokens=3, spec_acceptance=0.9, seed=4)
+    body = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Write a story."}],
+        "max_tokens": 40,
+        "ignore_eos": True,
+        "n": n,
+        "stream_options": CONTINUOUS,
+    }
+    events = stream_events(c, "/v1/chat/completions", body)
+    chunks = [e for e in events if isinstance(e, dict) and e["choices"]]
+    seen: dict[int, int] = {}
+    multi = False
+    for ch in chunks:
+        (choice,) = ch["choices"]
+        got = TOK.count(choice["delta"].get("content") or "")
+        multi |= got > 1
+        seen[choice["index"]] = seen.get(choice["index"], 0) + got
+        assert ch["usage"]["completion_tokens"] == seen[choice["index"]]
+    assert multi and set(seen) == set(range(n)) and all(v == 40 for v in seen.values())
+
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/completions"])
+def test_an_abort_inside_a_multi_token_step_streams_exactly_the_tokens_before_it(make_client, path):
+    """The injected abort cuts the step's chunk at `abort_at`: the last usage equals the
+    tokens received, as the gateway bills."""
+    c = make_client(spec_tokens=3, spec_acceptance=0.9, seed=4, abort_rate=1.0)
+    prompt = {"messages": [{"role": "user", "content": "hi"}]}
+    if path == "/v1/completions":
+        prompt = {"prompt": "hi"}
+    body = {
+        "model": MODEL,
+        **prompt,
+        "max_tokens": 40,
+        "ignore_eos": True,
+        "stream": True,
+        "stream_options": CONTINUOUS,
+    }
+    for _ in range(8):
+        received: list[dict] = []
+        with (
+            pytest.raises(httpx.RemoteProtocolError),
+            c.stream("POST", path, json=body) as response,
+        ):
+            for line in response.iter_lines():
+                if line.startswith("data: {"):
+                    received.append(json.loads(line[6:]))
+        texts = [
+            (e["choices"][0].get("delta") or {}).get("content") or e["choices"][0].get("text")
+            for e in received
+            if e["choices"]
+        ]
+        tokens = sum(TOK.count(t or "") for t in texts)
+        if received:
+            assert received[-1]["usage"]["completion_tokens"] == tokens < 40

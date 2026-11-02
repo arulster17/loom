@@ -5,6 +5,7 @@
 - [PLAN.md](PLAN.md): decisions, stack, phase plan, Postgres schemas, registry schema, open questions.
 - [architecture.md](architecture.md): Phase 0 components, data flow, module contracts, where each measurement lives.
 - [phase1-runpod-plan.md](phase1-runpod-plan.md): Phase 1 serving on RunPod (draft for approval): where things run, gateway-to-pod security, replicas, costs, milestones.
+- [phase1-contracts.md](phase1-contracts.md): Phase 1 M1 contracts: services and env, schema and ledger, Redis keys and reserve/settle, usage stream, gateway-to-pod, errors, cost headers.
 - [local-dev.md](local-dev.md): setup, tests, the mock backend, mock experiments end to end, lint, CI.
 
 ## Benchmark Lab
@@ -15,6 +16,11 @@
 - [cost-model.md](cost-model.md): $/1M tokens at SLO: goodput, allocation, CIs, what the hourly price includes, margins.
 - [perf/speculative-decoding.md](perf/speculative-decoding.md): speculative decoding in plain words, the Qwen3-8B n-gram vs EAGLE3 study (proposed) and why EAGLE3 did not help the 70B on 4x L40S.
 - [site.md](site.md): the public results site: snapshot export, build, deployment, waitlist form.
+
+## Write-ups
+
+- [writeups/70b-fp8-on-h100.md](writeups/70b-fp8-on-h100.md): serving Llama 3.3 70B under a 50 ms TPOT SLO: the cross-socket 4x L40S dead end, FP8 on 2x H100 SXM, and making the quality gate decide.
+- README charts: drawn by [`scripts/readme_charts.py`](../scripts/readme_charts.py) from the committed report CSVs into [img/](img/).
 
 ## Operations
 
