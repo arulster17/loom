@@ -14,12 +14,17 @@ a checkpoint fails here as it would on a pod ("weights ... are not cached").
 from __future__ import annotations
 
 import asyncio
+import io
+import shutil
 import socket
+import tarfile
+import tempfile
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx
 
@@ -51,6 +56,10 @@ class _MockHost:
     host: Host
     server: _Server | None = None
     cache: set[Checkpoint] = field(default_factory=set)  # simulated HF cache on the host
+    # Where the simulated engine writes profiler traces (loom_bench.profile.mock_trace).
+    profile_dir: Path = field(
+        default_factory=lambda: Path(tempfile.mkdtemp(prefix="loom-mock-prof-"))
+    )
 
 
 _LIVE: dict[str, _MockHost] = {}
@@ -116,7 +125,10 @@ class MockProvider:
         state = self._state(host)
         if state.server is not None:
             await self.stop_engine(host)
-        config = mock_config_from_launch(launch)
+        # The profile directory is the host's, not the config's: not part of the launch.
+        config = mock_config_from_launch(launch).model_copy(
+            update={"profile_dir": str(state.profile_dir)}
+        )
         if launch.served_model not in config.models:
             raise ValueError(f"mock does not serve {launch.served_model!r}")
         # Cold stages count from launch (provisioning included); warm ones from now.
@@ -205,11 +217,34 @@ class MockProvider:
         self._state(host)
         return await execute_eval_job(job)
 
+    async def collect_profile(
+        self, host: Host, run_id: str, trace_dir: str, max_bytes: int
+    ) -> bytes:
+        """Every trace the simulated engine wrote since the last collection, as a
+        .tar.gz, then deleted (as the RunPod script does). `trace_dir` is the pod's path
+        and has no meaning here: the mock writes to the host's own directory."""
+        state = self._state(host)
+        files = sorted(p for p in state.profile_dir.iterdir() if p.is_file())
+        if not files:
+            raise RuntimeError(f"{host.host_id}: the profiler wrote no files for {run_id}")
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for f in files:
+                tar.add(f, arcname=f.name)
+        for f in files:
+            f.unlink()
+        data = buf.getvalue()
+        if len(data) > max_bytes:
+            raise RuntimeError(f"trace archive is {len(data)} bytes, over the {max_bytes}-byte cap")
+        return data
+
     async def teardown(self, host: Host) -> None:
         self.weights.forget(host.host_id)
         state = _LIVE.pop(host.host_id, None)
         if state is not None and state.server is not None:
             await asyncio.to_thread(_stop_server, state.server)
+        if state is not None:
+            shutil.rmtree(state.profile_dir, ignore_errors=True)
 
     async def reap(self, now: datetime) -> list[str]:
         expired = [s.host for s in _LIVE.values() if s.host.ttl_at <= now]

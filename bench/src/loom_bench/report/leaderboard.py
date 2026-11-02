@@ -70,6 +70,18 @@ from loom_bench.report.methodology import (
     public_dataset,
 )
 from loom_bench.report.resolution import brackets_overlap, goodput_ties
+from loom_bench.report.specdec import (
+    ACCEPTANCE_RATE,
+    ACCEPTED_LENGTH,
+    SPECDEC_NOTE,
+    SpecDecTable,
+    at_goodput,
+    specdec_lines,
+    specdec_markdown,
+    specdec_rows,
+    specdec_table,
+)
+from loom_bench.report.specdec import HEADERS as SPECDEC_HEADERS
 
 
 class RowStatus(StrEnum):
@@ -112,6 +124,7 @@ class Leaderboard(BaseModel):
     rows: list[LeaderboardRow]
     price_columns: list[PriceColumn]  # extra cost columns with a value in some row
     equal_load: EqualLoadTable | None = None  # latency at the loads every config ran
+    specdec: SpecDecTable | None = None  # when some config speculates
 
     @property
     def side(self) -> str:
@@ -462,6 +475,7 @@ def build_leaderboard(
                 rows=rows,
                 price_columns=price_columns(members),
                 equal_load=equal_load_for([row.result for row in rows]),
+                specdec=specdec_table([row.result for row in rows]),
             )
         )
     ordered = [row.result for b in boards for row in b.rows]
@@ -600,6 +614,15 @@ def render_markdown(
                 "",
                 equal_load_markdown(b.equal_load),
             ]
+        if b.specdec is not None:
+            parts += [
+                "",
+                "#### Speculative decoding by load",
+                "",
+                SPECDEC_NOTE,
+                "",
+                specdec_markdown(b.specdec),
+            ]
         warned = [row.result for row in b.rows if row.result.warnings]
         if warned:
             parts += ["", "**Warnings**", ""]
@@ -636,6 +659,10 @@ def render_html(
             equal_load_places=EQUAL_LOAD_PLACES,
             equal_load_note=EQUAL_LOAD_NOTE,
             slo_text=slo_text,
+            specdec_headers=SPECDEC_HEADERS,
+            specdec_note=SPECDEC_NOTE,
+            specdec_rows=specdec_rows,
+            specdec_lines=specdec_lines,
             unbracketed=any_unbracketed(
                 row.result.goodput for b in report.boards for row in b.rows
             ),
@@ -684,6 +711,8 @@ CSV_COLUMNS = [
     *estimate_column_names("tpot_p95_ms"),
     *estimate_column_names("peak_output_tok_s"),
     "peak_load",
+    *estimate_column_names("spec_mean_accepted_length"),
+    *estimate_column_names("spec_acceptance_rate"),
     "quality_gate",
     "quality_baseline_config_hash",
     "quality_worst_task",
@@ -766,6 +795,8 @@ def _csv_row(b: Leaderboard, row: LeaderboardRow, m: Methodology) -> dict[str, A
         **estimate_columns("tpot_p95_ms", r.tpot_p95_ms),
         **estimate_columns("peak_output_tok_s", r.peak_output_tok_s),
         "peak_load": r.peak_load,
+        **estimate_columns("spec_mean_accepted_length", at_goodput(r, ACCEPTED_LENGTH)),
+        **estimate_columns("spec_acceptance_rate", at_goodput(r, ACCEPTANCE_RATE)),
         "quality_gate": q.gate if q else None,
         "quality_baseline_config_hash": q.baseline_config_hash if q else None,
         "quality_worst_task": worst.task if worst else None,

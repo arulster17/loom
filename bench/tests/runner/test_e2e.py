@@ -14,6 +14,7 @@ from sqlalchemy import select
 from typer.testing import CliRunner
 
 from loom_bench import runner as runner_module
+from loom_bench.budget import load_budget
 from loom_bench.cli import EXIT_MISMATCH, _analyze_experiments, app
 from loom_bench.cost import PriceColumn
 from loom_bench.experiment import Experiment, load_experiment, mock_launch
@@ -463,7 +464,9 @@ def test_overall_cap_refusal_uses_prior_spend_through_the_cli(db, tmp_path):
             git=GitInfo(),
             budget_micros=None,
         )
-        s.get(BenchExperiment, prior.id).spent_micros = parse_usd("$149.999")
+        s.get(BenchExperiment, prior.id).spent_micros = load_budget().overall_cap - parse_usd(
+            "$0.001"
+        )
     doc = {**mock_experiment().model_dump(mode="json"), "name": "after"}
     path = write_yaml(tmp_path / "after.yaml", doc)
     result = invoke("run", path, "--db", db, "--out", tmp_path)

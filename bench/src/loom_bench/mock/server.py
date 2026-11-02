@@ -12,6 +12,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, Request
@@ -37,6 +38,7 @@ from loom_bench.mock.engine import AsyncEngine
 from loom_bench.mock.logprobs import MAX_LOGPROBS, VOCAB, TokenLogprob, token_logprobs
 from loom_bench.mock.metrics import CONTENT_TYPE, render_metrics
 from loom_bench.mock.sim import SimRequest, SimSequence, prompt_block_hashes
+from loom_bench.profile.mock_trace import StepRecorder
 
 # ---------------------------------------------------------------- request bodies
 
@@ -565,13 +567,23 @@ async def _chat_completions(server: MockServer, request: Request) -> Response:
         return envelope.sse([choice])
 
     async def events() -> AsyncIterator[str]:
+        sent = [0] * len(gens)  # tokens streamed so far, per choice
         try:
+            # One chunk per engine step and choice, as vLLM streams: several tokens when
+            # a step accepted speculative drafts.
             async for c, n in _interleave(server, seqs):
-                gen, lps, i = gens[c], logprobs[c], n - 1
+                gen, lps = gens[c], logprobs[c]
                 pieces = gen.output.pieces
-                if c == 0 and i == abort_at:
+                first = sent[c]
+                # An injected abort drops choice 0's stream right before token `abort_at`.
+                # A step that crosses it is cut there, so exactly `abort_at` tokens reach
+                # the client (and the last usage says so), as with one token per chunk.
+                cut = c == 0 and abort_at is not None and first <= abort_at < n
+                end = abort_at if cut and abort_at is not None else n
+                if cut and end == first:
                     raise StreamAborted
-                if i == 0:
+                sent[c] = end
+                if first == 0:
                     # vLLM sends the role with the first token, not before prefill.
                     if tool is None:
                         yield chunk(c, {"role": "assistant", "content": ""}, 0)
@@ -579,18 +591,21 @@ async def _chat_completions(server: MockServer, request: Request) -> Response:
                         header = {"index": 0, **_tool_call(call_ids[c], tool.name, "")}
                         role = {"role": "assistant", "content": None, "tool_calls": [header]}
                         yield chunk(c, role, 0)
+                text = "".join(pieces[first:end])
                 if tool is None:
-                    delta: dict[str, Any] = {"content": pieces[i]}
+                    delta: dict[str, Any] = {"content": text}
                 else:
-                    delta = {"tool_calls": [{"index": 0, "function": {"arguments": pieces[i]}}]}
-                entry = lps[i] if lps is not None else None
+                    delta = {"tool_calls": [{"index": 0, "function": {"arguments": text}}]}
+                entries = [e for e in lps[first:end] if e] if lps is not None else []
                 yield chunk(
                     c,
                     delta,
-                    n,
-                    logprobs={"content": [_chat_logprob(entry)]} if entry else None,
-                    finish_reason=gen.finish_reason if n == len(pieces) else None,
+                    end,
+                    logprobs={"content": [_chat_logprob(e) for e in entries]} if entries else None,
+                    finish_reason=gen.finish_reason if end == len(pieces) else None,
                 )
+                if cut:
+                    raise StreamAborted
             if req.include_usage:
                 yield envelope.sse([], usage=usage())
             yield _DONE
@@ -663,23 +678,30 @@ async def _completions(server: MockServer, request: Request) -> Response:
     offsets = [0] * len(gens)
 
     async def events() -> AsyncIterator[str]:
+        sent = [0] * len(gens)  # tokens streamed so far, per choice
         try:
+            # One chunk per engine step and choice (several tokens after accepted drafts).
             async for c, n in _interleave(server, seqs):
-                gen, lps, i = gens[c], logprobs[c], n - 1
+                gen, lps = gens[c], logprobs[c]
                 pieces = gen.output.pieces
                 base = gen.prompt_tokens if req.echo else 0
-                if c == 0 and i == abort_at:
+                start = sent[c]
+                # As in chat: a step crossing `abort_at` is cut there, then the stream drops.
+                cut = c == 0 and abort_at is not None and start <= abort_at < n
+                end = abort_at if cut and abort_at is not None else n
+                if cut and end == start:
                     raise StreamAborted
-                if i == 0 and req.echo:
-                    tokens, first = [*gen.prompt_pieces, pieces[0]], 0
+                sent[c] = end
+                if start == 0 and req.echo:
+                    tokens, first = [*gen.prompt_pieces, *pieces[:end]], 0
                 else:
-                    tokens, first = [pieces[i]], base + i
+                    tokens, first = list(pieces[start:end]), base + start
                 text = "".join(tokens)
                 choice = {
                     "index": c,
                     "text": text,
                     "logprobs": None,
-                    "finish_reason": gen.finish_reason if n == len(pieces) else None,
+                    "finish_reason": gen.finish_reason if end == len(pieces) else None,
                 }
                 if lps is not None:
                     entries = lps[first : first + len(tokens)]
@@ -687,10 +709,12 @@ async def _completions(server: MockServer, request: Request) -> Response:
                         tokens, entries, offsets[c], known=server.config.text_offsets
                     )
                 if req.continuous_usage:
-                    yield envelope.sse([choice], usage=_running_usage(gen, n))
+                    yield envelope.sse([choice], usage=_running_usage(gen, end))
                 else:
                     yield envelope.sse([choice])
                 offsets[c] += len(text)
+                if cut:
+                    raise StreamAborted
             if req.include_usage:
                 yield envelope.sse([], usage=usage())
             yield _DONE
@@ -758,6 +782,29 @@ def create_app(config: MockConfig | None = None) -> FastAPI:
     @app.post("/v1/completions")
     async def completions(request: Request) -> Response:
         return await _completions(server, request)
+
+    @app.post("/start_profile")
+    async def start_profile(request: Request) -> Response:
+        if config.profile_dir is None:
+            raise ApiError(404, "profiling is not enabled")
+        if server.engine.recorder is not None:
+            raise ApiError(409, "a profiling session is already running")
+        raw = await request.body()
+        body = json.loads(raw) if raw else {}
+        server.engine.recorder = StepRecorder(
+            prefix=str(body.get("profile_prefix") or "mock"),
+            max_iterations=int(body.get("max_iterations") or 0),
+            delay_iterations=int(body.get("delay_iterations") or 0),
+        )
+        return Response(status_code=200)
+
+    @app.post("/stop_profile")
+    async def stop_profile() -> Response:
+        recorder, server.engine.recorder = server.engine.recorder, None
+        if config.profile_dir is None or recorder is None:
+            raise ApiError(404 if config.profile_dir is None else 409, "no profiling session")
+        recorder.write(Path(config.profile_dir))
+        return Response(status_code=200)
 
     @app.post("/tokenize")
     async def tokenize(request: Request) -> dict[str, Any]:

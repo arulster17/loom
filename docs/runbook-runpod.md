@@ -7,7 +7,7 @@ pending with AWS). The `aws_ec2` path is in [runbook.md](runbook.md); its sectio
 reproducing and publishing apply here unchanged. The security model is in
 [security.md](security.md#runpod-pods-runpod).
 
-Money rails, for reference: $149.75 overall, $50 per experiment (`bench/budget.yaml`), and
+Money rails, for reference: $249.75 overall (raised from $149.75 on 2026-11-02), $50 per experiment (`bench/budget.yaml`), and
 each experiment's own `budget.max_spend`. RunPod is prepaid with auto-pay off, so the
 account balance is the hard ceiling behind them. RunPod has no per-pod spend cap: the
 rails are the runner's budget guard, the pod's own TTL watchdog, the scheduled RunPod

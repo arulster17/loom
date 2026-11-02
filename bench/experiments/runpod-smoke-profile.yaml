@@ -1,0 +1,96 @@
+# PROPOSED 2026-11-01, NOT APPROVED, NOT RUN. RunPod smoke test for
+# qwen3-8b-profile-runpod.yaml: every code path that run uses, at the smallest scale that
+# still runs it. Same model, provider block, variants (checkpoints, KV-cache dtype,
+# `--profiler-config` with the same JSON), workload profiles and load modes,
+# repetitions, SLO, and the same profile section with shorter windows and fewer steps.
+# bench/tests/profile/test_capture.py (test_smoke_mirrors_the_real_profile_run) fails if the two drift apart.
+#
+# Paths no earlier smoke ran:
+# - vLLM v0.30.0 starting with `--profiler-config` (torch, a trace directory under
+#   /var/lib/loom), on BF16 and, after a warm restart, on FP8-dynamic weights with an
+#   FP8 KV cache;
+# - `bench job run` POSTing /start_profile with per-session bounds (profile_prefix,
+#   max_iterations, delay_iterations; a 4xx falls back to no body and is recorded) and
+#   /stop_profile, which flushes the trace, while the load runs;
+# - collect_profile.sh archiving the trace directory as root, uploading it through a
+#   presigned S3 PUT, deleting it, and the runner fetching and analyzing it
+#   (results/<id>/profiles/<run id>/{trace.tar.gz,window.json}, a `profile` event);
+# - a closed-loop workload with `duration_s` on a pod (earlier pods ran closed loop by
+#   count only in mocks).
+# Already proven elsewhere: the pinned ShareGPT download and chat requests (8bc65cfa),
+# the FP8 row's warm restart (runpod-smoke-fp8, 8bc65cfa), FP8 KV on Ada (7a8237d0).
+#
+# What it does not cover: trace size at the real run's 200 steps and concurrency 64
+# (bounded by profile.max_trace_mb, which fails the window, not the run).
+name: runpod-smoke-profile
+description: qwen3-8b-profile-runpod at smoke scale on one 1x L40S pod, every code path once.
+model: qwen3-8b
+smoke: true
+provider:
+  kind: runpod
+  container_disk_gb: 80
+variants:
+  - name: bf16
+    engine:
+      args:
+        profiler_config:
+          profiler: torch
+          torch_profiler_dir: /var/lib/loom/profiles
+          torch_profiler_with_stack: false
+          torch_profiler_record_shapes: false
+          torch_profiler_with_memory: false
+          torch_profiler_use_gzip: true
+          torch_profiler_dump_cuda_time_total: false
+  - name: fp8-kv8
+    model: qwen3-8b-fp8
+    kv_cache_dtype: fp8
+    engine:
+      args:
+        profiler_config:
+          profiler: torch
+          torch_profiler_dir: /var/lib/loom/profiles
+          torch_profiler_with_stack: false
+          torch_profiler_record_shapes: false
+          torch_profiler_with_memory: false
+          torch_profiler_use_gzip: true
+          torch_profiler_dump_cuda_time_total: false
+workloads:
+  - profile: fixed-1k-1k
+    overrides: {output_len: 128}
+    load:
+      mode: closed_loop
+      values: [4]
+      duration_s: 20
+      warmup_requests: 2
+      drain_timeout_s: 30
+  - profile: chat-sharegpt
+    overrides: {max_output_len: 64}
+    load:
+      mode: open_loop
+      values: [1]
+      duration_s: 15
+      warmup_s: 3
+      drain_timeout_s: 15
+repetitions: 2
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+profile:
+  windows:
+    - workload: fixed-1k-1k
+    - workload: chat-sharegpt
+  settle_s: 15
+  capture_s: 8
+  max_iterations: 32
+  tail_s: 3
+  drain_timeout_s: 15
+  trace_dir: /var/lib/loom/profiles
+  max_trace_mb: 256
+# bench plan (2026-11-01, against a copy of the results DB): one pod, 38.6 min of a
+# 55 min TTL, estimate $0.71; worst case (the pod lives to its TTL) $1.01; cap $1.05.
+budget:
+  max_spend: "$1.05"
+  ttl_minutes: 55
+  accrual_interval_s: 15
+seed: 0

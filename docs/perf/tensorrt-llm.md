@@ -218,7 +218,7 @@ smoke. None of that is built.
 | with the FP8 candidate (not built) | 3 | $11.89 | $15.69 | ~$16 |
 
 Planned figures run high: the config sweep's pods took about 70% of their planned time.
-The results database holds $96.57 of recorded spend against the $149.75 overall cap, so
+The results database holds $96.57 of recorded spend against the $249.75 overall cap, so
 both specs fit.
 
 ## What the smoke cannot show

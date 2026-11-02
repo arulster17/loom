@@ -162,7 +162,7 @@ class FakeRunpod:
 
 PodResult = tuple[int, str, str]  # (exit code, stdout, stderr) of one pod script
 Handler = Callable[[SshTarget, str], PodResult | Awaitable[PodResult]]
-TEMPLATES = ("pod_start", "start_engine", "stop_engine", "run_job")
+TEMPLATES = ("pod_start", "start_engine", "stop_engine", "run_job", "collect_profile")
 _REQUIRES = {
     " ".join(sorted(required_vars(name, template_dir="runpod_scripts"))): name for name in TEMPLATES
 }

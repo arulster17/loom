@@ -37,6 +37,7 @@ from loom_bench.loadgen.arrivals import parse_arrivals
 from loom_bench.loadgen.base import LOAD_GENERATORS
 from loom_bench.mock.config import MockConfig
 from loom_bench.money import parse_usd
+from loom_bench.profile.spec import ProfileSpec, check_profile
 from loom_bench.provenance import canonical_json, config_hash
 from loom_bench.providers.base import EngineLaunch
 from loom_bench.quality.suite import Suite, load_suite
@@ -446,6 +447,9 @@ class Experiment(_Strict):
     quality: QualitySpec | None = None
     loadgen: str = "native"
     seed: int = 0
+    # Optional engine profile windows (loom_bench.profile.spec): extra short jobs after a
+    # cell's load points; never load runs, never in goodput.
+    profile: ProfileSpec | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
@@ -488,6 +492,15 @@ class Experiment(_Strict):
                 raise ValueError(f"variant {v.name}: `mock` overrides need provider kind mock")
         if not is_mock and any(k.startswith("mock.") for k in self.sweep):
             raise ValueError("mock.* sweep knobs need provider kind mock")
+        if self.profile is not None:
+            check_profile(
+                self.profile,
+                provider_kind=self.provider.kind,
+                workloads={w.name: w.load for w in self.workloads},
+                variant_args={
+                    v.name: dict((v.engine.args if v.engine else None) or {}) for v in self.variants
+                },
+            )
         return self
 
     @property

@@ -278,3 +278,104 @@ def test_trtllm_gauges_of_later_versions_are_read():
     assert m.kv_usage_mean == pytest.approx(0.6)
     assert m.prefix_cache_hit_rate == pytest.approx(0.25)
     assert "preemptions" in m.missing  # GUARANTEED_NO_EVICT never preempts
+
+
+# --- speculative decoding (vLLM v0.30.0 SpecDecodingProm) ----------------------------
+
+
+def spec_scrape(drafts: float, draft_tokens: float, accepted: float, per_pos: list[float]) -> str:
+    """The spec-decode families as vLLM v0.30.0 exposes them (prometheus_client Counters:
+    `_total` and `_created` samples, the per-position counter labelled `position`)."""
+    pos = "vllm:spec_decode_num_accepted_tokens_per_pos_total"
+    lines = [
+        "# HELP vllm:spec_decode_num_drafts_total Number of spec decoding drafts.",
+        "# TYPE vllm:spec_decode_num_drafts_total counter",
+        f"vllm:spec_decode_num_drafts_total{{{MODEL}}} {drafts}",
+        f"vllm:spec_decode_num_drafts_created{{{MODEL}}} 1.7596e+09",
+        "# TYPE vllm:spec_decode_num_draft_tokens_total counter",
+        f"vllm:spec_decode_num_draft_tokens_total{{{MODEL}}} {draft_tokens}",
+        "# TYPE vllm:spec_decode_num_accepted_tokens_total counter",
+        f"vllm:spec_decode_num_accepted_tokens_total{{{MODEL}}} {accepted}",
+        f"# TYPE {pos} counter",
+        *(f'{pos}{{{MODEL},position="{i}"}} {v}' for i, v in enumerate(per_pos)),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def test_spec_decode_counters_give_acceptance_rate_length_and_positions():
+    base = vllm_scrape(4, 0, 0.2, 0, 0, 0, 0, 0)
+    scrapes = [
+        (0.0, base + spec_scrape(100, 300, 150, [80, 50, 20])),
+        (10.0, base + spec_scrape(1100, 3300, 2550, [980, 1050, 520])),
+    ]
+    m = summarize_scrapes("vllm", scrapes, speculative=True)
+    # The window: 1000 drafts of 3 tokens, 2400 accepted (900 + 1000 + 500 by position).
+    assert (m.spec_drafts, m.spec_draft_tokens, m.spec_accepted_tokens) == (1000, 3000, 2400)
+    assert m.spec_acceptance_rate == pytest.approx(0.8)
+    assert m.spec_mean_accepted_length == pytest.approx(3.4)  # 1 + 2400 / 1000
+    assert m.spec_acceptance_by_position == pytest.approx({"0": 0.9, "1": 1.0, "2": 0.5})
+    assert list(m.spec_acceptance_by_position or {}) == ["0", "1", "2"]
+    assert "spec_decode" not in m.missing
+
+
+def test_spec_positions_sort_numerically_and_sum_over_engines():
+    pos = "vllm:spec_decode_num_accepted_tokens_per_pos_total"
+
+    def per_pos(scale: int) -> str:
+        return "".join(
+            f'{pos}{{engine="{e}",position="{p}"}} {v * scale}\n'
+            for e in (0, 1)
+            for p, v in ((10, 1), (2, 2), (0, 3))
+        )
+
+    first = spec_scrape(0, 0, 0, []) + per_pos(0)
+    last = spec_scrape(10, 30, 12, []) + per_pos(1)
+    m = summarize_scrapes("vllm", [(0.0, first), (1.0, last)])
+    assert list(m.spec_acceptance_by_position or {}) == ["0", "2", "10"]
+    # Two engines: position 0 gained 3 + 3 over 10 drafts.
+    assert m.spec_acceptance_by_position == pytest.approx({"0": 0.6, "2": 0.4, "10": 0.2})
+
+
+def test_no_spec_counters_is_silent_unless_the_engine_speculates():
+    flat = vllm_scrape(1, 0, 0.1, 0, 0, 0, 0, 0)
+    plain = summarize_scrapes("vllm", [(0.0, flat), (1.0, flat)])
+    assert plain.spec_drafts is None and plain.spec_mean_accepted_length is None
+    assert "spec_decode" not in plain.missing
+    spec = summarize_scrapes("vllm", [(0.0, flat), (1.0, flat)], speculative=True)
+    assert "spec_decode" in spec.missing
+
+
+def test_a_window_with_no_drafts_has_counters_but_no_rates():
+    s = spec_scrape(5, 15, 9, [4, 3, 2])
+    m = summarize_scrapes("vllm", [(0.0, s), (1.0, s)], speculative=True)
+    assert (m.spec_drafts, m.spec_draft_tokens, m.spec_accepted_tokens) == (0, 0, 0)
+    assert m.spec_acceptance_rate is None and m.spec_mean_accepted_length is None
+    assert m.spec_acceptance_by_position is None
+    assert "spec_decode" not in m.missing
+
+
+def test_spec_counter_reset_counts_from_zero():
+    scrapes = [
+        (0.0, spec_scrape(10, 30, 15, [8, 5, 2])),
+        (1.0, spec_scrape(20, 60, 30, [16, 10, 4])),
+        (2.0, spec_scrape(5, 15, 6, [4, 2, 0])),  # the engine restarted
+    ]
+    m = summarize_scrapes("vllm", scrapes, speculative=True)
+    assert m.spec_drafts == 15 and m.spec_accepted_tokens == 21
+    assert m.spec_mean_accepted_length == pytest.approx(1 + 21 / 15)
+    assert m.spec_acceptance_by_position == pytest.approx({"0": 12 / 15, "1": 7 / 15, "2": 2 / 15})
+
+
+def test_sglang_has_no_spec_mapping():
+    s = sglang_scrape(1, 0, 0.1, 0.0) + spec_scrape(5, 15, 9, [4, 3, 2])
+    m = summarize_scrapes("sglang", [(0.0, s), (1.0, s)])
+    assert m.spec_drafts is None
+
+
+def test_runs_stored_before_the_spec_fields_still_load():
+    from loom_bench.metrics.prometheus import ServerMetrics
+
+    old = summarize_scrapes("vllm", []).model_dump()
+    for key in [k for k in old if k.startswith("spec_")]:
+        del old[key]
+    assert ServerMetrics.model_validate(old).spec_acceptance_rate is None
