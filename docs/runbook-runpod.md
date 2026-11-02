@@ -108,8 +108,8 @@ Run through all of it before every real run.
   `llama-3.3-70b-fp8-tp4-runpod` $11.05, $14.24, $15 (plan it against the real results
   DB: it loads BF16 run cf4d1614's stored samples and reference, and is refused without
   them); `runpod-smoke-fp8` $0.93, $1.19, $1.25; proposed, not approved:
-  `runpod-smoke-trtllm` $1.57, $2.57, $2.75 and `qwen3-8b-trtllm-vs-vllm-runpod` $8.07,
-  $10.46, $11 ([perf/tensorrt-llm.md](perf/tensorrt-llm.md)). Exit 3 means refused: lower the load
+  `runpod-smoke-trtllm` $2.35, $3.85, $4 and `qwen3-8b-trtllm-vs-vllm-runpod` $11.90,
+  $15.69, $16 (three pods each; [perf/tensorrt-llm.md](perf/tensorrt-llm.md)). Exit 3 means refused: lower the load
   points or `budget.ttl_minutes`, never the caps.
 
 ## 2. Running an experiment
