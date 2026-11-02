@@ -78,6 +78,55 @@ jobs:
       - run: npm run test:integration
       - run: npm run build
 
+  # M1 acceptance end to end: the whole compose stack (mock pods, gateway, billing, web,
+  # Stripe stub, Mailpit) built from this commit, driven from outside by
+  # `loom-m1-acceptance` (docs/phase1-m1-acceptance.md). The pytest twin of this run is
+  # marker-deselected in the `bench` job; this job is where it runs. Free: no cloud, no
+  # accounts. Ports are moved off the defaults so nothing else on the runner collides.
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      COMPOSE_PROJECT_NAME: loom-ci
+      LOOM_ADMIN_EMAILS: admin@m1.test
+      LOOM_PG_PORT: "25432"
+      LOOM_REDIS_PORT: "26379"
+      LOOM_GATEWAY_PORT: "18080"
+      LOOM_GATEWAY_METRICS_PORT: "19100"
+      LOOM_BILLING_PORT: "18090"
+      LOOM_BILLING_METRICS_PORT: "19101"
+      LOOM_STRIPE_STUB_PORT: "22111"
+      LOOM_WEB_PORT: "13000"
+      LOOM_MAILPIT_UI_PORT: "18025"
+      LOOM_MAILPIT_SMTP_PORT: "11025"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - name: Build and start the stack
+        run: docker compose up -d --build --wait --wait-timeout 600
+      - name: M1 acceptance
+        run: |
+          set -o pipefail
+          uv run loom-m1-acceptance --json m1-acceptance.json 2>&1 | tee m1-acceptance.log
+      - name: Stack state and logs
+        if: always()
+        run: |
+          docker compose ps -a
+          docker compose logs --no-color --timestamps > compose.log 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m1-acceptance
+          path: |
+            m1-acceptance.json
+            m1-acceptance.log
+            compose.log
+          if-no-files-found: ignore
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
   # The GPU hosts' client environment rebuilt from uv.lock exactly as RunPod and AWS
   # hosts install it, running every task of every eval suite at 2 items against the mock
   # backend (bench/tests/deps). Catches a missing or broken dependency before a paid run.
