@@ -17,9 +17,11 @@ G/VT quota (4 vCPU) fits exactly one g6e.xlarge, the same L40S.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import tarfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +41,7 @@ from loom_bench.jobs import EvalJob, LoadJob
 from loom_bench.money import parse_usd
 from loom_bench.plan import AWS_ENGINE_START_EXTRA_S, AWS_TIMING, _aws_disk_problems
 from loom_bench.store.db import session_scope
-from loom_bench.store.models import BenchRun
+from loom_bench.store.models import BenchExperiment, BenchResource, BenchRun, BenchSpend
 from loom_bench.store.parquet import read_requests
 from loom_bench.workloads import load_profile
 
@@ -663,6 +665,103 @@ def test_without_the_teardown_wait_the_second_host_hits_the_vcpu_quota(tmp_path,
     assert outcome.status.value == "failed"
     assert "VcpuLimitExceeded" in str(outcome.reason)
     assert quota["ec2"].refused == 1 and len(quota["ec2"].launched) == 1
+
+
+# Waiting for capacity ----------------------------------------------------------------------
+
+
+class NoCapacityFor:
+    """EC2 that refuses the first `sweeps` sweeps of both AZs with
+    InsufficientInstanceCapacity, as us-east-1 did aws-smoke-profile on 2026-11-02."""
+
+    def __init__(self, inner: Any, sweeps: int) -> None:
+        self._inner = inner
+        self.refusals = 2 * sweeps
+        self.refused = 0
+        self.launched: list[str] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def run_instances(self, **kw: Any) -> Any:
+        if self.refused < self.refusals:
+            self.refused += 1
+            raise client_error("InsufficientInstanceCapacity")
+        out = self._inner.run_instances(**kw)
+        self.launched.append(out["Instances"][0]["InstanceId"])
+        return out
+
+
+def _spend(ctx: Any) -> tuple[list[BenchSpend], list[BenchResource], list[BenchExperiment]]:
+    with session_scope(ctx.db_url) as s:
+        return (
+            list(s.scalars(select(BenchSpend))),
+            list(s.scalars(select(BenchResource))),
+            list(s.scalars(select(BenchExperiment))),
+        )
+
+
+def test_the_smoke_waits_out_no_capacity_then_runs_on_the_host_it_gets(tmp_path):
+    ec2: dict[str, NoCapacityFor] = {}
+    slept: list[float] = []
+
+    def wrap(inner: Any) -> NoCapacityFor:
+        ec2["ec2"] = NoCapacityFor(inner, sweeps=2)
+        return ec2["ec2"]
+
+    async def sleep(s: float) -> None:
+        slept.append(s)
+        await asyncio.sleep(0)
+
+    outcome, _, ctx, _, _, instances, reaped = run_on_host_sim(
+        RUNS["profile"][0],
+        tmp_path,
+        build=at_test_scale,
+        wrap_ec2=wrap,
+        provider_kw={"sleep": sleep},
+    )
+    assert outcome.status.value == "completed", outcome.reason
+    assert ec2["ec2"].refused == 4 and len(ec2["ec2"].launched) == 1
+    assert slept[:2] == [30, 60]  # two sweeps waited out, then polls of the host
+    (inst,) = instances
+    assert inst["InstanceId"] == ec2["ec2"].launched[0]
+    assert inst["State"]["Name"] == "terminated" and reaped == []
+    assert [e["kind"] for e in _events(outcome, ctx)].count("provisioned") == 1
+    spend, resources, _ = _spend(ctx)
+    assert spend and {r.resource_id for r in spend} == {inst["InstanceId"]}
+    assert [r.resource_id for r in resources] == [inst["InstanceId"]]
+
+
+def test_the_smoke_gives_up_at_the_deadline_with_nothing_spent_and_no_host(tmp_path):
+    ec2: dict[str, NoCapacityFor] = {}
+    now = [datetime(2026, 11, 2, 22, 20, tzinfo=UTC)]
+    slept: list[float] = []
+
+    def wrap(inner: Any) -> NoCapacityFor:
+        ec2["ec2"] = NoCapacityFor(inner, sweeps=1000)
+        return ec2["ec2"]
+
+    async def sleep(s: float) -> None:  # the provider's clock: waits cost no wall time
+        slept.append(s)
+        now[0] += timedelta(seconds=s)
+
+    outcome, _, ctx, _, _, instances, reaped = run_on_host_sim(
+        RUNS["profile"][0],
+        tmp_path,
+        build=at_test_scale,
+        wrap_ec2=wrap,
+        settings_update={"capacity_wait_s": 600},
+        provider_kw={"sleep": sleep, "clock": lambda: now[0]},
+    )
+    assert outcome.status.value == "failed"
+    assert "no capacity for g6e.xlarge after waiting 600 s" in str(outcome.reason)
+    assert slept == [30, 60, 120, 240, 150]
+    assert ec2["ec2"].refused == 12 and ec2["ec2"].launched == []
+    assert instances == [] and reaped == []
+    events = ctx.out_dir / str(outcome.experiment_id) / "events.jsonl"
+    assert not events.exists() or '"provisioned"' not in events.read_text()
+    spend, resources, (exp,) = _spend(ctx)
+    assert spend == [] and resources == [] and exp.spent_micros == 0
 
 
 def test_trtllm_start_scripts_stay_well_inside_ssms_document_size():
