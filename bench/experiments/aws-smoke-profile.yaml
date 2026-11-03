@@ -1,0 +1,93 @@
+# PROPOSED 2026-11-02, NOT APPROVED, NOT RUN. The AWS twin of runpod-smoke-profile.yaml:
+# the smoke for qwen3-8b-profile-aws.yaml, every path that run takes at smoke scale.
+#
+# Why AWS: RunPod Secure 1x L40S was out of stock all of 2026-11-02 (191 refused creates,
+# supply, not the request). The account's AWS us-east-1 on-demand G/VT quota (4 vCPU;
+# spot 0) fits exactly one g6e.xlarge: the same L40S 48 GB, with 4 vCPU and 32 GiB of RAM
+# (the pod had 16 vCPU and 94 GiB), at $1.861/h plus 200 GB gp3. Pinned to g6e.xlarge, no
+# fallback. Only the provider block, the budget and what the host forces differ from the
+# RunPod original, which keeps the design notes; config hashes differ (the hardware is in
+# them). bench/tests/aws/test_aws_perf_track.py fails if this, its twin or their RunPod
+# originals drift apart.
+#
+# New on AWS (runpod-smoke-profile's list still applies): vLLM's --profiler-config inside
+# the engine's Docker container, its trace directory bind-mounted at the same host path
+# (/var/lib/loom/profiles, engines.docker_run_argv); aws_scripts/collect_profile.sh
+# archiving it as root over SSM, uploading it through a presigned S3 PUT and clearing it;
+# the runner reading it back and analyzing it.
+#
+# bench plan (2026-11-02, against a copy of the results DB): one host, 42.6 min of a
+# 55 min TTL, estimate $1.34; worst case (the host lives to its TTL) $1.73; cap $1.75.
+name: aws-smoke-profile
+description: qwen3-8b-profile-runpod at smoke scale on one 1x L40S pod, every code path once.
+model: qwen3-8b
+smoke: true
+provider:
+  kind: aws_ec2
+  region: us-east-1
+  instance_type: g6e.xlarge
+  market: on_demand
+  disk_gb: 200
+variants:
+  - name: bf16
+    engine:
+      args:
+        profiler_config:
+          profiler: torch
+          torch_profiler_dir: /var/lib/loom/profiles
+          torch_profiler_with_stack: false
+          torch_profiler_record_shapes: false
+          torch_profiler_with_memory: false
+          torch_profiler_use_gzip: true
+          torch_profiler_dump_cuda_time_total: false
+  - name: fp8-kv8
+    model: qwen3-8b-fp8
+    kv_cache_dtype: fp8
+    engine:
+      args:
+        profiler_config:
+          profiler: torch
+          torch_profiler_dir: /var/lib/loom/profiles
+          torch_profiler_with_stack: false
+          torch_profiler_record_shapes: false
+          torch_profiler_with_memory: false
+          torch_profiler_use_gzip: true
+          torch_profiler_dump_cuda_time_total: false
+workloads:
+  - profile: fixed-1k-1k
+    overrides: {output_len: 128}
+    load:
+      mode: closed_loop
+      values: [4]
+      duration_s: 20
+      warmup_requests: 2
+      drain_timeout_s: 30
+  - profile: chat-sharegpt
+    overrides: {max_output_len: 64}
+    load:
+      mode: open_loop
+      values: [1]
+      duration_s: 15
+      warmup_s: 3
+      drain_timeout_s: 15
+repetitions: 2
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+profile:
+  windows:
+    - workload: fixed-1k-1k
+    - workload: chat-sharegpt
+  settle_s: 15
+  capture_s: 8
+  max_iterations: 32
+  tail_s: 3
+  drain_timeout_s: 15
+  trace_dir: /var/lib/loom/profiles
+  max_trace_mb: 256
+budget:
+  max_spend: "$1.75"
+  ttl_minutes: 55
+  accrual_interval_s: 15
+seed: 0
