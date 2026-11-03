@@ -126,6 +126,14 @@ TRANSIENT_CAPACITY_ERRORS = frozenset(
 # clears, so later sweeps skip that AZ, and a sweep with nothing else fails at once.
 UNSUPPORTED = "Unsupported"
 CAPACITY_ERRORS = TRANSIENT_CAPACITY_ERRORS | {UNSUPPORTED}
+# RunInstances refused for the account's vCPU quota. AWS counts an instance against it
+# for a while after it reports `terminated`: aws-smoke-trtllm (d549221f) launched its
+# third host 0.3 s after the second's teardown saw `terminated`, and was refused (the
+# first handover, 44 s later, was not). The quota is account-wide, so a sweep stops at the
+# first such refusal; `provision` waits it out on the backoff for at most QUOTA_WAIT_S,
+# then fails with what to check (something else holds the quota, or it is too small).
+QUOTA_ERRORS = frozenset({"VcpuLimitExceeded"})
+QUOTA_WAIT_S = 600
 SPOT_INTERRUPTION_CODES = frozenset(
     {"Server.SpotInstanceTermination", "Server.SpotInstanceShutdown"}
 )
@@ -262,6 +270,11 @@ class NoCapacity(RuntimeError):
         return [az for az, code in self.refused.items() if code != UNSUPPORTED]
 
     @property
+    def quota(self) -> bool:
+        """The sweep stopped on the account's vCPU quota (`QUOTA_ERRORS`)."""
+        return any(code in QUOTA_ERRORS for code in self.refused.values())
+
+    @property
     def unsupported(self) -> list[str]:
         """AZs that do not offer the instance type."""
         return [az for az, code in self.refused.items() if code == UNSUPPORTED]
@@ -276,6 +289,22 @@ class NoCapacity(RuntimeError):
         if self.unsupported:
             parts.append(f"not offered in {', '.join(self.unsupported)}")
         return "; ".join(parts)
+
+
+class VcpuQuotaHeld(RuntimeError):
+    """RunInstances kept failing on the account's vCPU quota for QUOTA_WAIT_S."""
+
+    def __init__(self, instance_type: str, held_s: float) -> None:
+        self.instance_type = instance_type
+        self.held_s = held_s
+        super().__init__(
+            f"RunInstances for {instance_type} refused for the account's vCPU quota "
+            f"(VcpuLimitExceeded) for {held_s:.0f} s. Something still holds it: another "
+            "instance not yet terminated (check `aws ec2 describe-instances --filters "
+            "Name=instance-state-name,Values=pending,running,shutting-down,stopping`), or "
+            "the G/VT on-demand quota is below one instance's vCPUs (docs/runbook.md, "
+            "section 7). No instance was launched."
+        )
 
 
 class AwsEc2Provider:
@@ -539,9 +568,14 @@ class AwsEc2Provider:
             try:
                 resp = self.ec2.run_instances(**kwargs)
             except ClientError as e:
-                if _error_code(e) not in CAPACITY_ERRORS:
+                code = _error_code(e)
+                if code in QUOTA_ERRORS:
+                    # Account-wide: every other AZ would refuse it too.
+                    refused[cand["az"]] = code
+                    raise NoCapacity(req.instance_type, refused) from None
+                if code not in CAPACITY_ERRORS:
                     raise
-                refused[cand["az"]] = _error_code(e)
+                refused[cand["az"]] = code
                 continue
             inst = resp["Instances"][0]
             return Host(
@@ -570,14 +604,17 @@ class AwsEc2Provider:
         """Launch the instance. While every AZ refuses it for capacity, sweep them all
         again for up to `capacity_wait_s`, waiting out the backoff (`CAPACITY_BACKOFF_S`)
         between sweeps, with one last sweep at the deadline. Only capacity refusals are
-        waited out (`TRANSIENT_CAPACITY_ERRORS`): any other error fails at once, and an AZ
-        that does not offer the type is dropped from later sweeps. No instance exists
-        while waiting: a sweep returns as soon as one launches."""
+        waited out (`TRANSIENT_CAPACITY_ERRORS`), plus the account's vCPU quota
+        (`QUOTA_ERRORS`) for at most QUOTA_WAIT_S of consecutive refusals, after which
+        `VcpuQuotaHeld` says what to check. Any other error fails at once, and an AZ that
+        does not offer the type is dropped from later sweeps. No instance exists while
+        waiting: a sweep returns as soon as one launches."""
         start = self.clock()
         deadline = start + timedelta(seconds=self.settings.capacity_wait_s)
         backoff = capacity_backoff()
         unsupported: set[str] = set()
         refusals = 0  # sweeps refused so far
+        quota_since: datetime | None = None  # first of the current run of quota refusals
         while True:
             try:
                 host = await asyncio.to_thread(self._provision, req, frozenset(unsupported))
@@ -587,6 +624,29 @@ class AwsEc2Provider:
                 now = self.clock()
                 waited = (now - start).total_seconds()
                 left = (deadline - now).total_seconds()
+                if e.quota:
+                    quota_since = quota_since or now
+                    held = (now - quota_since).total_seconds()
+                    if held >= QUOTA_WAIT_S or left <= 0:
+                        log.warning(
+                            "AWS %s: the vCPU quota is still exceeded after %.0f s; giving up",
+                            req.instance_type,
+                            held,
+                        )
+                        raise VcpuQuotaHeld(e.instance_type, held) from None
+                    pause = min(next(backoff), left, QUOTA_WAIT_S - held)
+                    log.warning(
+                        "AWS %s: vCPU quota still held (VcpuLimitExceeded), most likely by "
+                        "the host just terminated (waited %.0f s, up to %d s); next sweep "
+                        "in %.0f s",
+                        req.instance_type,
+                        held,
+                        QUOTA_WAIT_S,
+                        pause,
+                    )
+                    await self.sleep(pause)
+                    continue
+                quota_since = None
                 if not e.transient or left <= 0:
                     log.warning(
                         "AWS %s capacity: %s (waited %.0f s); giving up",

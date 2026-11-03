@@ -204,8 +204,16 @@ AWS g6e.xlarge capacity: launched i-0abc… in us-east-1d (waited 90 s)
   offer the type at all (g6e.xlarge is offered in us-east-1a to 1d only, per
   `aws ec2 describe-instance-type-offerings`), so that AZ is dropped from later sweeps,
   and a sweep with only `Unsupported` AZs fails at once.
-- **Everything else fails at once,** as before: `VcpuLimitExceeded` (the previous host is
-  still shutting down, or the quota is too small), auth errors, a bad AMI, invalid
+- **The vCPU quota (`VcpuLimitExceeded`) is waited out for up to 10 min.** AWS keeps
+  counting an instance against the quota for a short while after it reports
+  `terminated`: aws-smoke-trtllm (d549221f) launched its third host 0.3 s after the
+  second's teardown saw `terminated` and was refused. The quota is account-wide, so a
+  sweep stops at the first refusal, and the next sweep follows on the same backoff. If
+  the refusal lasts 600 s (`QUOTA_WAIT_S`, or less when `capacity_wait_s` ends first),
+  the run fails with `VcpuQuotaHeld`. That means something else holds the quota (another
+  instance not yet terminated) or the quota is below one instance's vCPUs. No instance
+  exists while it waits.
+- **Everything else fails at once,** as before: auth errors, a bad AMI, invalid
   parameters.
 - **A longer wait** costs nothing: `LOOM_AWS_CAPACITY_WAIT_S=7200 uv run bench run …`.
   Keep the laptop awake (`caffeinate -i`) for the whole wait.
@@ -291,8 +299,9 @@ read-only calls:
 | `~/.config/loom/aws.yaml` | **missing**: create it (below) |
 
 The only quota-sized host: if a managed instance is still running or shutting down, the
-next RunInstances fails with `VcpuLimitExceeded` (not retried), so run the smoke and the
-real run one after the other, never together, and check nothing managed is alive first.
+next RunInstances fails with `VcpuLimitExceeded` (waited out for at most 10 min, section 4),
+so run the smoke and the real run one after the other, never together, and check nothing
+managed is alive first.
 
 ```sh
 mkdir -p ~/.config/loom
@@ -342,8 +351,8 @@ uv run bench report -e <aws id>
   `failed` experiment row each). A retry 1-11 min later got a host each time, so retry
   that failure (and only it) rather than giving up. The provider now does this itself
   for up to `capacity_wait_s` (section 4, No capacity). A
-  `VcpuLimitExceeded` instead means the previous host is still shutting down: wait until
-  it is `terminated`.
+  `VcpuLimitExceeded` instead means the previous host still holds the quota (shutting
+  down, or just terminated); the provider waits that out for up to 10 min.
 - **Spend:** Cost Explorer is not enabled for the CLI user (`AccessDenied`). Check AWS-side
   spend from the instance's launch and stop times, or in the console's Billing pages.
 - **Never edit the checkout a run is using:** the host scripts are read from disk at
@@ -457,7 +466,8 @@ New on this path, each covered offline first (moto and the host simulator):
   g6e.xlarge). The provider now sweeps the AZs again for up to `capacity_wait_s`
   (`LOOM_AWS_CAPACITY_WAIT_S`, default 1800 s) on a 30/60/120/240 s backoff, with no
   instance and no spend while waiting (section 4, No capacity). Only one g6e.xlarge fits
-  the 4-vCPU quota, so `VcpuLimitExceeded` still fails at once.
+  the 4-vCPU quota. `VcpuLimitExceeded` is waited out for at most 10 min (the quota trails
+  `terminated`, d549221f), then fails with `VcpuQuotaHeld`.
 
 Run each smoke before its real run, with the same pinned AMI as 95cde129 and fccf9ed3
 (driver 595.91.07, CUDA 13.2) and the preflight in section 7a:

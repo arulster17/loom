@@ -530,13 +530,17 @@ class TrtllmHostSim(HostSim):
 class OneHostQuota:
     """EC2 held to the account's 4-vCPU G/VT quota (one g6e.xlarge): RunInstances fails
     with VcpuLimitExceeded while any instance is not yet terminated, and a terminated
-    instance reports shutting-down for its first two describes, as a real one does."""
+    instance reports shutting-down for its first two describes, as a real one does. With
+    `lag`, AWS's quota accounting also trails `terminated`: the next `lag` RunInstances
+    after a terminate are refused too (d549221f's third host, 0.3 s after the second)."""
 
-    def __init__(self, inner: Any) -> None:
+    def __init__(self, inner: Any, lag: int = 0) -> None:
         self._inner = inner
         self.shutting: dict[str, int] = {}
         self.launched: list[str] = []
         self.refused = 0
+        self.lag = lag
+        self._lag_left = 0
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
@@ -544,6 +548,7 @@ class OneHostQuota:
     def terminate_instances(self, **kw: Any) -> Any:
         for iid in kw["InstanceIds"]:
             self.shutting.setdefault(iid, 2)
+        self._lag_left = self.lag
         return self._inner.terminate_instances(**kw)
 
     def describe_instances(self, **kw: Any) -> Any:
@@ -564,7 +569,8 @@ class OneHostQuota:
             for i in r["Instances"]
             if i["State"]["Name"] != "terminated" or self.shutting.get(i["InstanceId"], 0)
         ]
-        if live:
+        if live or self._lag_left:
+            self._lag_left = max(0, self._lag_left - (0 if live else 1))
             self.refused += 1
             raise client_error("VcpuLimitExceeded")
         out = self._inner.run_instances(**kw)
@@ -647,24 +653,67 @@ def test_both_trtllm_cells_are_gated_on_vllms_reference_across_hosts(trtllm_run)
         assert "KL" in json.dumps(e)
 
 
-def test_without_the_teardown_wait_the_second_host_hits_the_vcpu_quota(tmp_path, monkeypatch):
-    # What the wait prevents: the next host group launched while the last instance is
-    # still shutting down is refused (docs/runbook.md, section 7), and the run fails.
+def test_a_quota_still_held_just_after_terminated_is_waited_out(tmp_path):
+    # d549221f: the third host's RunInstances went out 0.3 s after the second host was
+    # `terminated`, and AWS still counted it against the 4-vCPU quota. The provider now
+    # waits that out on the backoff; every host launches only after the last terminated.
+    # The lag clears by count, so the real clock serves; sleeps only record and yield.
+    quota: dict[str, OneHostQuota] = {}
+    slept: list[float] = []
+
+    def wrap(ec2: Any) -> OneHostQuota:
+        quota["ec2"] = OneHostQuota(ec2, lag=2)
+        return quota["ec2"]
+
+    async def sleep(s: float) -> None:
+        slept.append(s)
+        await asyncio.sleep(0)
+
+    outcome, _, _, _, _, instances, reaped = run_on_host_sim(
+        RUNS["trtllm"][0],
+        tmp_path,
+        build=at_test_scale,
+        sim_cls=TrtllmHostSim,
+        wrap_ec2=wrap,
+        provider_kw={"sleep": sleep},
+    )
+    assert outcome.status.value == "completed", outcome.reason
+    q = quota["ec2"]
+    assert len(q.launched) == 3 and q.refused == 4  # two refusals at each handover
+    assert all(i["State"]["Name"] == "terminated" for i in instances) and reaped == []
+    waits = [s for s in slept if s >= 30]
+    assert waits.count(30) == 2 and waits.count(60) == 2  # 30 s, then 60 s, per handover
+
+
+def test_without_the_teardown_wait_a_held_quota_fails_clearly(tmp_path, monkeypatch):
+    # What the teardown wait prevents: the next host group launched while the last
+    # instance is still shutting down keeps hitting the vCPU quota (docs/runbook.md,
+    # section 7). The provider waits up to QUOTA_WAIT_S, then fails saying what to check.
     import loom_bench.providers.aws_ec2 as aws_ec2
 
     monkeypatch.setattr(aws_ec2, "TERMINATE_WAIT_S", -1)
     quota: dict[str, OneHostQuota] = {}
+    now = [datetime(2026, 11, 3, 3, 0, tzinfo=UTC)]
 
     def wrap(ec2: Any) -> OneHostQuota:
         quota["ec2"] = OneHostQuota(ec2)
         return quota["ec2"]
 
+    async def sleep(s: float) -> None:
+        now[0] += timedelta(seconds=s)
+
     outcome, *_ = run_on_host_sim(
-        RUNS["trtllm"][0], tmp_path, build=at_test_scale, sim_cls=TrtllmHostSim, wrap_ec2=wrap
+        RUNS["trtllm"][0],
+        tmp_path,
+        build=at_test_scale,
+        sim_cls=TrtllmHostSim,
+        wrap_ec2=wrap,
+        provider_kw={"sleep": sleep, "clock": lambda: now[0]},
     )
     assert outcome.status.value == "failed"
-    assert "VcpuLimitExceeded" in str(outcome.reason)
-    assert quota["ec2"].refused == 1 and len(quota["ec2"].launched) == 1
+    reason = str(outcome.reason)
+    assert "VcpuLimitExceeded" in reason and "for 600 s" in reason
+    assert quota["ec2"].refused == 6 and len(quota["ec2"].launched) == 1
 
 
 # Waiting for capacity ----------------------------------------------------------------------

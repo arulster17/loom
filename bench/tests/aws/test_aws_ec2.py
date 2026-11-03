@@ -30,11 +30,13 @@ from loom_bench.providers import export_requirements
 from loom_bench.providers.aws_ec2 import (
     CLIENT_IMAGE,
     DOWNLOAD_ALLOWANCE_S,
+    QUOTA_WAIT_S,
     AwsEc2Provider,
     AwsSettings,
     HostLost,
     NoCapacity,
     SpotInterrupted,
+    VcpuQuotaHeld,
     host_loss,
     load_aws_settings,
     spot_hourly_micros,
@@ -262,13 +264,18 @@ async def test_provision_tries_next_az_on_capacity_error(aws: dict[str, Any]) ->
     assert host.info["subnet_id"] == aws["settings"].subnet_ids[1]
 
 
-async def test_provision_quota_error_is_not_retried(aws: dict[str, Any]) -> None:
+async def test_a_quota_refusal_with_no_wait_allowed_fails_at_once(aws: dict[str, Any]) -> None:
+    calls: list[str] = []
+
     def run_instances(**kw: Any) -> Any:
+        calls.append(kw["SubnetId"])
         raise client_error("VcpuLimitExceeded")
 
+    aws = {**aws, "settings": aws["settings"].model_copy(update={"capacity_wait_s": 0})}
     p = provider(aws, ec2=Proxy(aws["ec2"], run_instances=run_instances))
-    with pytest.raises(Exception, match="VcpuLimitExceeded"):
+    with pytest.raises(VcpuQuotaHeld, match="VcpuLimitExceeded"):
         await p.provision(request())
+    assert calls == aws["settings"].subnet_ids[:1]  # account-wide: no other AZ is tried
 
 
 # --- waiting for capacity ----------------------------------------------------------------
@@ -368,7 +375,6 @@ async def test_a_sweep_that_launches_in_a_later_az_keeps_it_and_does_not_wait(
 @pytest.mark.parametrize(
     "code",
     [
-        "VcpuLimitExceeded",
         "InstanceLimitExceeded",
         "AuthFailure",
         "UnauthorizedOperation",
@@ -428,6 +434,70 @@ async def test_an_az_that_does_not_offer_the_type_is_dropped_from_later_sweeps(
         "AWS g6e.xlarge capacity: none in us-east-1b (InsufficientInstanceCapacity); "
         "not offered in us-east-1a (waited 0 s, 1800 s left); next sweep in 30 s"
     )
+
+
+VCPU = "VcpuLimitExceeded"
+
+
+async def test_a_vcpu_quota_still_held_after_teardown_is_waited_out(
+    aws: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    # d549221f: the third host's RunInstances went out 0.3 s after the second reported
+    # `terminated` and was refused for the quota, which AWS frees a little later.
+    caplog.set_level(logging.WARNING, logger=AWS_LOG)
+    p, t, ec2 = waiting(aws, [VCPU, VCPU, VCPU])
+    host = await p.provision(request())
+    assert t.slept == [30, 60, 120]
+    # The quota is account-wide: each sweep stops at its first AZ.
+    assert ec2.calls == ["us-east-1a"] * 4
+    assert [i["InstanceId"] for i in instances(aws["ec2"])] == [host.host_id]
+    lines = [r.getMessage() for r in caplog.records if r.name == AWS_LOG]
+    assert lines[0] == (
+        "AWS g6e.xlarge: vCPU quota still held (VcpuLimitExceeded), most likely by the host "
+        "just terminated (waited 0 s, up to 600 s); next sweep in 30 s"
+    )
+    assert (
+        lines[-1]
+        == f"AWS g6e.xlarge capacity: launched {host.host_id} in us-east-1a (waited 210 s)"
+    )
+
+
+async def test_a_quota_that_stays_held_fails_clearly_after_quota_wait_s(
+    aws: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger=AWS_LOG)
+    p, t, ec2 = waiting(aws, [VCPU] * 100)  # capacity_wait_s stays 1800: the quota ends it
+    with pytest.raises(VcpuQuotaHeld) as err:
+        await p.provision(request())
+    assert QUOTA_WAIT_S == 600
+    assert t.slept == [30, 60, 120, 240, 150]  # the backoff, capped at 600 s in all
+    assert len(ec2.calls) == 6
+    assert instances(aws["ec2"]) == []
+    msg = str(err.value)
+    assert "refused for the account's vCPU quota (VcpuLimitExceeded) for 600 s" in msg
+    assert "describe-instances" in msg and "No instance was launched." in msg
+    assert caplog.records[-1].getMessage() == (
+        "AWS g6e.xlarge: the vCPU quota is still exceeded after 600 s; giving up"
+    )
+
+
+async def test_the_quota_wait_also_ends_at_the_capacity_deadline(aws: dict[str, Any]) -> None:
+    p, t, _ = waiting(aws, [VCPU] * 100, capacity_wait_s=100)
+    with pytest.raises(VcpuQuotaHeld, match="for 100 s"):
+        await p.provision(request())
+    assert t.slept == [30, 60, 10]
+    assert instances(aws["ec2"]) == []
+
+
+async def test_capacity_refusals_restart_the_quota_window(aws: dict[str, Any]) -> None:
+    # Quota, then a full capacity sweep, then quota again: the 600 s counts from the second
+    # run of quota refusals, not the first.
+    p, t, ec2 = waiting(aws, [VCPU, IIC, IIC, VCPU, VCPU])
+    host = await p.provision(request())
+    assert t.slept == [30, 60, 120, 240]
+    assert ec2.calls == ["us-east-1a", "us-east-1a", "us-east-1b", "us-east-1a", "us-east-1a",
+                         "us-east-1a"]  # fmt: skip
+    assert host.info["az"] == "us-east-1a"
 
 
 async def test_no_wait_when_no_az_offers_the_type(aws: dict[str, Any]) -> None:
