@@ -29,6 +29,10 @@ DEFAULT_TRACE_DIR = "/var/lib/loom/profiles"
 # Time beyond the window to stop the profiler (vLLM flushes the trace in /stop_profile),
 # archive the trace, upload it and fetch it back.
 COLLECT_ALLOWANCE_S = 90.0
+# Providers that collect a window's trace (`collect_profile`). On aws_ec2 the engine runs
+# in Docker, which bind-mounts the trace directory at the same path on the host
+# (engines.docker_run_argv), where the collection script finds it.
+PROFILE_PROVIDERS = frozenset({"aws_ec2", "runpod", "mock"})
 
 
 class _Strict(BaseModel):
@@ -86,9 +90,10 @@ def check_profile(
 
     `workloads`: label -> LoadSpec; `variant_args`: variant name -> its `engine.args`
     (an empty dict when the variant sets none)."""
-    if provider_kind not in {"runpod", "mock"}:
+    if provider_kind not in PROFILE_PROVIDERS:
         raise ValueError(
-            f"profile windows run on the runpod and mock providers only, not {provider_kind}"
+            f"profile windows run on the {', '.join(sorted(PROFILE_PROVIDERS))} providers "
+            f"only, not {provider_kind}"
         )
     for w in profile.windows:
         load = workloads.get(w.workload)

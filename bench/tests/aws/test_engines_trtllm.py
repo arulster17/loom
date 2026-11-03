@@ -170,6 +170,14 @@ def test_docker_run_argv_trtllm_entrypoint(qwen: ModelSpec) -> None:
     assert argv[i : i + 5] == ["--entrypoint", "bash", TRTLLM_IMAGE, "-c", TRTLLM_LAUNCHER]
     assert argv[i + 5 : i + 7] == ["trtllm-launch", TRTLLM_SERVE_SOURCE]
     assert argv[i + 7 :] == launch.args
+    # NVIDIA's documented run flags for its release image, before the entrypoint; the
+    # host's IPC namespace (and so its /dev/shm) as for every engine.
+    head = argv[:i]
+    assert "--ulimit memlock=-1 --ulimit stack=67108864" in " ".join(head)
+    assert "--ipc host" in " ".join(head)
+    # vLLM gets none of them (95cde129's container, unchanged).
+    vllm = docker_run_argv(render_launch(qwen), weights_dir="/w", container_name="c")
+    assert "--ulimit" not in vllm
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
