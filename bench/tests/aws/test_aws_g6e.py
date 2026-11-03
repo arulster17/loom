@@ -288,10 +288,14 @@ def run_on_host_sim(
     *,
     build: Callable[[Path, Path, bytes], Experiment] = at_test_scale,
     db: Path | None = None,
+    sim_cls: type[HostSim] = HostSim,
+    served: dict[str, bytes] | None = None,
+    wrap_ec2: Callable[[Any], Any] | None = None,
 ):
     """`path` built at test scale by `build` and run on HostSim, recorded in the SQLite DB
     at `db` (default: a new one in `tmp`; another run's, to gate against a baseline it
-    stored)."""
+    stored). `sim_cls` simulates the hosts, `served` adds dataset URLs they can fetch, and
+    `wrap_ec2` wraps the provider's EC2 client (e.g. to hold it to the vCPU quota)."""
     mp = pytest.MonkeyPatch()
     for k, v in {
         "AWS_ACCESS_KEY_ID": "testing",
@@ -328,7 +332,7 @@ def run_on_host_sim(
         exp = build(path, tmp, body)
         cells = expand(exp, REGISTRY)
         url = load_profile("chat-sharegpt").download.url  # type: ignore[union-attr]
-        sim = HostSim(ec2, s3, tmp / "hosts", served={url: body})
+        sim = sim_cls(ec2, s3, tmp / "hosts", served={url: body, **(served or {})})
         sim.params = ssm
         wheel = tmp / "loom_bench-0.1.0-py3-none-any.whl"
         wheel.write_bytes(b"wheel")
@@ -349,7 +353,7 @@ def run_on_host_sim(
         ctx.provider = AwsEc2Provider(
             settings,
             prices=PRICES,
-            ec2=ec2,
+            ec2=wrap_ec2(ec2) if wrap_ec2 else ec2,
             ssm=sim,
             s3=s3,
             wheel_path=wheel,

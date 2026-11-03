@@ -1,0 +1,78 @@
+# PROPOSED 2026-11-02, NOT APPROVED, NOT RUN: run aws-smoke-trtllm.yaml first.
+# The AWS twin of qwen3-8b-trtllm-vs-vllm-runpod.yaml (rows, engine defaults and quality
+# notes there; explainer docs/perf/tensorrt-llm.md): TensorRT-LLM 1.4.0rc2 BF16 and FP8
+# against vLLM v0.30.0 BF16 on chat and 1k/1k at SLO, both gated against vLLM BF16.
+#
+# Why AWS: RunPod Secure 1x L40S was out of stock all of 2026-11-02 (191 refused creates,
+# supply, not the request). The account's AWS us-east-1 on-demand G/VT quota (4 vCPU;
+# spot 0) fits exactly one g6e.xlarge: the same L40S 48 GB, with 4 vCPU and 32 GiB of RAM
+# (the pod had 16 vCPU and 94 GiB), at $1.861/h plus 200 GB gp3. Pinned to g6e.xlarge, no
+# fallback. Only the provider block, the budget and what the host forces differ from the
+# RunPod original, which keeps the design notes; config hashes differ (the hardware is in
+# them). bench/tests/aws/test_aws_perf_track.py fails if this, its twin or their RunPod
+# originals drift apart.
+# The vllm-bf16 cell is 95cde129's bf16 cell (same launch and hardware, config hash
+# 48f3d8d1...), so it also repeats that AWS run's chat points.
+#
+# Three hosts, one after the other, as RunPod's three pods: AWS keys a host by instance
+# type, not image, so trtllm-bf16 gets its own host_group (sharing vLLM's host would take
+# it to 7.3 h), and teardown waits until each instance is `terminated` before the next
+# launches (the quota holds one). TensorRT-LLM never ran on AWS: aws-smoke-trtllm.yaml
+# lists what its smoke proves first.
+#
+# Budget (`bench plan`, 2026-11-02, prices.yaml $1.8829/h with the root volume, against a
+# copy of the results DB): hosts 3.71, 3.80 and 3.56 h of a 4.75 h TTL each, estimate
+# $20.85; worst case (all three to TTL) $26.83; cap $27.
+name: qwen3-8b-trtllm-vs-vllm-aws
+description: Qwen3-8B on RunPod Secure 1x L40S, TensorRT-LLM 1.4.0rc2 BF16 and FP8 vs vLLM v0.30.0 BF16, chat and 1k/1k at SLO, gated vs vLLM BF16.
+model: qwen3-8b
+provider:
+  kind: aws_ec2
+  region: us-east-1
+  instance_type: g6e.xlarge
+  market: on_demand
+  disk_gb: 200
+variants:
+  - name: vllm-bf16
+  - name: trtllm-bf16
+    engine:
+      name: trtllm
+      version: "1.4.0rc2"
+      image: nvcr.io/nvidia/tensorrt-llm/release@sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a
+    host_group: trtllm-bf16
+  - name: trtllm-fp8
+    model: qwen3-8b-fp8-modelopt
+    host_group: b
+workloads:
+  # Searches start just above vLLM BF16's measured knees (chat 2.213, failing at 2.449;
+  # 1k-1k 1.0, failing at 1.107) and step by 1.5x, so vLLM brackets its knee in a step or
+  # two and TRT-LLM climbs or descends from the same place.
+  - profile: chat-sharegpt
+    load:
+      mode: open_loop
+      search: {lo: 2.25, hi: 16, rel_tol: 0.05, max_points: 5, scale: geometric, step: 1.5, descend: 3}
+      duration_s: 255
+      warmup_s: 45
+      drain_timeout_s: 60
+  - profile: fixed-1k-1k
+    load:
+      mode: open_loop
+      search: {lo: 1.0, hi: 6, rel_tol: 0.05, max_points: 4, scale: geometric, step: 1.5, descend: 2}
+      duration_s: 240
+      warmup_s: 60
+      drain_timeout_s: 60
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+quality:
+  suite: qwen3-8b
+  subset: phase0-strict
+  baseline_variant: vllm-bf16
+  replicates: 3
+budget:
+  max_spend: "$27"
+  ttl_minutes: 285
+  accrual_interval_s: 15
+seed: 0

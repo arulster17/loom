@@ -103,6 +103,11 @@ class AwsEc2ProviderSpec(_Strict):
     instance_type: str | None = None  # default: the cell's hardware.instance_types.aws
     market: Literal["spot", "on_demand"] = "spot"
     disk_gb: PositiveInt = 200
+    # Set in the engine container's environment (validated: no secret names), as on
+    # runpod. Part of the cell's launch, so its config hash once set; empty changes
+    # nothing. E.g. TRTLLM_ENABLE_PDL=0 if TensorRT-LLM's FlashInfer kernels refuse sm_89
+    # (docs/perf/tensorrt-llm.md).
+    engine_env: dict[str, str] = Field(default_factory=dict)
 
 
 # RunPod GPU type ids by registry GPU name; `provider.gpu_type_id` covers the others.
@@ -714,25 +719,35 @@ def _launch(exp: Experiment, spec: ModelSpec, mock: MockConfig | None) -> Engine
     launch = render_launch(spec)
     if isinstance(exp.provider, RunpodProviderSpec):
         launch = _runpod_engine_env(exp.provider, spec, launch)
+    elif isinstance(exp.provider, AwsEc2ProviderSpec):
+        launch = _with_engine_env(launch, _engine_env(exp.provider.engine_env))
     return launch
+
+
+def _engine_env(env: dict[str, str]) -> dict[str, str]:
+    try:
+        return validate_engine_env(env)
+    except ValueError as e:
+        raise ExpansionError(f"provider.engine_env: {e}") from None
+
+
+def _with_engine_env(launch: EngineLaunch, env: dict[str, str]) -> EngineLaunch:
+    if not env:
+        return launch
+    return launch.model_copy(update={"env": {**launch.env, **env}})
 
 
 def _runpod_engine_env(
     p: RunpodProviderSpec, spec: ModelSpec, launch: EngineLaunch
 ) -> EngineLaunch:
-    try:
-        env = validate_engine_env(p.engine_env)
-    except ValueError as e:
-        raise ExpansionError(f"provider.engine_env: {e}") from None
+    env = _engine_env(p.engine_env)
     if launch.gpus > 1 and not any(v in env for v in RUNPOD_NCCL_P2P_VARS):
         raise ExpansionError(
             f"{spec.id}: a {launch.gpus}-GPU RunPod pod must set "
             f"{' or '.join(RUNPOD_NCCL_P2P_VARS)} in provider.engine_env: pods can span "
             "CPU sockets, where NCCL peer-to-peer hangs at init (docs/runbook-runpod.md)"
         )
-    if not env:
-        return launch
-    return launch.model_copy(update={"env": {**launch.env, **env}})
+    return _with_engine_env(launch, env)
 
 
 def hardware_for(exp: Experiment, spec: ModelSpec) -> tuple[str, dict[str, Any]]:

@@ -525,6 +525,33 @@ def engine_process_argv(
     return [*ENTRYPOINTS[launch.engine], *args]
 
 
+_TRACE_DIR_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
+# NVIDIA's documented `docker run` for TensorRT-LLM release images (its quick start and
+# NGC page): pinned host memory unlimited, an 64 MiB stack. Docker's defaults (memlock
+# 8 MiB on Ubuntu 24.04, stack 8 MiB) are what the container gets otherwise; RunPod pods
+# set their own limits. With `--ipc host`, /dev/shm is the host's (half its RAM).
+DOCKER_ENGINE_FLAGS: dict[str, tuple[str, ...]] = {
+    "trtllm": ("--ulimit", "memlock=-1", "--ulimit", "stack=67108864"),
+}
+
+
+def profiler_trace_dir(launch: EngineLaunch) -> str | None:
+    """Where a vLLM launch's torch profiler writes traces (`--profiler-config`'s
+    `torch_profiler_dir`), or None when it is not profiled."""
+    if launch.engine != "vllm":
+        return None
+    raw = _flag_value(launch.args, "--profiler-config")
+    if raw is None:
+        return None
+    cfg = json.loads(raw)
+    path = cfg.get("torch_profiler_dir") if isinstance(cfg, dict) else None
+    if path is None:
+        return None
+    if not isinstance(path, str) or not _TRACE_DIR_RE.match(path) or ".." in path:
+        raise ValueError(f"torch_profiler_dir must be an absolute plain path, got {path!r}")
+    return path
+
+
 def docker_run_argv(launch: EngineLaunch, *, weights_dir: str, container_name: str) -> list[str]:
     """`docker run` for the engine container on a GPU host.
 
@@ -532,10 +559,14 @@ def docker_run_argv(launch: EngineLaunch, *, weights_dir: str, container_name: s
     the engine starts with `HF_HUB_OFFLINE=1` and never sees a Hugging Face token.
     `launch.env` is passed by name only (`-e NAME`); the caller exports the values.
     The port is published on loopback only: load is generated on the host itself.
+    A profiled vLLM launch gets its trace directory bind-mounted at the same path, so the
+    host's collection script (aws_scripts/collect_profile.sh) finds the traces where the
+    profile section says they are. Engine-specific flags: `DOCKER_ENGINE_FLAGS`.
     """
     if launch.engine not in ENTRYPOINTS:
         raise ValueError(f"no container entrypoint for engine {launch.engine!r}")
     entry = ENTRYPOINTS[launch.engine]
+    trace_dir = profiler_trace_dir(launch)
     argv = [
         "docker",
         "run",
@@ -557,6 +588,9 @@ def docker_run_argv(launch: EngineLaunch, *, weights_dir: str, container_name: s
         "--env",
         "TRANSFORMERS_OFFLINE=1",
     ]
+    if trace_dir is not None:
+        argv += ["--volume", f"{trace_dir}:{trace_dir}"]
+    argv += DOCKER_ENGINE_FLAGS.get(launch.engine, ())
     for name in sorted(validate_engine_env(launch.env)):
         argv += ["--env", name]
     argv += ["--entrypoint", entry[0], launch.image, *entry[1:], *launch.args]

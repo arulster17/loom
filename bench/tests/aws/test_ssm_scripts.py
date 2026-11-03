@@ -70,6 +70,11 @@ RENDERED = {
     "start_engine": START_VARS,
     "run_job": JOB_VARS,
     "stop_engine": {"CONTAINER": "loom-engine"},
+    "collect_profile": {
+        "TRACE_DIR": "/var/lib/loom/profiles",
+        "MAX_BYTES": 268435456,
+        "UPLOAD_URL": "https://b.s3.amazonaws.com/runs/e/r/trace.tar.gz?sig=1&b=2",
+    },
     "user_data": {
         "TTL_EPOCH": 1_790_000_000,
         "STAGE_FILE": "/var/lib/loom/stages",
@@ -493,3 +498,71 @@ async def test_run_script_host_check_wins_over_command_failure() -> None:
         await run_script(
             ssm, "i-1", "x", timeout_s=5, comment="c", poll_s=0, check_host=gone, sleep=no_sleep
         )
+
+
+# --- collect_profile.sh: a profile window's trace, from the engine's bind mount -------
+
+
+def _collect(
+    trace_dir: Path, tmp_path: Path, max_bytes: int = 1 << 20
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Run the rendered script with a curl that copies its `-T` file where S3 would be."""
+    bins = tmp_path / "bin"
+    bins.mkdir(exist_ok=True)
+    dest = tmp_path / "uploaded.tar.gz"
+    (bins / "curl").write_text(
+        f'#!/bin/bash\nwhile [ $# -gt 0 ]; do [ "$1" = -T ] && cp "$2" {dest}; shift; done\n'
+    )
+    (bins / "curl").chmod(0o755)
+    script = render_script(
+        "collect_profile",
+        TRACE_DIR=str(trace_dir),
+        MAX_BYTES=max_bytes,
+        UPLOAD_URL="https://b.s3.amazonaws.com/runs/e/r/trace.tar.gz?X-Amz-Signature=1&b=2",
+    )
+    assert BASH is not None
+    env = {"PATH": f"{bins}:/usr/bin:/bin", "HOME": str(tmp_path)}
+    res = subprocess.run(
+        [BASH, "-s"], input=script, env=env, capture_output=True, text=True, timeout=60
+    )
+    return res, dest
+
+
+def test_collect_profile_required_vars() -> None:
+    assert required_vars("collect_profile") == {"TRACE_DIR", "MAX_BYTES", "UPLOAD_URL"}
+
+
+@needs_bash
+def test_collect_profile_archives_uploads_and_clears_the_trace_dir(tmp_path: Path) -> None:
+    import tarfile
+
+    traces = tmp_path / "profiles"
+    (traces / "sub").mkdir(parents=True)
+    (traces / "loom-r_rank0.1.pt.trace.json.gz").write_bytes(b"a" * 100)
+    (traces / "sub" / "loom-r_rank1.1.pt.trace.json.gz").write_bytes(b"b" * 100)
+    res, dest = _collect(traces, tmp_path)
+    assert res.returncode == 0, res.stderr
+    assert "loom-profile-done" in res.stdout and "loom-sys profile_files 2" in res.stdout
+    with tarfile.open(dest) as t:
+        names = sorted(n.lstrip("./") for n in t.getnames() if t.getmember(n).isfile())
+    assert names == ["loom-r_rank0.1.pt.trace.json.gz", "sub/loom-r_rank1.1.pt.trace.json.gz"]
+    assert not [p for p in traces.rglob("*") if p.is_file()]  # cleared for the next window
+
+
+@needs_bash
+def test_collect_profile_fails_on_a_missing_or_empty_dir_and_over_the_cap(
+    tmp_path: Path,
+) -> None:
+    import os
+
+    traces = tmp_path / "profiles"
+    res, _ = _collect(traces, tmp_path)
+    assert res.returncode != 0 and "no trace directory" in res.stderr
+    traces.mkdir()
+    res, _ = _collect(traces, tmp_path)
+    assert res.returncode != 0 and "wrote no files" in res.stderr
+    (traces / "t.json.gz").write_bytes(os.urandom(50_000))
+    res, dest = _collect(traces, tmp_path, max_bytes=1000)
+    assert res.returncode != 0 and "over the 1000-byte cap" in res.stderr
+    assert not dest.exists()
+    assert not list(traces.iterdir())  # an oversized trace is not left for the next window

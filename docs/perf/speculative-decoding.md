@@ -225,6 +225,26 @@ head's 2 GB download (~15 s). For a wider margin: dropping chat's 3 req/s point 
 its own pod (`host_group`), one more cold start (~12 min, ~$0.25) for two pods well
 inside the TTL.
 
+**On AWS instead** (2026-11-02, proposed, not approved). RunPod Secure 1x L40S was out of
+stock all day, so `aws-smoke-specdec` and `qwen3-8b-specdec-aws` run the same study on one
+AWS g6e.xlarge on-demand host (the same L40S; 4 vCPU, 32 GiB; the account's 4-vCPU quota
+fits exactly one). Same rows, workloads, loads, windows and quality section; only the
+provider block and budget differ (`bench/tests/aws/test_aws_perf_track.py`). The host is
+$1.8829/h accrued against the pod's $1.10, and EC2 starts are slower, so:
+
+| Spec | Plan | Estimate | Worst case (TTL) | Cap |
+|---|---|---|---|---|
+| `aws-smoke-specdec` | 1.56 h of a 115 min TTL | $2.94 | $3.61 | $3.75 |
+| `qwen3-8b-specdec-aws` | 7.46 h of an 8 h TTL (the aws_ec2 limit; 6.7% margin) | $14.04 | $15.06 | $15.25 |
+
+The AWS runs 95cde129 and fccf9ed3 came in at 72-74% of plan, so expect about $10-11.
+The host fetches the EAGLE3 head into its instance-store HF cache on the warm restart and
+vLLM loads it offline; the CommitPackFT file lands under `/opt/dlami/nvme/loom-data` and
+the client container reads it read-only (both run end to end on the host simulator). The
+same margin options apply: the EAGLE3 row on its own host (`host_group`) would add one
+cold start (~20 min, ~$0.60), and teardown now waits for each instance to terminate, so
+the quota's one host is free before the next.
+
 **The smoke** (`runpod-smoke-specdec`) has the same provider, variants (so the same config
 hashes and launches), workload profiles and overrides, repetitions, SLO and quality
 section, with 10 s windows and tasks capped at 4 items. It runs once what no earlier run

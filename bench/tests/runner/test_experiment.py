@@ -370,6 +370,23 @@ def test_runpod_engine_env_is_part_of_the_config_hash():
     assert off.host_key == level.host_key  # the same pod shape either way
 
 
+def test_aws_engine_env_reaches_the_launch_and_only_then_moves_the_hash():
+    # The RunPod TensorRT-LLM smoke's fallback (TRTLLM_ENABLE_PDL=0) must exist on AWS too.
+    def aws(**provider):
+        doc = read_yaml(QWEN)
+        prov = {"kind": "aws_ec2", "market": "on_demand", **provider}
+        return expand(Experiment.model_validate({**doc, "provider": prov}), REGISTRY)
+
+    plain, env = aws()[0], aws(engine_env={"TRTLLM_ENABLE_PDL": "0"})[0]
+    assert plain.launch.env == {}
+    assert env.launch.env == {"TRTLLM_ENABLE_PDL": "0"}
+    assert env.config["launch"]["env"] == {"TRTLLM_ENABLE_PDL": "0"}
+    assert env.config_hash != plain.config_hash and env.host_key == plain.host_key
+    for bad in ({"HF_TOKEN": "x"}, {"lower": "1"}):
+        with pytest.raises(ExpansionError, match=r"provider\.engine_env"):
+            aws(engine_env=bad)
+
+
 def test_runpod_engine_env_rejects_secret_and_bad_names():
     for env in ({"HF_TOKEN": "x"}, {"nccl_debug": "INFO"}):
         with pytest.raises(ExpansionError, match=r"provider\.engine_env"):

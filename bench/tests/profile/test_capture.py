@@ -155,7 +155,17 @@ def runpod_doc(**profile_over: object) -> dict:
             ),
             "with_stack: false",
         ),
-        (lambda d: d.update(provider={"kind": "aws_ec2"}), "runpod and mock providers only"),
+        (
+            lambda d: d.update(
+                provider={
+                    "kind": "local",
+                    "base_url": "http://127.0.0.1:8000/v1",
+                    "engine": "vllm",
+                    "served_model": "m",
+                }
+            ),
+            "aws_ec2, mock, runpod providers only",
+        ),
     ],
 )
 def test_profile_section_rules(mutate, match: str) -> None:

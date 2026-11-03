@@ -1,0 +1,79 @@
+# PROPOSED 2026-11-02, NOT APPROVED: do not run without the user's approval of the cap.
+# Run aws-smoke-specdec.yaml first. The AWS twin of qwen3-8b-specdec-runpod.yaml (rows,
+# loads, windows and quality notes there; explainer docs/perf/speculative-decoding.md):
+# Qwen3-8B, vLLM v0.30.0, no speculation vs n-gram vs EAGLE3, one host, warm restarts.
+#
+# Why AWS: RunPod Secure 1x L40S was out of stock all of 2026-11-02 (191 refused creates,
+# supply, not the request). The account's AWS us-east-1 on-demand G/VT quota (4 vCPU;
+# spot 0) fits exactly one g6e.xlarge: the same L40S 48 GB, with 4 vCPU and 32 GiB of RAM
+# (the pod had 16 vCPU and 94 GiB), at $1.861/h plus 200 GB gp3. Pinned to g6e.xlarge, no
+# fallback. Only the provider block, the budget and what the host forces differ from the
+# RunPod original, which keeps the design notes; config hashes differ (the hardware is in
+# them). bench/tests/aws/test_aws_perf_track.py fails if this, its twin or their RunPod
+# originals drift apart.
+#
+# Budget (proposed, not approved): `bench plan` (2026-11-02, overall cap $249.75) puts
+# the host at 7.46 h of the 8 h TTL (the aws_ec2 provider's limit, as RunPod's), estimate
+# $14.04; the worst case to TTL is $15.06, under a $15.25 cap. Past runs came in at 30-80%
+# of plan (95cde129: $6.39 of $8.90): expect ~$9-11.
+name: qwen3-8b-specdec-aws
+description: "Qwen3-8B on RunPod Secure 1x L40S, vLLM v0.30.0: no speculation vs n-gram vs EAGLE3 (3 draft tokens), chat and real code edits at fixed loads, gated vs BF16."
+model: qwen3-8b
+provider:
+  kind: aws_ec2
+  region: us-east-1
+  instance_type: g6e.xlarge
+  market: on_demand
+  disk_gb: 200
+variants:
+  - name: bf16
+  - name: bf16-ngram
+    engine:
+      args:
+        speculative_config:
+          method: ngram
+          num_speculative_tokens: 3
+          prompt_lookup_max: 4
+          prompt_lookup_min: 2
+  - name: bf16-eagle3
+    store_output_text: true
+    engine:
+      args:
+        speculative_config:
+          method: eagle3
+          model: RedHatAI/Qwen3-8B-speculator.eagle3
+          revision: 08610ffa01dd9f16731fe8f627b85905b6aa51c4
+          num_speculative_tokens: 3
+workloads:
+  - profile: chat-sharegpt
+    load:
+      mode: open_loop
+      values: [0.25, 1, 2, 3]
+      duration_s: 180
+      warmup_s: 30
+      drain_timeout_s: 60
+  - profile: code-edit-commitpackft
+    label: code-edit
+    overrides: {max_output_len: 512}
+    load:
+      mode: open_loop
+      values: [0.5, 2, 4]
+      duration_s: 180
+      warmup_s: 30
+      # 512 tokens at the 50 ms TPOT target take ~26 s; 30 s drains any passing load.
+      drain_timeout_s: 30
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+quality:
+  suite: qwen3-8b
+  subset: phase0-strict
+  baseline_variant: bf16
+  replicates: 3
+budget:
+  max_spend: "$15.25"
+  ttl_minutes: 480
+  accrual_interval_s: 15
+seed: 0

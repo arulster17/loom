@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import math
 import os
 import re
@@ -54,6 +55,8 @@ from loom_bench.records import Market
 from loom_bench.registry import PinnedImage, read_yaml
 from loom_bench.tokenize import hf_cache_folder
 from loom_bench.workloads.profiles import DatasetDownload
+
+log = logging.getLogger(__name__)
 
 PROVIDER_NAME = "aws_ec2"
 DLAMI_PARAMETER = (
@@ -100,6 +103,14 @@ LMEVAL_EXTRA = "lmeval"
 CLIENT_IMAGE = "python@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d"
 BOOT_TIMEOUT_S = 900
 SSM_ONLINE_TIMEOUT_S = 900
+# A profile window's trace collection: archive, upload (traces are capped in size).
+PROFILE_COLLECT_TIMEOUT_S = 600
+_TRACE_DIR_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
+# Teardown waits up to this long for the instance to reach `terminated`. The account's
+# G/VT on-demand quota is 4 vCPU, exactly one g6e.xlarge: an instance still shutting down
+# holds it, and the next host of the same run (another `host_group`) would fail
+# RunInstances with VcpuLimitExceeded (docs/runbook.md, section 7).
+TERMINATE_WAIT_S = 600
 CAPACITY_ERRORS = frozenset(
     {
         "InsufficientInstanceCapacity",
@@ -845,6 +856,35 @@ class AwsEc2Provider:
         )
         return await asyncio.to_thread(self._fetch_eval_result, prefix)
 
+    # -- profiles -------------------------------------------------------------------
+
+    def _read(self, key: str) -> bytes:
+        body = self.s3.get_object(Bucket=self.settings.bucket, Key=key)["Body"]
+        return bytes(body.read())
+
+    async def collect_profile(
+        self, host: Host, run_id: str, trace_dir: str, max_bytes: int
+    ) -> bytes:
+        """The trace files a profile window left in `trace_dir` (bind-mounted into the
+        engine container at the same path), as one .tar.gz: a root script archives them,
+        uploads the archive to the run's S3 prefix through a presigned URL and deletes
+        them (loom_bench.profile.capture)."""
+        if not _TRACE_DIR_RE.match(trace_dir) or ".." in trace_dir:
+            raise ValueError(f"trace_dir must be an absolute plain path, got {trace_dir!r}")
+        key = self.job_prefix(host, run_id) + "trace.tar.gz"
+        script = render_script(
+            "collect_profile",
+            TRACE_DIR=trace_dir,
+            MAX_BYTES=int(max_bytes),
+            UPLOAD_URL=self._presign("put_object", key),
+        )
+        stdout = await self._run(
+            host, script, timeout_s=PROFILE_COLLECT_TIMEOUT_S, comment=f"loom profile {run_id}"
+        )
+        if "loom-profile-done" not in stdout:
+            raise RuntimeError(f"{host.host_id}: trace collection for {run_id} did not finish")
+        return await asyncio.to_thread(self._read, key)
+
     # -- teardown ------------------------------------------------------------------
 
     def _terminate(self, host_id: str) -> None:
@@ -854,9 +894,30 @@ class AwsEc2Provider:
             if _error_code(e) != "InvalidInstanceID.NotFound":
                 raise
 
+    async def _wait_terminated(self, host_id: str) -> None:
+        """Until the instance is `terminated` (or gone), at most TERMINATE_WAIT_S: it holds
+        its vCPUs against the on-demand quota until then. Billing already stopped at
+        shutting-down; a timeout is logged, not raised (the instance is going anyway)."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + TERMINATE_WAIT_S
+        while True:
+            inst = await asyncio.to_thread(self._describe, host_id)
+            if inst is None or inst["State"]["Name"] == "terminated":
+                return
+            if loop.time() > deadline:
+                log.warning(
+                    "%s still %s %ds after terminate",
+                    host_id,
+                    inst["State"]["Name"],
+                    TERMINATE_WAIT_S,
+                )
+                return
+            await self.sleep(self.settings.poll_interval_s)
+
     async def teardown(self, host: Host) -> None:
         await asyncio.to_thread(self._terminate, host.host_id)
         self.weights.forget(host.host_id)
+        await self._wait_terminated(host.host_id)
 
     async def reap(self, now: datetime) -> list[str]:
         return await asyncio.to_thread(aws_reaper.reap, self.ec2, now)
