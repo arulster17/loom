@@ -180,6 +180,36 @@ experiment (exit 1). Options: run again later, or set `provider.market: on_deman
   The runner policy allows this for `loom:managed=true` instances. The experiment row
   stays `running`; it is history only.
 
+### No capacity (`InsufficientInstanceCapacity`)
+
+A launch tries each subnet's AZ once (a sweep) and keeps the first instance it gets. When
+every AZ refuses for capacity, the provider sweeps again for up to `capacity_wait_s`
+(1800 s, as RunPod's; `LOOM_AWS_CAPACITY_WAIT_S` overrides it, 0 fails on the first
+sweep). It waits 30, 60, 120, then 240 s between sweeps (RunPod's backoff) and makes one
+last sweep at the deadline. Each sweep logs one line with the time waited:
+
+```text
+AWS g6e.xlarge capacity: none in us-east-1c, us-east-1a, us-east-1d, us-east-1b (InsufficientInstanceCapacity); not offered in us-east-1e, us-east-1f (waited 0 s, 1800 s left); next sweep in 30 s
+AWS g6e.xlarge capacity: none in us-east-1c, us-east-1a, us-east-1d, us-east-1b (InsufficientInstanceCapacity) (waited 30 s, 1770 s left); next sweep in 60 s
+AWS g6e.xlarge capacity: launched i-0abc… in us-east-1d (waited 90 s)
+```
+
+- **Nothing exists or bills while waiting.** No instance exists between sweeps, and the
+  budget guard only starts accruing a host once a sweep returns it. The host's launch
+  time and TTL are those of the sweep that got it, so the wait never shortens its life.
+  A run that gives up (`no capacity for g6e.xlarge after waiting 1800 s: …`, exit 1) has
+  spent $0 and has no host.
+- **What is waited out:** `InsufficientInstanceCapacity`, `InsufficientHostCapacity`,
+  `InsufficientCapacity` and `SpotMaxPriceTooLow`. `Unsupported` means the AZ does not
+  offer the type at all (g6e.xlarge is offered in us-east-1a to 1d only, per
+  `aws ec2 describe-instance-type-offerings`), so that AZ is dropped from later sweeps,
+  and a sweep with only `Unsupported` AZs fails at once.
+- **Everything else fails at once,** as before: `VcpuLimitExceeded` (the previous host is
+  still shutting down, or the quota is too small), auth errors, a bad AMI, invalid
+  parameters.
+- **A longer wait** costs nothing: `LOOM_AWS_CAPACITY_WAIT_S=7200 uv run bench run …`.
+  Keep the laptop awake (`caffeinate -i`) for the whole wait.
+
 ### Orphaned resources
 
 `bench reap` and the Lambda only act on resources whose `loom:ttl` has passed (or that are
@@ -310,7 +340,8 @@ uv run bench report -e <aws id>
 - **Capacity:** on-demand capacity was the operational issue. Four launch attempts got
   `InsufficientInstanceCapacity` in every g6e AZ before any host existed (exit 1, $0, a
   `failed` experiment row each). A retry 1-11 min later got a host each time, so retry
-  that failure (and only it) every 10 min rather than giving up. A
+  that failure (and only it) rather than giving up. The provider now does this itself
+  for up to `capacity_wait_s` (section 4, No capacity). A
   `VcpuLimitExceeded` instead means the previous host is still shutting down: wait until
   it is `terminated`.
 - **Spend:** Cost Explorer is not enabled for the CLI user (`AccessDenied`). Check AWS-side
@@ -366,7 +397,8 @@ uv run bench compare <id> <id> --match-by workload --cell-a bf16 --cell-b sglang
 uv run bench compare 95cde129 <id>                                # vLLM bf16 vs 95cde129's
 ```
 
-Retry `InsufficientInstanceCapacity` (no host, $0) every 10 min as in section 7.
+The provider waits out `InsufficientInstanceCapacity` itself, for up to `capacity_wait_s`
+(no host, $0; section 4, No capacity). If it gives up, run again later.
 
 **As run.**
 
@@ -420,6 +452,12 @@ New on this path, each covered offline first (moto and the host simulator):
   `TRTLLM_ENABLE_PDL: "0"` fallback.
 - **32 GiB host RAM** (the pod had 94): TensorRT-LLM's model load and evals on it are not
   measured yet. The smoke shows it first.
+- **Waiting for capacity:** on 2026-11-02 at 22:20, `aws-smoke-profile` failed at once
+  with `InsufficientInstanceCapacity` in us-east-1a to 1d (1e and 1f do not offer
+  g6e.xlarge). The provider now sweeps the AZs again for up to `capacity_wait_s`
+  (`LOOM_AWS_CAPACITY_WAIT_S`, default 1800 s) on a 30/60/120/240 s backoff, with no
+  instance and no spend while waiting (section 4, No capacity). Only one g6e.xlarge fits
+  the 4-vCPU quota, so `VcpuLimitExceeded` still fails at once.
 
 Run each smoke before its real run, with the same pinned AMI as 95cde129 and fccf9ed3
 (driver 595.91.07, CUDA 13.2) and the preflight in section 7a:
@@ -432,7 +470,8 @@ caffeinate -i uv run bench run bench/experiments/aws-smoke-trtllm.yaml --out res
 aws ec2 wait instance-terminated --region us-east-1 --instance-ids <last host>
 ```
 
-Retry `InsufficientInstanceCapacity` (no host, $0) every 10 min as in section 7. After
+To wait longer than 30 min for a host, set `LOOM_AWS_CAPACITY_WAIT_S` (e.g. `7200`) on
+the `bench run`; if the wait gives up (exit 1, no host, $0), run again later. After
 each smoke, check its RunPod twin's list (in the RunPod smoke spec's header), plus on AWS:
 `engine_started` for every cell, a `profile` event per window and no `profile_failed`
 (profile), `spec_decode` absent from every run's `server.missing` (specdec), three

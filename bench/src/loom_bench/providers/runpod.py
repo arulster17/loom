@@ -30,7 +30,6 @@ from __future__ import annotations
 import asyncio
 import atexit
 import hashlib
-import itertools
 import logging
 import math
 import os
@@ -38,7 +37,7 @@ import re
 import secrets
 import shutil
 import tempfile
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -64,6 +63,7 @@ from loom_bench.providers.base import (
     Host,
     HostLost,
     HostRequest,
+    capacity_backoff,
 )
 from loom_bench.providers.runpod_api import (
     GRAPHQL_URL,
@@ -124,8 +124,6 @@ _PINNED_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*[a-z0-9]@sha256:[0-9a-f]{64}$")
 # RunPod documents no limit on dockerStartCmd; keep the rendered start command small.
 MAX_START_CMD_BYTES = 8192
 POD_NAME_MAX = 191  # RunPod's documented limit on `name`
-# Waits between pod creates that RunPod refuses for lack of stock; the last repeats.
-CAPACITY_BACKOFF_S = (30.0, 60.0, 120.0, 240.0)
 
 log = logging.getLogger(__name__)
 
@@ -141,11 +139,6 @@ class _StockWatch:
 
     seen: list[str] | None = None
     failed: bool = False
-
-
-def _capacity_backoff() -> Iterator[float]:
-    yield from CAPACITY_BACKOFF_S
-    yield from itertools.repeat(CAPACITY_BACKOFF_S[-1])
 
 
 def check_url(url: str) -> str:
@@ -553,13 +546,13 @@ class RunpodProvider:
         availability (`RunpodApi.gpu_stock`) is read every `availability_poll_s`, and the
         next create goes out only when an allowed datacenter shows stock, aimed at those
         datacenters. A create refused while the same datacenters still show stock waits
-        out the backoff (`CAPACITY_BACKOFF_S`) before the next; a datacenter newly showing
+        out the backoff (`base.CAPACITY_BACKOFF_S`) before the next; a datacenter newly showing
         stock is tried at once. If the availability query fails, the wait falls back to
         blind creates on the backoff schedule: a broken signal never blocks a run.
         """
         start = self.clock()
         deadline = start + timedelta(seconds=self.settings.capacity_wait_s)
-        backoff = _capacity_backoff()
+        backoff = capacity_backoff()
         target: list[str] | None = None  # datacenters the next create is aimed at
         state = _StockWatch()
         while True:

@@ -16,6 +16,8 @@ the runner dies.
 
 from __future__ import annotations
 
+import itertools
+from collections.abc import Iterator
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -24,6 +26,16 @@ from pydantic import BaseModel, ConfigDict, Field
 from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult
 from loom_bench.provenance import PriceBasis
 from loom_bench.records import Market
+
+# Waits between attempts at a host the cloud refuses for lack of capacity (a RunPod create
+# refused for stock, an EC2 sweep with no capacity in any AZ); the last repeats.
+CAPACITY_BACKOFF_S = (30.0, 60.0, 120.0, 240.0)
+
+
+def capacity_backoff() -> Iterator[float]:
+    """`CAPACITY_BACKOFF_S`, then its last wait forever."""
+    yield from CAPACITY_BACKOFF_S
+    yield from itertools.repeat(CAPACITY_BACKOFF_S[-1])
 
 
 class HostRequest(BaseModel):
