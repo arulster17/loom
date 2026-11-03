@@ -32,7 +32,13 @@ from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
 
 import boto3  # type: ignore[import-untyped]
-from botocore.exceptions import ClientError  # type: ignore[import-untyped]
+from botocore.exceptions import (  # type: ignore[import-untyped]
+    ClientError,
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from loom_bench.engines import docker_run_argv, metrics_path
@@ -134,6 +140,21 @@ CAPACITY_ERRORS = TRANSIENT_CAPACITY_ERRORS | {UNSUPPORTED}
 # then fails with what to check (something else holds the quota, or it is too small).
 QUOTA_ERRORS = frozenset({"VcpuLimitExceeded"})
 QUOTA_WAIT_S = 600
+# EC2 calls that failed on the network, not with an answer: the request may or may not
+# have taken effect. 014218c9 lost a whole experiment to one RunInstances read timeout
+# (60 s) during its capacity wait. These are retried on the backoff, at most
+# NETWORK_RETRIES times in a row; RunInstances is resent with the same ClientToken, so a
+# call that did launch returns that instance instead of a second one.
+NETWORK_ERRORS: tuple[type[Exception], ...] = (
+    ReadTimeoutError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ConnectionClosedError,
+)
+NETWORK_RETRIES = 4
+# Teardown's terminate and its wait for `terminated`: a network error there is retried
+# (terminate is idempotent), never left as a running instance.
+TERMINATE_RETRY_S = (5.0, 10.0, 20.0, 40.0, 60.0)
 SPOT_INTERRUPTION_CODES = frozenset(
     {"Server.SpotInstanceTermination", "Server.SpotInstanceShutdown"}
 )
@@ -289,6 +310,44 @@ class NoCapacity(RuntimeError):
         if self.unsupported:
             parts.append(f"not offered in {', '.join(self.unsupported)}")
         return "; ".join(parts)
+
+
+class _PendingLaunch(Exception):
+    """RunInstances failed on the network: it may have launched an instance. Carries the
+    exact request (same ClientToken, tags, TTL) to resend, and what the host needs."""
+
+    def __init__(
+        self,
+        kwargs: dict[str, Any],
+        cand: dict[str, Any],
+        *,
+        now: datetime,
+        ttl_at: datetime,
+        tags: dict[str, str],
+        ami: str,
+        cause: Exception,
+    ) -> None:
+        self.kwargs = kwargs
+        self.cand = cand
+        self.now = now
+        self.ttl_at = ttl_at
+        self.tags = tags
+        self.ami = ami
+        self.cause = cause
+        super().__init__(f"RunInstances in {cand['az']}: {type(cause).__name__}: {cause}")
+
+    @property
+    def token(self) -> str:
+        return str(self.kwargs["ClientToken"])
+
+
+# What the capacity wait retries on the network: an unanswered RunInstances, or any other
+# EC2/SSM call of the sweep that failed before an answer.
+_NETWORK_RETRYABLE: tuple[type[Exception], ...] = (_PendingLaunch, *NETWORK_ERRORS)
+
+
+class Ec2Unreachable(RuntimeError):
+    """EC2 calls kept failing on the network for NETWORK_RETRIES backoff waits."""
 
 
 class VcpuQuotaHeld(RuntimeError):
@@ -541,21 +600,33 @@ class AwsEc2Provider:
             }
         return kwargs
 
-    def _provision(self, req: HostRequest, skip_azs: frozenset[str] = frozenset()) -> Host:
+    def _provision(
+        self,
+        req: HostRequest,
+        skip_azs: frozenset[str] = frozenset(),
+        pending: _PendingLaunch | None = None,
+    ) -> Host:
         """One sweep: try each candidate AZ (but `skip_azs`) once and keep the first
         instance launched; `NoCapacity` if every AZ refused it for capacity. The launch
         time and TTL are this sweep's, so time spent in earlier sweeps never shortens
         the host's life or bills it."""
         experiment = self._validate_request(req)
         assert req.instance_type is not None
+        refused: dict[str, str] = {}
+        if pending is not None:
+            # The same request again (same ClientToken): EC2 returns the instance the
+            # timed-out call launched, if it did, instead of launching a second one.
+            got = self._launch(req, pending.kwargs, pending.cand, refused, pending=pending)
+            if got is not None:
+                return self._host(req, got, pending)
+            skip_azs = skip_azs | {pending.cand["az"]}
         now = self.clock()
         ttl_at = now + timedelta(seconds=req.ttl_s)
         tags = self._tags(req, experiment, ttl_at)
         ami, root_device = self._ami()
         candidates = [c for c in self._candidates(req, now) if c["az"] not in skip_azs]
-        if not candidates:
+        if not candidates and not refused:
             raise ValueError("none of the configured subnets exist")
-        refused: dict[str, str] = {}
         for cand in candidates:
             kwargs = self._run_instances_kwargs(
                 req,
@@ -565,40 +636,92 @@ class AwsEc2Provider:
                 tags=tags,
                 ttl_at=ttl_at,
             )
-            try:
-                resp = self.ec2.run_instances(**kwargs)
-            except ClientError as e:
-                code = _error_code(e)
-                if code in QUOTA_ERRORS:
-                    # Account-wide: every other AZ would refuse it too.
-                    refused[cand["az"]] = code
-                    raise NoCapacity(req.instance_type, refused) from None
-                if code not in CAPACITY_ERRORS:
-                    raise
-                refused[cand["az"]] = code
-                continue
-            inst = resp["Instances"][0]
-            return Host(
-                provider=PROVIDER_NAME,
-                host_id=inst["InstanceId"],
-                request=req,
-                hourly_micros=cand["hourly_micros"],
-                launched_at=now,
-                ttl_at=ttl_at,
-                as_run_micros=cand["as_run_micros"],
-                price_basis=cand["price_basis"],
-                info={
-                    "region": self.settings.region,
-                    "az": cand["az"],
-                    "subnet_id": cand["subnet_id"],
-                    "ami": ami,
-                    "instance_type": req.instance_type,
-                    "market": req.market.value,
-                    "accrual_basis": cand["accrual_basis"],
-                    "tags": tags,
-                },
+            attempt = _PendingLaunch(
+                kwargs, cand, now=now, ttl_at=ttl_at, tags=tags, ami=ami, cause=RuntimeError()
             )
+            got = self._launch(req, kwargs, cand, refused, pending=attempt)
+            if got is not None:
+                return self._host(req, got, attempt)
         raise NoCapacity(req.instance_type, refused)
+
+    def _launch(
+        self,
+        req: HostRequest,
+        kwargs: dict[str, Any],
+        cand: dict[str, Any],
+        refused: dict[str, str],
+        *,
+        pending: _PendingLaunch,
+    ) -> dict[str, Any] | None:
+        """One RunInstances: the instance, or None if the AZ refused it for capacity
+        (recorded in `refused`). A quota refusal ends the sweep (`NoCapacity`); a network
+        failure raises `_PendingLaunch` with this exact request, to be resent."""
+        try:
+            resp = self.ec2.run_instances(**kwargs)
+        except NETWORK_ERRORS as e:
+            raise _PendingLaunch(
+                kwargs,
+                cand,
+                now=pending.now,
+                ttl_at=pending.ttl_at,
+                tags=pending.tags,
+                ami=pending.ami,
+                cause=e,
+            ) from e
+        except ClientError as e:
+            code = _error_code(e)
+            if code in QUOTA_ERRORS:
+                # Account-wide: every other AZ would refuse it too.
+                refused[cand["az"]] = code
+                raise NoCapacity(str(req.instance_type), refused) from None
+            if code not in CAPACITY_ERRORS:
+                raise
+            refused[cand["az"]] = code
+            return None
+        return dict(resp["Instances"][0])
+
+    def _host(self, req: HostRequest, inst: Mapping[str, Any], launch: _PendingLaunch) -> Host:
+        cand = launch.cand
+        return Host(
+            provider=PROVIDER_NAME,
+            host_id=inst["InstanceId"],
+            request=req,
+            hourly_micros=cand["hourly_micros"],
+            launched_at=launch.now,
+            ttl_at=launch.ttl_at,
+            as_run_micros=cand["as_run_micros"],
+            price_basis=cand["price_basis"],
+            info={
+                "region": self.settings.region,
+                "az": cand["az"],
+                "subnet_id": cand["subnet_id"],
+                "ami": launch.ami,
+                "instance_type": req.instance_type,
+                "market": req.market.value,
+                "accrual_basis": cand["accrual_basis"],
+                "tags": launch.tags,
+            },
+        )
+
+    def _launched_by(self, token: str) -> list[str]:
+        """Instances (not terminated) that RunInstances with `token` created."""
+        resp = self.ec2.describe_instances(Filters=[{"Name": "client-token", "Values": [token]}])
+        return [
+            str(inst["InstanceId"])
+            for r in resp["Reservations"]
+            for inst in r["Instances"]
+            if inst["State"]["Name"] not in ("terminated", "shutting-down")
+            and inst.get("ClientToken", token) == token
+        ]
+
+    def _abandon(self, pending: _PendingLaunch) -> list[str]:
+        """Give up on a launch whose RunInstances never got an answer: terminate any
+        instance it did create (found by its ClientToken), so nothing is left running."""
+        leftover = self._launched_by(pending.token)
+        for iid in leftover:
+            log.warning("terminating %s, launched by an unanswered RunInstances", iid)
+            self._terminate(iid)
+        return leftover
 
     async def provision(self, req: HostRequest) -> Host:
         """Launch the instance. While every AZ refuses it for capacity, sweep them all
@@ -615,10 +738,49 @@ class AwsEc2Provider:
         unsupported: set[str] = set()
         refusals = 0  # sweeps refused so far
         quota_since: datetime | None = None  # first of the current run of quota refusals
+        pending: _PendingLaunch | None = None  # an unanswered RunInstances, to resend
+        network_failures = 0  # in a row
         while True:
             try:
-                host = await asyncio.to_thread(self._provision, req, frozenset(unsupported))
+                host = await asyncio.to_thread(
+                    self._provision, req, frozenset(unsupported), pending
+                )
+            except _NETWORK_RETRYABLE as e:
+                if isinstance(e, _PendingLaunch):
+                    pending = e
+                network_failures += 1
+                now = self.clock()
+                left = (deadline - now).total_seconds()
+                what = str(e) if isinstance(e, _PendingLaunch) else f"{type(e).__name__}: {e}"
+                if network_failures > NETWORK_RETRIES or left <= 0:
+                    log.warning(
+                        "AWS %s: EC2 unreachable (%s), %d times in a row; giving up",
+                        req.instance_type,
+                        what,
+                        network_failures,
+                    )
+                    note = await self._give_up_launch(pending)
+                    raise Ec2Unreachable(
+                        f"EC2 calls for {req.instance_type} failed on the network "
+                        f"{network_failures} times in a row (last: {what}); {note}"
+                    ) from e
+                pause = min(next(backoff), left)
+                log.warning(
+                    "AWS %s: %s (network, %d of %d); %s in %.0f s",
+                    req.instance_type,
+                    what,
+                    network_failures,
+                    NETWORK_RETRIES,
+                    f"resending the same RunInstances (ClientToken {pending.token})"
+                    if pending is not None
+                    else "next sweep",
+                    pause,
+                )
+                await self.sleep(pause)
+                continue
             except NoCapacity as e:
+                pending = None  # the resent request got an answer
+                network_failures = 0
                 refusals += 1
                 unsupported.update(e.unsupported)
                 now = self.clock()
@@ -668,16 +830,47 @@ class AwsEc2Provider:
                 )
                 await self.sleep(pause)
                 continue
-            if refusals:
+            if refusals or network_failures:
                 waited = (self.clock() - start).total_seconds()
                 log.warning(
-                    "AWS %s capacity: launched %s in %s (waited %.0f s)",
+                    "AWS %s capacity: launched %s in %s (waited %.0f s)%s",
                     req.instance_type,
                     host.host_id,
                     host.info["az"],
                     waited,
+                    " by resending the unanswered RunInstances" if pending is not None else "",
                 )
             return host
+
+    async def _give_up_launch(self, pending: _PendingLaunch | None) -> str:
+        """Before failing on the network: an unanswered RunInstances may have launched an
+        instance; find it by its ClientToken and terminate it. If EC2 cannot even be
+        asked, say so: the instance carries the run's `loom:ttl` tags and its own TTL
+        shutdown, so the reaper and its watchdog end it."""
+        if pending is None:
+            return "no RunInstances was pending"
+        for delay in (0.0, *TERMINATE_RETRY_S):
+            if delay:
+                await self.sleep(delay)
+            try:
+                left = await asyncio.to_thread(self._abandon, pending)
+            except NETWORK_ERRORS as e:
+                log.warning("could not check RunInstances %s: %s", pending.token, e)
+                continue
+            if left:
+                log.warning("terminated %s left by RunInstances %s", left, pending.token)
+                return f"terminated {', '.join(left)}, launched by RunInstances {pending.token}"
+            return f"RunInstances {pending.token} launched nothing"
+        log.error(
+            "RunInstances %s may have launched an instance that could not be checked; it is "
+            "tagged loom:ttl=%s and shuts itself down then (bench reap also finds it)",
+            pending.token,
+            ttl_tag_value(pending.ttl_at),
+        )
+        return (
+            f"RunInstances {pending.token} could not be checked: any instance it launched "
+            f"is tagged loom:ttl={ttl_tag_value(pending.ttl_at)} and shuts itself down then"
+        )
 
     # -- host state -----------------------------------------------------------
 
@@ -1053,14 +1246,43 @@ class AwsEc2Provider:
             if _error_code(e) != "InvalidInstanceID.NotFound":
                 raise
 
+    async def _terminate_retrying(self, host_id: str) -> None:
+        """`terminate_instances`, resent after a network error (it is idempotent) up to
+        len(TERMINATE_RETRY_S) times: a timed-out call must never leave the instance up.
+        If EC2 stays unreachable it raises; the runner then reports the teardown failed,
+        and the instance's own TTL shutdown and the reaper remain."""
+        for attempt, delay in enumerate((*TERMINATE_RETRY_S, None), start=1):
+            try:
+                await asyncio.to_thread(self._terminate, host_id)
+                return
+            except NETWORK_ERRORS as e:
+                if delay is None:
+                    raise
+                log.warning(
+                    "terminating %s: %s (network, attempt %d); retrying in %.0f s",
+                    host_id,
+                    f"{type(e).__name__}: {e}",
+                    attempt,
+                    delay,
+                )
+                await self.sleep(delay)
+
     async def _wait_terminated(self, host_id: str) -> None:
         """Until the instance is `terminated` (or gone), at most TERMINATE_WAIT_S: it holds
         its vCPUs against the on-demand quota until then. Billing already stopped at
-        shutting-down; a timeout is logged, not raised (the instance is going anyway)."""
+        shutting-down; a timeout is logged, not raised (the instance is going anyway).
+        A describe that fails on the network is just one more poll."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + TERMINATE_WAIT_S
         while True:
-            inst = await asyncio.to_thread(self._describe, host_id)
+            try:
+                inst = await asyncio.to_thread(self._describe, host_id)
+            except NETWORK_ERRORS as e:
+                log.warning("describing %s while it terminates: %s; polling on", host_id, e)
+                if loop.time() > deadline:
+                    return
+                await self.sleep(self.settings.poll_interval_s)
+                continue
             if inst is None or inst["State"]["Name"] == "terminated":
                 return
             if loop.time() > deadline:
@@ -1074,7 +1296,7 @@ class AwsEc2Provider:
             await self.sleep(self.settings.poll_interval_s)
 
     async def teardown(self, host: Host) -> None:
-        await asyncio.to_thread(self._terminate, host.host_id)
+        await self._terminate_retrying(host.host_id)
         self.weights.forget(host.host_id)
         await self._wait_terminated(host.host_id)
 

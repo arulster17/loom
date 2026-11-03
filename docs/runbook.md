@@ -213,6 +213,17 @@ AWS g6e.xlarge capacity: launched i-0abc… in us-east-1d (waited 90 s)
   the run fails with `VcpuQuotaHeld`. That means something else holds the quota (another
   instance not yet terminated) or the quota is below one instance's vCPUs. No instance
   exists while it waits.
+- **Network errors are retried, and RunInstances is idempotent.** A sweep call that gets no
+  answer is retried on the same backoff, at most 4 times in a row. These are
+  `ReadTimeoutError`, `ConnectTimeoutError`, `EndpointConnectionError` and
+  `ConnectionClosedError`; 014218c9 lost its experiment to one RunInstances read timeout.
+  - **RunInstances is resent unchanged,** with the same `ClientToken`. If the lost call did
+    launch an instance, EC2 returns that instance, which is adopted, never doubled.
+  - **When the retries run out,** the provider looks up the token (`describe-instances`
+    filter `client-token`) and terminates anything it launched. The run then fails with
+    `Ec2Unreachable`, saying what was found.
+  - **Teardown** resends `terminate-instances` after a network error (5 tries over about
+    2 min) and polls through `describe` timeouts while it waits for `terminated`.
 - **Everything else fails at once,** as before: auth errors, a bad AMI, invalid
   parameters.
 - **A longer wait** costs nothing: `LOOM_AWS_CAPACITY_WAIT_S=7200 uv run bench run …`.

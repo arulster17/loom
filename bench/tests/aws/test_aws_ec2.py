@@ -64,6 +64,11 @@ EBS_200GB = 21_918
 
 @pytest.fixture
 def aws(moto_aws: None) -> dict[str, Any]:
+    return aws_env()
+
+
+def aws_env() -> dict[str, Any]:
+    """The moto account the provider tests run in (call inside `mock_aws`)."""
     ec2 = boto3.client("ec2", region_name=REGION)
     iam = boto3.client("iam", region_name=REGION)
     ssm = boto3.client("ssm", region_name=REGION)
