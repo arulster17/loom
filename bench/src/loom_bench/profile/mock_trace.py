@@ -2,7 +2,7 @@
 
 Between `/start_profile` and `/stop_profile` the simulated engine reports each step it
 runs; on stop this writes a Chrome trace shaped like a torch profiler trace (one GPU
-kernel event per simulated kernel, a CPU `execute_model` annotation per step) to the
+kernel event per simulated kernel, vLLM v0.30's CPU and GPU step annotations) to the
 profile directory, named as vLLM names its files. Each step's real duration is split
 by fixed shares (`SHARES`), after a CPU gap, so the analysis has a known answer.
 """
@@ -53,11 +53,13 @@ class StepRecorder:
         for i, (start, dur, seqs, prefill) in enumerate(self.steps):
             t = start * 1e6
             d = dur * 1e6
+            # vLLM v0.30's step name: prefill requests (tokens), decode requests (tokens)
+            name = f"execute_context_{int(prefill > 0)}({prefill})_generation_{seqs}({seqs})"
             out.append(
                 {
                     "ph": "X",
                     "cat": "user_annotation",
-                    "name": "execute_model",
+                    "name": name,
                     "ts": t,
                     "dur": d,
                     "pid": 1,
@@ -66,6 +68,19 @@ class StepRecorder:
                 }
             )
             k = t + GAP_SHARE * d
+            # its GPU side: from the step's first kernel to its last
+            out.append(
+                {
+                    "ph": "X",
+                    "cat": "gpu_user_annotation",
+                    "name": name,
+                    "ts": k,
+                    "dur": d - GAP_SHARE * d,
+                    "pid": 0,
+                    "tid": 7,
+                    "args": {"device": 0},
+                }
+            )
             for name, _, share in SHARES:
                 kd = share * d
                 out.append(
