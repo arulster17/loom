@@ -279,3 +279,22 @@ kernels vs GPU idle), whether FP8-KV attention is the per-request excess, and th
 prefill share at each config's chat goodput. Both variants add `--profiler-config`, so
 their config hashes differ from 7a8237d0's; `bench compare <id> 7a8237d0 --match-by
 workload` at the shared chat rates checks that an armed but idle profiler costs nothing.
+
+#### On AWS instead (2026-11-02, proposed, not approved, not run)
+
+RunPod Secure 1x L40S was out of stock all of 2026-11-02, so the run has AWS twins on one
+g6e.xlarge on-demand host (the same L40S 48 GB; 4 vCPU and 32 GiB against the pod's 16 and
+94; $1.861/h plus 200 GB gp3, accrued at $1.8829/h). The account's on-demand G/VT quota is
+4 vCPU, exactly one such host, so each spec uses one host, with fp8-kv8 through a warm
+restart. Same variants, workloads, windows, repetitions and SLO as the RunPod specs; only
+the provider block and budget differ (`bench/tests/aws/test_aws_perf_track.py`).
+
+On AWS the engine runs in Docker, so a profiled vLLM container bind-mounts its
+`torch_profiler_dir` at the same host path and `aws_scripts/collect_profile.sh` archives
+and uploads it over SSM (new code; the smoke runs it first).
+
+| Spec | Host time (plan) | Estimate | Worst case (host to TTL) | Cap |
+|---|---|---|---|---|
+| aws-smoke-profile | 42.6 min of a 55 min TTL | $1.34 | $1.73 | $1.75 |
+| qwen3-8b-profile-aws | 2.29 h of a 2.75 h TTL | $4.32 | $5.18 | $5.25 |
+| Total | | $5.66 | $6.91 | $7.00 |
