@@ -573,7 +573,6 @@ class AwsEc2Provider:
         waited out (`TRANSIENT_CAPACITY_ERRORS`): any other error fails at once, and an AZ
         that does not offer the type is dropped from later sweeps. No instance exists
         while waiting: a sweep returns as soon as one launches."""
-        assert req.instance_type is not None
         start = self.clock()
         deadline = start + timedelta(seconds=self.settings.capacity_wait_s)
         backoff = capacity_backoff()
@@ -596,7 +595,7 @@ class AwsEc2Provider:
                         waited,
                     )
                     raise NoCapacity(
-                        req.instance_type, e.refused, waited_s=waited if refusals > 1 else None
+                        e.instance_type, e.refused, waited_s=waited if refusals > 1 else None
                     ) from None
                 pause = min(next(backoff), left)
                 log.warning(
