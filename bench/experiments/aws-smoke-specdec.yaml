@@ -1,0 +1,83 @@
+# PROPOSED 2026-11-02, NOT APPROVED, NOT RUN: run this smoke before
+# qwen3-8b-specdec-aws.yaml. The AWS twin of runpod-smoke-specdec.yaml (its list of paths
+# applies), every path of the speculative-decoding study at smoke scale on one host.
+#
+# Why AWS: RunPod Secure 1x L40S was out of stock all of 2026-11-02 (191 refused creates,
+# supply, not the request). The account's AWS us-east-1 on-demand G/VT quota (4 vCPU;
+# spot 0) fits exactly one g6e.xlarge: the same L40S 48 GB, with 4 vCPU and 32 GiB of RAM
+# (the pod had 16 vCPU and 94 GiB), at $1.861/h plus 200 GB gp3. Pinned to g6e.xlarge, no
+# fallback. Only the provider block, the budget and what the host forces differ from the
+# RunPod original, which keeps the design notes; config hashes differ (the hardware is in
+# them). bench/tests/aws/test_aws_perf_track.py fails if this, its twin or their RunPod
+# originals drift apart.
+#
+# New on AWS: the EAGLE3 head (RedHatAI/Qwen3-8B-speculator.eagle3, pinned) downloaded
+# onto the instance-store HF cache on the warm restart and loaded offline by the vLLM
+# container; the pinned CommitPackFT file (136 MB) fetched onto the host once and read
+# through the client container's read-only /data mount; the EAGLE3 rows' output text
+# carried in result.json through S3.
+#
+# Budget (proposed, not approved): `bench plan` (2026-11-02) puts the host at 1.56 h of a
+# 115 min TTL, estimate $2.94; the worst case to TTL is $3.61, under a $3.75 cap.
+name: aws-smoke-specdec
+description: "The Qwen3-8B speculative decoding study at smoke scale on 1x L40S: bf16, n-gram and EAGLE3, every code path once."
+model: qwen3-8b
+smoke: true
+provider:
+  kind: aws_ec2
+  region: us-east-1
+  instance_type: g6e.xlarge
+  market: on_demand
+  disk_gb: 200
+variants:
+  - name: bf16
+  - name: bf16-ngram
+    engine:
+      args:
+        speculative_config:
+          method: ngram
+          num_speculative_tokens: 3
+          prompt_lookup_max: 4
+          prompt_lookup_min: 2
+  - name: bf16-eagle3
+    store_output_text: true
+    engine:
+      args:
+        speculative_config:
+          method: eagle3
+          model: RedHatAI/Qwen3-8B-speculator.eagle3
+          revision: 08610ffa01dd9f16731fe8f627b85905b6aa51c4
+          num_speculative_tokens: 3
+workloads:
+  - profile: chat-sharegpt
+    load:
+      mode: open_loop
+      values: [0.5, 12]
+      duration_s: 10
+      warmup_s: 2
+      drain_timeout_s: 15
+  - profile: code-edit-commitpackft
+    label: code-edit
+    overrides: {max_output_len: 512}
+    load:
+      mode: open_loop
+      values: [2]
+      duration_s: 10
+      warmup_s: 2
+      drain_timeout_s: 15
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+quality:
+  suite: qwen3-8b
+  subset: phase0-strict
+  baseline_variant: bf16
+  replicates: 3
+  limit: 4
+budget:
+  max_spend: "$3.75"
+  ttl_minutes: 115
+  accrual_interval_s: 15
+seed: 0

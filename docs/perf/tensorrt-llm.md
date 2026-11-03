@@ -3,7 +3,9 @@
 Status (2026-11-02): the engine adapter is built and tested offline, including the
 workaround that gives TensorRT-LLM the full quality gate. A smoke run
 (`runpod-smoke-trtllm`) and a comparison run (`qwen3-8b-trtllm-vs-vllm-runpod`) are written
-and priced. **Neither has been approved or run.** Nothing below is a measurement yet: it
+and priced, with AWS g6e.xlarge twins (`aws-smoke-trtllm`, `qwen3-8b-trtllm-vs-vllm-aws`)
+for while RunPod has no L40S stock ("On AWS instead" below). **None has been approved or
+run.** Nothing below is a measurement yet: it
 says what we expect to see and why.
 
 ## The short version (how to explain this in an interview)
@@ -323,6 +325,53 @@ $96.57 recorded against the $249.75 overall cap; $50 per-experiment cap):
 | `qwen3-8b-trtllm-vs-vllm-runpod` | 3 (285 min): vLLM 3.65 h, TRT-LLM BF16 3.70 h, TRT-LLM FP8 3.46 h | $11.90 | $15.69 | $16 |
 
 Planned figures run high: the config sweep's pods took about 70% of their planned time.
+
+## On AWS instead (2026-11-02, proposed, not approved, not run)
+
+RunPod Secure 1x L40S was out of stock all of 2026-11-02, so `aws-smoke-trtllm` and
+`qwen3-8b-trtllm-vs-vllm-aws` run the same comparison on AWS g6e.xlarge on-demand hosts:
+the same L40S 48 GB, with 4 vCPU and 32 GiB of RAM (the pod had 16 and 94), $1.861/h plus
+200 GB gp3. Same variants, image digests, workloads, search, repetitions, SLO and quality;
+only the provider block, the budget and one host group differ
+(`bench/tests/aws/test_aws_perf_track.py`).
+
+- **Three hosts, one after another,** as RunPod's three pods. AWS keys a host by instance
+  type, not image, so `trtllm-bf16` gets `host_group: trtllm-bf16` (sharing vLLM's host
+  would take it to 7.3 h). The account's 4-vCPU quota fits one g6e.xlarge, so teardown now
+  waits until each instance is `terminated` before the next launches; without that the
+  second host fails with `VcpuLimitExceeded`.
+- **The vLLM row is 95cde129's bf16 cell** (same launch and hardware, config hash
+  `48f3d8d1…`), so it doubles as a repeat of that AWS run.
+- **Docker on EC2, new for TensorRT-LLM.** The launcher and the wrapper's source go in
+  `docker run`'s argv (`--entrypoint bash ... -c <launcher> trtllm-launch <source> ...`),
+  about 21 KB of rendered SSM script, well under SSM's 64 KB document size, the nearest
+  documented limit. TensorRT-LLM containers get NVIDIA's `--ulimit memlock=-1 --ulimit
+  stack=67108864` on top of `--ipc host` (so `/dev/shm` is the host's, 16 GiB). The
+  weights check and download run the image's own python3.
+- **Image pull:** EC2 hosts pulled SGLang's 15.2 GB in 416 s (~37 MB/s), so 17.3 GB is about
+  8 min. The planner adds 240 s of pull on AWS (`plan.AWS_ENGINE_START_EXTRA_S`), 120 s on
+  RunPod.
+- **Driver:** the pinned DLAMI (`ami-028357be7d5b15c53`, Base OSS Nvidia Driver, Ubuntu
+  24.04) has driver 595.91.07, CUDA 13.2, so it is at or above 580 and nearer 13.4 than
+  RunPod's 13.0 hosts. The PTX-JIT caveat still applies and the smoke settles it.
+- **Disk:** checkpoints live on the 250 GB instance-store NVMe (Qwen3-8B BF16 16.4 GB, the
+  ModelOpt FP8 9.5 GB, the ShareGPT file 0.7 GB; the planner now refuses a host whose
+  checkpoints and datasets exceed it). Images go on the 200 GB root volume: vLLM 8.7 GB
+  and TensorRT-LLM 17.3 GB compressed on the first host, TensorRT-LLM only on the others.
+- **Host RAM, the tightest new constraint:** 32 GiB against the pod's 94. The PyTorch
+  backend reads the 16.4 GB BF16 checkpoint through host memory as it loads, alongside the
+  trtllm-serve process and its worker, while the client container holds the eval harness.
+  The vLLM and SGLang runs fit on this host (95cde129, fccf9ed3); TensorRT-LLM's peak is
+  not measured anywhere yet. The smoke loads both checkpoints and runs every eval task on
+  the same 32 GiB host type, so an out-of-memory shows there first (an
+  `engine_start_failed` or a failed eval).
+
+| Spec | Hosts (TTL each) | Estimate | Worst case (every host to TTL) | Cap (`max_spend`) |
+|---|---|---|---|---|
+| `aws-smoke-trtllm` | 3 (65 min): 44.4, 50.3, 49.2 min | $4.52 | $6.12 | $6.25 |
+| `qwen3-8b-trtllm-vs-vllm-aws` | 3 (285 min): vLLM 3.71 h, TRT-LLM BF16 3.80 h, TRT-LLM FP8 3.56 h | $20.85 | $26.83 | $27 |
+
+The AWS runs so far came in at 72-74% of plan (95cde129, fccf9ed3), so expect about $15.
 
 ## What the smoke cannot show
 

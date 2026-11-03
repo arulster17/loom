@@ -15,7 +15,8 @@ needs an admin identity.
 
 This is the `aws_ec2` path, now secondary for GPU benches: the account's GPU spot quota
 is 0 (an increase is pending with AWS), and the real runs are on RunPod
-([runbook-runpod.md](runbook-runpod.md)).
+([runbook-runpod.md](runbook-runpod.md)). While RunPod has no 1x L40S stock, the
+perf-track runs have g6e.xlarge on-demand twins here (section 7b).
 
 ## 1. Preflight checklist
 
@@ -381,6 +382,62 @@ Retry `InsufficientInstanceCapacity` (no host, $0) every 10 min as in section 7.
   before the next launch: the quota fits one g6e.xlarge.
 - **SGLang's retraction counter** is absent until SGLang first retracts a request, so a
   run's server metrics list `preemptions` as missing; read it as zero.
+
+### 7b. The perf-track runs on AWS (proposed 2026-11-02, not approved, not run)
+
+RunPod Secure 1x L40S was out of stock all of 2026-11-02 (191 refused creates), so the
+three perf-track runs have AWS twins on g6e.xlarge on-demand (the same L40S, pinned, no
+fallback). Each twin is its RunPod spec with only the provider block, the budget and, for
+TensorRT-LLM, one host group changed (`bench/tests/aws/test_aws_perf_track.py`). The
+explainers have the design: [roofline-and-profiling.md](perf/roofline-and-profiling.md),
+[speculative-decoding.md](perf/speculative-decoding.md),
+[tensorrt-llm.md](perf/tensorrt-llm.md).
+
+Quotes (`bench plan` against a copy of the results DB, $96.57 already spent, $153.18 left
+under the overall cap; every real run is under the $50 per-experiment cap):
+
+| Spec | Hosts | Estimate | Worst case (hosts to TTL) | Cap |
+|---|---|---|---|---|
+| `aws-smoke-profile` | 1, 42.6 min of 55 | $1.34 | $1.73 | $1.75 |
+| `qwen3-8b-profile-aws` | 1, 2.29 h of 2.75 | $4.32 | $5.18 | $5.25 |
+| `aws-smoke-specdec` | 1, 1.56 h of 1.92 | $2.94 | $3.61 | $3.75 |
+| `qwen3-8b-specdec-aws` | 1, 7.46 h of 8 | $14.04 | $15.06 | $15.25 |
+| `aws-smoke-trtllm` | 3 in a row, 65 min TTL each | $4.52 | $6.12 | $6.25 |
+| `qwen3-8b-trtllm-vs-vllm-aws` | 3 in a row, 4.75 h TTL each | $20.85 | $26.83 | $27 |
+| All six | | $48.01 | $58.53 | $59.25 |
+
+New on this path, each covered offline first (moto and the host simulator):
+
+- **Profile traces:** a profiled vLLM container bind-mounts `/var/lib/loom/profiles` at the
+  same host path; `collect_profile.sh` archives it as root over SSM and uploads it through
+  a presigned PUT.
+- **Several hosts in one run** (TensorRT-LLM's three host groups): teardown now waits
+  until each instance is `terminated` (up to 10 min), so the next launch does not hit
+  `VcpuLimitExceeded`. Runs still go one at a time, and only after `aws ec2 wait
+  instance-terminated` on the previous run's host.
+- **TensorRT-LLM in Docker:** NVIDIA's `--ulimit memlock=-1 --ulimit stack=67108864`; a
+  17.3 GB image (~8 min to pull); `provider.engine_env` now exists on aws_ec2 for the
+  `TRTLLM_ENABLE_PDL: "0"` fallback.
+- **32 GiB host RAM** (the pod had 94): TensorRT-LLM's model load and evals on it are not
+  measured yet. The smoke shows it first.
+
+Run each smoke before its real run, with the same pinned AMI as 95cde129 and fccf9ed3
+(driver 595.91.07, CUDA 13.2) and the preflight in section 7a:
+
+```sh
+export LOOM_AWS_CONFIG=~/.config/loom/aws.yaml LOOM_AWS_AMI_ID=ami-028357be7d5b15c53
+export LOOM_DATABASE_URL=sqlite:///$PWD/results/loom.db     # the main checkout's DB
+uv run bench plan bench/experiments/aws-smoke-trtllm.yaml          # one spec at a time
+caffeinate -i uv run bench run bench/experiments/aws-smoke-trtllm.yaml --out results/
+aws ec2 wait instance-terminated --region us-east-1 --instance-ids <last host>
+```
+
+Retry `InsufficientInstanceCapacity` (no host, $0) every 10 min as in section 7. After
+each smoke, check its RunPod twin's list (in the RunPod smoke spec's header), plus on AWS:
+`engine_started` for every cell, a `profile` event per window and no `profile_failed`
+(profile), `spec_decode` absent from every run's `server.missing` (specdec), three
+`provisioned` events each after a `torn_down` (TensorRT-LLM), and no engine exit or
+out-of-memory on the 32 GiB host.
 
 ## 8. Tearing down the whole stack
 

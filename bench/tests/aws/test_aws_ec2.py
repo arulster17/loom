@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlparse
 
 import boto3
 import pytest
@@ -297,6 +298,80 @@ async def test_teardown_is_idempotent(aws: dict[str, Any]) -> None:
     assert state(aws["ec2"], host.host_id) == "terminated"
     ghost = host.model_copy(update={"host_id": "i-0123456789abcdef0"})
     await p.teardown(ghost)
+
+
+async def test_teardown_returns_only_once_the_instance_is_terminated(
+    aws: dict[str, Any],
+) -> None:
+    # The 4-vCPU G/VT quota fits one g6e.xlarge, and an instance still shutting down holds
+    # it: a run's next host (another host_group) would fail with VcpuLimitExceeded.
+    ec2 = aws["ec2"]
+    seen: list[str] = []
+
+    def describe_instances(**kw: Any) -> dict[str, Any]:
+        resp = ec2.describe_instances(**kw)
+        inst = resp["Reservations"][0]["Instances"][0]
+        if len(seen) < 3:  # moto terminates at once; a real instance shuts down first
+            inst["State"] = {"Code": 32, "Name": "shutting-down"}
+        seen.append(inst["State"]["Name"])
+        return dict(resp)
+
+    p = provider(aws, ec2=Proxy(ec2, describe_instances=describe_instances))
+    host = await p.provision(request())
+    await p.teardown(host)
+    assert seen == ["shutting-down"] * 3 + ["terminated"]
+
+
+async def test_teardown_gives_up_waiting_after_the_limit(
+    aws: dict[str, Any], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import loom_bench.providers.aws_ec2 as mod
+
+    monkeypatch.setattr(mod, "TERMINATE_WAIT_S", 0)
+    ec2 = aws["ec2"]
+
+    def describe_instances(**kw: Any) -> dict[str, Any]:
+        resp = ec2.describe_instances(**kw)
+        resp["Reservations"][0]["Instances"][0]["State"] = {"Code": 32, "Name": "shutting-down"}
+        return dict(resp)
+
+    p = provider(aws, ec2=Proxy(ec2, describe_instances=describe_instances))
+    host = await p.provision(request())
+    await p.teardown(host)  # logged, not raised: the instance is going anyway
+    assert "still shutting-down" in caplog.text
+
+
+async def test_collect_profile_archives_uploads_and_reads_back_the_trace(
+    aws: dict[str, Any],
+) -> None:
+    s3 = aws["s3"]
+
+    def on_command(script: str) -> list[dict[str, Any]]:
+        assert re.search(r"^TRACE_DIR=/var/lib/loom/profiles$", script, re.MULTILINE)
+        assert re.search(r"^MAX_BYTES=1048576$", script, re.MULTILINE)
+        assert 'tar -C "$TRACE_DIR"' in script and "loom-profile-done" in script
+        url = re.search(r"^UPLOAD_URL='?([^'\n]+)'?$", script, re.MULTILINE)
+        assert url is not None
+        key = urlparse(url.group(1)).path.lstrip("/").removeprefix("loom-bench-test/")
+        s3.put_object(Bucket="loom-bench-test", Key=key, Body=b"tgz")
+        return [{"Status": "Success", "StandardOutputContent": "loom-profile-done\n"}]
+
+    ssm = FakeSsm(on_command=on_command)
+    p = provider(aws, ssm=ssm)
+    host = await p.provision(request())
+    blob = await p.collect_profile(host, "run-1", "/var/lib/loom/profiles", 1024 * 1024)
+    assert blob == b"tgz"
+    assert ssm.sent[0]["Comment"] == "loom profile run-1"
+    with pytest.raises(ValueError, match="absolute plain path"):
+        await p.collect_profile(host, "run-1", "/var/lib/../etc", 1)
+
+
+async def test_collect_profile_without_its_done_marker_fails(aws: dict[str, Any]) -> None:
+    ssm = FakeSsm(on_command=lambda _s: [{"Status": "Success", "StandardOutputContent": ""}])
+    p = provider(aws, ssm=ssm)
+    host = await p.provision(request())
+    with pytest.raises(RuntimeError, match="did not finish"):
+        await p.collect_profile(host, "run-1", "/var/lib/loom/profiles", 1)
 
 
 def test_host_loss_classification() -> None:
