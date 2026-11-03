@@ -837,3 +837,24 @@ def test_trtllm_start_scripts_stay_well_inside_ssms_document_size():
         )
         size = len(json.dumps(ssm_commands(script)).encode())
         assert size < 32 * 1024, (cell.key, size)
+
+
+def test_the_fp8_only_smoke_is_exactly_aws_smoke_trtllms_missing_cell():
+    # d549221f ran vllm-bf16 and trtllm-bf16 and failed provisioning trtllm-fp8. The runner
+    # has no resume, so aws-smoke-trtllm-fp8 runs that cell alone, gated against the
+    # stored vllm-bf16 smoke evals at the same item limit.
+    full = load_experiment(RUNS["trtllm"][0])
+    fp8 = load_experiment(X / "aws-smoke-trtllm-fp8.yaml")
+    (cell,) = expand(fp8, REGISTRY)
+    cells = {c.variant: c for c in expand(full, REGISTRY)}
+    assert cell.config_hash == cells["trtllm-fp8"].config_hash
+    assert cell.host_key == cells["trtllm-fp8"].host_key
+    assert fp8.smoke and fp8.provider == full.provider
+    assert fp8.workloads == full.workloads and fp8.repetitions == full.repetitions
+    assert fp8.slo == full.slo and fp8.seed == full.seed
+    assert fp8.quality is not None and full.quality is not None
+    same = {"suite", "subset", "replicates", "limit", "allow_code_exec"}
+    assert fp8.quality.model_dump(include=same) == full.quality.model_dump(include=same)
+    assert fp8.quality.baseline is not None
+    assert str(fp8.quality.baseline.experiment) == "d549221f-285e-4820-8d51-a391e46ced4f"
+    assert fp8.quality.baseline.config_hash == cells["vllm-bf16"].config_hash
