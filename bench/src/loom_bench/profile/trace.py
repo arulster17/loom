@@ -14,7 +14,14 @@ communication. Time with no kernel running is `idle`: the GPU waiting on the CPU
 
 Per-step figures divide by the number of engine steps in the window: from the
 trace's step annotations when it has them, else the `steps` the capture asked for
-(`max_iterations`), else they are left out.
+(`max_iterations`), else they are left out. vLLM v0.30 names each step
+`execute_context_<n>(<tokens>)_generation_<n>(<tokens>)` (prefill requests and tokens,
+decode requests): those annotations also split the window step by step, so pure-decode
+steps are broken down per batch size (`step_shapes`), each step measured from its start
+to the next step's start (the LM head and sampling run after the annotated forward, and
+the gap to the next step is the GPU waiting on the CPU). vLLM v0.30 ignores the
+per-session `max_iterations` (smoke a183a857 recorded every step of the capture), so
+the requested count is only a last resort.
 """
 
 from __future__ import annotations
@@ -68,17 +75,35 @@ LABELS = {
     "gemm": "GEMM (linear layers, LM head)",
     "attention": "Attention (incl. RoPE, KV-cache writes)",
     "allreduce": "All-reduce / NCCL (exposed)",
-    "quant": "Quantize / dequantize",
+    "quant": "Quantize / dequantize (incl. fused norm+quant)",
     "sampling": "Sampling",
     "memcpy": "Memory copies",
     "other": "Other kernels (norms, activations, elementwise)",
     "idle": "GPU idle: CPU / scheduler gaps",
 }
-STEP_ANNOTATION = re.compile(r"execute_model|model_runner|_model_forward|gpu_model_runner", re.I)
+STEP_ANNOTATION = re.compile(
+    r"execute_model|model_runner|_model_forward|gpu_model_runner|execute_context_\d", re.I
+)
+# vLLM v0.30's step name: prefill requests (tokens), decode requests (tokens).
+STEP_SHAPE = re.compile(r"execute_context_(\d+)\((\d+)\)_generation_(\d+)\((\d+)\)")
+
+
+# torch.compile (Inductor) fuses FP8 activation quantization into the RMSNorm / SiLU
+# kernel before each scaled GEMM: `triton_red_fused__to_copy_abs_clamp_cutlass_scaled_mm_
+# div_..._reciprocal_...` computes the per-token scale (abs, max, reciprocal, clamp) and
+# casts. Inductor's pointwise and reduction kernels (`triton_poi_`, `triton_red_`,
+# `triton_per_`) never run a matrix multiply: only its templates (`triton_tem_`) do.
+INDUCTOR_NON_GEMM = re.compile(r"^triton_(poi|red|per)_")
+INDUCTOR_QUANT = re.compile(r"scaled_mm|quant|fp8|e4m3|abs_clamp|clamp.*reciprocal", re.I)
 
 
 def categorize(name: str) -> str:
+    inductor = bool(INDUCTOR_NON_GEMM.match(name))
+    if inductor and INDUCTOR_QUANT.search(name):
+        return "quant"
     for cat, pat in CATEGORIES:
+        if inductor and cat == "gemm":
+            continue
         if pat.search(name):
             return cat
     return "other"
@@ -96,6 +121,7 @@ class RankBreakdown:
     steps: int | None
     step_source: str | None
     top_kernels: list[dict[str, Any]] = field(default_factory=list)
+    step_shapes: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def busy_ms(self) -> float:
@@ -121,6 +147,7 @@ class RankBreakdown:
             else {},
             "per_step_ms": self.per_step_ms(),
             "top_kernels": self.top_kernels,
+            "step_shapes": self.step_shapes,
         }
 
 
@@ -149,12 +176,12 @@ def _device(ev: dict[str, Any]) -> int:
         return 0
 
 
-def _exclusive(intervals: list[tuple[float, float, str]]) -> tuple[dict[str, float], float, float]:
-    """Exclusive time per category over [first start, last end], plus idle."""
+def _segments(intervals: list[tuple[float, float, str]]) -> list[tuple[float, float, str]]:
+    """The window [first start, last end] cut into consecutive pieces, each credited to
+    the highest-priority category running in it, or `idle`."""
     if not intervals:
-        return {}, 0.0, 0.0
+        return []
     start = min(s for s, _, _ in intervals)
-    end = max(e for _, e, _ in intervals)
     bounds: list[tuple[float, int, str]] = []
     for s, e, c in intervals:
         if e > s:
@@ -162,15 +189,86 @@ def _exclusive(intervals: list[tuple[float, float, str]]) -> tuple[dict[str, flo
             bounds.append((e, -1, c))
     bounds.sort(key=lambda b: (b[0], b[1]))
     active: dict[str, int] = defaultdict(int)
-    out: dict[str, float] = defaultdict(float)
+    out: list[tuple[float, float, str]] = []
     prev = start
     for t, delta, c in bounds:
         if t > prev:
             live = next((p for p in PRIORITY if active.get(p, 0) > 0), None)
-            out[live or "idle"] += t - prev
+            out.append((prev, t, live or "idle"))
             prev = t
         active[c] += delta
+    return out
+
+
+def _exclusive(intervals: list[tuple[float, float, str]]) -> tuple[dict[str, float], float, float]:
+    """Exclusive time per category over [first start, last end], plus idle."""
+    if not intervals:
+        return {}, 0.0, 0.0
+    out: dict[str, float] = defaultdict(float)
+    for s, e, c in _segments(intervals):
+        out[c] += e - s
+    start = min(s for s, _, _ in intervals)
+    end = max(e for _, e, _ in intervals)
     return dict(out), start, end
+
+
+def _by_period(
+    segments: list[tuple[float, float, str]], bounds: list[float]
+) -> list[dict[str, float]]:
+    """Exclusive time per category inside each period [bounds[i], bounds[i+1])."""
+    out: list[dict[str, float]] = [defaultdict(float) for _ in range(len(bounds) - 1)]
+    j = 0
+    for s, e, c in segments:
+        while j < len(bounds) - 1 and bounds[j + 1] <= s:
+            j += 1
+        k = j
+        while k < len(bounds) - 1 and bounds[k] < e:
+            lo, hi = max(s, bounds[k]), min(e, bounds[k + 1])
+            if hi > lo:
+                out[k][c] += hi - lo
+            if bounds[k + 1] >= e:
+                break
+            k += 1
+    return [dict(d) for d in out]
+
+
+def step_shapes(
+    segments: list[tuple[float, float, str]], steps: list[tuple[float, str]]
+) -> list[dict[str, Any]]:
+    """Per-step breakdown from vLLM's step annotations (start time, name): each step runs
+    from its start to the next step's start, so it includes the LM head, sampling and the
+    GPU waiting for the next step. Pure-decode steps are grouped by batch size; steps
+    carrying prefill form one `mixed` group. Milliseconds."""
+    parsed = [(t, STEP_SHAPE.search(n)) for t, n in sorted(steps)]
+    if len(parsed) < 2 or not all(m for _, m in parsed):
+        return []
+    bounds = [t for t, _ in parsed]
+    periods = _by_period(segments, bounds)
+    groups: dict[tuple[str, int], list[tuple[float, dict[str, float], int]]] = defaultdict(list)
+    for (t, m), (t_next, _), cats in zip(parsed, parsed[1:], periods, strict=False):
+        assert m is not None
+        prefill_reqs, prefill_tokens, decode_reqs = int(m[1]), int(m[2]), int(m[3])
+        key = ("decode", decode_reqs) if prefill_reqs == 0 else ("mixed", 0)
+        groups[key].append(((t_next - t) / 1000, cats, prefill_tokens))
+    out: list[dict[str, Any]] = []
+    for (kind, batch), rows in sorted(
+        groups.items(), key=lambda kv: (kv[0][0] != "decode", kv[0][1])
+    ):
+        n = len(rows)
+        periods_ms = sorted(r[0] for r in rows)
+        cat_ms = {k: sum(r[1].get(k, 0.0) for r in rows) / n / 1000 for k in (*ORDER, "idle")}
+        row: dict[str, Any] = {
+            "kind": kind,
+            "batch": batch if kind == "decode" else None,
+            "steps": n,
+            "step_ms_p50": periods_ms[n // 2],
+            "step_ms_mean": sum(periods_ms) / n,
+            "category_ms": cat_ms,
+        }
+        if kind == "mixed":
+            row["prefill_tokens_mean"] = sum(r[2] for r in rows) / n
+        out.append(row)
+    return out
 
 
 def analyze_events(
@@ -180,6 +278,7 @@ def analyze_events(
     by_dev: dict[int, list[tuple[float, float, str]]] = defaultdict(list)
     names: dict[int, dict[str, list[float]]] = defaultdict(lambda: defaultdict(lambda: [0, 0.0]))
     step_ranges: dict[int, list[tuple[float, float]]] = defaultdict(list)
+    step_names: dict[int, list[tuple[float, str]]] = defaultdict(list)
     cpu_steps = 0
     for ev in events:
         if ev.get("ph") != "X":
@@ -198,13 +297,19 @@ def analyze_events(
             by_dev[_device(ev)].append((ts, ts + dur, "memcpy"))
         elif cat == "gpu_user_annotation" and STEP_ANNOTATION.search(name):
             step_ranges[_device(ev)].append((ts, ts + dur))
+            step_names[_device(ev)].append((ts, name))
         elif cat == "user_annotation" and STEP_ANNOTATION.search(name):
             cpu_steps += 1
     if not by_dev:
         raise ValueError("the trace has no GPU kernel events")
     out = []
     for dev in sorted(by_dev):
-        excl, start, end = _exclusive(by_dev[dev])
+        segments = _segments(by_dev[dev])
+        excl: dict[str, float] = defaultdict(float)
+        for s, e, c in segments:
+            excl[c] += e - s
+        start = min(s for s, _, _ in by_dev[dev])
+        end = max(e for _, e, _ in by_dev[dev])
         ms = {k: excl.get(k, 0.0) / 1000 for k in (*ORDER, "idle")}
         n_steps, how = None, None
         if step_ranges.get(dev):
@@ -232,6 +337,7 @@ def analyze_events(
                     }
                     for n, (c, t) in top
                 ],
+                step_shapes=step_shapes(segments, step_names.get(dev, [])),
             )
         )
     return out
@@ -284,4 +390,18 @@ def render_breakdown(result: TraceBreakdown) -> str:
             share = v / r.window_ms if r.window_ms else 0.0
             step = f"  {per[k]:7.2f} ms/step" if per else ""
             buf.write(f"  {LABELS[k]:<48} {v:9.1f} ms  {100 * share:5.1f}%{step}\n")
+        if r.step_shapes:
+            cols = (*ORDER, "idle")
+            buf.write("  steps by shape (ms per step, start to next start):\n")
+            buf.write(
+                "    shape        steps  p50   mean  " + " ".join(f"{c:>9}" for c in cols) + "\n"
+            )
+            for g in r.step_shapes:
+                shape = f"decode x{g['batch']}" if g["kind"] == "decode" else "mixed"
+                head = f"    {shape:<12} {g['steps']:5d} {g['step_ms_p50']:5.1f}"
+                buf.write(
+                    f"{head} {g['step_ms_mean']:6.1f}  "
+                    + " ".join(f"{g['category_ms'][c]:9.2f}" for c in cols)
+                    + "\n"
+                )
     return buf.getvalue()
