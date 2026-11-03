@@ -98,12 +98,17 @@ LOCAL_TIMING = Timing(
     eval_job_s=1.0,
 )
 # Extra (image pull, engine init) seconds per engine on top of the provider's Timing,
-# for engines much slower to start than vLLM. TensorRT-LLM 1.2.1's image is 20.9 GB
+# for engines much slower to start than vLLM. TensorRT-LLM 1.4.0rc2's image is 17.3 GB
 # compressed (registry manifest, amd64) against vLLM 0.30.0's 8.7 GB and SGLang
-# 0.5.21's 15.2 GB, whose pull took 226 s on RunPod (b97dea4c): at that rate ~310 s,
-# so +180 s over the shared 240 s leaves margin. Its init adds an autotuner pass and
-# CUDA-graph capture for more batch sizes (no measured start yet): +120 s.
-ENGINE_START_EXTRA_S: dict[str, tuple[float, float]] = {"trtllm": (180.0, 120.0)}
+# 0.5.21's 15.2 GB, whose pull took 226 s on RunPod (b97dea4c): at that rate ~257 s,
+# so +120 s over the shared 240 s leaves margin. Its init adds an autotuner pass and
+# CUDA-graph capture (no measured start yet): +120 s.
+ENGINE_START_EXTRA_S: dict[str, tuple[float, float]] = {"trtllm": (120.0, 120.0)}
+# The same on an EC2 host, whose image pulls are slower: vLLM's 8.7 GB took 232-236 s
+# after user-data on g6e.xlarge (80ff5648, 95cde129) and SGLang's 15.2 GB 416 s on a warm
+# switch (deb3ba58, fccf9ed3), ~37 MB/s compressed. TensorRT-LLM's 17.3 GB at that rate is
+# ~475 s: +240 s over AWS_TIMING's 300 s leaves margin.
+AWS_ENGINE_START_EXTRA_S: dict[str, tuple[float, float]] = {"trtllm": (240.0, 120.0)}
 # The mock starts a uvicorn thread, then waits startup_delay_s * time_scale.
 MOCK_SERVER_START_S = 0.5
 MOCK_RUN_OVERHEAD_S = 0.3
@@ -285,7 +290,8 @@ class Estimator:
         """`ENGINE_START_EXTRA_S` for a cell on a provisioned host (not `local`)."""
         if self.timing is None or self.timing is LOCAL_TIMING:
             return 0.0, 0.0
-        return ENGINE_START_EXTRA_S.get(cell.launch.engine, (0.0, 0.0))
+        extra = AWS_ENGINE_START_EXTRA_S if self.timing is AWS_TIMING else ENGINE_START_EXTRA_S
+        return extra.get(cell.launch.engine, (0.0, 0.0))
 
     def download_bytes(self, cell: Cell, held: Collection[tuple[str, str]] = ()) -> int:
         """Bytes a start of `cell` downloads onto a host whose cache holds `held`: its
@@ -618,6 +624,30 @@ def _runpod_disk_problems(host_key: str, cells: Sequence[Cell]) -> list[str]:
     ]
 
 
+def _aws_disk_problems(
+    host_key: str, cells: Sequence[Cell], prices: PriceBook, profiles: Sequence[WorkloadProfile]
+) -> list[str]:
+    """An EC2 host keeps every checkpoint its cells serve (and the pinned datasets) on the
+    instance-store NVMe (`AwsSettings.weights_dir`, `data_dir`); nothing is deleted between
+    warm restarts. Engine images go on the root volume (`disk_gb`), which this does not
+    check: the DLAMI's own use of it is not in prices.yaml."""
+    hw = cells[0].hardware
+    nvme_gb = _instance(prices, hw["region"], hw["instance_type"]).local_nvme_gb
+    if nvme_gb is None:
+        return []
+    sizes = {(c.spec.hf.repo, c.spec.hf.revision): c.spec.hf.size_bytes for c in cells}
+    data = {
+        d.sha256: d.size_bytes for p in profiles if (d := getattr(p, "download", None)) is not None
+    }
+    need_gb = (sum(sizes.values()) + sum(data.values())) / 1e9
+    if need_gb <= nvme_gb:
+        return []
+    return [
+        f"{host_key}: {len(sizes)} checkpoints and {len(data)} datasets ({need_gb:.0f} GB) "
+        f"do not fit {hw['instance_type']}'s {nvme_gb} GB instance store, where the host keeps them"
+    ]
+
+
 def _remote_dataset_problem(kind: str, name: str, profile: WorkloadProfile) -> str | None:
     """A workload reading a file (`path`) on a cloud host that has no copy of it would
     fail every run there; say so before anything is created."""
@@ -750,6 +780,9 @@ def build_plan(
     if isinstance(exp.provider, RunpodProviderSpec):
         for key, members in started.items():
             refusals += _runpod_disk_problems(key, members)
+    if isinstance(exp.provider, AwsEc2ProviderSpec):
+        for key, members in started.items():
+            refusals += _aws_disk_problems(key, members, prices, [p for _, p in profiles])
     for host in hosts.values():
         host.steps.append(Step("teardown", host.key, est.teardown_s()))
         notes += [f"{host.key}: {n}" for n in host.price_notes]

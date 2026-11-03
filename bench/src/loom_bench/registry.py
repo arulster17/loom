@@ -105,7 +105,10 @@ EngineName = Literal["vllm", "sglang", "trtllm"]
 
 class Engine(StrictModel):
     name: EngineName
-    version: Annotated[str, StringConstraints(pattern=r"^\d+\.\d+\.\d+([.+-][\w.]+)?$")]
+    # x.y.z, optionally a PEP 440 pre-release (TensorRT-LLM "1.4.0rc2") and/or a suffix.
+    version: Annotated[
+        str, StringConstraints(pattern=r"^\d+\.\d+\.\d+((a|b|rc)\d+)?([.+-][\w.]+)?$")
+    ]
     image: PinnedImage
     args: dict[str, Any] = Field(default_factory=dict)
     chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)

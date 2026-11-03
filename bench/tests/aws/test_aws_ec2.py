@@ -1,14 +1,18 @@
 import base64
 import hashlib
+import itertools
+import logging
 import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlparse
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 
 from loom_bench.engines import render_launch
 from loom_bench.experiment import expand, load_experiment
@@ -29,12 +33,15 @@ from loom_bench.providers.aws_ec2 import (
     AwsEc2Provider,
     AwsSettings,
     HostLost,
+    NoCapacity,
     SpotInterrupted,
     host_loss,
     load_aws_settings,
     spot_hourly_micros,
+    ttl_tag_value,
 )
-from loom_bench.providers.base import Host, HostRequest
+from loom_bench.providers.base import CAPACITY_BACKOFF_S, Host, HostRequest, capacity_backoff
+from loom_bench.providers.runpod import RunpodSettings
 from loom_bench.quality.divergence import ReferenceLogprobs
 from loom_bench.quality.sanity import SanityResult
 from loom_bench.quality.suite import Suite
@@ -264,6 +271,192 @@ async def test_provision_quota_error_is_not_retried(aws: dict[str, Any]) -> None
         await p.provision(request())
 
 
+# --- waiting for capacity ----------------------------------------------------------------
+
+IIC = "InsufficientInstanceCapacity"
+AWS_LOG = "loom_bench.providers.aws_ec2"
+
+
+class FakeTime:
+    """A clock that `sleep` advances, so waits cost no wall time."""
+
+    def __init__(self) -> None:
+        self.start = self.now = datetime(2026, 11, 2, 22, 20, tzinfo=UTC)
+        self.slept: list[float] = []
+
+    def clock(self) -> datetime:
+        return self.now
+
+    async def sleep(self, s: float) -> None:
+        self.slept.append(s)
+        self.now += timedelta(seconds=s)
+
+
+class Refusals:
+    """RunInstances refused with each code in `codes` in turn (one per AZ tried), then
+    launched by moto; `calls` records the AZ of each attempt."""
+
+    def __init__(self, aws: dict[str, Any], codes: list[str]) -> None:
+        self.ec2 = aws["ec2"]
+        self.codes = list(codes)
+        az = {s["SubnetId"]: s["AvailabilityZone"] for s in aws["subnets"]}
+        self.az = az
+        self.calls: list[str] = []
+        self.client = Proxy(self.ec2, run_instances=self.run_instances)
+
+    def run_instances(self, **kw: Any) -> Any:
+        self.calls.append(self.az[kw["SubnetId"]])
+        if self.codes:
+            raise client_error(self.codes.pop(0))
+        return self.ec2.run_instances(**kw)
+
+
+def instances(ec2: Any) -> list[dict[str, Any]]:
+    return [i for r in ec2.describe_instances()["Reservations"] for i in r["Instances"]]
+
+
+def waiting(aws: dict[str, Any], codes: list[str], **settings: Any) -> Any:
+    t = FakeTime()
+    ec2 = Refusals(aws, codes)
+    aws = {**aws, "settings": aws["settings"].model_copy(update=settings)}
+    p = provider(aws, ec2=ec2.client, clock=t.clock)
+    p.sleep = t.sleep
+    return p, t, ec2
+
+
+def test_the_capacity_backoff_is_runpods_schedule_then_its_last_wait() -> None:
+    assert CAPACITY_BACKOFF_S == (30.0, 60.0, 120.0, 240.0)
+    assert list(itertools.islice(capacity_backoff(), 7)) == [30, 60, 120, 240, 240, 240, 240]
+
+
+async def test_a_sweep_with_no_capacity_is_retried_on_the_backoff_until_one_launches(
+    aws: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger=AWS_LOG)
+    p, t, ec2 = waiting(aws, [IIC] * 12)  # six sweeps of both AZs, then a launch
+    host = await p.provision(request())
+
+    assert t.slept == [30, 60, 120, 240, 240, 240]
+    assert ec2.calls == ["us-east-1a", "us-east-1b"] * 6 + ["us-east-1a"]
+    (inst,) = instances(aws["ec2"])
+    assert inst["InstanceId"] == host.host_id
+    # Billing and the TTL start at the sweep that launched it, not when the wait began.
+    assert host.launched_at == t.now == t.start + timedelta(seconds=930)
+    assert host.ttl_at == host.launched_at + timedelta(seconds=3600)
+    assert tags_of(inst)["loom:ttl"] == ttl_tag_value(host.ttl_at)
+    lines = [r.getMessage() for r in caplog.records if r.name == AWS_LOG]
+    assert lines == [
+        "AWS g6e.xlarge capacity: none in us-east-1a, us-east-1b "
+        f"(InsufficientInstanceCapacity) (waited {w} s, {1800 - w} s left); next sweep in {s} s"
+        for w, s in [(0, 30), (30, 60), (90, 120), (210, 240), (450, 240), (690, 240)]
+    ] + [f"AWS g6e.xlarge capacity: launched {host.host_id} in us-east-1a (waited 930 s)"]
+
+
+async def test_a_sweep_that_launches_in_a_later_az_keeps_it_and_does_not_wait(
+    aws: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger=AWS_LOG)
+    p, t, ec2 = waiting(aws, [IIC])
+    host = await p.provision(request())
+    assert t.slept == []
+    assert ec2.calls == ["us-east-1a", "us-east-1b"]
+    assert [i["InstanceId"] for i in instances(aws["ec2"])] == [host.host_id]
+    assert host.info["az"] == "us-east-1b" and host.launched_at == t.start
+    assert [r for r in caplog.records if r.name == AWS_LOG] == []  # no wait, nothing logged
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "VcpuLimitExceeded",
+        "InstanceLimitExceeded",
+        "AuthFailure",
+        "UnauthorizedOperation",
+        "InvalidAMIID.NotFound",
+        "InvalidParameterValue",
+    ],
+)
+async def test_other_errors_fail_at_once_even_mid_wait(aws: dict[str, Any], code: str) -> None:
+    # A capacity sweep, then the error in the next sweep's first AZ: no further sweep.
+    p, t, ec2 = waiting(aws, [IIC, IIC, code])
+    with pytest.raises(ClientError, match=re.escape(code)):
+        await p.provision(request())
+    assert t.slept == [30]
+    assert ec2.calls == ["us-east-1a", "us-east-1b", "us-east-1a"]
+    assert instances(aws["ec2"]) == []
+
+
+async def test_the_wait_gives_up_at_the_deadline_with_no_instance(
+    aws: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger=AWS_LOG)
+    p, t, ec2 = waiting(aws, [IIC] * 100, capacity_wait_s=100)
+    with pytest.raises(NoCapacity) as err:
+        await p.provision(request())
+    # 30 and 60 s on the backoff, then the 10 s left, then one last sweep at the deadline.
+    assert t.slept == [30, 60, 10]
+    assert len(ec2.calls) == 8
+    assert instances(aws["ec2"]) == []
+    assert str(err.value) == (
+        "no capacity for g6e.xlarge after waiting 100 s: "
+        "us-east-1a: InsufficientInstanceCapacity; us-east-1b: InsufficientInstanceCapacity"
+    )
+    assert caplog.records[-1].getMessage() == (
+        "AWS g6e.xlarge capacity: none in us-east-1a, us-east-1b "
+        "(InsufficientInstanceCapacity) (waited 100 s); giving up"
+    )
+
+
+async def test_no_wait_when_capacity_wait_s_is_zero(aws: dict[str, Any]) -> None:
+    p, t, ec2 = waiting(aws, [IIC, IIC], capacity_wait_s=0)
+    with pytest.raises(NoCapacity, match=r"^no capacity for g6e.xlarge: us-east-1a: Insuff"):
+        await p.provision(request())
+    assert t.slept == [] and len(ec2.calls) == 2
+    assert instances(aws["ec2"]) == []
+
+
+async def test_an_az_that_does_not_offer_the_type_is_dropped_from_later_sweeps(
+    aws: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger=AWS_LOG)
+    p, t, ec2 = waiting(aws, ["Unsupported", IIC, IIC])
+    host = await p.provision(request())
+    assert ec2.calls == ["us-east-1a", "us-east-1b", "us-east-1b", "us-east-1b"]
+    assert t.slept == [30, 60]
+    assert host.info["az"] == "us-east-1b"
+    assert caplog.records[0].getMessage() == (
+        "AWS g6e.xlarge capacity: none in us-east-1b (InsufficientInstanceCapacity); "
+        "not offered in us-east-1a (waited 0 s, 1800 s left); next sweep in 30 s"
+    )
+
+
+async def test_no_wait_when_no_az_offers_the_type(aws: dict[str, Any]) -> None:
+    p, t, ec2 = waiting(aws, ["Unsupported", "Unsupported"])
+    with pytest.raises(NoCapacity, match="us-east-1a: Unsupported; us-east-1b: Unsupported"):
+        await p.provision(request())
+    assert t.slept == [] and len(ec2.calls) == 2
+
+
+def test_capacity_wait_s_defaults_to_runpods_and_reads_its_env_override(tmp_path: Path) -> None:
+    cfg = tmp_path / "aws.yaml"
+    cfg.write_text(
+        "bucket: b-1\ninstance_profile_name: p\nsecurity_group_id: sg-0abc\n"
+        "subnet_ids: [subnet-0a]\nhf_token_secret_name: loom/hf\nowner: arul\n"
+    )
+    env = {"LOOM_AWS_CONFIG": str(cfg)}
+    assert (
+        load_aws_settings(env=env).capacity_wait_s
+        == 1800
+        == RunpodSettings(bucket="b-1", owner="arul").capacity_wait_s
+    )
+    assert load_aws_settings(env={**env, "LOOM_AWS_CAPACITY_WAIT_S": "7200"}).capacity_wait_s == (
+        7200
+    )
+    assert load_aws_settings(env={**env, "LOOM_AWS_CAPACITY_WAIT_S": "0"}).capacity_wait_s == 0
+    with pytest.raises(ValueError, match="capacity_wait_s"):
+        load_aws_settings(env={**env, "LOOM_AWS_CAPACITY_WAIT_S": "-1"})
+
+
 @pytest.mark.parametrize(
     ("changes", "match"),
     [
@@ -297,6 +490,80 @@ async def test_teardown_is_idempotent(aws: dict[str, Any]) -> None:
     assert state(aws["ec2"], host.host_id) == "terminated"
     ghost = host.model_copy(update={"host_id": "i-0123456789abcdef0"})
     await p.teardown(ghost)
+
+
+async def test_teardown_returns_only_once_the_instance_is_terminated(
+    aws: dict[str, Any],
+) -> None:
+    # The 4-vCPU G/VT quota fits one g6e.xlarge, and an instance still shutting down holds
+    # it: a run's next host (another host_group) would fail with VcpuLimitExceeded.
+    ec2 = aws["ec2"]
+    seen: list[str] = []
+
+    def describe_instances(**kw: Any) -> dict[str, Any]:
+        resp = ec2.describe_instances(**kw)
+        inst = resp["Reservations"][0]["Instances"][0]
+        if len(seen) < 3:  # moto terminates at once; a real instance shuts down first
+            inst["State"] = {"Code": 32, "Name": "shutting-down"}
+        seen.append(inst["State"]["Name"])
+        return dict(resp)
+
+    p = provider(aws, ec2=Proxy(ec2, describe_instances=describe_instances))
+    host = await p.provision(request())
+    await p.teardown(host)
+    assert seen == ["shutting-down"] * 3 + ["terminated"]
+
+
+async def test_teardown_gives_up_waiting_after_the_limit(
+    aws: dict[str, Any], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import loom_bench.providers.aws_ec2 as mod
+
+    monkeypatch.setattr(mod, "TERMINATE_WAIT_S", 0)
+    ec2 = aws["ec2"]
+
+    def describe_instances(**kw: Any) -> dict[str, Any]:
+        resp = ec2.describe_instances(**kw)
+        resp["Reservations"][0]["Instances"][0]["State"] = {"Code": 32, "Name": "shutting-down"}
+        return dict(resp)
+
+    p = provider(aws, ec2=Proxy(ec2, describe_instances=describe_instances))
+    host = await p.provision(request())
+    await p.teardown(host)  # logged, not raised: the instance is going anyway
+    assert "still shutting-down" in caplog.text
+
+
+async def test_collect_profile_archives_uploads_and_reads_back_the_trace(
+    aws: dict[str, Any],
+) -> None:
+    s3 = aws["s3"]
+
+    def on_command(script: str) -> list[dict[str, Any]]:
+        assert re.search(r"^TRACE_DIR=/var/lib/loom/profiles$", script, re.MULTILINE)
+        assert re.search(r"^MAX_BYTES=1048576$", script, re.MULTILINE)
+        assert 'tar -C "$TRACE_DIR"' in script and "loom-profile-done" in script
+        url = re.search(r"^UPLOAD_URL='?([^'\n]+)'?$", script, re.MULTILINE)
+        assert url is not None
+        key = urlparse(url.group(1)).path.lstrip("/").removeprefix("loom-bench-test/")
+        s3.put_object(Bucket="loom-bench-test", Key=key, Body=b"tgz")
+        return [{"Status": "Success", "StandardOutputContent": "loom-profile-done\n"}]
+
+    ssm = FakeSsm(on_command=on_command)
+    p = provider(aws, ssm=ssm)
+    host = await p.provision(request())
+    blob = await p.collect_profile(host, "run-1", "/var/lib/loom/profiles", 1024 * 1024)
+    assert blob == b"tgz"
+    assert ssm.sent[0]["Comment"] == "loom profile run-1"
+    with pytest.raises(ValueError, match="absolute plain path"):
+        await p.collect_profile(host, "run-1", "/var/lib/../etc", 1)
+
+
+async def test_collect_profile_without_its_done_marker_fails(aws: dict[str, Any]) -> None:
+    ssm = FakeSsm(on_command=lambda _s: [{"Status": "Success", "StandardOutputContent": ""}])
+    p = provider(aws, ssm=ssm)
+    host = await p.provision(request())
+    with pytest.raises(RuntimeError, match="did not finish"):
+        await p.collect_profile(host, "run-1", "/var/lib/loom/profiles", 1)
 
 
 def test_host_loss_classification() -> None:

@@ -236,6 +236,37 @@ class RunpodApi:
         data = out.get("data")
         return data if isinstance(data, dict) else {}
 
+    def gpu_stock(self, gpu_type_id: str) -> list[str]:
+        """The Secure Cloud datacenters that list `gpu_type_id` as available right now,
+        best-stocked first (High, Medium, Low).
+
+        This is the per-datacenter signal that matched what pod creates got on 2026-11-02:
+        `gpuTypes.lowestPrice.stockStatus` kept saying "Low" for L40S through 11 h of
+        refused creates, while `dataCenters.gpuAvailability` showed no datacenter with
+        stock. A malformed answer raises `RunpodApiError`, so callers can fall back.
+        """
+        data = self.graphql(
+            "query { dataCenters { id gpuAvailability { gpuTypeId stockStatus available } } }"
+        )
+        centers = data.get("dataCenters")
+        if not isinstance(centers, list):
+            raise RunpodApiError("POST", "graphql", 200, "dataCenters is not a list")
+        rank = {"High": 0, "Medium": 1, "Low": 2}
+        stocked: list[tuple[int, str]] = []
+        for dc in centers:
+            if not isinstance(dc, Mapping) or not isinstance(dc.get("id"), str):
+                raise RunpodApiError("POST", "graphql", 200, "a datacenter has no id")
+            for gpu in dc.get("gpuAvailability") or ():
+                if (
+                    isinstance(gpu, Mapping)
+                    and gpu.get("gpuTypeId") == gpu_type_id
+                    and gpu.get("available") is True
+                ):
+                    stocked.append((rank.get(str(gpu.get("stockStatus")), 3), dc["id"]))
+                    break
+        # Stable: datacenters of the same stock level keep RunPod's listing order.
+        return [dc for _, dc in sorted(stocked, key=lambda s: s[0])]
+
     def create_pod(self, body: Mapping[str, Any]) -> dict[str, Any]:
         """POST /pods. Not retried: the caller adopts or deletes a pod that a failed
         request may still have created (see `find_pods_by_name`)."""

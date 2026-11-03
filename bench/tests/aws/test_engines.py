@@ -10,6 +10,7 @@ from loom_bench.engines import (
     ENTRYPOINTS,
     docker_run_argv,
     draft_weights,
+    profiler_trace_dir,
     quantization_flag,
     render_args,
     render_launch,
@@ -378,6 +379,35 @@ def test_docker_run_argv(qwen: ModelSpec) -> None:
     i = argv.index("--entrypoint")
     assert argv[i : i + 4] == ["--entrypoint", "vllm", VLLM_IMAGE, "serve"]
     assert argv[i + 4 :] == launch.args
+    assert argv.count("--volume") == 1  # not profiled: no trace directory mounted
+
+
+def _profiled(qwen: ModelSpec, trace_dir: object) -> ModelSpec:
+    cfg = {"profiler": "torch", "torch_profiler_dir": trace_dir}
+    engine = qwen.engine.model_copy(update={"args": {"profiler_config": cfg}})
+    return qwen.model_copy(update={"engine": engine})
+
+
+def test_a_profiled_vllm_container_mounts_its_trace_dir_at_the_same_path(
+    qwen: ModelSpec,
+) -> None:
+    # vLLM writes traces inside the container; the host's collect_profile.sh archives
+    # them from the same path (aws_scripts/collect_profile.sh).
+    launch = render_launch(_profiled(qwen, "/var/lib/loom/profiles"))
+    assert profiler_trace_dir(launch) == "/var/lib/loom/profiles"
+    argv = docker_run_argv(launch, weights_dir="/w", container_name="c")
+    head = argv[: argv.index("--entrypoint")]
+    assert "--volume /var/lib/loom/profiles:/var/lib/loom/profiles" in " ".join(head)
+    assert profiler_trace_dir(render_launch(qwen)) is None
+
+
+@pytest.mark.parametrize("bad", ["relative", "/var/lib/../etc", "/tmp/$(id)", 3])
+def test_a_trace_dir_that_is_not_a_plain_absolute_path_is_refused(
+    qwen: ModelSpec, bad: object
+) -> None:
+    launch = render_launch(_profiled(qwen, bad))
+    with pytest.raises(ValueError, match="torch_profiler_dir"):
+        docker_run_argv(launch, weights_dir="/w", container_name="c")
 
 
 @pytest.mark.parametrize(

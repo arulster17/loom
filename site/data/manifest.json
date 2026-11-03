@@ -1,10 +1,10 @@
 {
   "schema_version": 3,
-  "generated_at": "2026-10-11T06:37:21.662504Z",
+  "generated_at": "2026-11-02T17:24:37.395049Z",
   "git": {
-    "sha": "40acca206d12529ec8c6d4c3780c3492646336c2",
+    "sha": "504519515fca1167a5ee621cda339f1ee27cb42a",
     "dirty": false,
-    "branch": "worktree-agent-a8d3c2a78f1c4deb6"
+    "branch": "perf-trtllm-2"
   },
   "bench_version": "0.1.0",
   "experiment_ids": [],
@@ -35,6 +35,12 @@
       "id": "qwen3-8b-fp8",
       "display_name": "Qwen3 8B FP8",
       "repo": "RedHatAI/Qwen3-8B-FP8-dynamic",
+      "configs": 0
+    },
+    {
+      "id": "qwen3-8b-fp8-modelopt",
+      "display_name": "Qwen3 8B FP8 (ModelOpt, FP8 KV)",
+      "repo": "nvidia/Qwen3-8B-FP8",
       "configs": 0
     }
   ]

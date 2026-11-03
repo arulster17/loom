@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import math
 import os
 import re
@@ -48,12 +49,15 @@ from loom_bench.providers.base import (
     HostLost,
     HostRequest,
     SpotInterrupted,
+    capacity_backoff,
 )
 from loom_bench.providers.weights import HostWeights, WeightsPlan, flat
 from loom_bench.records import Market
 from loom_bench.registry import PinnedImage, read_yaml
 from loom_bench.tokenize import hf_cache_folder
 from loom_bench.workloads.profiles import DatasetDownload
+
+log = logging.getLogger(__name__)
 
 PROVIDER_NAME = "aws_ec2"
 DLAMI_PARAMETER = (
@@ -100,15 +104,28 @@ LMEVAL_EXTRA = "lmeval"
 CLIENT_IMAGE = "python@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d"
 BOOT_TIMEOUT_S = 900
 SSM_ONLINE_TIMEOUT_S = 900
-CAPACITY_ERRORS = frozenset(
+# A profile window's trace collection: archive, upload (traces are capped in size).
+PROFILE_COLLECT_TIMEOUT_S = 600
+_TRACE_DIR_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
+# Teardown waits up to this long for the instance to reach `terminated`. The account's
+# G/VT on-demand quota is 4 vCPU, exactly one g6e.xlarge: an instance still shutting down
+# holds it, and the next host of the same run (another `host_group`) would fail
+# RunInstances with VcpuLimitExceeded (docs/runbook.md, section 7).
+TERMINATE_WAIT_S = 600
+# RunInstances refusals that move the sweep on to the next AZ. All but `Unsupported` can
+# clear while we wait, so `provision` sweeps again on the backoff.
+TRANSIENT_CAPACITY_ERRORS = frozenset(
     {
         "InsufficientInstanceCapacity",
         "InsufficientHostCapacity",
         "InsufficientCapacity",
         "SpotMaxPriceTooLow",
-        "Unsupported",
     }
 )
+# The AZ does not offer the instance type at all (g6e.xlarge in us-east-1e and -f): never
+# clears, so later sweeps skip that AZ, and a sweep with nothing else fails at once.
+UNSUPPORTED = "Unsupported"
+CAPACITY_ERRORS = TRANSIENT_CAPACITY_ERRORS | {UNSUPPORTED}
 SPOT_INTERRUPTION_CODES = frozenset(
     {"Server.SpotInstanceTermination", "Server.SpotInstanceShutdown"}
 )
@@ -160,6 +177,10 @@ class AwsSettings(BaseModel):
     poll_interval_s: Annotated[float, Field(gt=0)] = 5.0
     job_timeout_s: Annotated[int, Field(gt=0)] = 7200
     presign_expiry_s: Annotated[int, Field(gt=0, le=7 * 24 * 3600)] = 6 * 3600
+    # How long to keep sweeping the AZs while every one refuses the instance for capacity
+    # (as RunPod's `capacity_wait_s`). No instance exists and nothing is billed while
+    # waiting; 0 fails on the first sweep.
+    capacity_wait_s: Annotated[int, Field(ge=0)] = 1800
 
 
 def load_aws_settings(
@@ -221,6 +242,40 @@ def _tag_list(tags: Mapping[str, str]) -> list[dict[str, str]]:
 
 def _error_code(e: ClientError) -> str:
     return str(e.response.get("Error", {}).get("Code", ""))
+
+
+class NoCapacity(RuntimeError):
+    """A sweep of every AZ refused the instance for capacity; no instance exists."""
+
+    def __init__(
+        self, instance_type: str, refused: Mapping[str, str], *, waited_s: float | None = None
+    ) -> None:
+        self.instance_type = instance_type
+        self.refused = dict(refused)  # AZ -> RunInstances error code, in sweep order
+        after = "" if waited_s is None else f" after waiting {waited_s:.0f} s"
+        detail = "; ".join(f"{az}: {code}" for az, code in self.refused.items())
+        super().__init__(f"no capacity for {instance_type}{after}: {detail}")
+
+    @property
+    def transient(self) -> list[str]:
+        """AZs whose refusal can clear while we wait."""
+        return [az for az, code in self.refused.items() if code != UNSUPPORTED]
+
+    @property
+    def unsupported(self) -> list[str]:
+        """AZs that do not offer the instance type."""
+        return [az for az, code in self.refused.items() if code == UNSUPPORTED]
+
+    def summary(self) -> str:
+        """`none in us-east-1c, us-east-1a (InsufficientInstanceCapacity); not offered in
+        us-east-1e`: the sweep's log line."""
+        codes = sorted({self.refused[az] for az in self.transient})
+        parts = []
+        if self.transient:
+            parts.append(f"none in {', '.join(self.transient)} ({', '.join(codes)})")
+        if self.unsupported:
+            parts.append(f"not offered in {', '.join(self.unsupported)}")
+        return "; ".join(parts)
 
 
 class AwsEc2Provider:
@@ -457,16 +512,21 @@ class AwsEc2Provider:
             }
         return kwargs
 
-    def _provision(self, req: HostRequest) -> Host:
+    def _provision(self, req: HostRequest, skip_azs: frozenset[str] = frozenset()) -> Host:
+        """One sweep: try each candidate AZ (but `skip_azs`) once and keep the first
+        instance launched; `NoCapacity` if every AZ refused it for capacity. The launch
+        time and TTL are this sweep's, so time spent in earlier sweeps never shortens
+        the host's life or bills it."""
         experiment = self._validate_request(req)
+        assert req.instance_type is not None
         now = self.clock()
         ttl_at = now + timedelta(seconds=req.ttl_s)
         tags = self._tags(req, experiment, ttl_at)
         ami, root_device = self._ami()
-        candidates = self._candidates(req, now)
+        candidates = [c for c in self._candidates(req, now) if c["az"] not in skip_azs]
         if not candidates:
             raise ValueError("none of the configured subnets exist")
-        errors: list[str] = []
+        refused: dict[str, str] = {}
         for cand in candidates:
             kwargs = self._run_instances_kwargs(
                 req,
@@ -481,7 +541,7 @@ class AwsEc2Provider:
             except ClientError as e:
                 if _error_code(e) not in CAPACITY_ERRORS:
                     raise
-                errors.append(f"{cand['az']}: {_error_code(e)}")
+                refused[cand["az"]] = _error_code(e)
                 continue
             inst = resp["Instances"][0]
             return Host(
@@ -504,10 +564,60 @@ class AwsEc2Provider:
                     "tags": tags,
                 },
             )
-        raise RuntimeError(f"no capacity for {req.instance_type}: {'; '.join(errors)}")
+        raise NoCapacity(req.instance_type, refused)
 
     async def provision(self, req: HostRequest) -> Host:
-        return await asyncio.to_thread(self._provision, req)
+        """Launch the instance. While every AZ refuses it for capacity, sweep them all
+        again for up to `capacity_wait_s`, waiting out the backoff (`CAPACITY_BACKOFF_S`)
+        between sweeps, with one last sweep at the deadline. Only capacity refusals are
+        waited out (`TRANSIENT_CAPACITY_ERRORS`): any other error fails at once, and an AZ
+        that does not offer the type is dropped from later sweeps. No instance exists
+        while waiting: a sweep returns as soon as one launches."""
+        start = self.clock()
+        deadline = start + timedelta(seconds=self.settings.capacity_wait_s)
+        backoff = capacity_backoff()
+        unsupported: set[str] = set()
+        refusals = 0  # sweeps refused so far
+        while True:
+            try:
+                host = await asyncio.to_thread(self._provision, req, frozenset(unsupported))
+            except NoCapacity as e:
+                refusals += 1
+                unsupported.update(e.unsupported)
+                now = self.clock()
+                waited = (now - start).total_seconds()
+                left = (deadline - now).total_seconds()
+                if not e.transient or left <= 0:
+                    log.warning(
+                        "AWS %s capacity: %s (waited %.0f s); giving up",
+                        req.instance_type,
+                        e.summary(),
+                        waited,
+                    )
+                    raise NoCapacity(
+                        e.instance_type, e.refused, waited_s=waited if refusals > 1 else None
+                    ) from None
+                pause = min(next(backoff), left)
+                log.warning(
+                    "AWS %s capacity: %s (waited %.0f s, %.0f s left); next sweep in %.0f s",
+                    req.instance_type,
+                    e.summary(),
+                    waited,
+                    left,
+                    pause,
+                )
+                await self.sleep(pause)
+                continue
+            if refusals:
+                waited = (self.clock() - start).total_seconds()
+                log.warning(
+                    "AWS %s capacity: launched %s in %s (waited %.0f s)",
+                    req.instance_type,
+                    host.host_id,
+                    host.info["az"],
+                    waited,
+                )
+            return host
 
     # -- host state -----------------------------------------------------------
 
@@ -845,6 +955,35 @@ class AwsEc2Provider:
         )
         return await asyncio.to_thread(self._fetch_eval_result, prefix)
 
+    # -- profiles -------------------------------------------------------------------
+
+    def _read(self, key: str) -> bytes:
+        body = self.s3.get_object(Bucket=self.settings.bucket, Key=key)["Body"]
+        return bytes(body.read())
+
+    async def collect_profile(
+        self, host: Host, run_id: str, trace_dir: str, max_bytes: int
+    ) -> bytes:
+        """The trace files a profile window left in `trace_dir` (bind-mounted into the
+        engine container at the same path), as one .tar.gz: a root script archives them,
+        uploads the archive to the run's S3 prefix through a presigned URL and deletes
+        them (loom_bench.profile.capture)."""
+        if not _TRACE_DIR_RE.match(trace_dir) or ".." in trace_dir:
+            raise ValueError(f"trace_dir must be an absolute plain path, got {trace_dir!r}")
+        key = self.job_prefix(host, run_id) + "trace.tar.gz"
+        script = render_script(
+            "collect_profile",
+            TRACE_DIR=trace_dir,
+            MAX_BYTES=int(max_bytes),
+            UPLOAD_URL=self._presign("put_object", key),
+        )
+        stdout = await self._run(
+            host, script, timeout_s=PROFILE_COLLECT_TIMEOUT_S, comment=f"loom profile {run_id}"
+        )
+        if "loom-profile-done" not in stdout:
+            raise RuntimeError(f"{host.host_id}: trace collection for {run_id} did not finish")
+        return await asyncio.to_thread(self._read, key)
+
     # -- teardown ------------------------------------------------------------------
 
     def _terminate(self, host_id: str) -> None:
@@ -854,9 +993,30 @@ class AwsEc2Provider:
             if _error_code(e) != "InvalidInstanceID.NotFound":
                 raise
 
+    async def _wait_terminated(self, host_id: str) -> None:
+        """Until the instance is `terminated` (or gone), at most TERMINATE_WAIT_S: it holds
+        its vCPUs against the on-demand quota until then. Billing already stopped at
+        shutting-down; a timeout is logged, not raised (the instance is going anyway)."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + TERMINATE_WAIT_S
+        while True:
+            inst = await asyncio.to_thread(self._describe, host_id)
+            if inst is None or inst["State"]["Name"] == "terminated":
+                return
+            if loop.time() > deadline:
+                log.warning(
+                    "%s still %s %ds after terminate",
+                    host_id,
+                    inst["State"]["Name"],
+                    TERMINATE_WAIT_S,
+                )
+                return
+            await self.sleep(self.settings.poll_interval_s)
+
     async def teardown(self, host: Host) -> None:
         await asyncio.to_thread(self._terminate, host.host_id)
         self.weights.forget(host.host_id)
+        await self._wait_terminated(host.host_id)
 
     async def reap(self, now: datetime) -> list[str]:
         return await asyncio.to_thread(aws_reaper.reap, self.ec2, now)

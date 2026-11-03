@@ -30,7 +30,6 @@ from __future__ import annotations
 import asyncio
 import atexit
 import hashlib
-import itertools
 import logging
 import math
 import os
@@ -38,7 +37,8 @@ import re
 import secrets
 import shutil
 import tempfile
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from fractions import Fraction
@@ -63,6 +63,7 @@ from loom_bench.providers.base import (
     Host,
     HostLost,
     HostRequest,
+    capacity_backoff,
 )
 from loom_bench.providers.runpod_api import (
     GRAPHQL_URL,
@@ -123,8 +124,6 @@ _PINNED_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*[a-z0-9]@sha256:[0-9a-f]{64}$")
 # RunPod documents no limit on dockerStartCmd; keep the rendered start command small.
 MAX_START_CMD_BYTES = 8192
 POD_NAME_MAX = 191  # RunPod's documented limit on `name`
-# Waits between pod creates that RunPod refuses for lack of stock; the last repeats.
-CAPACITY_BACKOFF_S = (30.0, 60.0, 120.0, 240.0)
 
 log = logging.getLogger(__name__)
 
@@ -133,9 +132,13 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _capacity_backoff() -> Iterator[float]:
-    yield from CAPACITY_BACKOFF_S
-    yield from itertools.repeat(CAPACITY_BACKOFF_S[-1])
+@dataclass
+class _StockWatch:
+    """What one stock wait last saw: the stocked datacenters (logged on change) and
+    whether the availability query is failing (logged once)."""
+
+    seen: list[str] | None = None
+    failed: bool = False
 
 
 def check_url(url: str) -> str:
@@ -176,6 +179,9 @@ class RunpodSettings(BaseModel):
     # How long to keep retrying a pod create that RunPod refuses for lack of stock.
     # Nothing is billed while waiting; 0 fails on the first refusal.
     capacity_wait_s: Annotated[int, Field(ge=0)] = 1800
+    # During that wait, how often to read RunPod's per-datacenter GPU availability; a
+    # create goes out only when an allowed datacenter shows stock (`provision`).
+    availability_poll_s: Annotated[float, Field(gt=0)] = 30.0
     # Fail an engine start whose log has not grown for this long before it is healthy
     # (874110b6 hung silently after NCCL init until the 1800 s ready timeout).
     engine_stall_s: Annotated[int, Field(gt=0)] = 600
@@ -390,8 +396,17 @@ class RunpodProvider:
         }
 
     def pod_body(
-        self, req: HostRequest, *, name: str, experiment: str, ttl_at: datetime, pubkey: str
+        self,
+        req: HostRequest,
+        *,
+        name: str,
+        experiment: str,
+        ttl_at: datetime,
+        pubkey: str,
+        data_centers: Sequence[str] | None = None,
     ) -> dict[str, Any]:
+        """The create body. `data_centers` (datacenters seen with stock) narrows where
+        RunPod may place the pod; otherwise the spec's `data_center_ids`, else any."""
         assert req.instance_type is not None
         body: dict[str, Any] = {
             "name": name,
@@ -411,7 +426,9 @@ class RunpodProvider:
             "dockerStartCmd": [self.start_command(ttl_at)],
             "env": self.pod_env(experiment, ttl_at, pubkey),
         }
-        if self.spec.data_center_ids:
+        if data_centers:
+            body["dataCenterIds"] = list(data_centers)
+        elif self.spec.data_center_ids:
             body["dataCenterIds"] = list(self.spec.data_center_ids)
         return body
 
@@ -426,7 +443,7 @@ class RunpodProvider:
                     self.api.terminate_pod(str(pod["id"]))
             raise
 
-    def _provision(self, req: HostRequest) -> Host:
+    def _provision(self, req: HostRequest, data_centers: Sequence[str] | None = None) -> Host:
         experiment = self._validate_request(req)
         assert req.instance_type is not None
         region = self.spec.cloud_type
@@ -438,7 +455,14 @@ class RunpodProvider:
         ttl_at = now + timedelta(seconds=req.ttl_s)
         name = self.pod_name(experiment, ttl_at)
         pubkey = self._keypair()[1]
-        body = self.pod_body(req, name=name, experiment=experiment, ttl_at=ttl_at, pubkey=pubkey)
+        body = self.pod_body(
+            req,
+            name=name,
+            experiment=experiment,
+            ttl_at=ttl_at,
+            pubkey=pubkey,
+            data_centers=data_centers,
+        )
         pod = self._create(body)
         pod_id = str(pod["id"])
         created_s = (self.clock() - now).total_seconds()
@@ -514,28 +538,96 @@ class RunpodProvider:
         )
 
     async def provision(self, req: HostRequest) -> Host:
-        """Create the pod. While RunPod has no matching GPU in stock, retry with backoff
-        for up to `capacity_wait_s`; each attempt gets a fresh name and TTL, so time
-        spent waiting never shortens the pod's life."""
-        deadline = self.clock() + timedelta(seconds=self.settings.capacity_wait_s)
-        for delay in _capacity_backoff():
+        """Create the pod. While RunPod has no matching GPU in stock, keep trying for up
+        to `capacity_wait_s`; each attempt gets a fresh name and TTL, so time spent
+        waiting never shortens the pod's life.
+
+        The first create goes out at once. After a stock refusal, RunPod's per-datacenter
+        availability (`RunpodApi.gpu_stock`) is read every `availability_poll_s`, and the
+        next create goes out only when an allowed datacenter shows stock, aimed at those
+        datacenters. A create refused while the same datacenters still show stock waits
+        out the backoff (`base.CAPACITY_BACKOFF_S`) before the next; a datacenter newly showing
+        stock is tried at once. If the availability query fails, the wait falls back to
+        blind creates on the backoff schedule: a broken signal never blocks a run.
+        """
+        start = self.clock()
+        deadline = start + timedelta(seconds=self.settings.capacity_wait_s)
+        backoff = capacity_backoff()
+        target: list[str] | None = None  # datacenters the next create is aimed at
+        state = _StockWatch()
+        while True:
             try:
-                return await asyncio.to_thread(self._provision, req)
+                return await asyncio.to_thread(self._provision, req, target)
             except RunpodApiError as e:
                 if not e.no_capacity:
                     raise
                 left = (deadline - self.clock()).total_seconds()
                 if left <= 0:
                     raise
-                wait = min(delay, left)
+                refused = target
+                retry_at = self.clock() + timedelta(seconds=min(next(backoff), left))
                 log.warning(
-                    "RunPod has no %s in stock; retrying in %.0f s (%.0f s left)",
+                    "RunPod refused a %s create for lack of stock%s (waited %.0f s, %.0f s left)",
                     req.instance_type,
-                    wait,
+                    f" in {', '.join(refused)}" if refused else "",
+                    (self.clock() - start).total_seconds(),
                     left,
                 )
-                await self.sleep(wait)
-        raise AssertionError("unreachable")
+            target = await self._wait_for_stock(req, start, deadline, retry_at, refused, state)
+
+    async def _wait_for_stock(
+        self,
+        req: HostRequest,
+        start: datetime,
+        deadline: datetime,
+        retry_at: datetime,
+        refused: list[str] | None,
+        state: _StockWatch,
+    ) -> list[str] | None:
+        """Wait until a create is worth sending; the datacenters to aim it at (None: the
+        spec's own, as a blind create)."""
+        assert req.instance_type is not None
+        gpu = self._gpu_type_id(req.instance_type)
+        allowed = self.spec.data_center_ids
+        while True:
+            now = self.clock()
+            if now >= deadline:
+                return None  # one last create at the deadline, as the blind wait does
+            try:
+                listed = await asyncio.to_thread(self.api.gpu_stock, gpu)
+            except Exception as e:
+                if not state.failed:
+                    log.warning(
+                        "RunPod availability query failed (%s); blind creates on the backoff "
+                        "schedule instead",
+                        str(e)[:200],
+                    )
+                    state.failed = True
+                await self.sleep(
+                    max(
+                        0.0, min((retry_at - now).total_seconds(), (deadline - now).total_seconds())
+                    )
+                )
+                return None
+            if state.failed:
+                log.info("RunPod availability query works again")
+                state.failed = False
+            stocked = [dc for dc in listed if allowed is None or dc in allowed]
+            waited = (now - start).total_seconds()
+            if stocked != state.seen:
+                log.warning(
+                    "RunPod %s stock: %s (waited %.0f s)",
+                    gpu,
+                    ", ".join(stocked) if stocked else "none in any allowed datacenter",
+                    waited,
+                )
+                state.seen = stocked
+            new = refused is not None and bool(set(stocked) - set(refused))
+            if stocked and (now >= retry_at or refused is None or new):
+                return stocked
+            await self.sleep(
+                min(self.settings.availability_poll_s, (deadline - now).total_seconds())
+            )
 
     # -- host state ---------------------------------------------------------------
 
