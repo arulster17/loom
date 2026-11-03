@@ -26,10 +26,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import os
 import re
 import shlex
+import tarfile
 import threading
 import time
 from pathlib import Path
@@ -57,9 +59,18 @@ def var(script: str, name: str) -> str:
 
 
 def array(script: str, name: str) -> list[str]:
-    m = re.search(rf"^{name}=\((.*)\)$", script, re.MULTILINE)
-    assert m, name
-    return shlex.split(m.group(1))
+    """A bash array as rendered into a host script (`NAME=('a' 'b' ...)`). An element may
+    span lines (TensorRT-LLM's launcher passes its wrapper's Python source): the array
+    ends at the first `)` at a line end that is outside every quote, as bash reads it."""
+    start = re.search(rf"^{name}=\(", script, re.MULTILINE)
+    assert start, name
+    rest = script[start.end() :]
+    for end in re.finditer(r"\)$", rest, re.MULTILINE):
+        try:
+            return shlex.split(rest[: end.start()])
+        except ValueError:  # that `)` was inside a quoted element
+            continue
+    raise AssertionError(f"{name}: unterminated array")
 
 
 def pairs(script: str, name: str) -> list[tuple[str, str]]:
@@ -76,6 +87,8 @@ def kind_of(script: str) -> str:
         return "start_engine"
     if re.search(r"^BENCH_CMD=", script, re.MULTILINE):
         return "run_job"
+    if re.search(r"^TRACE_DIR=", script, re.MULTILINE):
+        return "collect_profile"
     return "stop_engine"
 
 
@@ -84,12 +97,36 @@ def is_sglang(script: str) -> bool:
     return "sglang.launch_server" in array(script, "ENGINE_CMD")
 
 
+def is_trtllm(script: str) -> bool:
+    """Whether the rendered ENGINE_CMD runs TensorRT-LLM's launcher (`bash -c ...`)."""
+    return "trtllm-launch" in array(script, "ENGINE_CMD")
+
+
+_SNAPSHOT_RE = re.compile(r"^/root/\.cache/huggingface/hub/models--(.+?)--(.+)/snapshots/(\w+)$")
+
+
 def engine_checkpoint(script: str) -> tuple[str, str]:
     """(repo, revision) the rendered ENGINE_CMD loads: vLLM `serve <repo>`, SGLang
-    `--model-path <repo>`, both `--revision <rev>`."""
+    `--model-path <repo>`, both `--revision <rev>`; TensorRT-LLM the snapshot directory of
+    the container's HF cache (`/root/.cache/huggingface/hub/models--<org>--<name>/...`)."""
     cmd = array(script, "ENGINE_CMD")
+    if is_trtllm(script):
+        (m,) = [m for a in cmd if (m := _SNAPSHOT_RE.match(a))]
+        return f"{m.group(1)}/{m.group(2)}", m.group(3)
     repo = cmd[cmd.index("--model-path") + 1] if is_sglang(script) else cmd[cmd.index("serve") + 1]
     return repo, cmd[cmd.index("--revision") + 1]
+
+
+def mounted_trace_dir(script: str) -> str | None:
+    """The profiler's trace directory when ENGINE_CMD both configures it (vLLM
+    `--profiler-config`) and bind-mounts it at the same host path, else None: an unmounted
+    directory stays inside the container, where the host's collection cannot see it."""
+    cmd = array(script, "ENGINE_CMD")
+    if "--profiler-config" not in cmd:
+        return None
+    path = json.loads(cmd[cmd.index("--profiler-config") + 1]).get("torch_profiler_dir")
+    mounts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--volume"]
+    return path if f"{path}:{path}" in mounts else None
 
 
 def write_hub_snapshot(host_root: Path, weights_dir: str, repo: str, rev: str) -> None:
@@ -155,7 +192,12 @@ class HostSim(FakeSsm):
         kind = kind_of(script)
         with self._lock:
             self.launched.append((instance, kind, script))
-        handler = {"start_engine": self.start, "stop_engine": self.stop, "run_job": self.job}
+        handler = {
+            "start_engine": self.start,
+            "stop_engine": self.stop,
+            "run_job": self.job,
+            "collect_profile": self.collect_profile,
+        }
         rc, out, err = handler[kind](instance, script)
         inv = {
             "Status": "Success" if rc == 0 else "Failed",
@@ -189,6 +231,15 @@ class HostSim(FakeSsm):
         # Qwen3's byte-level BPE splits multi-byte characters across tokens; SGLang
         # reports every completions text_offset as -1 and renders each token alone
         # (565b8d3f), so divergence scored on SGLang runs as it does for real.
+        # A profiled engine writes traces where the host sees them only through the
+        # container's bind mount (engines.docker_run_argv): without it the mock has no
+        # profiler, as vLLM's traces would stay inside the container.
+        trace_dir = mounted_trace_dir(script)
+        profile: dict[str, Any] = {}
+        if trace_dir is not None:
+            host_dir = self.root / instance / trace_dir.lstrip("/")
+            host_dir.mkdir(parents=True, exist_ok=True)
+            profile = {"profile_dir": str(host_dir)}
         cfg = MockConfig(
             **{
                 "time_scale": 0.01,
@@ -196,6 +247,7 @@ class HostSim(FakeSsm):
                 "logprob_jitter": 0.25,
                 "text_offsets": not is_sglang(script),
                 "byte_level": True,
+                **profile,
                 **self.mock,
             }
         )
@@ -221,6 +273,28 @@ class HostSim(FakeSsm):
             f"loom-sys image_digest {var(script, 'IMAGE')}",
         ]
         return 0, "\n".join(lines) + "\n", ""
+
+    def collect_profile(self, instance: str, script: str) -> tuple[int, str, str]:
+        """collect_profile.sh on the host: archive TRACE_DIR's files, upload the archive
+        to the presigned URL's key, clear them."""
+        trace_dir = self.root / instance / var(script, "TRACE_DIR").lstrip("/")
+        if not trace_dir.is_dir():
+            return 1, "", f"loom-error no trace directory {var(script, 'TRACE_DIR')}"
+        files = sorted(p for p in trace_dir.rglob("*") if p.is_file())
+        if not files:
+            return 1, "", "loom-error the profiler wrote no files"
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for f in files:
+                tar.add(f, arcname=str(f.relative_to(trace_dir)))
+        if len(buf.getvalue()) > int(var(script, "MAX_BYTES")):
+            return 1, "", "loom-error trace archive over the cap"
+        self.s3.put_object(
+            Bucket=BUCKET, Key=s3_key(var(script, "UPLOAD_URL")), Body=buf.getvalue()
+        )
+        for f in files:
+            f.unlink()
+        return 0, f"loom-sys profile_files {len(files)}\nloom-profile-done\n", ""
 
     def stop(self, instance: str, script: str) -> tuple[int, str, str]:
         srv = self.servers.pop(instance, None)
