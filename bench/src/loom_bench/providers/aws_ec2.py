@@ -578,10 +578,12 @@ class AwsEc2Provider:
         deadline = start + timedelta(seconds=self.settings.capacity_wait_s)
         backoff = capacity_backoff()
         unsupported: set[str] = set()
+        refusals = 0  # sweeps refused so far
         while True:
             try:
                 host = await asyncio.to_thread(self._provision, req, frozenset(unsupported))
             except NoCapacity as e:
+                refusals += 1
                 unsupported.update(e.unsupported)
                 now = self.clock()
                 waited = (now - start).total_seconds()
@@ -594,7 +596,7 @@ class AwsEc2Provider:
                         waited,
                     )
                     raise NoCapacity(
-                        req.instance_type, e.refused, waited_s=waited if waited > 0 else None
+                        req.instance_type, e.refused, waited_s=waited if refusals > 1 else None
                     ) from None
                 pause = min(next(backoff), left)
                 log.warning(
@@ -607,8 +609,8 @@ class AwsEc2Provider:
                 )
                 await self.sleep(pause)
                 continue
-            waited = (self.clock() - start).total_seconds()
-            if waited > 0:
+            if refusals:
+                waited = (self.clock() - start).total_seconds()
                 log.warning(
                     "AWS %s capacity: launched %s in %s (waited %.0f s)",
                     req.instance_type,

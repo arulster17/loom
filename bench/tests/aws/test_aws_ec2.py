@@ -353,14 +353,16 @@ async def test_a_sweep_with_no_capacity_is_retried_on_the_backoff_until_one_laun
 
 
 async def test_a_sweep_that_launches_in_a_later_az_keeps_it_and_does_not_wait(
-    aws: dict[str, Any],
+    aws: dict[str, Any], caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.WARNING, logger=AWS_LOG)
     p, t, ec2 = waiting(aws, [IIC])
     host = await p.provision(request())
     assert t.slept == []
     assert ec2.calls == ["us-east-1a", "us-east-1b"]
     assert [i["InstanceId"] for i in instances(aws["ec2"])] == [host.host_id]
     assert host.info["az"] == "us-east-1b" and host.launched_at == t.start
+    assert [r for r in caplog.records if r.name == AWS_LOG] == []  # no wait, nothing logged
 
 
 @pytest.mark.parametrize(

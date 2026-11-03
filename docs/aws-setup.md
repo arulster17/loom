@@ -151,6 +151,7 @@ Fields (any field can be overridden with `LOOM_AWS_<FIELD>`, e.g.
 | `poll_interval_s` | | 5 | SSM / instance-state polling |
 | `job_timeout_s` | | 7200 | Run-time cap for request-count (no `duration_s`) load jobs and, plus 900 s, for eval jobs |
 | `presign_expiry_s` | | 21600 | Lifetime of job input/output presigned URLs |
+| `capacity_wait_s` | | 1800 | How long to keep sweeping the AZs while every one refuses the instance for capacity; 0 fails on the first sweep ([runbook](runbook.md#no-capacity-insufficientinstancecapacity)) |
 
 Presigned URLs stop working when the credentials that signed them expire. With
 short-lived SSO credentials, keep `presign_expiry_s` within the session length.
