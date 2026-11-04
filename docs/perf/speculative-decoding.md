@@ -1,7 +1,8 @@
 # Speculative decoding: what it is, when it pays, and what Loom measured
 
-Status, 2026-11-02: the Qwen3-8B study is **proposed, not run** (specs, quote, smoke and
-post-run steps below). The 70B findings are from runs already stored (cf4d1614, 55102ddb).
+Status, 2026-11-04: the Qwen3-8B study **ran** on AWS (experiment 53e4c107, results
+below; report in [reports/8b-specdec-v1](../../reports/8b-specdec-v1/leaderboard.md)).
+The 70B findings are from runs stored earlier (cf4d1614, 55102ddb).
 
 ## The short version (how to explain it in an interview)
 
@@ -24,6 +25,149 @@ other half of the story: **n-gram** lookup copies them from text already in the 
 (free, great when the answer repeats the input, useless otherwise); **EAGLE3** uses a
 small trained network that reads the big model's internal state (costs a little, works
 on ordinary chat).
+
+## What we measured on Qwen3-8B (53e4c107, 2026-11-04)
+
+**In plain words.** On one L40S, EAGLE3 made chat replies stream about twice as fast per
+token at every load we tried, and n-gram did almost nothing for chat. On real code edits,
+where the reply copies most of the prompt, both made replies stream about three times as
+fast, n-gram slightly more. We never found the load where speculation stops helping:
+up to the highest load we ran, the speculating engines kept fewer requests in flight
+(each one finishes sooner), so they never got busy enough for the extra checking to
+cost them. Quality looks unchanged, but the gate could not formally prove it on one
+task (IFEval), so neither speculative config is ranked or priced yet. The handful of
+chat replies EAGLE3 could not speed up were almost all in Chinese, Japanese, Arabic or
+German, whose tokens its 32,000-token guessing vocabulary mostly lacks.
+
+**The run.** `qwen3-8b-specdec-aws` as experiment 53e4c107: one AWS g6e.xlarge on-demand
+host (1x L40S) in us-west-2, vLLM v0.30.0, Qwen3-8B BF16 non-thinking; 63 of 63 load runs
+completed, 3 replicated eval passes per row, two gates. It took 5.1 h (01:56 to 07:03 UTC)
+of its 8 h TTL, planned at 7.46 h, and cost $9.62 recorded (planned $14.04, cap $15.25).
+Its smoke, 75ba8277, passed every path for $1.51. No request was cancelled at the drain
+timeout at any load, so every speed figure below is over complete requests. Report:
+`bench report -e 53e4c107 --alt-slo tpot_ms.p95=20 --out reports/8b-specdec-v1`.
+
+**Speed: time per output token (TPOT p50), and the speed-up against no speculation at
+the same load** (geometric means over 3 repetitions; CIs in the report):
+
+| Workload | Load | bf16 | bf16-ngram | bf16-eagle3 | Requests in flight: bf16 / ngram / eagle3 |
+|---|---|---|---|---|---|
+| chat | 0.25 req/s | 24.0 ms | 22.5 ms (1.07x) | 12.0 ms (2.00x) | 1.7 / 1.6 / 0.9 |
+| chat | 1 req/s | 27.1 ms | 26.7 ms (1.01x) | 13.8 ms (1.96x) | 8.3 / 7.6 / 4.4 |
+| chat | 2 req/s | 34.0 ms | 33.1 ms (1.03x) | 16.4 ms (2.07x) | 19.9 / 18.6 / 10.2 |
+| chat | 3 req/s | 46.5 ms | 43.1 ms (1.08x) | 20.1 ms (2.31x) | 40.3 / 36.0 / 18.6 |
+| code-edit | 0.5 req/s | 23.7 ms | 7.7 ms (3.09x) | 8.8 ms (2.70x) | 2.8 / 1.0 / 1.1 |
+| code-edit | 2 req/s | 25.0 ms | 8.2 ms (3.06x) | 9.3 ms (2.70x) | 11.1 / 4.0 / 4.3 |
+| code-edit | 4 req/s | 27.1 ms | 9.0 ms (3.02x) | 10.1 ms (2.69x) | 22.4 / 8.2 / 8.7 |
+
+("Requests in flight" is vLLM's running-request gauge, averaged over the window.)
+
+**Acceptance** (vLLM's counters; nearly flat across loads, ranges below):
+
+| Workload | Method | Tokens per verify step that drafted | Draft tokens kept | Tokens per streamed chunk |
+|---|---|---|---|---|
+| chat | n-gram | 1.84-1.97 | 28-32% | 1.23-1.26 |
+| chat | EAGLE3 | 2.29-2.34 | 43-45% | 2.29-2.32 |
+| code-edit | n-gram | 3.61-3.65 | 87-88% | 3.09-3.14 |
+| code-edit | EAGLE3 | 3.06 | 69% | 3.03-3.05 |
+
+n-gram's two numbers differ because it drafts only when it finds the last few tokens
+earlier in the text: on chat that happened on a minority of steps, so the per-chunk
+figure (every step) is 1.25 although a step that did draft gained ~1.9 tokens. On code
+edits the match is almost always there, and its drafts are kept 88% of the time, more
+than EAGLE3's 69%: copying the input is exactly what an n-gram lookup does.
+
+**Why the speed-up grew with load instead of fading.** The textbook expectation (section
+"Why it helps at low batch") is a crossover at high batch. It did not appear here, and
+the in-flight column says why: at the same arrival rate, a request that streams twice as
+fast is in the engine half as long (Little's law), so EAGLE3 at 3 req/s ran 18.6 requests
+at once against bf16's 40.3. bf16's own steps slowed with its larger batch (24 to 46.5 ms
+per token), while EAGLE3's verify step stayed near bf16's low-load step (ITL 27.9-38.1 ms
+against bf16's 23.8-38.0). The largest batch any speculating row reached was ~19
+requests, short of where verifying 4 tokens per request would cost more than it saves. So
+the crossover, if it exists on this card, lies beyond these loads; finding it would take
+chat at 4-6 req/s (where bf16 is already past its SLO).
+
+**Cost at the SLO** (TTFT p95 1 s, TPOT p95 50 ms; $1.8829/h). On chat, bf16 and n-gram
+hold the SLO up to 2 req/s (both fail at 3, TPOT p95 55-56 ms), while EAGLE3 held it at every
+tested load, 3 req/s included (TPOT p95 27.2 ms): $0.1336 per 1M blended against
+$0.2047, about 35% less. That is an upper bound for EAGLE3 (its goodput was not
+bracketed), and none of it is ranked: both gates are inconclusive and the chat cells are
+untrusted (throughput run-to-run CV 10.8% for bf16 and n-gram, TTFT p95 CV 13.2% for
+EAGLE3). On code edits every row met the SLO at every load, so all three tie at ≥4 req/s
+($0.2783 per 1M blended): the 50 ms target is too loose for speculation to change the
+cost there.
+
+**At a tight interactive SLO (TPOT p95 20 ms; not the declared SLO).** bf16 cannot serve
+either workload at all (its TPOT p95 is 24-25 ms even at the lowest load). On code edits
+both speculative rows meet 20 ms at every load up to 4 req/s ($0.2783 per 1M blended,
+unranked). On chat, EAGLE3 met it at 1 req/s (TPOT p95 17.7 ms [16.3, 19.3]) but the
+view reports no goodput: its 0.25 req/s point failed on the CI's upper bound (15.7 ms
+[11.5, 21.6], from only 33-36 requests per repetition), and loads above a failing one
+never count. The report's sentence that this "points to per-request latency, not load"
+does not fit that case: it is a thin sample at the lowest load.
+
+**Quality: the gates are inconclusive on IFEval only, and the outputs match bf16 as
+closely as bf16 matches itself.**
+
+| Check | bf16-ngram vs bf16 | bf16-eagle3 vs bf16 | Margin |
+|---|---|---|---|
+| gsm8k (1,319) | +0.08 pts [-0.40, +0.56] pass | +0.05 [-0.28, +0.40] pass | 1 pt |
+| ifeval (541) | -0.55 pts [-2.03, +0.92] inconclusive | -0.49 [-2.16, +1.11] inconclusive | 2 pts |
+| json_schema (300) | -0.33 [-1.33, +0.67] pass | +0.11 [-0.89, +1.11] pass | 3 pts |
+| tool_calling, strict (135 each) | 0.00 [-2.22, +2.22] pass | 0.00 [-2.22, +2.22] pass | 6 pts |
+| divergence (48 prompts, 3,068 positions) | KL 0.00053, top-1 99.15% pass | KL 0.00048, top-1 99.48% pass | |
+| sanity (7,284 outputs) | pass | pass | |
+
+- The divergence check feeds bf16's own greedy continuations to each engine and compares
+  the next-token probabilities. bf16 scored against its own capture gives KL 0.00051 and
+  top-1 99.22%; n-gram and EAGLE3 land at the same values. At the level of individual
+  token probabilities, speculation changed nothing measurable.
+- IFEval misses its 2-point margin by 0.03 pts (n-gram) and 0.16 pts (EAGLE3) on the
+  confidence interval's lower end; neither point delta is close (-0.55, -0.49). bf16's
+  three IFEval passes themselves scored 0.8207, 0.8207 and 0.8262 (21 items changed on
+  the third pass), against 0.8170 on every n-gram pass and 0.8189, 0.8170, 0.8170 for
+  EAGLE3. So half the measured gap is bf16's third pass running high.
+- Item by item, 12 IFEval items flipped consistently between bf16 and n-gram (4 in
+  n-gram's favour, 8 against) and 15 for EAGLE3 (5 for, 10 against). With so few items
+  that split is not distinguishable from a coin (two-sided binomial p ≈ 0.4 and 0.3), and
+  vLLM's own reruns disagree on ~21 IFEval items ([quality-gate.md](../quality-gate.md),
+  "Replicated passes"). It is not evidence of a drop; it is also not proof there is none.
+- What settles it is a tighter IFEval interval, not more passes: the run-noise part is
+  already averaged over 3 passes a side, and what remains is item-level flips. More
+  IFEval-like items (IFEval has 541) or a second environment would; neither was run. The
+  eval outputs themselves are not stored (only scores), so a byte-for-byte comparison of
+  answers is not possible from this run.
+
+**What the draft missed** (`bench draft-misses 53e4c107 --cell bf16-eagle3`, per
+workload, in `reports/8b-specdec-v1/draft-misses/`):
+
+- Chat: 10 of 2,865 requests got 1.2 tokens per chunk or fewer. Their output was a median
+  69% outside the head's 32,000-token draft vocabulary, against 3.3% for every other
+  request. Their outside tokens are Chinese, Japanese, Arabic, Persian and German words;
+  one is a 6-token reply with nothing outside (too short to draft). Across all chat
+  requests the share outside the vocabulary and tokens per chunk move against each other
+  (Spearman -0.30): median 2.30 tokens per chunk under 5% outside, 2.17 at 5-20%, 1.55
+  at 20-50%, 1.18 above 50%.
+- Code edits: no request fell to 1.2; the lowest, 1.67-2.00, have rare identifiers and
+  licence headers outside the vocabulary (`.basicConfig`, `Copyright`, ...); the
+  correlation is stronger (Spearman -0.60).
+- So the draft vocabulary does explain the low-acceptance requests on this model. It is
+  the hypothesis the 70B section below left open; the 70B itself was never re-run with
+  stored text.
+
+**Where the data is weak.**
+- Every goodput except chat bf16/n-gram is a lower bound (no tested load failed), so the
+  costs for those rows are upper bounds.
+- The chat cells are "untrusted" (run-to-run CV above 10% on throughput or TTFT p95);
+  three repetitions of 180 s at these loads.
+- Both gates are inconclusive, which blocks ranking and pricing under the quality
+  standard: nothing here is a shippable row yet.
+- One host, one region, one day; the 0.25 req/s points have only ~33-36 requests per
+  repetition.
+- n-gram's lower TTFT on code edits (46-59 ms against bf16's 75-87, CIs separated) is
+  measured but not explained; plausibly fewer decode steps competing with prefill, not
+  tested.
 
 ## Terms (each defined once)
 
@@ -142,7 +286,7 @@ covers a Python snippet completely and misses 80% of the tokens of a Chinese sen
 (checked 2026-11-02), so the vocabulary is a real way for a request to get no draft
 accepted.
 
-## The Qwen3-8B study (proposed, not run)
+## The Qwen3-8B study: design (ran as 53e4c107 on AWS; results above)
 
 `bench/experiments/qwen3-8b-specdec-runpod.yaml`: one RunPod Secure 1x L40S pod, vLLM
 v0.30.0, Qwen3-8B BF16, non-thinking mode.
@@ -275,8 +419,8 @@ where a latency tool should be worth more; and what the EAGLE3 draft fails to pr
 ```sh
 ID=<experiment id>; OUT=reports/8b-specdec-v1
 uv run bench report -e $ID --alt-slo tpot_ms.p95=20 --out $OUT
-uv run bench draft-misses $ID --cell bf16-eagle3 --workload chat-sharegpt --out $OUT/chat
-uv run bench draft-misses $ID --cell bf16-eagle3 --workload code-edit --out $OUT/code-edit
+uv run bench draft-misses $ID --cell bf16-eagle3 --workload chat-sharegpt --out $OUT/draft-misses/chat
+uv run bench draft-misses $ID --cell bf16-eagle3 --workload code-edit --out $OUT/draft-misses/code-edit
 ```
 
 The first writes the declared-SLO leaderboard (with the "Speculative decoding by load"
@@ -346,9 +490,11 @@ would still accept the odd draft, so "exactly 1.00 over 1,023 steps" points to s
 systematic. The leading hypothesis is the draft vocabulary: the head can only propose the
 32,000 most common Llama 3 tokens (of 128,256), and a greedy continuation of a
 random-word prompt that drifts into rare tokens (or a loop of one) can never be drafted.
-Those load runs did not store output text, so this is unconfirmed for the 70B. The
-Qwen3-8B study stores the EAGLE3 row's text, and `bench draft-misses` tests exactly this
-hypothesis there (and the other usual cause, a repetition loop). Not known either: how the extra 10-19 ms of a
+Those load runs did not store output text, so this is unconfirmed for the 70B. On
+Qwen3-8B (53e4c107, stored text) the same kind of head's low-acceptance requests were
+indeed the ones whose output left its draft vocabulary (median 69% of tokens outside,
+against 3.3% for the rest; section "What we measured on Qwen3-8B"), which makes the
+hypothesis likely for the 70B too, not proven. Not known either: how the extra 10-19 ms of a
 verify step (16-24%, both workloads) splits between the head's three sequential forward passes (each with its own
 all-reduces at TP=4) and the 4x larger verify batch; it was not profiled.
 
@@ -359,6 +505,11 @@ reach, so the SLO-based goodput, and with it the cost, did not move.
 
 ## Open questions
 
+- Settling the two IFEval gates (53e4c107): more IFEval-like items or a second host, not
+  more passes; until then neither speculative row ranks.
+- The load where speculation stops paying on an L40S: not reached at chat 3 req/s or
+  code edits 4 req/s (the speculating rows never ran more than ~19 requests at once).
+- Why n-gram lowers TTFT on code edits (measured, not explained).
 - CommitPackFT covers one kind of copy-heavy text (code edits). RAG over pasted passages
   with long extractive answers would be the other; no permissive dataset with long enough
   answers was chosen here.

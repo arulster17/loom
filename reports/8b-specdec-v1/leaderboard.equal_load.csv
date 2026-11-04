@@ -1,0 +1,106 @@
+model,workload,load_mode,load,config,metric,value,value_lo,value_hi,value_ci_method,slo_met,significantly_lower,verdict
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,0.25,bf16-eagle3,ttft_ms.p50,125.6744,95.4763,165.4239,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,0.25,bf16-eagle3,ttft_ms.p95,209.6778,160.2849,274.2915,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,0.25,bf16-eagle3,tpot_ms.p50,12.0181,11.6701,12.3764,log_t,True,True,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,0.25,bf16-eagle3,tpot_ms.p95,15.7487,11.469,21.6255,log_t,True,True,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,0.25,bf16-eagle3,e2e_ms.p95,8093.8294,6592.1374,9937.6074,log_t,True,True,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,0.25,bf16-ngram,ttft_ms.p50,98.8157,70.7625,137.9904,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,0.25,bf16-ngram,ttft_ms.p95,179.1659,133.0784,241.2143,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,0.25,bf16-ngram,tpot_ms.p50,22.4594,20.9121,24.1212,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,0.25,bf16-ngram,tpot_ms.p95,25.714,25.3681,26.0647,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,0.25,bf16-ngram,e2e_ms.p95,14979.4444,13934.7217,16102.4929,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,0.25,bf16,ttft_ms.p50,119.4007,93.4057,152.6303,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,0.25,bf16,ttft_ms.p95,203.1042,155.9236,264.561,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,0.25,bf16,tpot_ms.p50,23.9962,23.8196,24.1742,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,0.25,bf16,tpot_ms.p95,24.9952,23.6588,26.4071,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,0.25,bf16,e2e_ms.p95,15981.1699,12983.1449,19671.4889,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,1.0,bf16-eagle3,ttft_ms.p50,132.3193,99.0697,176.728,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,1.0,bf16-eagle3,ttft_ms.p95,241.8604,213.7318,273.691,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,1.0,bf16-eagle3,tpot_ms.p50,13.8117,13.1112,14.5496,log_t,True,True,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,1.0,bf16-eagle3,tpot_ms.p95,17.714,16.2998,19.2508,log_t,True,True,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,1.0,bf16-eagle3,e2e_ms.p95,9024.7874,7803.0546,10437.8081,log_t,True,True,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,1.0,bf16-ngram,ttft_ms.p50,104.1381,84.1563,128.8642,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,1.0,bf16-ngram,ttft_ms.p95,197.0112,179.8336,215.8296,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,1.0,bf16-ngram,tpot_ms.p50,26.7317,25.1381,28.4263,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,1.0,bf16-ngram,tpot_ms.p95,30.7791,27.541,34.398,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,1.0,bf16-ngram,e2e_ms.p95,16482.7204,14738.4918,18433.37,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,1.0,bf16,ttft_ms.p50,125.734,99.9059,158.2395,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,1.0,bf16,ttft_ms.p95,231.3909,206.607,259.1477,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,1.0,bf16,tpot_ms.p50,27.0749,25.089,29.2181,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,1.0,bf16,tpot_ms.p95,29.6854,27.6081,31.9189,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,1.0,bf16,e2e_ms.p95,18818.4623,17171.4789,20623.4143,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.0,bf16-eagle3,ttft_ms.p50,161.2712,153.7247,169.1881,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.0,bf16-eagle3,ttft_ms.p95,292.5995,279.3462,306.4817,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.0,bf16-eagle3,tpot_ms.p50,16.4236,14.9256,18.072,log_t,True,True,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.0,bf16-eagle3,tpot_ms.p95,21.5019,19.1556,24.1356,log_t,True,True,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.0,bf16-eagle3,e2e_ms.p95,11121.7333,9879.7061,12519.9019,log_t,True,True,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.0,bf16-ngram,ttft_ms.p50,133.0474,125.3269,141.2435,log_t,True,True,bf16-ngram lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.0,bf16-ngram,ttft_ms.p95,259.2012,229.0415,293.3323,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.0,bf16-ngram,tpot_ms.p50,33.1302,28.8425,38.0554,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.0,bf16-ngram,tpot_ms.p95,40.5033,36.0106,45.5566,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.0,bf16-ngram,e2e_ms.p95,20893.2284,17490.5087,24957.9358,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.0,bf16,ttft_ms.p50,160.9936,152.7084,169.7282,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.0,bf16,ttft_ms.p95,286.5967,279.076,294.3201,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.0,bf16,tpot_ms.p50,33.9919,30.3525,38.0677,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.0,bf16,tpot_ms.p95,38.231,33.4855,43.649,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.0,bf16,e2e_ms.p95,24117.0055,20612.7217,28217.0381,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,3.0,bf16-eagle3,ttft_ms.p50,195.3184,160.9274,237.059,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,3.0,bf16-eagle3,ttft_ms.p95,375.2962,270.9775,519.7746,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,3.0,bf16-eagle3,tpot_ms.p50,20.0867,17.5096,23.0431,log_t,True,True,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,3.0,bf16-eagle3,tpot_ms.p95,27.217,24.5034,30.231,log_t,True,True,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,3.0,bf16-eagle3,e2e_ms.p95,13870.3661,12676.5373,15176.6254,log_t,True,True,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,3.0,bf16-ngram,ttft_ms.p50,165.8186,128.4428,214.0704,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,3.0,bf16-ngram,ttft_ms.p95,364.4011,231.6441,573.2422,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,3.0,bf16-ngram,tpot_ms.p50,43.0657,36.591,50.686,log_t,False,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,3.0,bf16-ngram,tpot_ms.p95,55.8982,46.9685,66.5256,log_t,False,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,3.0,bf16-ngram,e2e_ms.p95,28100.3896,24725.9283,31935.3791,log_t,False,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,3.0,bf16,ttft_ms.p50,211.7349,170.7749,262.519,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,3.0,bf16,ttft_ms.p95,406.0351,292.9237,562.824,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,3.0,bf16,tpot_ms.p50,46.4719,38.4897,56.1094,log_t,False,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,3.0,bf16,tpot_ms.p95,55.2297,43.6597,69.8657,log_t,False,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,3.0,bf16,e2e_ms.p95,32983.7632,27448.9777,39634.5777,log_t,False,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,code-edit,open_loop,0.5,bf16-eagle3,ttft_ms.p50,75.836,73.0385,78.7406,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,0.5,bf16-eagle3,ttft_ms.p95,93.5604,86.7912,100.8576,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,0.5,bf16-eagle3,tpot_ms.p50,8.7755,8.5274,9.0308,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,0.5,bf16-eagle3,tpot_ms.p95,10.7908,9.7743,11.913,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-edit,open_loop,0.5,bf16-eagle3,e2e_ms.p95,3138.5214,2856.0011,3448.9892,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-edit,open_loop,0.5,bf16-ngram,ttft_ms.p50,46.1809,45.4214,46.953,log_t,True,True,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,0.5,bf16-ngram,ttft_ms.p95,67.4262,64.2167,70.7962,log_t,True,True,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,0.5,bf16-ngram,tpot_ms.p50,7.6601,7.0628,8.3079,log_t,True,True,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,0.5,bf16-ngram,tpot_ms.p95,12.903,9.6734,17.211,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-edit,open_loop,0.5,bf16-ngram,e2e_ms.p95,3285.5102,2873.7785,3756.2316,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-edit,open_loop,0.5,bf16,ttft_ms.p50,74.8994,71.9681,77.95,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,0.5,bf16,ttft_ms.p95,89.0158,86.3079,91.8087,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,0.5,bf16,tpot_ms.p50,23.6833,23.496,23.8721,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,0.5,bf16,tpot_ms.p95,24.2432,23.3374,25.184,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-edit,open_loop,0.5,bf16,e2e_ms.p95,8113.4141,7357.5269,8946.9586,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-edit,open_loop,2.0,bf16-eagle3,ttft_ms.p50,87.2479,86.1114,88.3994,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,2.0,bf16-eagle3,ttft_ms.p95,104.9072,102.7041,107.1576,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,2.0,bf16-eagle3,tpot_ms.p50,9.2585,8.9825,9.543,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,2.0,bf16-eagle3,tpot_ms.p95,11.1987,11.1222,11.2757,log_t,True,True,bf16-eagle3 lower
+Qwen/Qwen3-8B,code-edit,open_loop,2.0,bf16-eagle3,e2e_ms.p95,3341.9035,3108.123,3593.268,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-edit,open_loop,2.0,bf16-ngram,ttft_ms.p50,56.2865,55.4694,57.1157,log_t,True,True,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,2.0,bf16-ngram,ttft_ms.p95,73.8828,70.5337,77.391,log_t,True,True,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,2.0,bf16-ngram,tpot_ms.p50,8.1614,7.9806,8.3464,log_t,True,True,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,2.0,bf16-ngram,tpot_ms.p95,13.5842,12.594,14.6521,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,code-edit,open_loop,2.0,bf16-ngram,e2e_ms.p95,3351.697,3103.9782,3619.1854,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-edit,open_loop,2.0,bf16,ttft_ms.p50,79.719,78.5111,80.9455,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,2.0,bf16,ttft_ms.p95,96.7516,93.7695,99.8285,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,2.0,bf16,tpot_ms.p50,24.9873,24.5261,25.4573,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,2.0,bf16,tpot_ms.p95,25.708,25.2248,26.2004,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,code-edit,open_loop,2.0,bf16,e2e_ms.p95,8735.4171,8293.8466,9200.4971,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-edit,open_loop,4.0,bf16-eagle3,ttft_ms.p50,92.9872,89.1234,97.0184,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,4.0,bf16-eagle3,ttft_ms.p95,118.1323,106.6198,130.8879,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,4.0,bf16-eagle3,tpot_ms.p50,10.0506,9.9613,10.1408,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,4.0,bf16-eagle3,tpot_ms.p95,12.2673,12.1551,12.3805,log_t,True,True,bf16-eagle3 lower
+Qwen/Qwen3-8B,code-edit,open_loop,4.0,bf16-eagle3,e2e_ms.p95,3635.8677,3444.1004,3838.3126,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-edit,open_loop,4.0,bf16-ngram,ttft_ms.p50,59.367,55.4538,63.5563,log_t,True,True,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,4.0,bf16-ngram,ttft_ms.p95,80.4771,72.2813,89.6021,log_t,True,True,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,4.0,bf16-ngram,tpot_ms.p50,8.9766,8.8711,9.0833,log_t,True,True,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,4.0,bf16-ngram,tpot_ms.p95,15.4059,14.9836,15.8401,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,code-edit,open_loop,4.0,bf16-ngram,e2e_ms.p95,3891.7149,3574.5084,4237.0707,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,code-edit,open_loop,4.0,bf16,ttft_ms.p50,87.3747,83.0284,91.9485,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,4.0,bf16,ttft_ms.p95,110.6886,97.5944,125.5397,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,4.0,bf16,tpot_ms.p50,27.0752,26.3611,27.8088,log_t,True,False,bf16-ngram lower
+Qwen/Qwen3-8B,code-edit,open_loop,4.0,bf16,tpot_ms.p95,28.6156,26.2845,31.1535,log_t,True,False,bf16-eagle3 lower
+Qwen/Qwen3-8B,code-edit,open_loop,4.0,bf16,e2e_ms.p95,9481.7622,8688.3012,10347.6861,log_t,True,False,no significant difference
