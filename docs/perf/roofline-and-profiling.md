@@ -12,6 +12,10 @@ uv run bench roofline -e 7a8237d0 -e 9f0853d7 -e cf4d1614 -e 55102ddb \
   --db sqlite:///results/loom.db --out reports/roofline     # free: no GPU, DB read-only
 ```
 
+The GPU-side measurement (where each millisecond of a step goes, from torch-profiler traces
+of run 14d959e5) is in [reports/8b-profile-v1/](../../reports/8b-profile-v1/README.md), and
+summarized below under [What the trace measured](#what-the-trace-measured-14d959e5).
+
 ## Terms (each defined once)
 
 - **Decode step**: one pass of the model that produces the next token for *every*
@@ -66,7 +70,24 @@ judges. KV capacity was not the limit: at goodput both caches were under 20% ful
 **"The faster the step, the more the fixed overhead hurts."** fp8-kv8 reaches only
 61-65% of its floor, against 75% for BF16, and the H100 70B BF16 run reaches 82-85%.
 Every config pays roughly 3-6 ms per step that does not shrink with bytes; on a 15 ms
-floor that is a bigger share than on a 24 ms one. That is the next thing to profile.
+floor that is a bigger share than on a 24 ms one.
+
+**"We profiled it: the overhead is mostly GEMMs below peak bandwidth, and FP8 adds a CPU
+stall."** A GPU trace of every step (14d959e5) splits a batch-1 bf16 step (22.2 ms) into
+20.9 ms of weight-reading GEMMs, which stream the 15.1 GB at 84% of the spec bandwidth, plus
+0.8 ms attention, 0.4 ms of small kernels and under 0.1 ms with the GPU idle. The fp8-kv8 step
+(16.3 ms) reads 8.2 GB, but its FP8 GEMMs reach only 57-72% of bandwidth (13.7 ms instead of
+~10). It also pays two costs bf16 does not: 0.6 ms quantizing activations to FP8, and 1.0 ms
+with the GPU idle, because in that configuration the CPU blocks on a GPU-to-CPU copy for the
+whole step and cannot prepare the next one in parallel. Halving the bytes cut the step 1.36x,
+not 1.85x.
+
+**"The 2.4x checks out in the trace."** Per extra request, attention costs 0.29 ms in BF16 and
+0.17 ms with the FP8 cache: 1.7x cheaper for half the bytes, because the FP8 attention kernel
+runs at ~64% of bandwidth against ~74-90%. Decode alone gives ~2.8-3.1x. At its goodput
+fp8-kv8 handles 2.4x the prompts, and FP8 prefill is only 1.3x faster per token (50 vs 67 µs).
+So steps carrying a prompt chunk take 33% of its GPU time against 17% for bf16, and those
+60-70 ms steps are the slow tokens the p95 counts.
 
 **"On 2x H100 the 4x FP8 gain was mostly memory capacity, not speed."** Llama 3.3 70B
 BF16 fills 141 GB of the pod's 160 GB, leaving room for only about 42k cached tokens,
@@ -162,18 +183,24 @@ over each cell's 4-5 load points, R² ≥ 0.95 except 4x L40S at 0.89 with 3 poi
 
 What the fit says:
 
-1. **FP8 weights deliver their full byte saving.** The fixed part drops by 8-10 ms; the
-   weight floor drops by 8.0 ms.
+1. **FP8 weights deliver most, not all, of their byte saving.** fp8-kv8's fixed part is
+   7.4-8.6 ms below bf16's in 7a8237d0's fits; the weight floor drops by 8.0 ms. **Measured (14d959e5):**
+   a batch-1 step drops by 5.9 ms, from 22.2 to 16.3 ms. Its GEMMs drop by 7.1 ms (20.9 → 13.7),
+   and FP8 adds back 1.6 ms of GPU idle and activation quantization.
 2. **Every config pays 3-6 ms per step on one GPU beyond the weight read** (bf16 +4.4 to
    +6.3, fp8-kv8 +5.0 to +5.8, H100 +3.2 to +4.9 after the modelled all-reduce). That
-   overhead does not scale with bytes. Candidates: GEMMs below peak bandwidth, small
-   kernels (norms, activations, rotary, FP8 activation quantization: four per layer),
-   sampling, and the GPU idling while the CPU schedules the next step. This is what the
-   profiling run measures.
+   overhead does not scale with bytes. **Measured (14d959e5, batch 1):** on bf16, 3.3 of its
+   4.7 ms are GEMMs reading weights at 84% of the spec bandwidth instead of 100%. The rest
+   is attention beyond its bytes (0.6), small kernels (0.4) and GPU idle (0.07). On fp8-kv8,
+   4.3 of its 6.8 ms are FP8 GEMMs at 57-72% of bandwidth, plus 1.0 ms GPU idle (a CPU stall,
+   below), 0.6 ms quantization, 0.6 ms attention beyond its bytes and 0.2 ms other kernels.
+   Sampling is 0.03 ms on both.
 3. **An FP8 KV cache halves the bytes but not the time.** Per request, FP8 KV costs
-   0.19-0.21 ms against BF16's 0.30-0.35: 1.6-1.7x cheaper, not 2x. Attention over an
-   FP8 cache on Ada runs further from peak bandwidth (1.5-1.9x its floor vs 1.3-1.5x),
-   consistent with the dequantization work, but the trace has to confirm it.
+   0.19-0.21 ms against BF16's 0.30-0.35: 1.6-1.7x cheaper, not 2x. **Confirmed by the
+   trace:** attention alone costs 0.288 ms per request on bf16 and 0.170 on fp8-kv8 (chat);
+   that is 74% and 63% of the bandwidth their KV bytes need (90% and 65% on 1k/1k). The FP8
+   cache is read by FlashInfer's kernel, which converts the values back to BF16 as it reads;
+   BF16 uses FlashAttention.
 4. **The 4x L40S TP4 run pays 12.5 ms per step beyond its floor and 3.6x the KV floor per
    request.** Its all-reduces go through host memory; at batch 21 each carries 344 KB,
    between the two message sizes the link was measured at, so mid-size messages are
@@ -198,6 +225,23 @@ implied prefill share rises from 15% to 25% while its floor barely moves, so FP8
 prefill reaches a smaller share of its doubled peak). Mixed prefill+decode steps
 stretch the tail, and the realized gain lands at 2.37x. FP8 weights alone (3.87 req/s)
 and an FP8 cache alone (3.67 req/s) each gave ~1.7x; together they compound.
+
+**The trace confirms each step of that** (14d959e5, both cells at both chat rates on one
+host; [report](../../reports/8b-profile-v1/README.md#4-the-237x-step-by-step)):
+
+| At its goodput | bf16 @ 2.21 req/s | fp8-kv8 @ 5.24 req/s |
+|---|---|---|
+| Decode step line from the trace (ms) | 22.3 + 0.323 × batch | 15.4 + 0.204 × batch |
+| Typical decode batch, step | 20-28, 28.7-31.1 ms | 59-79, 26.3-31.5 ms |
+| Steps carrying prefill | 7% of steps, 17% of GPU time | 17% of steps, 33% of GPU time |
+| Prefill cost per prompt token | 67 µs (57% of BF16 peak) | 50 µs (38% of FP8 peak) |
+| TPOT p95 / ITL p50 (unprofiled) | 1.34 | 1.56 |
+
+The bf16 line matches the client fit to 0.4 ms. The fp8-kv8 line is 0.9 ms higher, which
+is the profiler (2.5-3.8% on fp8-kv8) and possibly the host's CPU. Within a 31.1 ms step the
+lines fit 27 vs 77 requests, 2.8x (the unprofiled fits: 3.1x). FP8 prefill is only 1.34x faster per token. So at
+2.37x the prompts, pure prefill work is ~25% of fp8-kv8's GPU time against ~14% of bf16's,
+which is the 15% / 25% the client data implied.
 
 The fixed-1k-1k version of the same comparison: 2.69x decode capacity, 2.25x measured.
 On 2x H100 (9f0853d7) decode alone would give 3.2x, and the measured 4.0x comes from
@@ -234,16 +278,23 @@ of the GPU can. Loom captures one through vLLM's built-in torch profiler.
 2. After a cell's measured load points, the runner runs one short extra job per
    (workload, load value): load for `settle_s` to reach steady state, then
    `POST /start_profile` with `max_iterations` (how many engine steps to record) and
-   `POST /stop_profile`, which writes the trace. A trace of 200 steps is a few MB.
+   `POST /stop_profile`, which writes the trace. vLLM v0.30 accepts `max_iterations` but
+   ignores it (smoke a183a857). Each window records every step for `capture_s`: in
+   14d959e5, 209-1,218 steps in 20 s, 6-22 MB per trace, flushed in 9-51 s.
 3. On RunPod a root script archives the trace directory and uploads it through the same
-   presigned-S3 path the jobs use (`collect_profile.sh`); the runner downloads it to
-   `results/<experiment>/profiles/<run id>/trace.tar.gz`.
+   presigned-S3 path the jobs use (`collect_profile.sh`; on AWS the same over SSM); the
+   runner downloads it to `results/<experiment>/profiles/<run id>/trace.tar.gz`.
 4. `bench profile analyze` (run automatically, also by hand on any trace) puts every GPU
    kernel in a category by name: GEMM, attention, all-reduce/NCCL, quantize/dequantize,
    sampling, memory copies, other kernels; time with no kernel running is **GPU idle**
    (the CPU scheduling the next step). Overlapping kernels count once, so only exposed
-   communication counts as communication. It reports per-step milliseconds and the
-   top kernels, in `window.json` and a `profile` event.
+   communication counts as communication. torch.compile fuses FP8 activation
+   quantization into the RMSNorm and SiLU kernels. Those count as quantize, not GEMM.
+   vLLM v0.30 labels every step `execute_context_<n>(<tokens>)_generation_<n>(<tokens>)`.
+   From those labels the analysis counts steps and splits the window step by step, from
+   one step's start to the next. Pure-decode steps are grouped by batch size, and steps
+   carrying prefill are grouped as "mixed" (`step_shapes`). It writes per-step
+   milliseconds, the step shapes and the top kernels to `window.json` and a `profile` event.
 
 **Profiled windows never count.** They are not recorded in `bench_runs`, so they are not
 in goodput, latency, cost or the search. The profiler slows the steps it records; each
@@ -259,42 +310,64 @@ metrics need admin profiling rights, neither of which RunPod's containers are kn
 grant. Loom uses the torch profiler (no install, kernel-level timing, small traces);
 nsys stays an option to try on one pod if the torch trace leaves a gap.
 
-### The proposed run (not approved, not run)
+### The profiling run (14d959e5, ran 2026-11-03)
 
-`bench/experiments/qwen3-8b-profile-runpod.yaml`, after its smoke
-`bench/experiments/runpod-smoke-profile.yaml`: bf16 and fp8-kv8 on one RunPod Secure
-1x L40S pod; fixed-1k-1k closed loop at 1, 16 and 64 concurrent requests (known batch
-sizes: the step-time-vs-batch line from the trace's side) and chat at 2.213 and 5.239
-req/s (each config's goodput in 7a8237d0); two measured repetitions per point and one
-profile window each (200 steps).
+`bench/experiments/qwen3-8b-profile-aws.yaml`, after its smoke `aws-smoke-profile`
+(a183a857, $0.96). bf16 and fp8-kv8 on one AWS g6e.xlarge (1x L40S 48 GB, 4 vCPU, on-demand;
+fp8-kv8 through a warm restart). fixed-1k-1k closed loop at 1, 16 and 64 concurrent requests
+(known batch sizes) and chat at 2.213 and 5.239 req/s (each config's goodput in 7a8237d0).
+Two measured repetitions per point, all 20 completed. One 20 s profile window per point, all
+10 captured. **$4.59** of a $5.25 cap; the instance is terminated. The RunPod twins
+(`qwen3-8b-profile-runpod`, `runpod-smoke-profile`) never got a pod: Secure L40S creates were
+refused all of 2026-11-02 ($0).
 
-| Spec | Pod time (plan) | Estimate | Worst case (pod to TTL) | Cap |
-|---|---|---|---|---|
-| runpod-smoke-profile | 38.6 min of a 55 min TTL | $0.71 | $1.01 | $1.05 |
-| qwen3-8b-profile-runpod | 2.23 h of a 2.67 h TTL | $2.45 | $2.94 | $3.00 |
-| Total | | $3.16 | $3.95 | $4.05 |
+Report, tables and per-window breakdowns:
+[reports/8b-profile-v1/](../../reports/8b-profile-v1/README.md).
 
-What it answers: the per-step split of fixed overhead (GEMM below bandwidth vs small
-kernels vs GPU idle), whether FP8-KV attention is the per-request excess, and the
-prefill share at each config's chat goodput. Both variants add `--profiler-config`, so
-their config hashes differ from 7a8237d0's; `bench compare <id> 7a8237d0 --match-by
-workload` at the shared chat rates checks that an armed but idle profiler costs nothing.
+#### What the trace measured (14d959e5)
 
-#### On AWS instead (2026-11-02, proposed, not approved, not run)
+A decode step at batch 1 (fixed-1k-1k, ~1.5k tokens of context), ms per step from one step's
+start to the next:
 
-RunPod Secure 1x L40S was out of stock all of 2026-11-02, so the run has AWS twins on one
-g6e.xlarge on-demand host (the same L40S 48 GB; 4 vCPU and 32 GiB against the pod's 16 and
-94; $1.861/h plus 200 GB gp3, accrued at $1.8829/h). The account's on-demand G/VT quota is
-4 vCPU, exactly one such host, so each spec uses one host, with fp8-kv8 through a warm
-restart. Same variants, workloads, windows, repetitions and SLO as the RunPod specs; only
-the provider block and budget differ (`bench/tests/aws/test_aws_perf_track.py`).
+| | bf16 | fp8-kv8 |
+|---|---|---|
+| Step | 22.17 | 16.28 |
+| Weight-read floor | 17.52 | 9.48 |
+| GEMM (36 layers + LM head) | 20.85 (726 GB/s, 84% of peak) | 13.71 (597 GB/s, 69%) |
+| Attention | 0.83 | 0.77 |
+| FP8 activation quantization | 0 | 0.61 |
+| Other kernels | 0.41 | 0.17 |
+| Sampling | 0.03 | 0.03 |
+| GPU idle | 0.07 | 1.04 |
 
-On AWS the engine runs in Docker, so a profiled vLLM container bind-mounts its
-`torch_profiler_dir` at the same host path and `aws_scripts/collect_profile.sh` archives
-and uploads it over SSM (new code; the smoke runs it first).
+What each line means:
 
-| Spec | Host time (plan) | Estimate | Worst case (host to TTL) | Cap |
-|---|---|---|---|---|
-| aws-smoke-profile | 42.6 min of a 55 min TTL | $1.34 | $1.73 | $1.75 |
-| qwen3-8b-profile-aws | 2.29 h of a 2.75 h TTL | $4.32 | $5.18 | $5.25 |
-| Total | | $5.66 | $6.91 | $7.00 |
+- **The GEMMs are the step.** They are memory-bound at every batch measured: from batch 1 to
+  64 they grow only 20.9 → 24.0 ms (bf16) and 13.7 → 14.6 ms (fp8), and their compute floor at
+  batch 64 is 2.7 / 1.3 ms. Per layer, BF16's cuBLAS kernels stream at 77-86% of the 864 GB/s
+  spec peak. The FP8 CUTLASS kernels stream at 57-72%: qkv and o projections are the worst
+  (57%, 63%), gate_up the best (72%). So half the bytes buys 1.59x per layer, not 2x. The LM
+  head stays BF16 in the FP8 checkpoint: 1.7 ms in both.
+- **fp8-kv8's GPU idles ~1 ms per step; bf16's does not.** In bf16 the CPU prepares a step in
+  1.9 ms, then waits on an event while the GPU runs, so its work is hidden. In fp8-kv8 the CPU
+  blocks in a GPU-to-CPU copy (`aten::to`, 13.1 ms per step) for the whole GPU step, so its
+  ~1 ms of preparation runs while the GPU waits. It also makes five pinned-memory copies and a
+  stream sync per step that bf16 does not. Which of FP8 weights, the FP8 cache or the FlashInfer
+  backend causes it is not separated yet: the windows were taken without Python stacks.
+- **Quantization is small in decode, not in prefill.** 0.6 ms per decode step (108 fused
+  norm/SiLU + quantize kernels). In a step carrying an 800-token prompt chunk it is 5.4 ms
+  of ~72.
+- **Attention is the per-request cost.** 0.288 ms per extra request in BF16, 0.170 with the
+  FP8 cache (chat). At batch 64 (1k/1k) that is 18.9 of a 40.9 ms step on bf16 and 13.3 of
+  30.0 on fp8-kv8. At bf16's overload point (5.24 req/s, batch ~125), 36.8 of 63 ms.
+- **Prefill is where FP8 gains least.** Per prompt token, 67 µs on bf16 (57% of the BF16
+  tensor peak) against 50 µs on fp8-kv8 (38% of the FP8 peak): 1.34x, not 2x.
+
+The profiler cost: profiled steps were 0-5% slower than the 22 s just before them in the same
+job (fp8-kv8 2.5-3.8%, its step being CPU-bound). The one window reading 0.88 (bf16 at 64
+concurrent) caught a closed-loop wave's prefill burst, with shorter contexts, not a speed-up.
+Two things not settled: fp8-kv8 at 5.24 req/s ran 6% slower on this host than in 7a8237d0
+(ITL p50 27.5 vs 25.9 ms; bf16 matched), plausibly the 4-vCPU host and the CPU-bound step. And
+the CPU stall's call site is not named yet. Next, not proposed for spend yet: one fp8-kv8 window
+with Python stacks, and the `fp8` and `bf16-kv8` cells profiled, which separate the
+two FP8 halves.

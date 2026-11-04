@@ -1,0 +1,200 @@
+{
+ "window": {
+  "run_id": "1b155770-945a-495d-a660-d73f560c50cd",
+  "cell": "fp8-kv8",
+  "workload": "fixed-1k-1k",
+  "load_value": 1.0,
+  "client_latency": {
+   "profiled": {
+    "tokens": 1216,
+    "itl_p50_ms": 16.266446000372525,
+    "itl_mean_ms": 16.32914408552578
+   },
+   "before": {
+    "tokens": 1428,
+    "itl_p50_ms": 15.665067499867291,
+    "itl_mean_ms": 15.700371778712123
+   },
+   "profiler_slowdown": 1.038389780351111
+  },
+  "capture": {
+   "prefix": "loom-1b155770-945a-495d-a660-d73f560c50cd",
+   "start_s": 45.000187698000445,
+   "start_status": 200,
+   "stop_s": 65.00016111100012,
+   "stop_status": 200,
+   "stopped_s": 115.68632015100047
+  }
+ },
+ "trace_bytes": 21983190,
+ "ranks": [
+  {
+   "source": "./rank0.1793755960932987595.pt.trace.json.gz",
+   "device": 0,
+   "window_ms": 19948.722482910158,
+   "busy_ms": 18685.07594824219,
+   "kernels": 550580,
+   "steps": 1218,
+   "step_source": "gpu annotations",
+   "category_ms": {
+    "gemm": 16737.967981933594,
+    "attention": 943.3176064453125,
+    "allreduce": 0.0,
+    "quant": 752.8654384765625,
+    "sampling": 31.8675126953125,
+    "memcpy": 6.96923486328125,
+    "other": 212.088173828125,
+    "idle": 1263.6465346679688
+   },
+   "category_share": {
+    "gemm": 0.839049618153384,
+    "attention": 0.04728711862393404,
+    "allreduce": 0.0,
+    "quant": 0.0377400326823702,
+    "sampling": 0.0015974713529958138,
+    "memcpy": 0.0003493574523006029,
+    "other": 0.010631666965632437,
+    "idle": 0.06334473476938286
+   },
+   "per_step_ms": {
+    "gemm": 13.742174040996384,
+    "attention": 0.774480793469058,
+    "allreduce": 0.0,
+    "quant": 0.6181161235439758,
+    "sampling": 0.026163803526529146,
+    "memcpy": 0.005721867703843391,
+    "other": 0.17412822153376437,
+    "idle": 1.0374766294482503
+   },
+   "top_kernels": [
+    {
+     "name": "void cutlass::Kernel2<enable_sm89_to_sm90<cutlass::gemm::kernel::DefaultGemmWithVisitor<cutlass::float_e4m3_t, cutlass::layout::RowMajor, (cutlass::ComplexTrans",
+     "category": "gemm",
+     "count": 131436,
+     "total_ms": 7495.44405800006
+    },
+    {
+     "name": "void cutlass::Kernel2<enable_sm89_to_sm90<cutlass::gemm::kernel::DefaultGemmWithVisitor<cutlass::float_e4m3_t, cutlass::layout::RowMajor, (cutlass::ComplexTrans",
+     "category": "gemm",
+     "count": 43812,
+     "total_ms": 7059.449416000108
+    },
+    {
+     "name": "std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, float, false, true, true, false, 6, false, c",
+     "category": "gemm",
+     "count": 1218,
+     "total_ms": 2136.3224319999968
+    },
+    {
+     "name": "void flashinfer::BatchPrefillWithPagedKVCacheKernel<flashinfer::KernelTraits<(flashinfer::MaskMode)0, 16u, 1u, 2u, 8u, 8u, 1u, 4u, (flashinfer::PosEncodingMode)",
+     "category": "attention",
+     "count": 43812,
+     "total_ms": 665.0768109999728
+    },
+    {
+     "name": "triton_red_fused__to_copy_abs_clamp_cutlass_scaled_mm_div_max_mul_reciprocal_silu_slice_unsqueeze_2",
+     "category": "quant",
+     "count": 43848,
+     "total_ms": 267.6498050000818
+    },
+    {
+     "name": "triton_red_fused__to_copy_abs_clamp_cutlass_scaled_mm_div_fused_add_rms_norm_max_mul_reciprocal_unsqueeze_3",
+     "category": "quant",
+     "count": 42630,
+     "total_ms": 193.96298699998786
+    },
+    {
+     "name": "triton_red_fused__to_copy_abs_clamp_cutlass_scaled_mm_div_fused_add_rms_norm_max_mul_reciprocal_unsqueeze_1",
+     "category": "quant",
+     "count": 43848,
+     "total_ms": 190.85219200007074
+    },
+    {
+     "name": "triton_red_fused_4",
+     "category": "other",
+     "count": 42630,
+     "total_ms": 164.5996579999677
+    },
+    {
+     "name": "void vllm::reshape_and_cache_flash_kernel<__nv_bfloat16, unsigned char, (vllm::Fp8KVCacheDataType)1>(__nv_bfloat16 const*, __nv_bfloat16 const*, unsigned char*,",
+     "category": "attention",
+     "count": 43848,
+     "total_ms": 159.10175299999844
+    },
+    {
+     "name": "void flashinfer::PersistentVariableLengthMergeStatesKernel<8u, 16u, 8u, 4u, __nv_bfloat16, __nv_bfloat16, int>(__nv_bfloat16*, float*, int*, __nv_bfloat16*, flo",
+     "category": "attention",
+     "count": 43812,
+     "total_ms": 116.29257700003835
+    },
+    {
+     "name": "triton_red_fused__to_copy_abs_clamp_cutlass_scaled_mm_div_max_mul_reciprocal_unsqueeze_view_0",
+     "category": "quant",
+     "count": 43848,
+     "total_ms": 101.8276909999826
+    },
+    {
+     "name": "void cutlass::Kernel2<enable_sm89_to_sm90<cutlass::gemm::kernel::DefaultGemmWithVisitor<cutlass::float_e4m3_t, cutlass::layout::RowMajor, (cutlass::ComplexTrans",
+     "category": "gemm",
+     "count": 108,
+     "total_ms": 38.592590999999985
+    },
+    {
+     "name": "_gumbel_sample_kernel",
+     "category": "sampling",
+     "count": 1218,
+     "total_ms": 18.883710000000022
+    },
+    {
+     "name": "void cutlass::Kernel2<enable_sm89_to_sm90<cutlass::gemm::kernel::DefaultGemmWithVisitor<cutlass::float_e4m3_t, cutlass::layout::RowMajor, (cutlass::ComplexTrans",
+     "category": "gemm",
+     "count": 36,
+     "total_ms": 8.159766000000001
+    },
+    {
+     "name": "void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<at::native::index_kernel_impl<at::native::OpaqueType<2> >(at::TensorIteratorBase&",
+     "category": "other",
+     "count": 1218,
+     "total_ms": 6.157336000000009
+    }
+   ],
+   "step_shapes": [
+    {
+     "kind": "decode",
+     "batch": 1,
+     "steps": 1216,
+     "step_ms_p50": 16.284822265625,
+     "step_ms_mean": 16.340939570778296,
+     "category_ms": {
+      "gemm": 13.713620733160722,
+      "attention": 0.772392299049779,
+      "allreduce": 0.0,
+      "quant": 0.6140554685090717,
+      "sampling": 0.02616346780877364,
+      "memcpy": 0.005721645154451069,
+      "other": 0.17374039660002055,
+      "idle": 1.0352455596923829
+     }
+    },
+    {
+     "kind": "mixed",
+     "batch": null,
+     "steps": 1,
+     "step_ms_p50": 61.69856494140625,
+     "step_ms_mean": 61.69856494140625,
+     "category_ms": {
+      "gemm": 48.4971826171875,
+      "attention": 3.2587353515625,
+      "allreduce": 0.0,
+      "quant": 5.55960546875,
+      "sampling": 0.02681591796875,
+      "memcpy": 0.00646533203125,
+      "other": 0.64541552734375,
+      "idle": 3.7043447265625
+     },
+     "prefill_tokens_mean": 1024.0
+    }
+   ]
+  }
+ ]
+}

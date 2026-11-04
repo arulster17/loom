@@ -63,6 +63,10 @@ class Store:
         self.path = root / "loom.db"
         self.url = f"sqlite:///{self.path}"
         upgrade(self.url)
+        self.new_experiment()
+
+    def new_experiment(self) -> uuid.UUID:
+        """Add an experiment; later runs go to it."""
         self.experiment_id = uuid.uuid4()
         con = sqlite3.connect(self.path)
         con.execute(
@@ -73,6 +77,7 @@ class Store:
         )
         con.commit()
         con.close()
+        return self.experiment_id
 
     def add_run(
         self,
@@ -86,6 +91,7 @@ class Store:
         rep: int = 0,
         relative_uri: bool = False,
         summ: dict[str, Any] | None = None,
+        load_mode: str = "open_loop",
         **patch: Any,
     ) -> str:
         run_id = uuid.uuid4()
@@ -96,12 +102,13 @@ class Store:
         con.execute(
             "insert into bench_runs (id, experiment_id, cell_key, config_hash, workload,"
             " load_mode, load_value, repetition, status, provenance, summary, requests_uri)"
-            " values (?, ?, ?, 'h', ?, 'open_loop', ?, ?, 'completed', ?, ?, ?)",
+            " values (?, ?, ?, 'h', ?, ?, ?, ?, 'completed', ?, ?, ?)",
             (
                 run_id.hex,
                 self.experiment_id.hex,
                 cell,
                 workload,
+                load_mode,
                 load,
                 rep,
                 json.dumps(provenance(model_id, **patch)),

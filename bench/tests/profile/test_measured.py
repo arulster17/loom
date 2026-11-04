@@ -142,6 +142,57 @@ def test_ratio_explanation_and_report(store) -> None:
     assert svg.startswith("<svg") and "bf16 · fixed-1k-1k @ 16" in svg  # cell · workload @ load
 
 
+def _cells(store, load_mode: str = "open_loop", bf16_only: bool = False) -> None:
+    for cell, model, patch, fixed, per in (
+        ("bf16", "qwen3-8b", {}, 22.0, 0.33),
+        ("fp8-kv8", "qwen3-8b-fp8", {"kv_cache_dtype": "fp8"}, 14.5, 0.19),
+    ):
+        if bf16_only and cell != "bf16":
+            continue
+        for b in (8, 16, 32):
+            itl = (fixed + per * b) / 1000
+            store.add_run(
+                cell=cell,
+                model_id=model,
+                load=float(b),
+                records=steady_requests(b, itl_s=itl),
+                window_s=99 * itl,
+                load_mode=load_mode,
+                **patch,
+            )
+
+
+def _goodput(store, rows: list[tuple[str, float]]) -> None:
+    exp_dir = store.root / str(store.experiment_id)
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    (exp_dir / "goodput.json").write_text(
+        json.dumps([{"cell": c, "workload": "fixed-1k-1k", "max_load": g} for c, g in rows])
+    )
+
+
+def test_ratio_pairs_cells_within_one_experiment(store) -> None:
+    """A second experiment with the same cell names (a profiling run at fixed points) must
+    not lend its goodput or fit to the first one's ratio, and a closed-loop pair is not
+    explained (its goodput is a concurrency)."""
+    _cells(store)
+    _goodput(store, [("bf16", 8.0), ("fp8-kv8", 16.0)])
+    sweep = str(store.experiment_id)
+    store.new_experiment()
+    _cells(store, bf16_only=True)
+    _goodput(store, [("bf16", 32.0)])
+    other = str(store.experiment_id)
+    store.new_experiment()
+    _cells(store, load_mode="closed_loop")
+    _goodput(store, [("bf16", 8.0), ("fp8-kv8", 32.0)])
+    closed = str(store.experiment_id)
+    rep = build_report(
+        store.url, [other, sweep, closed], [], compare=[("fixed-1k-1k", "bf16", "fp8-kv8")]
+    )
+    (x,) = rep.ratios
+    assert x.measured_ratio == pytest.approx(2.0)  # the sweep's 16 / 8, nothing mixed in
+    assert any("closed loop" in s for s in rep.skipped)
+
+
 def test_cli_roofline_writes_the_report(store, tmp_path) -> None:
     store.add_run(
         cell="bf16", model_id="qwen3-8b", load=1.0, records=steady_requests(4), window_s=3.0
