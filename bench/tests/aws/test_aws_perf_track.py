@@ -693,7 +693,10 @@ def test_without_the_teardown_wait_a_held_quota_fails_clearly(tmp_path, monkeypa
 
     monkeypatch.setattr(aws_ec2, "TERMINATE_WAIT_S", -1)
     quota: dict[str, OneHostQuota] = {}
-    now = [datetime(2026, 11, 3, 3, 0, tzinfo=UTC)]
+    # Start the fake clock at the real time: the host's spend accrues from its (real)
+    # launch time to this clock, so a fixed date made the test hit the budget cap
+    # once a day had passed.
+    now = [datetime.now(UTC)]
 
     def wrap(ec2: Any) -> OneHostQuota:
         quota["ec2"] = OneHostQuota(ec2)
@@ -710,7 +713,7 @@ def test_without_the_teardown_wait_a_held_quota_fails_clearly(tmp_path, monkeypa
         wrap_ec2=wrap,
         provider_kw={"sleep": sleep, "clock": lambda: now[0]},
     )
-    assert outcome.status.value == "failed"
+    assert outcome.status.value == "failed", outcome.reason
     reason = str(outcome.reason)
     assert "VcpuLimitExceeded" in reason and "for 600 s" in reason
     assert quota["ec2"].refused == 6 and len(quota["ec2"].launched) == 1
