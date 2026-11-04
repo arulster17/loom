@@ -415,7 +415,7 @@ class QualitySpec(_Strict):
     limit: PositiveInt | None = None
     # Independent passes of the suite per cell, pooled into per-item mean scores
     # (`pool_replicates`) so engine nondeterminism averages out of the gate. The
-    # divergence half runs on the first pass only.
+    # divergence half runs on the last pass only.
     replicates: Annotated[int, Field(ge=1, le=10)] = 1
 
     @model_validator(mode="after")

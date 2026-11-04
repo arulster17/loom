@@ -98,16 +98,16 @@ def test_each_pod_downloads_only_its_checkpoint_and_warm_restarts_offline(sweep_
     assert mbt == [None, None, None, None, "1024"]
 
 
-def test_every_cell_runs_three_passes_and_only_the_first_scores_divergence(sweep_run):
+def test_every_cell_runs_three_passes_and_only_the_last_scores_divergence(sweep_run):
     _, sim, _, cells, _ = sweep_run
     evals = [j for j in sim.jobs if isinstance(j, EvalJob)]
     assert len(evals) == REPLICATES * len(cells)
     bf16 = next(c for c in cells if c.key == "bf16")
     modes = [j.divergence for j in evals]
     per_cell = [modes[i : i + REPLICATES] for i in range(0, len(modes), REPLICATES)]
-    assert per_cell[0] == ["capture_and_floor", None, None]
+    assert per_cell[0] == [None, None, "capture_and_floor"]
     for passes in per_cell[1:]:
-        assert passes == ["score", None, None]
+        assert passes == [None, None, "score"]
     # Candidates on pods b and c score against the reference captured on pod a.
     for job in evals:
         if job.divergence == "score":

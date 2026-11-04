@@ -454,10 +454,10 @@ def test_every_cell_runs_its_passes_and_fp8_kv8_is_gated_against_bf16(aws_run):
     evals = [j for j in sim.jobs if isinstance(j, EvalJob)]
     assert len(evals) == replicates * len(cells)
     modes = [j.divergence for j in evals]
-    assert modes[:replicates] == ["capture_and_floor"] + [None] * (replicates - 1)
-    assert modes[replicates:] == ["score"] + [None] * (replicates - 1)
-    assert evals[replicates].reference is not None
-    assert evals[replicates].reference.config_hash == cells[0].config_hash
+    assert modes[:replicates] == [None] * (replicates - 1) + ["capture_and_floor"]
+    assert modes[replicates:] == [None] * (replicates - 1) + ["score"]
+    assert evals[-1].reference is not None
+    assert evals[-1].reference.config_hash == cells[0].config_hash
     assert [j.served_model for j in evals] == ["qwen3-8b"] * replicates + [
         "qwen3-8b-fp8"
     ] * replicates

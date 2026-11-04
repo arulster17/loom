@@ -8,6 +8,7 @@ the launch (SSM, describe, teardown, the ClientToken cleanup, the reaper) goes t
 region the host runs in. Moto runs all three regions in one account here."""
 
 import logging
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,8 @@ from loom_bench.plan import host_price
 from loom_bench.prices import load_prices
 from loom_bench.providers import make_provider
 from loom_bench.providers.aws_ec2 import (
+    NOT_FOUND_GRACE_S,
+    NOT_FOUND_POLL_S,
     QUOTA_WAIT_S,
     AwsEc2Provider,
     AwsRegion,
@@ -29,7 +32,7 @@ from loom_bench.providers.aws_ec2 import (
     VcpuQuotaHeld,
     load_aws_settings,
 )
-from loom_bench.providers.base import Host
+from loom_bench.providers.base import Host, HostLost
 from loom_bench.registry import load_registry
 
 from .conftest import amazon_ami, state
@@ -485,6 +488,69 @@ async def test_ssm_describe_and_teardown_go_to_the_hosts_region(env: dict[str, A
 
     await p.teardown(host)
     assert state(r[WEST2]["ec2"], host.host_id) == "terminated"
+
+
+class LaggingDescribe:
+    """DescribeInstances by id answers NotFound for the first `misses` calls after the
+    launch, as EC2's eventually consistent API does for a new instance."""
+
+    def __init__(self, inner: Any, misses: int) -> None:
+        self.inner = inner
+        self.misses = misses
+        self.calls = 0
+
+    def __call__(self, **kw: Any) -> Any:
+        if "InstanceIds" in kw:
+            self.calls += 1
+            if self.calls <= self.misses:
+                raise client_error("InvalidInstanceID.NotFound", "DescribeInstances")
+        return self.inner.describe_instances(**kw)
+
+
+def _lagging_in_east2(env: dict[str, Any], misses: int) -> tuple[Ec2s, LaggingDescribe]:
+    """No capacity in the primary, so the host launches in us-east-2, whose describe lags."""
+    r = env["regions"]
+    ec2 = Ec2s(env, {az: [IIC] for az in r[PRIMARY]["azs"]})
+    lag = LaggingDescribe(r[EAST2]["ec2"], misses)
+    ec2.clients[EAST2] = Proxy(ec2.clients[EAST2], describe_instances=lag)
+    return ec2, lag
+
+
+async def test_a_new_instance_not_yet_visible_to_describe_is_not_lost(
+    env: dict[str, Any],
+) -> None:
+    """46938d1f: its third host launched in us-east-2 after the primary's sweep (50 s),
+    the first DescribeInstances that same second said NotFound, and check_host raised
+    `HostLost: ... is not-found (no reason) after 50s`; teardown then terminated the new,
+    healthy instance and the experiment failed. NotFound right after the launch is EC2's
+    eventual consistency: check_host asks again."""
+    r = env["regions"]
+    ec2, lag = _lagging_in_east2(env, misses=2)
+    p, t = make(env, ec2.clients)
+    t.now += timedelta(seconds=50)  # the sweep's launch time is its start, 50 s back
+    host = await p.provision(request())
+    assert host.info["region"] == EAST2
+    t.slept.clear()
+
+    inst = await p.check_host(host)
+    assert inst["InstanceId"] == host.host_id
+    assert lag.calls == 3 and t.slept == [NOT_FOUND_POLL_S] * 2
+    assert state(r[EAST2]["ec2"], host.host_id) != "terminated"
+
+
+async def test_an_instance_still_not_found_after_the_grace_is_lost(env: dict[str, Any]) -> None:
+    ec2, lag = _lagging_in_east2(env, misses=10_000)
+    p, t = make(env, ec2.clients)
+    host = await p.provision(request())
+
+    with pytest.raises(HostLost, match="not-found"):
+        await p.check_host(host)
+    assert sum(t.slept) == pytest.approx(NOT_FOUND_GRACE_S)
+    # Later checks get no new grace: the launch was answered long ago.
+    calls = lag.calls
+    with pytest.raises(HostLost, match="not-found"):
+        await p.check_host(host)
+    assert lag.calls == calls + 1
 
 
 async def test_provenance_records_the_launch_region_and_the_config_hash_ignores_it(

@@ -280,8 +280,8 @@ def test_sglang_is_scored_on_vllms_in_run_reference_and_gated_against_it(engines
     replicates = exp.quality.replicates  # type: ignore[union-attr]
     evals = [j for j in sim.jobs if isinstance(j, EvalJob)]
     assert len(evals) == 2 * replicates == 6
-    assert [j.divergence for j in evals] == ["capture_and_floor", None, None, "score", None, None]
-    ref = evals[replicates].reference
+    assert [j.divergence for j in evals] == [None, None, "capture_and_floor", None, None, "score"]
+    ref = evals[-1].reference
     assert ref is not None and ref.config_hash == vllm.config_hash
     assert not [e for e in outcome.events if e["kind"] == "stored_baseline"]
     (gate,) = outcome.gates

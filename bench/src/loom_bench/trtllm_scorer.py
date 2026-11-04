@@ -28,6 +28,7 @@ On the pod this file runs as `python3 -c` source right after detokenize.py's sou
 installed: no `from __future__` import, and tensorrt_llm is imported only inside functions.
 """
 
+import asyncio
 import contextlib
 import json
 import time
@@ -42,6 +43,16 @@ with contextlib.suppress(ImportError):
 ROUTE = "/v1/completions"
 # The divergence check asks for 5; the cap keeps a stray request from asking for a huge k.
 MAX_K = 20
+# Prompt-logprobs requests the engine runs at once. 46938d1f's trtllm-bf16 (1.4.0rc2, L40S)
+# answered every eval task, then its LLM shut down under the divergence check's 48 scoring
+# requests sent 16 at a time ("HTTP 500: loom prompt logprobs: RuntimeError: LLM is
+# shutting down"), and the next pass found the engine dead. Its smokes, 4 requests, passed.
+# Prompt logprobs come from context logits, one fp32 vocabulary row (Qwen3: 151,936 entries,
+# ~0.6 MB) per prompt token, which the engine's memory profile at startup does not count;
+# a batch of 16 scoring prompts holds 16x that at once. One at a time keeps that to one
+# prompt. It also changes the candidate's batching, which the noise floor already spans:
+# the baseline's floor is its own scoring at concurrency 1 against its capture at 16.
+SCORE_CONCURRENCY = 1
 
 Score = Callable[[Mapping[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -189,6 +200,7 @@ def make_scorer(server: Any, sampling_params: Callable[..., Any]) -> Score:
     tokenizer (the one its completions route encodes with) and its served model name."""
     tokenizer = getattr(server.tokenizer, "tokenizer", server.tokenizer)
     token_bytes = hf_token_bytes(tokenizer)
+    running = asyncio.Semaphore(SCORE_CONCURRENCY)
 
     async def score(request: Mapping[str, Any]) -> dict[str, Any]:
         k = int(request["logprobs"])
@@ -200,9 +212,10 @@ def make_scorer(server: Any, sampling_params: Callable[..., Any]) -> Score:
             max_tokens=1, temperature=0.0, prompt_logprobs=k, seed=request.get("seed")
         )
         # A fresh salt: no KV block reuse, so every position's context logits are computed.
-        result = await server.generator.generate_async(
-            ids, sampling_params=params, cache_salt=uuid.uuid4().hex
-        ).aresult()
+        async with running:
+            result = await server.generator.generate_async(
+                ids, sampling_params=params, cache_salt=uuid.uuid4().hex
+            ).aresult()
         out = result.outputs[0]
         generated = [int(t) for t in out.token_ids][:1]
         if not generated or out.prompt_logprobs is None:

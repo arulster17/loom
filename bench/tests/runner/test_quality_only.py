@@ -101,7 +101,7 @@ async def test_replicated_passes_pool_into_one_gated_result(ctx, suite):
     outcome = await run_experiment(_replicated(suite, 3), ctx)
     assert outcome.exit_code == EXIT_OK, outcome.reason
     kinds = [e["kind"] for e in outcome.events]
-    # The divergence half (reference capture, scoring) runs on the first pass only.
+    # The divergence half (reference capture, scoring) runs on the last pass only.
     assert kinds.count("reference_captured") == 1 and kinds.count("gate") == 1
     quality = [e for e in outcome.events if e["kind"] == "quality"]
     assert [e["replicates"] for e in quality] == [3, 3]

@@ -15,6 +15,7 @@ from loom_bench.quality.tasks.lmeval import (
     LmEvalParams,
     build_command,
     ensure_installed,
+    failure_summary,
     parse_results,
     parse_samples,
 )
@@ -246,3 +247,52 @@ async def test_run_end_to_end_with_fake_harness(tmp_path, monkeypatch):
     info = out.provenance["lm_eval"]
     assert info["lm_eval_version"] == "0.4.13"
     assert out.version == "lm_eval=0.4.13;gsm8k=3.0;ifeval=4.0;niah_single_2=1.0"
+
+
+# How lm_eval 0.4.13 failed in 46938d1f against a dead engine: the first request's
+# failure, many lines of progress and retries, then only a later request's
+# "Session is closed" traceback at the end.
+FAILING_MAIN = textwrap.dedent(
+    """
+    import sys
+    print("WARNING API request failed! Status code: 500, Response text: "
+          "{'error': 'LLM is shutting down'}. Retrying...")
+    print("ERROR Exception:ClientResponseError(status=500), (no outputs), retrying.")
+    for i in range(40):
+        print(f"INFO Retry attempt {i}")
+    print("Traceback (most recent call last):")
+    print('  File "aiohttp/client.py", line 581, in _request')
+    print('    raise RuntimeError("Session is closed")')
+    print("RuntimeError: Session is closed")
+    sys.exit(1)
+    """
+)
+
+
+async def test_a_failed_run_names_its_first_request_failure(tmp_path, monkeypatch):
+    pkg = tmp_path / "site" / "lm_eval"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "__main__.py").write_text(FAILING_MAIN)
+    monkeypatch.syspath_prepend(str(tmp_path / "site"))
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "site"))
+    task = build_task(
+        "lm_eval",
+        "gsm8k",
+        {"tasks": ["gsm8k"], "limit": 3, "metric": "exact_match", "filter": "strict-match"},
+    )
+    async with EvalClient("http://h/v1", "qwen3-8b") as client:
+        with pytest.raises(LmEvalError) as e:
+            await task.run(EvalContext(client=client, workdir=tmp_path / "work"))
+    message = str(e.value)
+    assert message.startswith("gsm8k: lm_eval exited 1:\nfirst request failure: ")
+    assert "Status code: 500" in message and "LLM is shutting down" in message
+    assert message.endswith("RuntimeError: Session is closed")
+
+
+def test_failure_summary_is_the_tail_when_no_request_failed():
+    log = "\n".join(f"line {i}" for i in range(30))
+    assert failure_summary(log) == "\n".join(f"line {i}" for i in range(10, 30))
+    # A failure already in the tail is not repeated.
+    log = "a\nAPI request failed! 400\nb"
+    assert failure_summary(log) == log

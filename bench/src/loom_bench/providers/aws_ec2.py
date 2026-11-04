@@ -167,6 +167,16 @@ SPOT_INTERRUPTION_CODES = frozenset(
     {"Server.SpotInstanceTermination", "Server.SpotInstanceShutdown"}
 )
 GONE_STATES = frozenset({"shutting-down", "terminated", "stopping", "stopped"})
+# DescribeInstances is eventually consistent: right after RunInstances answers, it may
+# still say InvalidInstanceID.NotFound. 46938d1f lost its third host that way: RunInstances
+# in us-east-2 answered at 12:45:26Z, the first describe that same second was NotFound,
+# check_host called that HostLost and our teardown terminated a healthy new instance
+# (CloudTrail: RunInstances, DescribeInstances NotFound, TerminateInstances, all from Loom,
+# within a second). A gone instance reads `terminated` for about an hour, so NotFound this
+# soon only means "not visible yet": check_host asks again for up to NOT_FOUND_GRACE_S
+# after the launch was answered, every NOT_FOUND_POLL_S.
+NOT_FOUND_GRACE_S = 300.0
+NOT_FOUND_POLL_S = 5.0
 
 _SAFE_ID = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 SafeId = Annotated[str, StringConstraints(pattern=_SAFE_ID)]
@@ -515,6 +525,9 @@ class AwsEc2Provider:
         self.clock = clock
         self.sleep = sleep
         self.weights = HostWeights()  # what each instance's HF cache holds
+        # When RunInstances answered with each host: DescribeInstances may not know the
+        # instance yet for a while after (NOT_FOUND_GRACE_S).
+        self._answered_at: dict[str, datetime] = {}
 
     # -- regions ----------------------------------------------------------------
 
@@ -932,6 +945,7 @@ class AwsEc2Provider:
 
     def _host(self, req: HostRequest, inst: Mapping[str, Any], launch: _PendingLaunch) -> Host:
         cand = launch.cand
+        self._answered_at[str(inst["InstanceId"])] = self.clock()
         return Host(
             provider=PROVIDER_NAME,
             host_id=inst["InstanceId"],
@@ -1157,8 +1171,27 @@ class AwsEc2Provider:
         return None
 
     async def check_host(self, host: Host) -> dict[str, Any]:
-        """Describe the instance; raise `SpotInterrupted`/`HostLost` if it is gone."""
-        inst = await asyncio.to_thread(self._describe, host.host_id, self._host_region(host))
+        """Describe the instance; raise `SpotInterrupted`/`HostLost` if it is gone.
+
+        NotFound within NOT_FOUND_GRACE_S of the RunInstances answer is DescribeInstances
+        not knowing the new instance yet, not a loss: it is asked again until then."""
+        region = self._host_region(host)
+        inst = await asyncio.to_thread(self._describe, host.host_id, region)
+        if inst is None:
+            answered = self._answered_at.get(host.host_id, host.launched_at)
+            left = NOT_FOUND_GRACE_S - (self.clock() - answered).total_seconds()
+            # Bounded by count as well as by the clock, so a clock that stands still
+            # cannot keep it asking.
+            for _ in range(max(0, math.ceil(left / NOT_FOUND_POLL_S))):
+                await self.sleep(NOT_FOUND_POLL_S)
+                inst = await asyncio.to_thread(self._describe, host.host_id, region)
+                if inst is not None:
+                    log.info(
+                        "%s: visible to DescribeInstances %.0f s after RunInstances answered",
+                        host.host_id,
+                        (self.clock() - answered).total_seconds(),
+                    )
+                    break
         lost = host_loss(inst, host.host_id, host.launched_at, self.clock())
         if lost is not None:
             raise lost

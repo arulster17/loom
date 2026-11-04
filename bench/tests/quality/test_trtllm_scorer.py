@@ -15,6 +15,7 @@ over the same toy model. Identical distributions must come out identical (KL 0, 
 100%); an off-by-one alignment must not.
 """
 
+import asyncio
 import hashlib
 import json
 import math
@@ -34,6 +35,7 @@ from loom_bench.mock.logprobs import TokenLogprob
 from loom_bench.quality.client import EvalClient
 from loom_bench.quality.divergence import capture_reference, score_against_reference
 from loom_bench.trtllm_scorer import (
+    SCORE_CONCURRENCY,
     PromptLogprobsMiddleware,
     byte_decoder,
     echo_logprobs,
@@ -288,6 +290,41 @@ async def test_divergence_through_the_route_matches_an_identical_reference():
     assert len(calls) == len(PROMPTS)
     assert {c[1].prompt_logprobs for c in calls} == {K} and {c[1].max_tokens for c in calls} == {1}
     assert len({c[2] for c in calls}) == len(calls)
+
+
+async def test_scoring_requests_reach_the_engine_one_at_a_time():
+    """46938d1f: trtllm-bf16's LLM shut down under 16 concurrent prompt-logprobs requests
+    (its smokes sent 4). The client still sends 16 at once; the engine sees one."""
+    tok = ToyTokenizer()
+    ref_client = EvalClient(
+        "http://ref/v1", "qwen3-8b", transport=httpx.ASGITransport(app=reference_app(tok))
+    )
+    reference = await capture_reference(ref_client, list(PROMPTS), top_k=K)
+    server = fake_server(tok)
+    inner = server.generator.generate_async
+    live = peak = 0
+
+    def generate_async(ids: list[int], **kw: Any) -> Any:
+        promise = inner(ids, **kw)
+
+        class Counted:
+            async def aresult(self) -> Any:
+                nonlocal live, peak
+                live += 1
+                peak = max(peak, live)
+                await asyncio.sleep(0.01)
+                try:
+                    return await promise.aresult()
+                finally:
+                    live -= 1
+
+        return Counted()
+
+    server.generator.generate_async = generate_async
+    assert SCORE_CONCURRENCY == 1
+    result = await score_against_reference(trtllm_client(server), reference, n_boot=200)
+    assert result.n_prompts == len(PROMPTS) > 1
+    assert peak == 1
 
 
 async def test_an_off_by_one_alignment_does_not_pass_as_identical():

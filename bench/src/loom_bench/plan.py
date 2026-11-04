@@ -380,7 +380,7 @@ class Estimator:
 
     def eval_s(self, cell: Cell, *, divergence: bool = True) -> float:
         """One eval job: its suite tasks, its divergence half (with the noise-floor pass on
-        the baseline; only the first of `quality.replicates` passes runs it) and the job
+        the baseline; only the last of `quality.replicates` passes runs it) and the job
         overhead."""
         if self.suite is None:
             return 0.0

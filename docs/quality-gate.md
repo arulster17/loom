@@ -378,7 +378,8 @@ What separates the engines is the direction of the disagreements (14 vs 7 agains
 in every pairing with a vLLM run), not their number.
 
 `quality.replicates: R` runs the suite R times on each cell's engine instance (the
-divergence half on the first pass only) and pools them (`pool_replicates`): each item's
+divergence half on the last pass only, so an engine it takes down costs only the
+divergence) and pools them (`pool_replicates`): each item's
 score becomes its mean over the R passes, an unbiased estimate of the probability that
 the config passes it. The gate is unchanged on those means. Writing an item's pass on run
 r as Y_ir = p_i + e_ir, with p_i the config's pass probability and e_ir run noise, the

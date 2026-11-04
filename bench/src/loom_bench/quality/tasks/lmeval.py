@@ -56,6 +56,13 @@ _SAMPLES_RE = re.compile(r"^samples_(?P<task>.+)_(?P<date>\d{4}-\d{2}-\d{2}T[\d.
 _MODEL = {"chat": "local-chat-completions", "completions": "local-completions"}
 _PATH = {"chat": "/chat/completions", "completions": "/completions"}
 _LOG_TAIL_LINES = 20
+# lm_eval's own log lines for a failed request (lm_eval/models/api_models.py `amodel_call`).
+# Once one request exhausts its retries, lm_eval closes the aiohttp session the others
+# share, and the traceback the log ends with is often only a later "RuntimeError: Session
+# is closed" (46938d1f: the engine had died; the tail never said so). The first of these
+# lines names what actually failed.
+_REQUEST_FAILURE_MARKS = ("API request failed!", "Exception:")
+_FAILURE_LINE_CHARS = 500
 
 
 class LmEvalNotInstalled(RuntimeError):
@@ -263,6 +270,17 @@ def parse_results(files: Iterable[Path]) -> dict[str, Any]:
     return out
 
 
+def failure_summary(log_text: str, tail_lines: int = _LOG_TAIL_LINES) -> str:
+    """The first failed-request line of an lm_eval log, if any, then the log's tail."""
+    lines = log_text.splitlines()
+    tail = lines[-tail_lines:]
+    first = next((ln for ln in lines if any(m in ln for m in _REQUEST_FAILURE_MARKS)), None)
+    if first is None or first in tail:
+        return "\n".join(tail)
+    first = first.strip()[:_FAILURE_LINE_CHARS]
+    return f"first request failure: {first}\n...\n" + "\n".join(tail)
+
+
 def ensure_installed() -> None:
     if importlib.util.find_spec("lm_eval") is None:
         raise LmEvalNotInstalled(
@@ -315,8 +333,8 @@ class LmEvalTask(ParamTask[LmEvalParams]):
                 await proc.wait()
                 raise LmEvalError(f"{self.name}: lm_eval timed out; log at {log_path}") from None
         if code != 0:
-            tail = log_path.read_text(errors="replace").splitlines()[-_LOG_TAIL_LINES:]
-            raise LmEvalError(f"{self.name}: lm_eval exited {code}:\n" + "\n".join(tail))
+            summary = failure_summary(log_path.read_text(errors="replace"))
+            raise LmEvalError(f"{self.name}: lm_eval exited {code}:\n{summary}")
         sample_files = list(out_dir.rglob("samples_*.jsonl"))
         if not sample_files:
             raise LmEvalError(f"{self.name}: lm_eval wrote no samples under {out_dir}")

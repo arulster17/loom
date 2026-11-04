@@ -149,3 +149,28 @@ async def test_every_divergence_measured_is_unchanged(ctx, suite):
     gate = _gate(ctx.db_url, outcome.experiment_id)
     assert gate.details["divergence"]["verdict"] != "inconclusive"
     assert "KL" in gate.details["divergence"]["reason"]
+
+
+async def test_the_divergence_runs_on_the_last_pass_so_losing_it_keeps_every_pass(ctx, suite):
+    """46938d1f: trtllm-bf16's engine died during pass 1's divergence (HTTP 500 "LLM is
+    shutting down"); pass 2's gsm8k then failed against the dead engine (lm_eval:
+    "Session is closed") and the whole suite was lost. With the divergence on the last
+    pass, all three passes' task scores are in before it runs."""
+    exp = _two_engines(suite)
+    assert exp.quality is not None
+    exp = exp.model_copy(update={"quality": exp.quality.model_copy(update={"replicates": 3})})
+    provider = DivergenceFails(fail_calls={5})  # the candidate's last pass
+    ctx.provider = provider
+    outcome = await run_experiment(exp, ctx)
+
+    modes = [j.divergence for j in provider.jobs]
+    assert modes == [None, None, "capture_and_floor", None, None, "score"]
+    assert outcome.reason == "divergence failed in 1 of 2 quality evals"
+    assert not [e for e in outcome.events if e["kind"] == "quality_failed"]
+    quality = [e for e in outcome.events if e["kind"] == "quality"]
+    assert [e["replicates"] for e in quality] == [3, 3]
+    gate = _gate(ctx.db_url, outcome.experiment_id)
+    assert gate.details["candidate_replicates"] == 3
+    assert gate.details["divergence"]["reason"] == (
+        f"not measured: candidate divergence failed: {SWEEP_ERROR}"
+    )

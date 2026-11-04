@@ -675,20 +675,26 @@ class _Executor:
         quality = self.exp.quality
         assert quality is not None
         is_baseline = cell.variant == quality.baseline_variant
-        # Pass 1 also runs the divergence half; later passes only re-score the tasks.
+        # The last pass also runs the divergence half (after its tasks); the others only
+        # score the tasks. Last, so an engine the divergence requests take down costs only
+        # the divergence: 46938d1f's TensorRT-LLM died in pass 1's divergence, and pass 2
+        # found it dead and lost the whole suite.
+        last = quality.replicates - 1
         job = self._eval_job(cell, endpoint, suite)
         passes = []
         for rep in range(quality.replicates):
-            this = job if rep == 0 else self._eval_job(cell, endpoint, suite, with_divergence=False)
+            this = (
+                job if rep == last else self._eval_job(cell, endpoint, suite, with_divergence=False)
+            )
             setup = 0.0 if host.host_id in self.eval_hosts else self.est.eval_setup_s()
             self.guard.check_next(
-                self.est.eval_s(cell, divergence=rep == 0) + setup,
+                self.est.eval_s(cell, divergence=rep == last) + setup,
                 what=f"quality suite pass {rep + 1}/{quality.replicates} on {cell.key}",
             )
             got = await self.guard.guarded(self.provider.run_eval(host, this))
             self.eval_hosts.add(host.host_id)
             passes.append(got)
-        out = passes[0]
+        out = passes[last]
         result = pool_replicates([suite_result_of(p) for p in passes])
         if out.divergence_error is not None:
             self.divergence_failures += 1
