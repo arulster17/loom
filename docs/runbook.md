@@ -11,7 +11,12 @@ each experiment's own `budget.max_spend`. How they act is in
 
 Commands below assume the repo root, region `us-east-1`, the default name prefix
 `loom-bench` and an identity with the `loom-bench-runner` policy unless a step says it
-needs an admin identity.
+needs an admin identity. With `extra_regions` configured
+([aws-setup.md](aws-setup.md#hosts-in-more-than-one-region)), a host can run in
+us-east-2 or us-west-2 too. Its events (`provisioned`, then the engine start's
+`system.region`) and its provenance `region` say which. Run the per-instance commands
+there with `--region`, and the "nothing running" checks in each region:
+`for r in us-east-1 us-east-2 us-west-2; do aws ec2 describe-instances --region $r …; done`.
 
 This is the `aws_ec2` path, now secondary for GPU benches: the account's GPU spot quota
 is 0 (an increase is pending with AWS), and the real runs are on RunPod
@@ -58,6 +63,10 @@ Run through all of it before every real run.
   aws lambda invoke --region us-east-1 --function-name loom-bench-reaper \
     --cli-binary-format raw-in-base64-out --payload '{"dry_run": true}' /dev/stdout
   ```
+
+  With `extra_regions`, the env must also show `LOOM_REAPER_REGIONS` listing them, and the
+  invoke's `regions` lists them too. Otherwise the Lambda reaps only us-east-1: apply the
+  Terraform first.
 
 - [ ] **Nothing managed is already running** (an old host would share the account's spot
   quota and keep billing):
@@ -174,7 +183,7 @@ experiment (exit 1). Options: run again later, or set `provider.market: on_deman
   rather than waiting for its TTL (8 h for the Qwen experiment):
 
   ```sh
-  aws ec2 terminate-instances --region us-east-1 --instance-ids <instance id>
+  aws ec2 terminate-instances --region <host region> --instance-ids <instance id>
   ```
 
   The runner policy allows this for `loom:managed=true` instances. The experiment row
@@ -194,6 +203,16 @@ AWS g6e.xlarge capacity: none in us-east-1c, us-east-1a, us-east-1d, us-east-1b 
 AWS g6e.xlarge capacity: launched i-0abc… in us-east-1d (waited 90 s)
 ```
 
+**With `extra_regions`,** a sweep tries every AZ of us-east-1, then of each extra region
+in order, before it waits. The vCPU quota is per region: a `VcpuLimitExceeded` skips
+the rest of that region for this sweep only. The 10-minute quota wait below applies only
+when every region refused for its quota.
+
+```text
+AWS g6e.xlarge capacity: none in us-east-1c, us-east-1a, us-east-1d, us-east-1b, us-west-2a, … (InsufficientInstanceCapacity); vCPU quota held in us-east-2 (VcpuLimitExceeded); not offered in us-east-1e, us-east-1f (waited 0 s, 1800 s left); next sweep in 30 s
+AWS g6e.xlarge capacity: launched i-0def… in us-west-2b (waited 30 s)
+```
+
 - **Nothing exists or bills while waiting.** No instance exists between sweeps, and the
   budget guard only starts accruing a host once a sweep returns it. The host's launch
   time and TTL are those of the sweep that got it, so the wait never shortens its life.
@@ -207,8 +226,10 @@ AWS g6e.xlarge capacity: launched i-0abc… in us-east-1d (waited 90 s)
 - **The vCPU quota (`VcpuLimitExceeded`) is waited out for up to 10 min.** AWS keeps
   counting an instance against the quota for a short while after it reports
   `terminated`: aws-smoke-trtllm (d549221f) launched its third host 0.3 s after the
-  second's teardown saw `terminated` and was refused. The quota is account-wide, so a
-  sweep stops at the first refusal, and the next sweep follows on the same backoff. If
+  second's teardown saw `terminated` and was refused. The quota is per account and
+  region, so a sweep skips the rest of that region at the first refusal (with no other
+  region configured, the sweep ends there), and the next sweep follows on the same
+  backoff. If
   the refusal lasts 600 s (`QUOTA_WAIT_S`, or less when `capacity_wait_s` ends first),
   the run fails with `VcpuQuotaHeld`. That means something else holds the quota (another
   instance not yet terminated) or the quota is below one instance's vCPUs. No instance
@@ -239,14 +260,17 @@ uv run bench reap --dry-run      # what is expired: DB-recorded hosts + tagged E
 uv run bench reap                # terminate them; DB rows marked reaper / self-ttl
 ```
 
-Without `LOOM_AWS_CONFIG`, `bench reap` only handles database rows. Console checks,
-always by tag:
+Without `LOOM_AWS_CONFIG`, `bench reap` only handles database rows; with it, it reaps
+every region in the settings. Console checks, always by tag and in every host region
+(EC2 lists only its own region):
 
 ```sh
-aws ec2 describe-instances --region us-east-1 --filters Name=tag:loom:managed,Values=true \
-  --query 'Reservations[].Instances[].[InstanceId,State.Name,LaunchTime]'
-aws ec2 describe-volumes --region us-east-1 --filters Name=tag:loom:managed,Values=true \
-  --query 'Volumes[].[VolumeId,State,CreateTime]'
+for r in us-east-1 us-east-2 us-west-2; do
+  aws ec2 describe-instances --region "$r" --filters Name=tag:loom:managed,Values=true \
+    --query 'Reservations[].Instances[].[InstanceId,State.Name,LaunchTime,Placement.AvailabilityZone]'
+  aws ec2 describe-volumes --region "$r" --filters Name=tag:loom:managed,Values=true \
+    --query 'Volumes[].[VolumeId,State,CreateTime,AvailabilityZone]'
+done
 ```
 
 In the console: EC2 → Instances / Volumes, filter `tag:loom:managed = true`; Resource

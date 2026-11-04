@@ -89,9 +89,12 @@ This creates:
   plain HTTP, and expires `runs/` and `ssm/` objects after 30 days;
 - the GPU host role and instance profile: SSM core, read/write on that bucket, and
   `GetSecretValue` on the HF token secret only;
-- a security group with no inbound rules, in the default VPC;
+- a security group with no inbound rules, in the default VPC, and one in the default
+  VPC of each extra host region (`extra_host_regions`, default `us-east-2` and
+  `us-west-2`; see [Hosts in more than one region](#hosts-in-more-than-one-region));
 - the TTL reaper Lambda on a 15-minute EventBridge schedule. It can only terminate
-  instances and delete volumes tagged `loom:managed=true`;
+  instances and delete volumes tagged `loom:managed=true`, in the primary region and
+  every extra host region;
 - the RunPod reaper Lambda, also every 15 minutes, its role, and the empty Secrets
   Manager secret `loom/runpod-reaper-api-key` it reads its RunPod key from. It starts in
   dry run and does nothing useful until step 8;
@@ -131,16 +134,17 @@ Fields (any field can be overridden with `LOOM_AWS_<FIELD>`, e.g.
 
 | Field | From Terraform | Default | Meaning |
 |---|---|---|---|
-| `region` | yes | `us-east-1` | Region for every API call |
+| `region` | yes | `us-east-1` | Primary region: the bucket, the HF token secret, and the first region a capacity sweep tries |
 | `bucket` | yes | | Bench bucket (job inputs/outputs, SSM output) |
-| `instance_profile_name` | yes | | GPU host instance profile |
-| `security_group_id` | yes | | No-ingress security group |
-| `subnet_ids` | yes | | Default-VPC subnets to try (cheapest spot AZ first) |
+| `instance_profile_name` | yes | | GPU host instance profile (IAM, so it works in every region) |
+| `security_group_id` | yes | | No-ingress security group in the primary region |
+| `subnet_ids` | yes | | Primary-region default-VPC subnets to try (cheapest spot AZ first) |
+| `extra_regions` | yes | `[]` | More regions to launch hosts in, swept after `region` in order: each `{region, security_group_id, subnet_ids, ami_id}` ([below](#hosts-in-more-than-one-region)). `LOOM_AWS_EXTRA_REGIONS=us-west-2` keeps only the named ones; an empty value keeps none |
 | `hf_token_secret_name` | yes | | Secret read on the host |
 | `owner` | yes | | `loom:owner` tag |
 | `name_prefix` | yes | `loom-bench` | `Name` tag prefix |
 | `dlami_ssm_parameter` | | DLAMI Ubuntu 24.04 base OSS driver | AMI lookup |
-| `ami_id` | | unset | Pin one AMI instead of the parameter's latest (it moves about weekly), e.g. the one a smoke ran on |
+| `ami_id` | | unset | Pin one AMI in the primary region instead of the parameter's latest (it moves about weekly), e.g. the one a smoke ran on. Extra regions run the same release |
 | `data_dir` | | `/opt/dlami/nvme/loom-data` | Pinned workload datasets on the host (`<sha256>/<file>`), mounted read-only at `/data` in the client container |
 | `root_volume_gb` | | 200 | Root gp3 volume (Docker images) |
 | `weights_dir` | | `/opt/dlami/nvme/loom-hf` | HF cache on the instance-store NVMe |
@@ -263,7 +267,9 @@ Each layer covers the failure of the one before it.
    When recorded spend reaches the cap it trips: the in-flight call is cancelled, every
    host is torn down and the experiment is aborted (exit 5). The cap can therefore be
    overshot by up to one accrual interval of every live host's rate, plus the teardown
-   time, which is still recorded ([benchmark-lab.md](benchmark-lab.md)).
+   time, which is still recorded ([benchmark-lab.md](benchmark-lab.md)). A host accrues
+   at its own region's prices; the plan's estimate and cap check use the dearest region
+   it may launch in.
 2. **Instance self-shutdown at TTL.** User-data runs `shutdown -h` at the host's
    TTL. Instances launch with shutdown behaviour `terminate`, so this ends the
    instance and deletes its root volume even if the laptop running `bench` sleeps,
@@ -272,12 +278,18 @@ Each layer covers the failure of the one before it.
 3. **Reaper Lambda (every 15 minutes).** It terminates any `loom:managed=true`
    instance whose `loom:ttl` has passed, and deletes unattached managed volumes.
    Managed resources with a missing or garbled TTL are reaped once they are older
-   than 24 h. It covers a host whose OS hung before the shutdown fired. It only
-   watches the Terraform region. A second Lambda, the RunPod reaper (step 8), does the
-   same for RunPod pods.
+   than 24 h. It covers a host whose OS hung before the shutdown fired. EC2 is
+   regional, so the Lambda (in the primary region) reaps each region in its
+   `LOOM_REAPER_REGIONS` environment variable, which Terraform sets to the primary
+   region plus `extra_host_regions`. A deployed Lambda older than that variable reaps
+   only its own region. A second Lambda, the RunPod reaper (step 8), does the same for
+   RunPod pods.
 4. **`bench reap`.** It runs the same `aws_reaper.reap` function from your machine
-   with your runner credentials. Use it after an aborted run, or if the Lambda is
-   disabled.
+   with your runner credentials, in every region of your `AwsSettings`. Use it after an
+   aborted run, or if the Lambda is disabled.
+
+Layers 1, 2 and 4 cover every region a host can launch in without any setup; layer 3
+covers a region once Terraform lists it in `extra_host_regions` and has been applied.
 
 Other rails:
 
@@ -288,6 +300,103 @@ Other rails:
   Its inputs and outputs move through presigned URLs.
 - Spot interruptions surface as `SpotInterrupted`, with the time since launch, so
   the runner can record the interruption rate.
+
+## Hosts in more than one region
+
+On 2026-11-03 us-east-1 refused g6e.xlarge (`InsufficientInstanceCapacity`) for hours,
+while the G/VT on-demand quota was 4 vCPU, one g6e.xlarge, in each of us-east-1,
+us-east-2 and us-west-2. With `extra_regions` set, the provider launches the host
+wherever one of those has capacity.
+
+**What happens.**
+
+- **One sweep tries every AZ of every region.** It starts with the experiment's
+  `provider.region` (normally the primary, us-east-1), then goes through the others in
+  configured order. An extra region is tried only if `bench/prices.yaml` prices the
+  instance type there; today that is g6e.xlarge only.
+- **The vCPU quota is per region.** A `VcpuLimitExceeded` skips the rest of that region
+  for the sweep, and the sweep goes on to the next region. The 600 s quota wait
+  (`QUOTA_WAIT_S`) applies only when every region was refused for its quota. If one
+  region is quota-blocked and the others are out of capacity, the provider waits for
+  capacity up to `capacity_wait_s`.
+- **Everything after the launch uses the host's own region** (`Host.info["region"]`):
+  SSM commands, describe and `check_host`, teardown and its wait for `terminated`, and
+  the ClientToken lookup that adopts or terminates an unanswered RunInstances. The
+  ClientToken is resent to the region it was first sent to.
+- **What stays in the primary region:** the bucket (job inputs and outputs, SSM output,
+  traces) and the HF token secret, which the host reads with `--region <primary>`.
+  The instance profile is IAM, which is global, so the same profile and role work in
+  every region without changes.
+- **The same image everywhere.** AMI ids are regional. Every region runs the primary
+  region's release, which is `ami_id` (or the DLAMI parameter's latest):
+  - an extra region's own `ami_id` must carry the same image name;
+  - with no `ami_id`, the provider looks up the one image of that name and owner there;
+  - a region that has neither fails the sweep before anything launches.
+- **Comparability.** The cell's config, and so its `config_hash`, keeps the
+  experiment's `provider.region`. A g6e.xlarge cell that ran in us-west-2 hashes the
+  same as one that ran in us-east-1, so the two compare and reproduce against each
+  other. Provenance `region` and the events' `system.region`/`az` record where it
+  actually ran. Its as-run price and report prices come from that region's
+  `prices.yaml` entry.
+- **Prices.** The host accrues at its own region's price. The plan's estimate and cap
+  check use the dearest region it may launch in.
+
+DLAMI release `Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 24.04) 20261006`
+(owner 898082745236, root `/dev/sda1`, x86_64), from `aws ec2 describe-images`
+on 2026-11-03:
+
+| Region | AMI id | Default VPC | g6e.xlarge AZs |
+|---|---|---|---|
+| us-east-1 | `ami-028357be7d5b15c53` | | 1a, 1b, 1c, 1d |
+| us-east-2 | `ami-089d4ee74147726da` | `vpc-0f2e136abaa3440f2` | 2a, 2b, 2c |
+| us-west-2 | `ami-0fec8acfc603e6e16` | `vpc-06835f42c895f74dc` | 2a, 2b, 2c, 2d |
+
+Prices from the AWS Price List API (publication 2026-11-03, effective 2026-11-01).
+g6e.xlarge is $1.861/h on demand and gp3 is $0.08/GB-month in all three regions, so a
+200 GB host accrues $1.8829/h in each.
+
+**Cross-region traffic.** A host outside us-east-1 still uses the us-east-1 bucket. AWS
+bills that traffic as inter-region transfer: $0.01/GB between us-east-2 and us-east-1,
+and $0.02/GB between us-west-2 and us-east-1. The sending region bills it, so downloads
+from the bucket and uploads to it are each billed once.
+
+- Each job's inputs are the job JSON, the bench wheel and `requirements.txt`, a few MB.
+- Outputs are `result.json`, `gpu.csv` and the SSM logs: KB to a few MB.
+- A profile trace is at most `max_trace_mb` (256 MB).
+- So a run with several profile windows moves well under 2 GB, under $0.04. That is
+  less than two minutes of the host's price, so the plan does not add it.
+- Docker images and weights come from the internet (Docker Hub, Hugging Face), which is
+  free inbound in every region.
+
+**Setting it up.**
+
+1. Apply the Terraform (step 4) with `extra_host_regions` listing the regions (the
+   default is `["us-east-2", "us-west-2"]`). For an existing stack this adds only the
+   following:
+   - a no-ingress security group in each extra region's default VPC;
+   - `LOOM_REAPER_REGIONS` and the extra regions' instance and volume ARNs for the
+     reaper Lambda;
+   - the extra regions' ARNs in the runner policy.
+2. Add the regions to `AwsSettings` from `terraform output extra_host_networks` (or
+   `aws_settings_yaml`), pinning each region's copy of the primary's AMI:
+
+   ```yaml
+   extra_regions:
+     - region: us-east-2
+       security_group_id: sg-…        # terraform output extra_host_networks
+       subnet_ids: [subnet-02e2f9fe5fe799627, subnet-03a93c5765f027fe4, subnet-096c4bbaf7acab9b8]
+       ami_id: ami-089d4ee74147726da
+     - region: us-west-2
+       security_group_id: sg-…
+       subnet_ids: [subnet-0462ea6f142aea107, subnet-06b1b2f7e71a45df8, subnet-08c8337b0a0c61430, subnet-0fedcbf1191fbd3d9]
+       ami_id: ami-0fec8acfc603e6e16
+   ```
+
+   A checkout older than this change refuses an `AwsSettings` file with
+   `extra_regions` (unknown field). Use a separate file (`LOOM_AWS_CONFIG`) while an
+   older checkout still runs from the shared one.
+3. Check: `uv run bench run <experiment.yaml> --dry-run` notes the regions it priced
+   (`worst of the regions it may launch in (…)`).
 
 ## Load and eval jobs on the host
 
@@ -333,7 +442,10 @@ a full-suite run on a large model.
 
 ## What it costs besides GPU time
 
-The S3 bucket and the two Lambdas cost cents. Secrets Manager is $0.40 per secret per
+The S3 bucket and the two Lambdas cost cents; reaping three regions instead of one
+keeps the EC2 reaper inside the Lambda free tier. Security groups are free. A host
+outside the bucket's region pays inter-region transfer on its bucket traffic, under
+$0.04 a run ([above](#hosts-in-more-than-one-region)). Secrets Manager is $0.40 per secret per
 month (two secrets: the HF token and the RunPod reaper key). CloudWatch Logs for the
 reapers are kept 30 days. The root gp3 volume
 (200 GB, about $0.022/h) is part of each host's accrued `hourly_micros` and of every

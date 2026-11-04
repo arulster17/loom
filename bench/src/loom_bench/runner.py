@@ -447,7 +447,8 @@ class _Executor:
                     provider=host.provider,
                     resource_type=RESOURCE_TYPES[host.provider],
                     resource_id=host.host_id,
-                    region=host.request.region,
+                    # Where it runs: aws_ec2 may launch outside the requested region.
+                    region=host.info.get("region") or host.request.region,
                     experiment_id=self.experiment_id,
                     tags=host.info.get("tags", host.request.tags),
                     created_at=host.launched_at,
@@ -982,7 +983,10 @@ class _Executor:
                 ep=cell.spec.parallelism.ep,
             ),
             cloud=hw.get("cloud"),
-            region=hw.get("region"),
+            # The region the host ran in, which prices its as-run cost; the config (and
+            # so its hash) keeps the experiment's region, so the same hardware in another
+            # region compares as the same config.
+            region=host.info.get("region") or hw.get("region"),
             market=host.request.market,
             hourly_micros=host.as_run_micros,
             price_basis=host.price_basis,
@@ -1769,7 +1773,9 @@ async def reap(
     if ec2 is not None:
         from loom_bench.providers import aws_reaper
 
-        aws_ids = await asyncio.to_thread(aws_reaper.reap, ec2, now, dry_run=dry_run)
+        # One client per region hosts may run in (EC2 is regional), or a single client.
+        clients = list(ec2) if isinstance(ec2, list | tuple) else [ec2]
+        aws_ids = await asyncio.to_thread(aws_reaper.reap_regions, clients, now, dry_run=dry_run)
     pod_ids: list[str] = []
     if runpod is not None:
         from loom_bench.providers import runpod_reaper

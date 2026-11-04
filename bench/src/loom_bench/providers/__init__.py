@@ -68,9 +68,10 @@ def make_provider(spec: ProviderSpec, *, prices: PriceBook, work_dir: Path) -> P
         from loom_bench.providers.aws_ec2 import AwsEc2Provider, load_aws_settings
 
         settings = load_aws_settings()
-        if settings.region != spec.region:
+        if spec.region not in settings.region_names:
             raise ValueError(
-                f"experiment region {spec.region} != AWS settings region {settings.region}"
+                f"experiment region {spec.region} is not one of the AWS settings' regions "
+                f"({', '.join(settings.region_names)})"
             )
         wheel = settings.wheel_path or build_wheel(work_dir / "wheel")
         return AwsEc2Provider(settings, prices=prices, wheel_path=wheel)

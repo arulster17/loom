@@ -4,15 +4,16 @@ Terminates instances and deletes unattached volumes tagged `loom:managed=true`
 whose `loom:ttl` (ISO-8601 UTC) has passed. A managed resource with a missing or
 unparseable TTL is reaped once it is older than `max_age`.
 
-Runs from `bench reap` and as the scheduled Lambda (`lambda_handler`). This file
-imports only the standard library and boto3 so Terraform can zip it alone.
+Runs from `bench reap` and as the scheduled Lambda (`lambda_handler`), in each region
+of `LOOM_REAPER_REGIONS` (default: the Lambda's own). This file imports only the
+standard library and boto3 so Terraform can zip it alone.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -113,6 +114,37 @@ def reap(
     return reaped
 
 
+def reap_regions(
+    clients: list[Any],
+    now: datetime,
+    *,
+    dry_run: bool = False,
+    max_age: timedelta = DEFAULT_MAX_AGE,
+) -> list[str]:
+    """`reap` with each region's EC2 client in turn (EC2 is regional: a client only sees
+    its own region's instances). A region that fails is logged and skipped so the others
+    are still reaped; if any failed, the error is raised once all were tried."""
+    reaped: list[str] = []
+    failed: list[str] = []
+    for client in clients:
+        region = getattr(getattr(client, "meta", None), "region_name", None) or "?"
+        try:
+            reaped += reap(client, now, dry_run=dry_run, max_age=max_age)
+        except Exception:
+            log.exception("reaping %s failed", region)
+            failed.append(region)
+    if failed:
+        raise RuntimeError(f"reaping failed in {', '.join(failed)}; reaped {reaped}")
+    return reaped
+
+
+def lambda_regions(env: Mapping[str, str]) -> list[str | None]:
+    """`LOOM_REAPER_REGIONS` (comma-separated); unset or empty: the Lambda's own region."""
+    raw = env.get("LOOM_REAPER_REGIONS", "")
+    regions: list[str | None] = [r.strip() for r in raw.split(",") if r.strip()]
+    return regions or [None]
+
+
 def lambda_handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]:
     import boto3  # type: ignore[import-untyped]
 
@@ -120,6 +152,7 @@ def lambda_handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]
     event = event or {}
     dry_run = bool(event.get("dry_run", os.environ.get("LOOM_REAPER_DRY_RUN") == "true"))
     max_age = timedelta(hours=float(os.environ.get("LOOM_REAPER_MAX_AGE_HOURS", "24")))
-    ec2 = boto3.client("ec2")
-    ids = reap(ec2, datetime.now(UTC), dry_run=dry_run, max_age=max_age)
-    return {"reaped": ids, "dry_run": dry_run}
+    regions = lambda_regions(os.environ)
+    clients = [boto3.client("ec2", region_name=r) for r in regions]
+    ids = reap_regions(clients, datetime.now(UTC), dry_run=dry_run, max_age=max_age)
+    return {"reaped": ids, "dry_run": dry_run, "regions": [c.meta.region_name for c in clients]}

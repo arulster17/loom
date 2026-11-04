@@ -424,8 +424,9 @@ def reproduce_cmd(
     raise typer.Exit(EXIT_OK if result.ok else EXIT_MISMATCH)
 
 
-def _ec2_client() -> object | None:
-    """An EC2 client for the configured AWS settings, or None when AWS is not set up."""
+def _ec2_client() -> list[object] | None:
+    """An EC2 client per region of the configured AWS settings (hosts may run in any of
+    them), or None when AWS is not set up."""
     try:
         import boto3  # type: ignore[import-untyped]
 
@@ -434,7 +435,7 @@ def _ec2_client() -> object | None:
         settings = load_aws_settings()
     except (ImportError, ValidationError, FileNotFoundError):
         return None
-    return boto3.client("ec2", region_name=settings.region)
+    return [boto3.client("ec2", region_name=r) for r in settings.region_names]
 
 
 def _runpod_reaper() -> tuple[object, str] | None:
