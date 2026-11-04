@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="970" height="276" viewBox="0 0 970 276" role="img" aria-labelledby="t">
+<style>
+.s1{fill:#2a78d6}.s2{fill:#eb6834}.s3{fill:#1baf7a}.s4{fill:#b9b8b3}
+.bg{fill:#fcfcfb}.t1{fill:#0b0b0b}.t2{fill:#52514e}.ax{stroke:#d6d5d0;stroke-width:1}
+text{font-family:system-ui,-apple-system,sans-serif;font-size:12px}
+@media (prefers-color-scheme: dark){
+.s1{fill:#3987e5}.s2{fill:#d95926}.s3{fill:#199e70}.s4{fill:#5d5c58}
+.bg{fill:#1a1a19}.t1{fill:#f0efec}.t2{fill:#c3c2b7}.ax{stroke:#3a3a37}}
+</style>
+<rect class="bg" width="970" height="276"/>
+<title id="t">Where a typical decode step goes, at each config's goodput</title>
+<text class="t1" x="12" y="20" style="font-size:14px;font-weight:600">Where a typical decode step (ITL p50) goes, at goodput</text>
+<rect class="s1" x="12" y="32" width="10" height="10" rx="2"/>
+<text class="t2" x="26" y="41">Weight read (floor)</text>
+<rect class="s2" x="177" y="32" width="10" height="10" rx="2"/>
+<text class="t2" x="191" y="41">KV-cache read (floor)</text>
+<rect class="s3" x="356" y="32" width="10" height="10" rx="2"/>
+<text class="t2" x="370" y="41">All-reduce (model)</text>
+<rect class="s4" x="514" y="32" width="10" height="10" rx="2"/>
+<text class="t2" x="528" y="41">Beyond the floor (measured - floor)</text>
+<text class="t1" x="342" y="71" text-anchor="end">08204560 trtllm-fp8 · chat-sharegpt @ 2.49</text>
+<rect class="s1" x="350.0" y="60" width="107.5" height="18" rx="2"><title>Weight read (floor): 9.5 ms</title></rect>
+<rect class="s2" x="459.5" y="60" width="18.6" height="18" rx="2"><title>KV-cache read (floor): 1.8 ms</title></rect>
+<rect class="s4" x="480.2" y="60" width="65.6" height="18" rx="2"><title>Beyond the floor (measured - floor): 5.7 ms</title></rect>
+<text class="t2" x="551.8" y="73">16.9 ms · 66%</text>
+<text class="t1" x="342" y="101" text-anchor="end">08204560 trtllm-fp8 · fixed-1k-1k @ 1</text>
+<rect class="s1" x="350.0" y="90" width="107.5" height="18" rx="2"><title>Weight read (floor): 9.5 ms</title></rect>
+<rect class="s2" x="459.5" y="90" width="29.4" height="18" rx="2"><title>KV-cache read (floor): 2.7 ms</title></rect>
+<rect class="s4" x="491.0" y="90" width="70.8" height="18" rx="2"><title>Beyond the floor (measured - floor): 6.1 ms</title></rect>
+<text class="t2" x="567.7" y="103">18.3 ms · 67%</text>
+<text class="t1" x="342" y="131" text-anchor="end">46938d1f trtllm-bf16 · chat-sharegpt @ 1.36</text>
+<rect class="s1" x="350.0" y="120" width="200.4" height="18" rx="2"><title>Weight read (floor): 17.5 ms</title></rect>
+<rect class="s2" x="552.4" y="120" width="32.4" height="18" rx="2"><title>KV-cache read (floor): 3.0 ms</title></rect>
+<rect class="s4" x="586.8" y="120" width="85.2" height="18" rx="2"><title>Beyond the floor (measured - floor): 7.4 ms</title></rect>
+<text class="t2" x="678.0" y="133">27.9 ms · 74%</text>
+<text class="t1" x="342" y="161" text-anchor="end">46938d1f trtllm-bf16 · fixed-1k-1k @ 0.667</text>
+<rect class="s1" x="350.0" y="150" width="200.4" height="18" rx="2"><title>Weight read (floor): 17.5 ms</title></rect>
+<rect class="s2" x="552.4" y="150" width="73.7" height="18" rx="2"><title>KV-cache read (floor): 6.6 ms</title></rect>
+<rect class="s4" x="628.1" y="150" width="114.3" height="18" rx="2"><title>Beyond the floor (measured - floor): 9.9 ms</title></rect>
+<text class="t2" x="748.5" y="163">34.0 ms · 71%</text>
+<text class="t1" x="342" y="191" text-anchor="end">46938d1f vllm-bf16 · chat-sharegpt @ 2.25</text>
+<rect class="s1" x="350.0" y="180" width="200.4" height="18" rx="2"><title>Weight read (floor): 17.5 ms</title></rect>
+<rect class="s2" x="552.4" y="180" width="61.3" height="18" rx="2"><title>KV-cache read (floor): 5.5 ms</title></rect>
+<rect class="s4" x="615.7" y="180" width="87.4" height="18" rx="2"><title>Beyond the floor (measured - floor): 7.6 ms</title></rect>
+<text class="t2" x="709.1" y="193">30.6 ms · 75%</text>
+<text class="t1" x="342" y="221" text-anchor="end">46938d1f vllm-bf16 · fixed-1k-1k @ 1</text>
+<rect class="s1" x="350.0" y="210" width="200.4" height="18" rx="2"><title>Weight read (floor): 17.5 ms</title></rect>
+<rect class="s2" x="552.4" y="210" width="132.9" height="18" rx="2"><title>KV-cache read (floor): 11.7 ms</title></rect>
+<rect class="s4" x="687.3" y="210" width="122.7" height="18" rx="2"><title>Beyond the floor (measured - floor): 10.6 ms</title></rect>
+<text class="t2" x="816.0" y="223">39.8 ms · 73%</text>
+<line class="ax" x1="350" x2="810" y1="240" y2="240"/>
+<text class="t2" x="350.0" y="256" text-anchor="middle">0</text>
+<text class="t2" x="465.5" y="256" text-anchor="middle">10</text>
+<text class="t2" x="581.1" y="256" text-anchor="middle">20</text>
+<text class="t2" x="696.6" y="256" text-anchor="middle">30</text>
+<text class="t2" x="580.0" y="272" text-anchor="middle">ms per decode step (labels: measured ITL p50 · share of it the floor explains)</text>
+</svg>

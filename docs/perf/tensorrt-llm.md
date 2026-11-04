@@ -1,12 +1,11 @@
 # TensorRT-LLM in the Lab
 
-Status (2026-11-02): the engine adapter is built and tested offline, including the
-workaround that gives TensorRT-LLM the full quality gate. A smoke run
-(`runpod-smoke-trtllm`) and a comparison run (`qwen3-8b-trtllm-vs-vllm-runpod`) are written
-and priced, with AWS g6e.xlarge twins (`aws-smoke-trtllm`, `qwen3-8b-trtllm-vs-vllm-aws`)
-for while RunPod has no L40S stock ("On AWS instead" below). **None has been approved or
-run.** Nothing below is a measurement yet: it
-says what we expect to see and why.
+Status (2026-11-04): **measured.** TensorRT-LLM 1.4.0rc2 (BF16 and FP8) and vLLM v0.30.0
+(BF16) ran on AWS g6e.xlarge (1x L40S) under the Lab's SLO. Results are in "What we
+measured" below; the report is [reports/8b-trtllm-v1](../../reports/8b-trtllm-v1/leaderboard.md)
+with the roofline in [reports/8b-trtllm-v1/roofline](../../reports/8b-trtllm-v1/roofline/roofline.md).
+Every figure traces to a run id: 46938d1f (vLLM BF16 and TensorRT-LLM BF16 load runs),
+9647a23b (TensorRT-LLM BF16 evals), 08204560 (TensorRT-LLM FP8 load runs and evals).
 
 ## The short version (how to explain this in an interview)
 
@@ -33,18 +32,37 @@ the same latency targets. It asks three questions:
 2. What does that make the cost per million tokens?
 3. Does switching engine (or precision) change the answers?
 
-On this setup I expect the two engines to land close on throughput in BF16 (the reasons
-are below). FP8 should give TensorRT-LLM a large gain, as it gave vLLM in the config sweep.
-The interesting parts are what the engines' default policies do to latency under load,
-and whether TensorRT-LLM passes the same quality gate vLLM's own variants face. The
-answers will be measured, not assumed.
+**What we found, in plain words:**
 
-A good one-liner: *"I added TensorRT-LLM as a third engine to my benchmark lab, pinned to
-an exact image, and compared it with vLLM at a fixed latency target on realistic chat
-traffic, in BF16 and FP8. The comparison reports cost per million tokens and includes a
-quality gate, so a faster engine that changes answers can't win. TensorRT-LLM's server
-can't return the prompt logprobs that gate needs, so I added a small route inside the
-server that gets them from its own Python API: same process, same GPU, same weights."*
+1. **At engine defaults, TensorRT-LLM BF16 was slower than vLLM BF16 on this GPU.**
+   - It held the SLO up to 1.355 req/s on chat, against vLLM's 2.25.
+   - On 1k-in/1k-out it held 0.667 req/s, against vLLM's 1.0.
+   - That makes it about 1.6–1.7x the cost per token.
+   - The measured cause: each decode step costs more for every request in the batch. The
+     cost of reading the weights is the same on both engines.
+2. **TensorRT-LLM FP8 roughly matched vLLM BF16.** It held chat up to 2.49 req/s at 11%
+   less cost per token, and tied on 1k-1k. Its steps are fast (about 17–19 ms) until the
+   running batch grows past about 32 requests. Then they jump to about 48–50 ms. That
+   jump, not the average speed, is what set its limit.
+3. **Neither TensorRT-LLM config passes the quality gate,** for one reason: strict tool
+   calling.
+   - When asked for schema-constrained tool calls, TensorRT-LLM 1.4.0rc2 forces a slightly
+     different JSON prefix from the one Qwen3 was trained on. The model then picks the
+     wrong function on multi-tool requests.
+   - Everything else matches vLLM BF16: math, plain tool calling, JSON schema, and the
+     token-level logprobs.
+   - So this is the engine's constrained decoding, not the weights. It is a finding about
+     TensorRT-LLM 1.4.0rc2, not something we fixed.
+
+A good one-liner: *"I added TensorRT-LLM as a third engine to my benchmark lab and
+compared it with vLLM at a fixed latency target on realistic chat traffic, in BF16 and
+FP8. At engine defaults on an L40S, TensorRT-LLM BF16 served about 40% less load at the
+SLO. The roofline fit showed the extra cost was per sequence, not the weight read. Its
+FP8 build matched vLLM BF16 but hit a step-time cliff above about 32 running requests.
+The quality gate caught a real engine bug: TensorRT-LLM's strict tool-call grammar forces
+a JSON prefix Qwen3 doesn't use, which drops strict tool-calling accuracy 11–14 points.
+To run that gate at all, I added a small route inside the server that gets prompt
+logprobs from its own Python API."*
 
 ## Terms, defined once
 
@@ -111,32 +129,203 @@ in 1.2.1 it was already the default. It loads the Hugging Face checkpoint direct
 Lab's pinned weights, tokenizer and chat template are exactly what vLLM loads. There is no
 per-GPU compile step to pay for on a billed pod and no extra artifact to pin.
 
-## What we expect, and why
+## What we expected, and what happened
 
-- **Similar BF16 throughput at the 50 ms TPOT target.** On one L40S an 8B BF16 decode step
-  is limited by reading 16.4 GB of weights plus the KV cache. Both engines read the same
-  bytes, and better kernels cannot read memory faster. TensorRT-LLM's edge is lower CPU
-  overhead per step (the overlap scheduler, its attention kernels). That edge shows most
-  at small batches and fades as the batch grows.
-- **Lower TTFT, possibly worse TPOT tails, at TensorRT-LLM's defaults.** With chunked
-  prefill off and up to 8192 tokens per step, a new prompt is prefilled in one step, which
-  helps its TTFT. But that step stalls every request that is decoding. vLLM caps a step at
-  2048 tokens and spreads long prompts out. Which effect decides goodput depends on how
-  often a chat prompt (up to 4096 tokens) arrives while many requests are decoding. That
-  is what the run measures.
-- **No-eviction admission costs little on these workloads.** The Lab pins each request's
-  output length (`max_tokens` equals the real length, with `ignore_eos`). The reservation
-  TensorRT-LLM makes therefore equals what the request uses. With real clients sending a
-  large `max_tokens`, it would admit fewer requests than vLLM. That is worth saying in an
-  interview, and the doc should not hide it.
-- **FP8 should move goodput most.** The FP8 cell halves the weight bytes per step
-  (9.4 GB) and the KV bytes per token. vLLM's FP8-weights-plus-FP8-KV cell served chat at
-  2.4x its BF16 rate in the config sweep (5.239 against 2.213 req/s). The gate decides
-  whether it may ship.
+| Expectation (written before the runs) | What happened |
+|---|---|
+| Similar BF16 throughput: both engines read the same 16.4 GB of weights per step | Not borne out: TensorRT-LLM BF16 served 40% less chat load at the SLO. The weight read did cost the same; the per-sequence part did not (below). |
+| Lower TTFT, possibly worse TPOT tails, from unchunked prefill | TTFT: no significant difference at equal load. TPOT: worse, and with more run-to-run spread. |
+| No-eviction admission costs little here (pinned output lengths) | Consistent: neither engine queued (waiting about 0 at every passing point); TensorRT-LLM never preempted, vLLM preempted only in overload. |
+| FP8 moves goodput most | Partly: FP8 steps were about 2x faster than BF16's, but a step-time cliff above about 32 running requests capped its goodput near vLLM BF16's. |
 
-A tuned TensorRT-LLM config is the natural follow-up: chunked prefill on, CUDA-graph
-padding on, perhaps `max_num_tokens` 2048. It is left out so the first comparison is
-"engine defaults versus engine defaults", as vLLM versus SGLang was.
+## What we measured (2026-11-04)
+
+All three cells ran on AWS g6e.xlarge (1x L40S 48 GB, 4 vCPU, 32 GiB), on-demand at
+$1.8829/h including 200 GB of storage. Each cell had its own host. The workloads, load
+windows, search, 3 repetitions and SLO (TTFT p95 ≤ 1 s, TPOT p95 ≤ 50 ms, judged on the
+upper end of each 95% CI) are the config sweep's. The engines ran at their defaults (see
+"What TensorRT-LLM does differently").
+
+### Goodput and cost at the SLO
+
+Goodput is the highest tested load that met the SLO, with the load that failed after it.
+Cost is per 1M tokens, blended at each workload's own input:output mix, with 95% CIs.
+Sources: [reports/8b-trtllm-v1](../../reports/8b-trtllm-v1/leaderboard.md).
+
+| Cell | Workload | Goodput | Out tok/s at goodput | TTFT p95 | TPOT p95 | $/1M blended | vs vLLM BF16 |
+|---|---|---|---|---|---|---|---|
+| vLLM BF16 (reference) | chat-sharegpt | 2.25 req/s (fails at 2.367) | 708 [608, 824] | 310 ms | 40.2 ms | $0.1859 [0.1650, 0.2092] | – |
+| TensorRT-LLM BF16 | chat-sharegpt | 1.355 req/s (fails at 1.5) | 415 [340, 507] | 284 ms | 35.7 ms | $0.3118 [0.2504, 0.3882] | 1.68x the cost |
+| TensorRT-LLM FP8 | chat-sharegpt | 2.49 req/s (fails at 2.619) | 799 [771, 827] | 164 ms | 21.3 ms | $0.1654 [0.1516, 0.1803] | 0.89x |
+| vLLM BF16 (reference) | fixed-1k-1k | 1.0 req/s (fails at 1.107) | 1,068 [1,023, 1,114] | 255 ms | 44.7 ms | $0.2450 [0.2347, 0.2557] | – |
+| TensorRT-LLM BF16 | fixed-1k-1k | 0.667 req/s (fails at 0.738) | 681 [509, 913] | 379 ms | 38.7 ms | $0.3838 [0.2865, 0.5143] | 1.57x |
+| TensorRT-LLM FP8 | fixed-1k-1k | 1.0 req/s (fails at 1.107) | 1,068 [1,023, 1,114] | 125 ms | 20.1 ms | $0.2450 [0.2347, 0.2557] | tied (same search point) |
+
+**How the rows were joined.** The three cells come from three experiments:
+- vLLM BF16 and the TensorRT-LLM BF16 load runs from 46938d1f;
+- TensorRT-LLM BF16's evals from 9647a23b (46938d1f lost them);
+- TensorRT-LLM FP8 from 08204560.
+
+`bench report -e 46938d1f -e 9647a23b -e 08204560` pairs results by config hash:
+- `48f3d8d1…` for vLLM BF16, the stored baseline every gate used;
+- `ae3b5705…` for TensorRT-LLM BF16, whose load runs and gate share that hash across
+  46938d1f and 9647a23b;
+- `55b35655…` for TensorRT-LLM FP8.
+
+The report puts FP8 on its own board (model `nvidia/Qwen3-8B-FP8`). The table above lines
+its rows up with vLLM BF16's by workload: same SLO, workloads, windows and search.
+
+**Equal load** (the report's "Latency at equal load"):
+- **Chat at 2.25 req/s:**
+  - TensorRT-LLM BF16's TPOT p50 is 38.8 [37.0, 40.7] ms against vLLM's 34.8 [33.6, 36.0]:
+    significantly higher.
+  - Its TTFT p95 is 330 against 310 ms: no significant difference.
+  - FP8 at the same load runs TPOT p50 17.8 ms and TTFT p95 162 ms.
+- **1k-1k at 1.0 req/s:**
+  - TensorRT-LLM BF16's TPOT p50 is 53.4 ms against vLLM's 42.7. The CI is too wide to
+    call it significant.
+  - FP8 runs at 19.1 ms.
+
+### Why TensorRT-LLM BF16 is slower: the per-sequence cost
+
+`bench roofline` fits each cell's typical decode step (ITL p50) as a fixed part plus a
+per-sequence part times the batch. Source:
+[roofline.md](../../reports/8b-trtllm-v1/roofline/roofline.md), "Fixed and per-sequence
+step cost". The fixed part's floor is the weight read; the per-sequence part's floor is
+that sequence's KV read.
+
+| Cell | Workload | Fixed ms (floor 17.5) | Per sequence ms (floor) | Per-seq vs floor | R² |
+|---|---|---|---|---|---|
+| vLLM BF16 | chat | 22.6 | 0.317 (0.212) | 1.49x | 0.991 |
+| TensorRT-LLM BF16 | chat | 22.3 | 0.401 (0.211) | 1.90x | 0.998 |
+| vLLM BF16 | 1k-1k | 24.6 | 0.336 (0.261) | 1.29x | 1.000 |
+| TensorRT-LLM BF16 | 1k-1k | 22.9 | 0.455 (0.261) | 1.74x | 0.997 |
+
+- **The fixed part is the same or slightly lower on TensorRT-LLM.** Its weight-read path is
+  not the problem.
+- **Each extra running request costs TensorRT-LLM 27–35% more step time than vLLM.** At
+  chat's batch of about 25 that is about 2 ms per step. Under the 50 ms TPOT target that
+  is enough to move the knee.
+- **At light load the two match.** At chat 1.0 req/s (batch about 9) TensorRT-LLM's TPOT
+  p50 is 28.3 ms. vLLM BF16's, at the same config hash, is 27.1 ms (53e4c107, the
+  spec-decode run's BF16 cell, another host and day). The gap
+  opens as the batch grows, as a per-sequence cost would.
+- **Queueing is not the cause.** Engine gauges show waiting at about 0 on both engines at
+  every passing point, and the running batch at equal load is about the same (25 vs 23 at
+  chat 2.25).
+- **What is not established:** which part of the per-sequence work is slower. Candidates
+  are attention over the KV cache on sm_89, per-request sampling and bookkeeping, or the
+  missing CUDA graphs (next section). A profile window (`profile:` in the spec) on this
+  cell would settle it; it has not been run.
+
+### FP8: fast steps, then a cliff above about 32 running requests
+
+Per repetition, FP8's step time is bimodal (08204560):
+
+| Running batch (mean over the window) | ITL p50 | TPOT p95 |
+|---|---|---|
+| about 11–20 (max ≤ 35) | 16–19 ms | 20–23 ms |
+| about 34–50 | 47–50 ms | 47–53 ms |
+| about 67–72 | 55 ms | 58 ms |
+
+- **The flip happens within one load point.** At chat 2.619 req/s, repetitions 1 and 2 ran
+  at 22–23 ms TPOT p95 and repetition 0 at 48.3 ms. Slower steps keep more requests in
+  flight, which keeps the batch high: once a run crosses the line it tends to stay there.
+- **That is what set FP8's goodput.** The SLO is judged on the upper end of the CI over
+  3 repetitions, and one slow repetition widens the CI past 50 ms (2.619 req/s: TPOT p95
+  CI [9.8, 86.5] ms). FP8's mean latency would allow far more load.
+- **The likely cause, not proven:** TensorRT-LLM 1.4.0rc2 captures CUDA graphs only for
+  decode-only batches of 1–31, 32, 64 and 128 by default, with padding off
+  (`CudaGraphConfig` in `llmapi/llm_args.py`). Batches of 33–63 therefore run every step
+  without a graph, launching kernels one by one from Python. FP8's short steps make that
+  overhead visible. BF16's per-sequence growth may include the same effect at its larger
+  batches.
+- **The test, not yet run:** a variant with `cuda_graph_config: {enable_padding: true}`,
+  which pads to captured sizes, or an explicit batch list. With a profile window it would
+  confirm or rule this out.
+- **Context only, not a paired comparison:** vLLM's own FP8 weights plus FP8 KV on an L40S
+  held chat at 5.239 req/s in the config sweep (7a8237d0, RunPod, RedHat checkpoint). If
+  the cliff is the graph-size default, it is what costs TensorRT-LLM FP8 most of its FP8
+  advantage.
+
+### The quality gate: blocked only by strict tool calling
+
+Both TensorRT-LLM configs were gated against vLLM BF16 (46938d1f's stored evals and
+divergence reference). The gate used three replicated passes of phase0-strict, full item
+counts, and margins of gsm8k 1, ifeval 2, json_schema 3 and tool tasks 6 points.
+
+| Task | TensorRT-LLM BF16 (9647a23b) | TensorRT-LLM FP8 (08204560) |
+|---|---|---|
+| gsm8k (1,319) | pass, +0.25 pts [−0.13, +0.66] | pass, −0.08 pts [−0.94, +0.78] |
+| ifeval (541) | inconclusive, −0.55 pts [−2.16, +1.05] | inconclusive, −0.68 pts [−2.53, +1.17] |
+| tool_calling (135) | pass, +0.00 pts [−2.22, +2.22] | pass, +0.49 pts [−1.73, +2.72] |
+| **tool_calling_strict (135)** | **fail, −13.83 pts [−19.75, −8.15]** | **fail, −11.36 pts [−17.04, −6.17]** |
+| json_schema (300) | pass, +0.67 pts [−0.67, +2.00] | pass, +0.00 pts [−1.89, +1.89] |
+| divergence (48 prompts, 3,068 positions) | pass, KL 0.0006 nats, top-1 99.19% | pass, KL 0.0141 nats, top-1 95.60% |
+| sanity (7,290 outputs) | pass | pass |
+
+**In plain words.** The weights behave the same:
+- TensorRT-LLM BF16's token-level probabilities match vLLM BF16's to within vLLM's own
+  run-to-run noise (KL 0.0006 nats against a noise floor of ≤ 0.0007).
+- FP8's are close too (KL 0.0141, under the 0.05 limit).
+- Math, ordinary tool calling and JSON-schema output all pass.
+
+What fails is one engine feature: strict tool calling, where the server constrains the
+model's output to the tool's schema.
+
+**Why it fails (stored samples, read-only):**
+- **The forced prefix.** With strict tools, TensorRT-LLM 1.4.0rc2's `qwen3` parser builds
+  an xgrammar structural tag whose forced prefix is `<tool_call>\n{"name":"` + name, with
+  no space after `"name":` (`tensorrt_llm/serve/tool_parser/qwen3_tool_parser.py`,
+  `structure_info`). Qwen3's chat template writes `{"name": "`, with a space, and so do
+  vLLM v0.30's hermes structural tag and Qwen3's own training format.
+- **Its effect.** Forced off its usual tokens at the point where it names the function, the
+  model picks the wrong function when there are several to choose from:
+  - TensorRT-LLM BF16 has 22 strict failures: 18 `wrong_function` and 1
+    `missing_argument`, all on the 45 "multiple"-tool items, plus 3 `wrong_value` on
+    simple ones. Simple items pass 87/90.
+  - vLLM BF16's 3 strict failures are those same 3 `wrong_value` on simple items, so the
+    entire drop is on multiple-tool items.
+  - FP8 shows the same pattern: 16 `wrong_function`, all multiple.
+  - Example: "set the thermostat to 19 °C" becomes `get_weather(city="house")`
+    (`m-thermo-1`).
+- **Plain tool calling is unaffected:** its 3 failures are the same 3 `wrong_value` items
+  as the baseline's.
+- **It reproduces.** TensorRT-LLM BF16 scored 0.837 strict in the divergence smoke
+  a596326d (full items). The first eval pass of 46938d1f, kept in S3 when that experiment
+  failed, read 0.844.
+
+**What this does and does not say:**
+- It is a TensorRT-LLM 1.4.0rc2 behavior with Qwen3, found by the gate. It is not a
+  verdict on the FP8 checkpoint or the engine's numerics.
+- The gate blocks shipping either config as it stands, as it should.
+- Possible follow-ups, each needing the user's yes:
+  - a patched parser variant with the space restored, gated again;
+  - an upstream report to NVIDIA.
+- Neither has been done.
+
+### Weak spots, plainly
+
+- **TensorRT-LLM BF16's rows are untrusted.** Run-to-run CV is above 10% at goodput:
+  chat TTFT p95 13.9%; 1k-1k TTFT p95 13.1%, request rate and output tok/s 11.8%. Read its
+  goodput as indicative; the direction (well below vLLM) holds at every equal-load point.
+- **The goodputs are bracketed, not lower bounds.** Every cell has a load that failed above
+  its goodput, so none is a "≥". But a bracket is as coarse as the search: 2.25 to 2.367
+  for vLLM chat, 1.355 to 1.5 for TensorRT-LLM BF16.
+- **One host per cell, different hosts and times on the same day.**
+  - vLLM BF16 and TensorRT-LLM BF16 ran in 46938d1f on separate hosts in different
+    regions (us-east-2 and us-east-1), hours apart.
+  - FP8 ran in 08204560 that evening, in us-east-2.
+  - TensorRT-LLM BF16's evals ran on a fourth host (9647a23b).
+  - Host-to-host variation (a few percent in earlier runs) sits inside these comparisons.
+    The effects reported here are 1.5–1.7x.
+- **FP8 1k-1k ties vLLM BF16 by construction.** At a passing open-loop point throughput is
+  the offered load, and both cells got the same seeded requests at the same search point.
+  Its latencies there are far lower.
+- **The cause of the BF16 per-sequence cost and of FP8's cliff is inferred from engine
+  gauges and the roofline fit, not profiled.**
+- **Engine defaults only.** No TensorRT-LLM tuning (chunked prefill, CUDA-graph padding,
+  `max_num_tokens`) was tried, by design.
 
 ## Choosing the version (checked 2026-11-02)
 
@@ -267,9 +456,9 @@ cell's gate must report "KL ... nats, top-1 ...%".
   26.09, `TRT_LLM_VERSION=1.4.0rc2` and a CUDA forward-compatibility driver 615.71.
   CUDA 13.x runs on driver 580 or newer through minor-version compatibility. The pods keep
   the vLLM runs' `allowedCudaVersions: ["13.0"]`, because changing it would also move the
-  vLLM cell's config hash. **This is the largest risk the smoke settles:** 13.4 is four
-  minor versions past the hosts' 13.0. Code paths that JIT-compile PTX at run time need a
-  driver at least as new as the toolkit that produced the PTX.
+  vLLM cell's config hash. **Settled on AWS:** the runs used the DLAMI's driver 595.91.07
+  (CUDA 13.2), and the 13.4 userspace ran there through minor-version compatibility, BF16
+  and FP8 alike (d549221f onward). RunPod's 13.0 hosts were never reached (no stock).
 - **How it starts on a pod:** the pod runs the image directly (no Docker inside), as for
   vLLM. The engine command is `bash -c <launcher> trtllm-launch <wrapper source> <options
   JSON> <snapshot dir> --backend pytorch --tp_size 1 --pp_size 1 --max_seq_len 32768
@@ -284,6 +473,7 @@ cell's gate must report "KL ... nats, top-1 ...%".
 - **Known issue to watch:** NVIDIA/TensorRT-LLM #16330 (open). It reports FlashInfer's
   PDL path failing on an sm_89 L20 with 1.2.0 ("requires .target sm_90 or higher"). If
   the smoke hits it, add `provider.engine_env: {TRTLLM_ENABLE_PDL: "0"}` to both specs.
+  It did not hit: no run needed the setting.
 
 ## FP8: the second candidate
 
@@ -301,98 +491,51 @@ commit.
 - **Ada support is not settled by the docs.** At v1.4.0rc2,
   `docs/source/features/quantization.md` marks per-tensor FP8 and FP8 KV cache supported
   on Ada and for Qwen-3, and block-scaled FP8 unsupported. The same page also says the
-  PyTorch backend's FP8 targets "the latest Blackwell and Hopper GPUs". The smoke settles
-  it on an L40S.
+  PyTorch backend's FP8 targets "the latest Blackwell and Hopper GPUs". **Settled:**
+  it loads and serves on the L40S (e3694f45, 08204560), with the step-time cliff described
+  in "What we measured".
 - **Why not RedHat's checkpoint:** its compressed-tensors format, which vLLM's FP8 cells
   used, does not load in TensorRT-LLM.
 
 **What it adds:** TensorRT-LLM's FP8 path, gated against vLLM BF16 on the full gate,
 divergence included. Unlike the config sweep's FP8 KV cells, this checkpoint ships
 calibrated KV-cache scales. It ships only on a gate pass; the precision is in the row's
-name.
+name. Measured (08204560): divergence passes (KL 0.0141 nats, top-1 95.60%) and the gate
+fails only on strict tool calling, the same engine behavior as BF16's.
 
-**What it costs:** a third pod (`host_group: b`). On the second pod it would push that
-pod past 80% of its TTL. That adds $3.81 to the estimate.
+## How it ran: experiments, failures and spend
 
-## The quote
+RunPod Secure had no 1x L40S stock throughout 2026-11-02 (every create refused for about
+11 h; probes showed the request body was not the cause), so the runs moved to AWS
+g6e.xlarge, on the same GPU. `qwen3-8b-trtllm-vs-vllm-aws.yaml` and its smokes are the
+AWS twins of the RunPod specs above.
 
-`bench plan` against a copy of the results DB (Secure 1x L40S at $1.1010/h with disk;
-$96.57 recorded against the $249.75 overall cap; $50 per-experiment cap):
+| Experiment | What | Spend | Outcome |
+|---|---|---|---|
+| d549221f | `aws-smoke-trtllm`, 3 hosts | $1.86 | vLLM BF16 and TensorRT-LLM BF16 ran every path (divergence measured through the prompt-logprobs route). The third host was refused with `VcpuLimitExceeded` 0.3 s after the second was terminated: AWS's quota trails `terminated`. Fixed: the quota is waited out for up to 10 min. |
+| e3694f45 | `aws-smoke-trtllm-fp8`, the missing FP8 cell | $1.10 | FP8 (ModelOpt, FP8 KV) loads and serves on the L40S; all paths ran |
+| 46938d1f | `qwen3-8b-trtllm-vs-vllm-aws`, the real run | $10.76 | Failed part-way after the vLLM BF16 cell (load and evals) and the TensorRT-LLM BF16 load runs completed, 27/27 each (details below) |
+| a596326d | `aws-smoke-trtllm-divergence` | $1.51 | The TensorRT-LLM engine survived the full 48-prompt divergence, scored serially |
+| 9647a23b | `qwen3-8b-trtllm-bf16-quality-aws`: TensorRT-LLM BF16 evals, 3 passes | $1.64 | Gate FAIL, on tool_calling_strict only |
+| 08204560 | `qwen3-8b-trtllm-fp8-aws`: TensorRT-LLM FP8 load runs and evals | $5.52 | 27/27 runs. Gate FAIL, on tool_calling_strict only |
 
-| Spec | Pods (TTL each) | Estimate | Worst case (every pod to TTL) | Cap (`max_spend`) |
-|---|---|---|---|---|
-| `runpod-smoke-trtllm` | 3 (70 min) | $2.35 | $3.85 | $4 |
-| `qwen3-8b-trtllm-vs-vllm-runpod` | 3 (285 min): vLLM 3.65 h, TRT-LLM BF16 3.70 h, TRT-LLM FP8 3.46 h | $11.90 | $15.69 | $16 |
+That totals $22.39 for the TensorRT-LLM track on AWS, as recorded in `bench_spend`.
 
-Planned figures run high: the config sweep's pods took about 70% of their planned time.
+**Why 46938d1f failed.** There were two causes, both fixed in d550c1e:
+- **TensorRT-LLM BF16's evals were lost.**
+  - Its first pass scored every task. Then the TensorRT-LLM engine died
+    ("LLM is shutting down") under 16 concurrent prompt-logprobs requests.
+  - Each such request holds a full-vocabulary fp32 row per prompt token, which the
+    engine's startup memory profile does not count.
+  - The scorer now sends them one at a time (`SCORE_CONCURRENCY = 1`), and divergence runs
+    on the last pass, so losing the engine to it can no longer cost the task passes.
+  - 9647a23b re-ran those evals on the same config hash.
+- **The FP8 host was read as lost.** A new us-east-2 instance was described within its
+  first second, got EC2's eventually consistent `InvalidInstanceID.NotFound`, and was
+  terminated. `check_host` now allows `NOT_FOUND_GRACE_S` (300 s) after launch. 08204560
+  ran FP8 on its own.
 
-## On AWS instead (2026-11-02, proposed, not approved, not run)
-
-RunPod Secure 1x L40S was out of stock all of 2026-11-02, so `aws-smoke-trtllm` and
-`qwen3-8b-trtllm-vs-vllm-aws` run the same comparison on AWS g6e.xlarge on-demand hosts:
-the same L40S 48 GB, with 4 vCPU and 32 GiB of RAM (the pod had 16 and 94), $1.861/h plus
-200 GB gp3. Same variants, image digests, workloads, search, repetitions, SLO and quality;
-only the provider block, the budget and one host group differ
-(`bench/tests/aws/test_aws_perf_track.py`).
-
-- **Three hosts, one after another,** as RunPod's three pods. AWS keys a host by instance
-  type, not image, so `trtllm-bf16` gets `host_group: trtllm-bf16` (sharing vLLM's host
-  would take it to 7.3 h). The account's 4-vCPU quota fits one g6e.xlarge, so teardown now
-  waits until each instance is `terminated` before the next launches; without that the
-  second host fails with `VcpuLimitExceeded`.
-- **The vLLM row is 95cde129's bf16 cell** (same launch and hardware, config hash
-  `48f3d8d1…`), so it doubles as a repeat of that AWS run.
-- **Docker on EC2, new for TensorRT-LLM.** The launcher and the wrapper's source go in
-  `docker run`'s argv (`--entrypoint bash ... -c <launcher> trtllm-launch <source> ...`),
-  about 21 KB of rendered SSM script, well under SSM's 64 KB document size, the nearest
-  documented limit. TensorRT-LLM containers get NVIDIA's `--ulimit memlock=-1 --ulimit
-  stack=67108864` on top of `--ipc host` (so `/dev/shm` is the host's, 16 GiB). The
-  weights check and download run the image's own python3.
-- **Image pull:** EC2 hosts pulled SGLang's 15.2 GB in 416 s (~37 MB/s), so 17.3 GB is about
-  8 min. The planner adds 240 s of pull on AWS (`plan.AWS_ENGINE_START_EXTRA_S`), 120 s on
-  RunPod.
-- **Driver:** the pinned DLAMI (`ami-028357be7d5b15c53`, Base OSS Nvidia Driver, Ubuntu
-  24.04) has driver 595.91.07, CUDA 13.2, so it is at or above 580 and nearer 13.4 than
-  RunPod's 13.0 hosts. The PTX-JIT caveat still applies and the smoke settles it.
-- **Disk:** checkpoints live on the 250 GB instance-store NVMe (Qwen3-8B BF16 16.4 GB, the
-  ModelOpt FP8 9.5 GB, the ShareGPT file 0.7 GB; the planner now refuses a host whose
-  checkpoints and datasets exceed it). Images go on the 200 GB root volume: vLLM 8.7 GB
-  and TensorRT-LLM 17.3 GB compressed on the first host, TensorRT-LLM only on the others.
-- **Host RAM, the tightest new constraint:** 32 GiB against the pod's 94. The PyTorch
-  backend reads the 16.4 GB BF16 checkpoint through host memory as it loads, alongside the
-  trtllm-serve process and its worker, while the client container holds the eval harness.
-  The vLLM and SGLang runs fit on this host (95cde129, fccf9ed3); TensorRT-LLM's peak is
-  not measured anywhere yet. The smoke loads both checkpoints and runs every eval task on
-  the same 32 GiB host type, so an out-of-memory shows there first (an
-  `engine_start_failed` or a failed eval).
-
-| Spec | Hosts (TTL each) | Estimate | Worst case (every host to TTL) | Cap (`max_spend`) |
-|---|---|---|---|---|
-| `aws-smoke-trtllm` | 3 (65 min): 44.4, 50.3, 49.2 min | $4.52 | $6.12 | $6.25 |
-| `qwen3-8b-trtllm-vs-vllm-aws` | 3 (285 min): vLLM 3.71 h, TRT-LLM BF16 3.80 h, TRT-LLM FP8 3.56 h | $20.85 | $26.83 | $27 |
-
-The AWS runs so far came in at 72-74% of plan (95cde129, fccf9ed3), so expect about $15.
-
-## What the smoke cannot show
-
-The smoke runs every path of the real run once:
-
-- the same three pods and image digests;
-- both workloads, with the dataset download;
-- the geometric search with a descent;
-- 3 repetitions;
-- phase0-strict with 3 replicated passes;
-- divergence capture, and scoring through the prompt-logprobs route on both TensorRT-LLM
-  cells (including the two hard prompts);
-- both gates.
-
-What only the real run sees:
-
-- full-length outputs and real overload on TensorRT-LLM (no preemption, but a queue);
-- a search that bisects;
-- full eval item counts, and prompt-logprobs scoring of all 48 divergence prompts at
-  concurrency 16;
-- a 4-5 hour pod.
-
-The first two ran on vLLM in 7a8237d0 and 55a6222b. On TensorRT-LLM they are new
-behavior, not new code paths.
+Two other infrastructure fixes came out of this track:
+- RunInstances and teardown now survive EC2 network errors, with an idempotent
+  `ClientToken` (014218c9, a profiling run, lost its experiment to one read timeout).
+- The RunPod stock wait now creates only when a datacenter shows stock.
