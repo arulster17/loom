@@ -59,5 +59,16 @@ output "aws_settings_yaml" {
     hf_token_secret_name  = var.hf_token_secret_name
     owner                 = var.owner
     name_prefix           = var.name_prefix
+    extra_regions         = [for m in local.extra_host_networks : { region = m.region, security_group_id = m.security_group_id, subnet_ids = m.subnet_ids }]
   })
+}
+
+output "host_regions" {
+  description = "Every region GPU hosts may launch in, the primary first; the reaper covers each."
+  value       = local.host_regions
+}
+
+output "extra_host_networks" {
+  description = "Security group and default-VPC subnets per extra host region (AwsSettings.extra_regions)."
+  value       = local.extra_host_networks
 }

@@ -5,7 +5,7 @@ data "aws_iam_policy_document" "runner" {
   statement {
     sid       = "LaunchManagedGpuInstances"
     actions   = ["ec2:RunInstances"]
-    resources = ["${local.ec2_arn}:instance/*"]
+    resources = [for a in local.host_ec2_arns : "${a}:instance/*"]
 
     condition {
       test     = "StringEquals"
@@ -59,7 +59,7 @@ data "aws_iam_policy_document" "runner" {
   statement {
     sid       = "LaunchManagedVolumes"
     actions   = ["ec2:RunInstances"]
-    resources = ["${local.ec2_arn}:volume/*"]
+    resources = [for a in local.host_ec2_arns : "${a}:volume/*"]
 
     condition {
       test     = "StringEquals"
@@ -71,7 +71,7 @@ data "aws_iam_policy_document" "runner" {
   statement {
     sid       = "LaunchFromAmazonImages"
     actions   = ["ec2:RunInstances"]
-    resources = ["arn:${local.partition}:ec2:${var.region}::image/*"]
+    resources = [for r in local.host_regions : "arn:${local.partition}:ec2:${r}::image/*"]
 
     condition {
       test     = "StringEquals"
@@ -83,18 +83,22 @@ data "aws_iam_policy_document" "runner" {
   statement {
     sid     = "LaunchIntoBenchNetwork"
     actions = ["ec2:RunInstances"]
-    resources = [
-      "${local.ec2_arn}:subnet/*",
-      "${local.ec2_arn}:network-interface/*",
-      "${local.ec2_arn}:security-group/${aws_security_group.instance.id}",
-      "${local.ec2_arn}:spot-instances-request/*",
-    ]
+    resources = concat(
+      flatten([
+        for a in local.host_ec2_arns : [
+          "${a}:subnet/*",
+          "${a}:network-interface/*",
+          "${a}:spot-instances-request/*",
+        ]
+      ]),
+      local.host_security_group_arns,
+    )
   }
 
   statement {
     sid       = "TagOnLaunchOnly"
     actions   = ["ec2:CreateTags"]
-    resources = ["${local.ec2_arn}:instance/*", "${local.ec2_arn}:volume/*"]
+    resources = flatten([for a in local.host_ec2_arns : ["${a}:instance/*", "${a}:volume/*"]])
 
     condition {
       test     = "StringEquals"
@@ -106,7 +110,7 @@ data "aws_iam_policy_document" "runner" {
   statement {
     sid       = "TerminateManagedInstances"
     actions   = ["ec2:TerminateInstances"]
-    resources = ["${local.ec2_arn}:instance/*"]
+    resources = [for a in local.host_ec2_arns : "${a}:instance/*"]
 
     condition {
       test     = "StringEquals"
@@ -118,7 +122,7 @@ data "aws_iam_policy_document" "runner" {
   statement {
     sid       = "DeleteManagedVolumes"
     actions   = ["ec2:DeleteVolume"]
-    resources = ["${local.ec2_arn}:volume/*"]
+    resources = [for a in local.host_ec2_arns : "${a}:volume/*"]
 
     condition {
       test     = "StringEquals"
@@ -166,7 +170,7 @@ data "aws_iam_policy_document" "runner" {
   statement {
     sid       = "SendCommandToManagedHosts"
     actions   = ["ssm:SendCommand"]
-    resources = ["${local.ec2_arn}:instance/*"]
+    resources = [for a in local.host_ec2_arns : "${a}:instance/*"]
 
     condition {
       test     = "StringEquals"
@@ -178,7 +182,7 @@ data "aws_iam_policy_document" "runner" {
   statement {
     sid       = "SendRunShellScript"
     actions   = ["ssm:SendCommand"]
-    resources = ["arn:${local.partition}:ssm:${var.region}::document/AWS-RunShellScript"]
+    resources = [for r in local.host_regions : "arn:${local.partition}:ssm:${r}::document/AWS-RunShellScript"]
   }
 
   statement {
@@ -194,7 +198,7 @@ data "aws_iam_policy_document" "runner" {
   statement {
     sid       = "ReadDlamiParameter"
     actions   = ["ssm:GetParameter"]
-    resources = ["arn:${local.partition}:ssm:${var.region}::parameter/aws/service/deeplearning/*"]
+    resources = [for r in local.host_regions : "arn:${local.partition}:ssm:${r}::parameter/aws/service/deeplearning/*"]
   }
 
   statement {

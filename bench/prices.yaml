@@ -11,7 +11,7 @@
 # instance names (l40s-x1, ...) are Loom's names for a GPU type x count. RunPod picks
 # the datacenter; the provider accrues at max(the pod's API costPerHr, this price).
 
-last_checked: 2026-10-31
+last_checked: 2026-11-03
 
 clouds:
   aws:
@@ -182,6 +182,54 @@ clouds:
             - https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json
             - https://instances.vantage.sh/aws/ec2/p5en.48xlarge
           last_checked: 2026-10-04
+    # The aws_ec2 provider's extra regions (AwsSettings.extra_regions): only g6e.xlarge,
+    # the type the bench launches there. Read from the AWS Price List API
+    # (`aws pricing get-products`, publication 2026-11-03T21:10:38Z, effective
+    # 2026-11-01): Linux, shared tenancy, no pre-installed software, on-demand; gp3
+    # "EBS:VolumeUsage.gp3". Both match us-east-1. No spot price is recorded here, so a
+    # spot plan falls back to on-demand; the provider reads live spot prices per region.
+    us-east-2:
+      storage:
+        kind: ebs-gp3
+        per_gb_month: 80_000  # "USE2-EBS:VolumeUsage.gp3", AWS Price List API 2026-11-03
+        sources:
+          - https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/us-east-2/index.json
+          - https://aws.amazon.com/ebs/pricing/
+        last_checked: 2026-11-03
+      instances:
+        g6e.xlarge:
+          gpu: L40S
+          gpu_count: 1
+          gpu_memory_gb: 48
+          vcpus: 4
+          memory_gib: 32
+          local_nvme_gb: 250
+          on_demand_per_hour: 1_861_000  # "USE2-BoxUsage:g6e.xlarge"
+          sources:
+            - https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/us-east-2/index.json
+            - https://aws.amazon.com/ec2/pricing/on-demand/
+          last_checked: 2026-11-03
+    us-west-2:
+      storage:
+        kind: ebs-gp3
+        per_gb_month: 80_000  # "USW2-EBS:VolumeUsage.gp3", AWS Price List API 2026-11-03
+        sources:
+          - https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/us-west-2/index.json
+          - https://aws.amazon.com/ebs/pricing/
+        last_checked: 2026-11-03
+      instances:
+        g6e.xlarge:
+          gpu: L40S
+          gpu_count: 1
+          gpu_memory_gb: 48
+          vcpus: 4
+          memory_gib: 32
+          local_nvme_gb: 250
+          on_demand_per_hour: 1_861_000  # "USW2-BoxUsage:g6e.xlarge"
+          sources:
+            - https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/us-west-2/index.json
+            - https://aws.amazon.com/ec2/pricing/on-demand/
+          last_checked: 2026-11-03
 
   gcp:
     us-central1:

@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import boto3
 import pytest
 
 from loom_bench.providers import aws_reaper
@@ -116,10 +117,54 @@ def test_reap_continues_after_a_failure(ec2: Any) -> None:
 def test_lambda_handler(ec2: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     iid = launch(ec2, managed(PAST))
     monkeypatch.setenv("LOOM_REAPER_DRY_RUN", "true")
-    assert lambda_handler({}, None) == {"reaped": [iid], "dry_run": True}
+    monkeypatch.delenv("LOOM_REAPER_REGIONS", raising=False)
+    # No LOOM_REAPER_REGIONS: the Lambda's own region only, as before.
+    want = {"reaped": [iid], "dry_run": True, "regions": ["us-east-1"]}
+    assert lambda_handler({}, None) == want
     assert state(ec2, iid) == "running"
-    assert lambda_handler({"dry_run": False}, None) == {"reaped": [iid], "dry_run": False}
+    assert lambda_handler({"dry_run": False}, None) == {**want, "dry_run": False}
     assert state(ec2, iid) == "terminated"
+
+
+def test_lambda_handler_reaps_every_listed_region(
+    ec2: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A Lambda in us-east-1 sees only us-east-1 instances unless told the other regions.
+    west = boto3.client("ec2", region_name="us-west-2")
+    east2 = boto3.client("ec2", region_name="us-east-2")
+    here = launch(ec2, managed(PAST))
+    there = launch(west, managed(PAST))
+    live = launch(east2, managed(FUTURE))
+    monkeypatch.setenv("LOOM_REAPER_REGIONS", "us-east-1, us-west-2,us-east-2")
+    out = lambda_handler({"dry_run": False}, None)
+    assert out["regions"] == ["us-east-1", "us-west-2", "us-east-2"]
+    assert sorted(out["reaped"]) == sorted([here, there])
+    assert state(ec2, here) == state(west, there) == "terminated"
+    assert state(east2, live) == "running"
+
+
+def test_lambda_regions_default_to_the_lambdas_own() -> None:
+    assert aws_reaper.lambda_regions({}) == [None]
+    assert aws_reaper.lambda_regions({"LOOM_REAPER_REGIONS": " "}) == [None]
+    assert aws_reaper.lambda_regions({"LOOM_REAPER_REGIONS": "us-east-1,us-west-2"}) == [
+        "us-east-1",
+        "us-west-2",
+    ]
+
+
+def test_reap_regions_reaps_the_others_when_one_region_fails(ec2: Any) -> None:
+    west = boto3.client("ec2", region_name="us-west-2")
+    there = launch(west, managed(PAST))
+
+    class Down:
+        meta = ec2.meta
+
+        def get_paginator(self, name: str) -> Any:
+            raise RuntimeError("endpoint down")
+
+    with pytest.raises(RuntimeError, match=r"reaping failed in us-east-1; reaped \['i-"):
+        aws_reaper.reap_regions([Down(), west], NOW)
+    assert state(west, there) == "terminated"
 
 
 def test_reaper_module_imports_only_stdlib_and_boto3() -> None:

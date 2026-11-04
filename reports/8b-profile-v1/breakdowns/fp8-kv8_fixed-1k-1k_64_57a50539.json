@@ -1,0 +1,182 @@
+{
+ "window": {
+  "run_id": "57a50539-43cc-4a6d-b590-ceb5cefecc14",
+  "cell": "fp8-kv8",
+  "workload": "fixed-1k-1k",
+  "load_value": 64.0,
+  "client_latency": {
+   "profiled": {
+    "tokens": 41813,
+    "itl_p50_ms": 29.74652899956709,
+    "itl_mean_ms": 30.628720528711213
+   },
+   "before": {
+    "tokens": 42899,
+    "itl_p50_ms": 28.678347999630205,
+    "itl_mean_ms": 32.85047229289717
+   },
+   "profiler_slowdown": 1.0372469502061505
+  },
+  "capture": {
+   "prefix": "loom-57a50539-43cc-4a6d-b590-ceb5cefecc14",
+   "start_s": 45.000225795000006,
+   "start_status": 200,
+   "stop_s": 65.0013224889999,
+   "stop_status": 200,
+   "stopped_s": 91.39598922000005
+  }
+ },
+ "trace_bytes": 12098512,
+ "ranks": [
+  {
+   "source": "./rank0.1793756545389513232.pt.trace.json.gz",
+   "device": 0,
+   "window_ms": 19570.803828125,
+   "busy_ms": 18779.929454589845,
+   "kernels": 295809,
+   "steps": 653,
+   "step_source": "gpu annotations",
+   "category_ms": {
+    "gemm": 9509.686881835938,
+    "attention": 8692.3819140625,
+    "allreduce": 0.0,
+    "quant": 415.791568359375,
+    "sampling": 35.507837890625,
+    "memcpy": 4.1188857421875,
+    "other": 122.44236669921875,
+    "idle": 790.8743735351562
+   },
+   "category_share": {
+    "gemm": 0.48591192090790186,
+    "attention": 0.44415047999054424,
+    "allreduce": 0.0,
+    "quant": 0.021245502842445602,
+    "sampling": 0.001814327004780307,
+    "memcpy": 0.0002104607341814081,
+    "other": 0.006256379031466152,
+    "idle": 0.04041092948868042
+   },
+   "per_step_ms": {
+    "gemm": 14.563073325935587,
+    "attention": 13.311457755072741,
+    "allreduce": 0.0,
+    "quant": 0.6367405334753062,
+    "sampling": 0.054376474564509954,
+    "memcpy": 0.006307635133518376,
+    "other": 0.1875074528318817,
+    "idle": 1.2111399288440372
+   },
+   "top_kernels": [
+    {
+     "name": "void flashinfer::BatchPrefillWithPagedKVCacheKernel<flashinfer::KernelTraits<(flashinfer::MaskMode)0, 16u, 1u, 2u, 8u, 8u, 1u, 4u, (flashinfer::PosEncodingMode)",
+     "category": "attention",
+     "count": 23508,
+     "total_ms": 8533.227356000058
+    },
+    {
+     "name": "void cutlass::Kernel2<enable_sm89_to_sm90<cutlass::gemm::kernel::DefaultGemmWithVisitor<cutlass::float_e4m3_t, cutlass::layout::RowMajor, (cutlass::ComplexTrans",
+     "category": "gemm",
+     "count": 94032,
+     "total_ms": 8210.714549999859
+    },
+    {
+     "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_tn_align8",
+     "category": "gemm",
+     "count": 653,
+     "total_ms": 1298.9727659999994
+    },
+    {
+     "name": "triton_red_fused__to_copy_abs_clamp_cutlass_scaled_mm_div_max_mul_reciprocal_silu_slice_unsqueeze_2",
+     "category": "quant",
+     "count": 23508,
+     "total_ms": 145.22262900004097
+    },
+    {
+     "name": "triton_red_fused__to_copy_abs_clamp_cutlass_scaled_mm_div_fused_add_rms_norm_max_mul_reciprocal_unsqueeze_3",
+     "category": "quant",
+     "count": 22855,
+     "total_ms": 108.13433099999668
+    },
+    {
+     "name": "triton_red_fused__to_copy_abs_clamp_cutlass_scaled_mm_div_fused_add_rms_norm_max_mul_reciprocal_unsqueeze_1",
+     "category": "quant",
+     "count": 23508,
+     "total_ms": 106.25989200000221
+    },
+    {
+     "name": "triton_red_fused_4",
+     "category": "other",
+     "count": 22855,
+     "total_ms": 94.18108199999439
+    },
+    {
+     "name": "void vllm::reshape_and_cache_flash_kernel<__nv_bfloat16, unsigned char, (vllm::Fp8KVCacheDataType)1>(__nv_bfloat16 const*, __nv_bfloat16 const*, unsigned char*,",
+     "category": "attention",
+     "count": 23508,
+     "total_ms": 83.40832899999994
+    },
+    {
+     "name": "void flashinfer::PersistentVariableLengthMergeStatesKernel<8u, 16u, 8u, 4u, __nv_bfloat16, __nv_bfloat16, int>(__nv_bfloat16*, float*, int*, __nv_bfloat16*, flo",
+     "category": "attention",
+     "count": 23508,
+     "total_ms": 77.57919400000425
+    },
+    {
+     "name": "triton_red_fused__to_copy_abs_clamp_cutlass_scaled_mm_div_max_mul_reciprocal_unsqueeze_view_0",
+     "category": "quant",
+     "count": 23508,
+     "total_ms": 58.65956099998941
+    },
+    {
+     "name": "_gumbel_sample_kernel",
+     "category": "sampling",
+     "count": 653,
+     "total_ms": 26.590232000000004
+    },
+    {
+     "name": "_gather_block_tables_kernel",
+     "category": "other",
+     "count": 653,
+     "total_ms": 3.2775300000000063
+    },
+    {
+     "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::ArgMaxOps<float>, unsigned int, long, 4, 4> >(at::native::ReduceOp<float, at::nat",
+     "category": "sampling",
+     "count": 653,
+     "total_ms": 3.2618560000000048
+    },
+    {
+     "name": "triton_red_fused__to_copy_abs_clamp_cutlass_scaled_mm_div_embedding_max_mul_reciprocal_rms_norm_unsqueeze_0",
+     "category": "quant",
+     "count": 653,
+     "total_ms": 3.0053300000000043
+    },
+    {
+     "name": "_get_num_sampled_and_rejected_kernel",
+     "category": "sampling",
+     "count": 653,
+     "total_ms": 2.830787000000006
+    }
+   ],
+   "step_shapes": [
+    {
+     "kind": "decode",
+     "batch": 64,
+     "steps": 652,
+     "step_ms_p50": 29.96541845703125,
+     "step_ms_mean": 29.966919322008003,
+     "category_ms": {
+      "gemm": 14.563067306424943,
+      "attention": 13.308120869080712,
+      "allreduce": 0.0,
+      "quant": 0.6367403864012174,
+      "sampling": 0.05437756422546012,
+      "memcpy": 0.006306363532879601,
+      "other": 0.18750688686253836,
+      "idle": 1.2107999439824577
+     }
+    }
+   ]
+  }
+ ]
+}

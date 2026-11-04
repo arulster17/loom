@@ -7,8 +7,14 @@ Safety rails, in the order they act:
    provenance, is the observed spot (or on-demand) price plus the same volume;
 2. user-data schedules `shutdown -h` at the TTL and the instance is launched with
    shutdown behaviour `terminate`, so it ends itself if the runner dies;
-3. the reaper Lambda (`aws_reaper`) terminates anything managed past its TTL;
-4. `bench reap` does the same from a laptop.
+3. the reaper Lambda (`aws_reaper`) terminates anything managed past its TTL, in every
+   region in its `LOOM_REAPER_REGIONS`;
+4. `bench reap` does the same from a laptop, in every configured region.
+
+Hosts may launch in several regions (`AwsSettings.extra_regions`): one capacity sweep
+tries every AZ of each in turn, and every later call about a host (SSM, describe,
+teardown) goes to the region it launched in (`Host.info["region"]`). The bucket and the
+HF token secret stay in the primary region.
 
 Nothing here handles a secret: the HF token is read on the host from Secrets
 Manager by the start script and never passes through SSM parameters, user-data,
@@ -29,11 +35,17 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any
+from typing import Annotated, Any, Self
 
 import boto3  # type: ignore[import-untyped]
-from botocore.exceptions import ClientError  # type: ignore[import-untyped]
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from botocore.exceptions import (  # type: ignore[import-untyped]
+    ClientError,
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from loom_bench.engines import docker_run_argv, metrics_path
 from loom_bench.jobs import EvalJob, EvalJobResult, LoadJob, LoadJobResult, TokenizerSpec
@@ -126,6 +138,31 @@ TRANSIENT_CAPACITY_ERRORS = frozenset(
 # clears, so later sweeps skip that AZ, and a sweep with nothing else fails at once.
 UNSUPPORTED = "Unsupported"
 CAPACITY_ERRORS = TRANSIENT_CAPACITY_ERRORS | {UNSUPPORTED}
+# RunInstances refused for the account's vCPU quota. AWS counts an instance against it
+# for a while after it reports `terminated`: aws-smoke-trtllm (d549221f) launched its
+# third host 0.3 s after the second's teardown saw `terminated`, and was refused (the
+# first handover, 44 s later, was not). The quota is per account and region, so a sweep
+# skips the rest of a region at its first such refusal and goes on to the next region.
+# When every region it tried refused for quota, `provision` waits it out on the backoff for
+# at most QUOTA_WAIT_S, then fails with what to check (something else holds the quota,
+# or it is too small).
+QUOTA_ERRORS = frozenset({"VcpuLimitExceeded"})
+QUOTA_WAIT_S = 600
+# EC2 calls that failed on the network, not with an answer: the request may or may not
+# have taken effect. 014218c9 lost a whole experiment to one RunInstances read timeout
+# (60 s) during its capacity wait. These are retried on the backoff, at most
+# NETWORK_RETRIES times in a row; RunInstances is resent with the same ClientToken, so a
+# call that did launch returns that instance instead of a second one.
+NETWORK_ERRORS: tuple[type[Exception], ...] = (
+    ReadTimeoutError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ConnectionClosedError,
+)
+NETWORK_RETRIES = 4
+# Teardown's terminate and its wait for `terminated`: a network error there is retried
+# (terminate is idempotent), never left as a running instance.
+TERMINATE_RETRY_S = (5.0, 10.0, 20.0, 40.0, 60.0)
 SPOT_INTERRUPTION_CODES = frozenset(
     {"Server.SpotInstanceTermination", "Server.SpotInstanceShutdown"}
 )
@@ -146,26 +183,53 @@ def ttl_tag_value(ttl_at: datetime) -> str:
     return ttl_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+SecurityGroupId = Annotated[str, StringConstraints(pattern=r"^sg-[0-9a-f]+$")]
+SubnetIds = Annotated[
+    list[Annotated[str, StringConstraints(pattern=r"^subnet-[0-9a-f]+$")]],
+    Field(min_length=1),
+]
+AmiId = Annotated[str, StringConstraints(pattern=r"^ami-[0-9a-f]{8,17}$")]
+
+
+class AwsRegion(BaseModel):
+    """One region hosts may launch in, with its own network: a security group and
+    subnets are regional. `ami_id` pins that region's copy of the primary region's AMI
+    (AMI ids differ per region); unset, the image of the same name is looked up there."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    region: Annotated[str, StringConstraints(pattern=r"^[a-z0-9-]+$")]
+    security_group_id: SecurityGroupId
+    subnet_ids: SubnetIds
+    ami_id: AmiId | None = None
+
+
 class AwsSettings(BaseModel):
-    """Account-specific settings; `terraform output -raw aws_settings_yaml` fills them."""
+    """Account-specific settings; `terraform output -raw aws_settings_yaml` fills them.
+
+    `region` is the primary region: the bucket and the HF token secret live there, it is
+    swept first, and `security_group_id`, `subnet_ids` and `ami_id` are its own.
+    `extra_regions` are swept after it, in order, when it has no capacity. The instance
+    profile is IAM, so global: the same one serves every region."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     region: str = "us-east-1"
     bucket: Annotated[str, StringConstraints(min_length=3)]
     instance_profile_name: Annotated[str, StringConstraints(min_length=1)]
-    security_group_id: Annotated[str, StringConstraints(pattern=r"^sg-[0-9a-f]+$")]
-    subnet_ids: Annotated[
-        list[Annotated[str, StringConstraints(pattern=r"^subnet-[0-9a-f]+$")]],
-        Field(min_length=1),
-    ]
+    security_group_id: SecurityGroupId
+    subnet_ids: SubnetIds
     hf_token_secret_name: Annotated[str, StringConstraints(min_length=1)]
     owner: SafeId
     name_prefix: SafeId = "loom-bench"
     dlami_ssm_parameter: str = DLAMI_PARAMETER
     # Pin one AMI (e.g. the one a smoke ran on) instead of the parameter's latest: the
     # DLAMI parameter moves about weekly, so a smoke and its real run can otherwise differ.
-    ami_id: Annotated[str, StringConstraints(pattern=r"^ami-[0-9a-f]{8,17}$")] | None = None
+    ami_id: AmiId | None = None
+    # More regions to launch hosts in, swept after `region` in this order.
+    # `LOOM_AWS_EXTRA_REGIONS=us-west-2` keeps only the named ones (in that order); an
+    # empty value keeps none.
+    extra_regions: list[AwsRegion] = Field(default_factory=list)
     root_volume_gb: Annotated[int, Field(ge=50, le=2000)] = 200
     weights_dir: str = "/opt/dlami/nvme/loom-hf"
     # Root-owned, world-readable copies of pinned workload datasets: <sha256>/<file name>.
@@ -182,12 +246,53 @@ class AwsSettings(BaseModel):
     # waiting; 0 fails on the first sweep.
     capacity_wait_s: Annotated[int, Field(ge=0)] = 1800
 
+    @model_validator(mode="after")
+    def _regions_once(self) -> Self:
+        names = self.region_names
+        twice = sorted({n for n in names if names.count(n) > 1})
+        if twice:
+            raise ValueError(f"regions listed more than once: {', '.join(twice)}")
+        return self
+
+    @property
+    def region_names(self) -> list[str]:
+        return [self.region, *(r.region for r in self.extra_regions)]
+
+    @property
+    def host_regions(self) -> list[AwsRegion]:
+        """Every region hosts may launch in, the primary first."""
+        primary = AwsRegion(
+            region=self.region,
+            security_group_id=self.security_group_id,
+            subnet_ids=list(self.subnet_ids),
+            ami_id=self.ami_id,
+        )
+        return [primary, *self.extra_regions]
+
+
+def _list_env(value: str) -> list[str]:
+    return [s.strip() for s in value.split(",") if s.strip()]
+
+
+def _select_regions(configured: Any, value: str) -> list[Any]:
+    """The configured `extra_regions` named in `value` (comma-separated), in its order."""
+    by_name = {r["region"] if isinstance(r, Mapping) else r.region: r for r in configured or []}
+    names = _list_env(value)
+    unknown = [n for n in names if n not in by_name]
+    if unknown:
+        raise ValueError(
+            f"{SETTINGS_ENV_PREFIX}EXTRA_REGIONS names {', '.join(unknown)}, which the AWS "
+            "settings file does not configure under extra_regions"
+        )
+    return [by_name[n] for n in names]
+
 
 def load_aws_settings(
     path: Path | str | None = None, env: Mapping[str, str] | None = None
 ) -> AwsSettings:
     """Settings from a YAML file (`path` or `$LOOM_AWS_CONFIG`), overridden by
-    `LOOM_AWS_<FIELD>` environment variables (`LOOM_AWS_SUBNET_IDS` is comma-separated)."""
+    `LOOM_AWS_<FIELD>` environment variables (`LOOM_AWS_SUBNET_IDS` is comma-separated;
+    `LOOM_AWS_EXTRA_REGIONS` selects from the file's `extra_regions` by name)."""
     env = os.environ if env is None else env
     path = path or env.get(SETTINGS_PATH_ENV)
     data: dict[str, Any] = dict(read_yaml(Path(path)) or {}) if path else {}
@@ -195,9 +300,12 @@ def load_aws_settings(
         value = env.get(SETTINGS_ENV_PREFIX + field.upper())
         if value is None:
             continue
-        data[field] = (
-            [s.strip() for s in value.split(",") if s.strip()] if field == "subnet_ids" else value
-        )
+        if field == "subnet_ids":
+            data[field] = _list_env(value)
+        elif field == "extra_regions":
+            data[field] = _select_regions(data.get(field), value)
+        else:
+            data[field] = value
     return AwsSettings.model_validate(data)
 
 
@@ -248,13 +356,22 @@ class NoCapacity(RuntimeError):
     """A sweep of every AZ refused the instance for capacity; no instance exists."""
 
     def __init__(
-        self, instance_type: str, refused: Mapping[str, str], *, waited_s: float | None = None
+        self,
+        instance_type: str,
+        refused: Mapping[str, str],
+        *,
+        waited_s: float | None = None,
+        regions: Mapping[str, str] | None = None,
     ) -> None:
         self.instance_type = instance_type
         self.refused = dict(refused)  # AZ -> RunInstances error code, in sweep order
+        self.regions = dict(regions or {})  # AZ -> its region
         after = "" if waited_s is None else f" after waiting {waited_s:.0f} s"
         detail = "; ".join(f"{az}: {code}" for az, code in self.refused.items())
         super().__init__(f"no capacity for {instance_type}{after}: {detail}")
+
+    def region_of(self, az: str) -> str:
+        return self.regions.get(az, "")
 
     @property
     def transient(self) -> list[str]:
@@ -262,20 +379,100 @@ class NoCapacity(RuntimeError):
         return [az for az, code in self.refused.items() if code != UNSUPPORTED]
 
     @property
+    def quota_regions(self) -> list[str]:
+        """Regions whose sweep stopped on the account's vCPU quota there."""
+        out = [self.region_of(az) for az, c in self.refused.items() if c in QUOTA_ERRORS]
+        return list(dict.fromkeys(out))
+
+    @property
+    def quota(self) -> bool:
+        """Every region with a refusal that can clear stopped on the vCPU quota
+        (`QUOTA_ERRORS`): the quota, not capacity, is what to wait out."""
+        held = set(self.quota_regions)
+        return bool(held) and {self.region_of(az) for az in self.transient} <= held
+
+    @property
     def unsupported(self) -> list[str]:
         """AZs that do not offer the instance type."""
         return [az for az, code in self.refused.items() if code == UNSUPPORTED]
 
     def summary(self) -> str:
-        """`none in us-east-1c, us-east-1a (InsufficientInstanceCapacity); not offered in
-        us-east-1e`: the sweep's log line."""
-        codes = sorted({self.refused[az] for az in self.transient})
+        """`none in us-east-1c, us-east-1a (InsufficientInstanceCapacity); vCPU quota held
+        in us-east-2 (VcpuLimitExceeded); not offered in us-east-1e`: the sweep's log line."""
+        capacity = [az for az in self.transient if self.refused[az] not in QUOTA_ERRORS]
+        codes = sorted({self.refused[az] for az in capacity})
         parts = []
-        if self.transient:
-            parts.append(f"none in {', '.join(self.transient)} ({', '.join(codes)})")
+        if capacity:
+            parts.append(f"none in {', '.join(capacity)} ({', '.join(codes)})")
+        quota = [
+            self.region_of(az) or az for az in self.transient if self.refused[az] in QUOTA_ERRORS
+        ]
+        if quota:
+            parts.append(f"vCPU quota held in {', '.join(quota)} (VcpuLimitExceeded)")
         if self.unsupported:
             parts.append(f"not offered in {', '.join(self.unsupported)}")
         return "; ".join(parts)
+
+
+class _PendingLaunch(Exception):
+    """RunInstances failed on the network: it may have launched an instance. Carries the
+    exact request (same ClientToken, tags, TTL) to resend, and what the host needs."""
+
+    def __init__(
+        self,
+        kwargs: dict[str, Any],
+        cand: dict[str, Any],
+        *,
+        now: datetime,
+        ttl_at: datetime,
+        tags: dict[str, str],
+        ami: str,
+        cause: Exception,
+    ) -> None:
+        self.kwargs = kwargs
+        self.cand = cand
+        self.now = now
+        self.ttl_at = ttl_at
+        self.tags = tags
+        self.ami = ami
+        self.cause = cause
+        super().__init__(f"RunInstances in {cand['az']}: {type(cause).__name__}: {cause}")
+
+    @property
+    def token(self) -> str:
+        return str(self.kwargs["ClientToken"])
+
+
+# What the capacity wait retries on the network: an unanswered RunInstances, or any other
+# EC2/SSM call of the sweep that failed before an answer.
+_NETWORK_RETRYABLE: tuple[type[Exception], ...] = (_PendingLaunch, *NETWORK_ERRORS)
+
+
+class _QuotaRefused(Exception):
+    """RunInstances refused for the vCPU quota: the sweep skips the rest of that region."""
+
+
+class Ec2Unreachable(RuntimeError):
+    """EC2 calls kept failing on the network for NETWORK_RETRIES backoff waits."""
+
+
+class VcpuQuotaHeld(RuntimeError):
+    """RunInstances kept failing on the account's vCPU quota for QUOTA_WAIT_S."""
+
+    def __init__(self, instance_type: str, held_s: float, regions: list[str] | None = None) -> None:
+        self.instance_type = instance_type
+        self.held_s = held_s
+        self.regions = [r for r in regions or [] if r]
+        where = f" in {', '.join(self.regions)}" if self.regions else ""
+        flag = f"--region {self.regions[0]} " if len(self.regions) == 1 else "--region <region> "
+        super().__init__(
+            f"RunInstances for {instance_type} refused for the account's vCPU quota "
+            f"(VcpuLimitExceeded){where} for {held_s:.0f} s. Something still holds it: another "
+            f"instance not yet terminated (check `aws ec2 describe-instances {flag}--filters "
+            "Name=instance-state-name,Values=pending,running,shutting-down,stopping`), or "
+            "the G/VT on-demand quota is below one instance's vCPUs (docs/runbook.md, "
+            "section 7). No instance was launched."
+        )
 
 
 class AwsEc2Provider:
@@ -293,12 +490,25 @@ class AwsEc2Provider:
         requirements: Callable[[str], str] = export_requirements,
         clock: Callable[[], datetime] = utcnow,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clients: Callable[[str, str], Any] | None = None,
     ) -> None:
+        """`ec2` and `ssm` are the primary region's clients; `clients(service, region)`
+        makes the others (default: boto3). `s3` is the bucket's, in the primary region."""
         self.settings = settings
         self.prices = prices if prices is not None else load_prices()
-        self.ec2 = ec2 or boto3.client("ec2", region_name=settings.region)
-        self.ssm = ssm or boto3.client("ssm", region_name=settings.region)
+        self._make_client = clients or (
+            lambda service, region: boto3.client(service, region_name=region)
+        )
+        self._clients: dict[tuple[str, str], Any] = {}
+        if ec2 is not None:
+            self._clients["ec2", settings.region] = ec2
+        if ssm is not None:
+            self._clients["ssm", settings.region] = ssm
+        self._client("ec2", settings.region)
+        self._client("ssm", settings.region)
         self.s3 = s3 or boto3.client("s3", region_name=settings.region)
+        self._regions = {r.region: r for r in settings.host_regions}
+        self._region_amis: dict[tuple[str, str], tuple[str, str]] = {}
         self.wheel_path = wheel_path or settings.wheel_path
         self.requirements = requirements
         self._requirements: dict[str, str] = {}  # extra -> exported requirements.txt
@@ -306,14 +516,66 @@ class AwsEc2Provider:
         self.sleep = sleep
         self.weights = HostWeights()  # what each instance's HF cache holds
 
+    # -- regions ----------------------------------------------------------------
+
+    @property
+    def ec2(self) -> Any:
+        """The primary region's EC2 client."""
+        return self._client("ec2", self.settings.region)
+
+    @ec2.setter
+    def ec2(self, client: Any) -> None:
+        self._clients["ec2", self.settings.region] = client
+
+    @property
+    def ssm(self) -> Any:
+        """The primary region's SSM client."""
+        return self._client("ssm", self.settings.region)
+
+    @ssm.setter
+    def ssm(self, client: Any) -> None:
+        self._clients["ssm", self.settings.region] = client
+
+    def _client(self, service: str, region: str) -> Any:
+        key = (service, region)
+        if key not in self._clients:
+            self._clients[key] = self._make_client(service, region)
+        return self._clients[key]
+
+    def _host_region(self, host: Host) -> str:
+        """The region the host runs in: every call about it goes there."""
+        return str(host.info.get("region") or self.settings.region)
+
+    def _priced_in(self, region: str, instance_type: str) -> bool:
+        try:
+            self.prices.instance("aws", region, instance_type)
+            return self.prices.region("aws", region).storage is not None
+        except KeyError:
+            return False
+
+    def _sweep_regions(self, req: HostRequest) -> list[AwsRegion]:
+        """The regions a sweep tries, in order: the requested one (default: the primary),
+        then the others as configured. A region other than the requested one is tried
+        only if prices.yaml prices the instance type and its storage there, since the
+        host's accrual and the plan's cap both need that price."""
+        assert req.instance_type is not None
+        first = req.region or self.settings.region
+        regions = [self._regions[first]] + [
+            r
+            for r in self.settings.host_regions
+            if r.region != first and self._priced_in(r.region, req.instance_type)
+        ]
+        return regions
+
     # -- provisioning -------------------------------------------------------
 
     def _validate_request(self, req: HostRequest) -> str:
         if req.cloud != "aws":
             raise ValueError(f"aws_ec2 needs cloud 'aws', got {req.cloud!r}")
-        if req.region not in (None, self.settings.region):
+        if req.region not in (None, *self._regions):
             raise ValueError(
-                f"request region {req.region} != settings region {self.settings.region}"
+                f"request region {req.region} is not one of the settings' regions "
+                f"({', '.join(self._regions)})"
             )
         if req.market not in (Market.SPOT, Market.ON_DEMAND):
             raise ValueError(f"aws_ec2 supports spot and on_demand, not {req.market}")
@@ -329,30 +591,29 @@ class AwsEc2Provider:
             raise ValueError(f"tags {sorted(reserved)} are set by the provider")
         return experiment
 
-    def _on_demand_micros(self, instance_type: str) -> Micros:
+    def _on_demand_micros(self, instance_type: str, region: str) -> Micros:
         quote = self.prices.instance_price(
-            "aws", self.settings.region, instance_type, Market.ON_DEMAND, allow_unverified=True
+            "aws", region, instance_type, Market.ON_DEMAND, allow_unverified=True
         )
         return quote.per_hour
 
-    def _ebs_micros(self, volume_gb: int) -> Micros:
-        storage = self.prices.region("aws", self.settings.region).storage
+    def _ebs_micros(self, volume_gb: int, region: str) -> Micros:
+        storage = self.prices.region("aws", region).storage
         if storage is None:
-            raise KeyError(f"no storage price for aws/{self.settings.region}")
+            raise KeyError(f"no storage price for aws/{region}")
         return math.ceil(Fraction(storage.per_gb_month * volume_gb, HOURS_PER_MONTH))
 
     def _volume_gb(self, req: HostRequest) -> int:
         return max(req.disk_gb, self.settings.root_volume_gb)
 
     def _as_run(
-        self, req: HostRequest, rec: Mapping[str, Any] | None, az: str
+        self, req: HostRequest, rec: Mapping[str, Any] | None, az: str, region: str
     ) -> tuple[Micros | None, PriceBasis]:
         """The host's cost price (no safety multiplier) plus its root volume, rounded
-        once (`PriceBook.with_storage`), and its basis. A spot host in an AZ with no
-        observed spot price has no known as-run price."""
+        once (`PriceBook.with_storage`), and its basis, at `region`'s prices. A spot host
+        in an AZ with no observed spot price has no known as-run price."""
         assert req.instance_type is not None
         volume = self._volume_gb(req)
-        region = self.settings.region
         if rec is not None:
             spot = Fraction(Decimal(rec["SpotPrice"])) * MICROS_PER_USD
             basis = PriceBasis(
@@ -377,8 +638,11 @@ class AwsEc2Provider:
         )
         return price, basis
 
-    def _candidates(self, req: HostRequest, now: datetime) -> list[dict[str, Any]]:
-        """Subnets to try in order, each with its AZ, accrual price and as-run price.
+    def _candidates(
+        self, req: HostRequest, now: datetime, where: AwsRegion | None = None
+    ) -> list[dict[str, Any]]:
+        """Subnets of one region (default: the primary) to try in order, each with its AZ,
+        accrual price and as-run price at that region's prices.
 
         Accrual = instance rate + root EBS rate, both rounded up. On-demand keeps the
         configured subnet order at the prices.yaml rate. Spot tries the cheapest AZ
@@ -386,14 +650,17 @@ class AwsEc2Provider:
         tried last, accrued at the on-demand rate.
         """
         assert req.instance_type is not None
-        on_demand = self._on_demand_micros(req.instance_type)
-        ebs = self._ebs_micros(self._volume_gb(req))
-        subnets = self.ec2.describe_subnets(SubnetIds=self.settings.subnet_ids)["Subnets"]
+        where = where or self._regions[self.settings.region]
+        region = where.region
+        ec2 = self._client("ec2", region)
+        on_demand = self._on_demand_micros(req.instance_type, region)
+        ebs = self._ebs_micros(self._volume_gb(req), region)
+        subnets = ec2.describe_subnets(SubnetIds=where.subnet_ids)["Subnets"]
         az_of = {s["SubnetId"]: s["AvailabilityZone"] for s in subnets}
-        ordered = [sid for sid in self.settings.subnet_ids if sid in az_of]
+        ordered = [sid for sid in where.subnet_ids if sid in az_of]
         latest: dict[str, dict[str, Any]] = {}
         if req.market is Market.SPOT:
-            history = self.ec2.describe_spot_price_history(
+            history = ec2.describe_spot_price_history(
                 InstanceTypes=[req.instance_type],
                 ProductDescriptions=["Linux/UNIX"],
                 StartTime=now,
@@ -421,8 +688,10 @@ class AwsEc2Provider:
                     "multiplier": str(multiplier),
                 }
             basis.update(instance_micros_per_hour=instance, ebs_micros_per_hour=ebs)
-            as_run, price_basis = self._as_run(req, rec, az_of[sid])
+            as_run, price_basis = self._as_run(req, rec, az_of[sid], region)
             cand = {
+                "region": region,
+                "security_group_id": where.security_group_id,
                 "subnet_id": sid,
                 "az": az_of[sid],
                 "hourly_micros": instance + ebs,
@@ -433,13 +702,56 @@ class AwsEc2Provider:
             (spot if rec is not None else fallback).append(cand)
         return sorted(spot, key=lambda c: c["hourly_micros"]) + fallback
 
-    def _ami(self) -> tuple[str, str]:
+    def _primary_image(self) -> dict[str, Any]:
+        """The primary region's AMI: `ami_id`, or the DLAMI parameter's latest."""
         ami = (
             self.settings.ami_id
             or self.ssm.get_parameter(Name=self.settings.dlami_ssm_parameter)["Parameter"]["Value"]
         )
-        image = self.ec2.describe_images(ImageIds=[ami])["Images"][0]
-        return ami, image["RootDeviceName"]
+        image = dict(self.ec2.describe_images(ImageIds=[ami])["Images"][0])
+        return {**image, "ImageId": ami}
+
+    def _ami(
+        self, region: str | None = None, primary: Mapping[str, Any] | None = None
+    ) -> tuple[str, str]:
+        """(AMI id, root device) for a host in `region` (default: the primary region).
+
+        Every region runs the primary region's image release: AMI ids differ per region,
+        so another region uses its own pinned `ami_id`, which must carry the primary
+        image's name, or else the one image of that name and owner there. A region where
+        neither holds fails the sweep, so no host runs a different image unnoticed."""
+        primary = primary or self._primary_image()
+        if region is None or region == self.settings.region:
+            return str(primary["ImageId"]), str(primary["RootDeviceName"])
+        key = (region, str(primary["ImageId"]))
+        if key not in self._region_amis:
+            self._region_amis[key] = self._regional_ami(self._regions[region], primary)
+        return self._region_amis[key]
+
+    def _regional_ami(self, where: AwsRegion, primary: Mapping[str, Any]) -> tuple[str, str]:
+        ec2 = self._client("ec2", where.region)
+        name, owner = primary.get("Name"), primary.get("OwnerId")
+        origin = f"{primary['ImageId']} in {self.settings.region}"
+        if where.ami_id:
+            image = ec2.describe_images(ImageIds=[where.ami_id])["Images"][0]
+            if image.get("Name") != name:
+                raise ValueError(
+                    f"{where.region}: ami_id {where.ami_id} is {image.get('Name')!r}, not "
+                    f"{name!r} ({origin}); pin the same image release in every region"
+                )
+        else:
+            if not name or not owner:
+                raise ValueError(f"{origin} has no name or owner to find it in {where.region} by")
+            images = ec2.describe_images(
+                Owners=[owner], Filters=[{"Name": "name", "Values": [name]}]
+            )["Images"]
+            if len(images) != 1:
+                raise ValueError(
+                    f"{where.region}: {len(images)} images named {name!r} owned by {owner} "
+                    f"({origin}); set that region's ami_id"
+                )
+            image = images[0]
+        return str(image["ImageId"]), str(image["RootDeviceName"])
 
     def user_data(self, ttl_at: datetime) -> str:
         return render_script(
@@ -468,6 +780,7 @@ class AwsEc2Provider:
         subnet_id: str,
         tags: dict[str, str],
         ttl_at: datetime,
+        security_group_id: str | None = None,
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "ImageId": ami,
@@ -475,7 +788,7 @@ class AwsEc2Provider:
             "MinCount": 1,
             "MaxCount": 1,
             "SubnetId": subnet_id,
-            "SecurityGroupIds": [self.settings.security_group_id],
+            "SecurityGroupIds": [security_group_id or self.settings.security_group_id],
             "IamInstanceProfile": {"Name": self.settings.instance_profile_name},
             "InstanceInitiatedShutdownBehavior": "terminate",
             "MetadataOptions": {
@@ -512,81 +825,256 @@ class AwsEc2Provider:
             }
         return kwargs
 
-    def _provision(self, req: HostRequest, skip_azs: frozenset[str] = frozenset()) -> Host:
-        """One sweep: try each candidate AZ (but `skip_azs`) once and keep the first
-        instance launched; `NoCapacity` if every AZ refused it for capacity. The launch
-        time and TTL are this sweep's, so time spent in earlier sweeps never shortens
-        the host's life or bills it."""
+    def _provision(
+        self,
+        req: HostRequest,
+        skip_azs: frozenset[str] = frozenset(),
+        pending: _PendingLaunch | None = None,
+    ) -> Host:
+        """One sweep: try each candidate AZ (but `skip_azs`) of each region once and keep
+        the first instance launched; `NoCapacity` if every AZ refused it for capacity. A
+        vCPU quota refusal skips the rest of that region (the quota is per region). The
+        launch time and TTL are this sweep's, so time spent in earlier sweeps never
+        shortens the host's life or bills it."""
         experiment = self._validate_request(req)
         assert req.instance_type is not None
+        refused: dict[str, str] = {}
+        region_of: dict[str, str] = {}
+        held: set[str] = set()  # regions refused for the vCPU quota this sweep
+        if pending is not None:
+            # The same request again (same ClientToken, same region): EC2 returns the
+            # instance the timed-out call launched, if it did, instead of a second one.
+            try:
+                got = self._launch(req, pending.kwargs, pending.cand, refused, pending=pending)
+            except _QuotaRefused:
+                got = None
+                held.add(pending.cand["region"])
+            region_of[pending.cand["az"]] = pending.cand["region"]
+            if got is not None:
+                return self._host(req, got, pending)
+            skip_azs = skip_azs | {pending.cand["az"]}
         now = self.clock()
         ttl_at = now + timedelta(seconds=req.ttl_s)
         tags = self._tags(req, experiment, ttl_at)
-        ami, root_device = self._ami()
-        candidates = [c for c in self._candidates(req, now) if c["az"] not in skip_azs]
-        if not candidates:
-            raise ValueError("none of the configured subnets exist")
-        refused: dict[str, str] = {}
-        for cand in candidates:
-            kwargs = self._run_instances_kwargs(
-                req,
-                ami=ami,
-                root_device=root_device,
-                subnet_id=cand["subnet_id"],
-                tags=tags,
-                ttl_at=ttl_at,
-            )
-            try:
-                resp = self.ec2.run_instances(**kwargs)
-            except ClientError as e:
-                if _error_code(e) not in CAPACITY_ERRORS:
-                    raise
-                refused[cand["az"]] = _error_code(e)
+        regions = self._sweep_regions(req)
+        primary = self._primary_image()
+        # Every region's image first, so a region that cannot run the release fails the
+        # sweep before anything launches.
+        amis = {r.region: self._ami(r.region, primary) for r in regions}
+        tried = False
+        for where in regions:
+            if where.region in held:
                 continue
-            inst = resp["Instances"][0]
-            return Host(
-                provider=PROVIDER_NAME,
-                host_id=inst["InstanceId"],
-                request=req,
-                hourly_micros=cand["hourly_micros"],
-                launched_at=now,
-                ttl_at=ttl_at,
-                as_run_micros=cand["as_run_micros"],
-                price_basis=cand["price_basis"],
-                info={
-                    "region": self.settings.region,
-                    "az": cand["az"],
-                    "subnet_id": cand["subnet_id"],
-                    "ami": ami,
-                    "instance_type": req.instance_type,
-                    "market": req.market.value,
-                    "accrual_basis": cand["accrual_basis"],
-                    "tags": tags,
-                },
-            )
-        raise NoCapacity(req.instance_type, refused)
+            ami, root_device = amis[where.region]
+            for cand in self._candidates(req, now, where):
+                if cand["az"] in skip_azs:
+                    continue
+                tried = True
+                region_of[cand["az"]] = where.region
+                kwargs = self._run_instances_kwargs(
+                    req,
+                    ami=ami,
+                    root_device=root_device,
+                    subnet_id=cand["subnet_id"],
+                    tags=tags,
+                    ttl_at=ttl_at,
+                    security_group_id=cand["security_group_id"],
+                )
+                attempt = _PendingLaunch(
+                    kwargs, cand, now=now, ttl_at=ttl_at, tags=tags, ami=ami, cause=RuntimeError()
+                )
+                try:
+                    got = self._launch(req, kwargs, cand, refused, pending=attempt)
+                except _QuotaRefused:
+                    break  # this region's quota: its other AZs would refuse too
+                if got is not None:
+                    return self._host(req, got, attempt)
+        if not tried and not refused:
+            raise ValueError("none of the configured subnets exist")
+        raise NoCapacity(req.instance_type, refused, regions=region_of)
+
+    def _launch(
+        self,
+        req: HostRequest,
+        kwargs: dict[str, Any],
+        cand: dict[str, Any],
+        refused: dict[str, str],
+        *,
+        pending: _PendingLaunch,
+    ) -> dict[str, Any] | None:
+        """One RunInstances in the candidate's region: the instance, or None if the AZ
+        refused it for capacity (recorded in `refused`). A quota refusal raises
+        `_QuotaRefused`, so the sweep moves on to the next region; a network failure
+        raises `_PendingLaunch` with this exact request, to be resent."""
+        try:
+            resp = self._client("ec2", cand["region"]).run_instances(**kwargs)
+        except NETWORK_ERRORS as e:
+            raise _PendingLaunch(
+                kwargs,
+                cand,
+                now=pending.now,
+                ttl_at=pending.ttl_at,
+                tags=pending.tags,
+                ami=pending.ami,
+                cause=e,
+            ) from e
+        except ClientError as e:
+            code = _error_code(e)
+            if code in QUOTA_ERRORS:
+                # Per account and region: every other AZ of the region would refuse too.
+                refused[cand["az"]] = code
+                raise _QuotaRefused(cand["region"]) from None
+            if code not in CAPACITY_ERRORS:
+                raise
+            refused[cand["az"]] = code
+            return None
+        return dict(resp["Instances"][0])
+
+    def _host(self, req: HostRequest, inst: Mapping[str, Any], launch: _PendingLaunch) -> Host:
+        cand = launch.cand
+        return Host(
+            provider=PROVIDER_NAME,
+            host_id=inst["InstanceId"],
+            request=req,
+            hourly_micros=cand["hourly_micros"],
+            launched_at=launch.now,
+            ttl_at=launch.ttl_at,
+            as_run_micros=cand["as_run_micros"],
+            price_basis=cand["price_basis"],
+            info={
+                "region": cand["region"],
+                "az": cand["az"],
+                "subnet_id": cand["subnet_id"],
+                "ami": launch.ami,
+                "instance_type": req.instance_type,
+                "market": req.market.value,
+                "accrual_basis": cand["accrual_basis"],
+                "tags": launch.tags,
+            },
+        )
+
+    def _launched_by(self, token: str, region: str | None = None) -> list[str]:
+        """Instances (not terminated) that RunInstances with `token` created in `region`
+        (default: the primary)."""
+        ec2 = self._client("ec2", region or self.settings.region)
+        resp = ec2.describe_instances(Filters=[{"Name": "client-token", "Values": [token]}])
+        return [
+            str(inst["InstanceId"])
+            for r in resp["Reservations"]
+            for inst in r["Instances"]
+            if inst["State"]["Name"] not in ("terminated", "shutting-down")
+            and inst.get("ClientToken", token) == token
+        ]
+
+    def _abandon(self, pending: _PendingLaunch) -> list[str]:
+        """Give up on a launch whose RunInstances never got an answer: terminate any
+        instance it did create (found by its ClientToken, in the region it was sent to),
+        so nothing is left running."""
+        region = pending.cand["region"]
+        leftover = self._launched_by(pending.token, region)
+        for iid in leftover:
+            log.warning("terminating %s in %s, launched by an unanswered RunInstances", iid, region)
+            self._terminate(iid, region)
+        return leftover
 
     async def provision(self, req: HostRequest) -> Host:
         """Launch the instance. While every AZ refuses it for capacity, sweep them all
         again for up to `capacity_wait_s`, waiting out the backoff (`CAPACITY_BACKOFF_S`)
         between sweeps, with one last sweep at the deadline. Only capacity refusals are
-        waited out (`TRANSIENT_CAPACITY_ERRORS`): any other error fails at once, and an AZ
-        that does not offer the type is dropped from later sweeps. No instance exists
-        while waiting: a sweep returns as soon as one launches."""
+        waited out (`TRANSIENT_CAPACITY_ERRORS`), plus the account's vCPU quota
+        (`QUOTA_ERRORS`) for at most QUOTA_WAIT_S of consecutive refusals, after which
+        `VcpuQuotaHeld` says what to check. Any other error fails at once, and an AZ that
+        does not offer the type is dropped from later sweeps. No instance exists while
+        waiting: a sweep returns as soon as one launches.
+
+        A sweep covers every configured region (`_sweep_regions`). The quota is per
+        region: a region refused for it is skipped for the rest of that sweep, and only
+        a sweep in which every region was refused for it counts toward QUOTA_WAIT_S."""
+        multi_region = len(self.settings.region_names) > 1
         start = self.clock()
         deadline = start + timedelta(seconds=self.settings.capacity_wait_s)
         backoff = capacity_backoff()
         unsupported: set[str] = set()
         refusals = 0  # sweeps refused so far
+        quota_since: datetime | None = None  # first of the current run of quota refusals
+        pending: _PendingLaunch | None = None  # an unanswered RunInstances, to resend
+        network_failures = 0  # in a row
         while True:
             try:
-                host = await asyncio.to_thread(self._provision, req, frozenset(unsupported))
+                host = await asyncio.to_thread(
+                    self._provision, req, frozenset(unsupported), pending
+                )
+            except _NETWORK_RETRYABLE as e:
+                if isinstance(e, _PendingLaunch):
+                    pending = e
+                network_failures += 1
+                now = self.clock()
+                left = (deadline - now).total_seconds()
+                what = str(e) if isinstance(e, _PendingLaunch) else f"{type(e).__name__}: {e}"
+                if network_failures > NETWORK_RETRIES or left <= 0:
+                    log.warning(
+                        "AWS %s: EC2 unreachable (%s), %d times in a row; giving up",
+                        req.instance_type,
+                        what,
+                        network_failures,
+                    )
+                    note = await self._give_up_launch(pending)
+                    raise Ec2Unreachable(
+                        f"EC2 calls for {req.instance_type} failed on the network "
+                        f"{network_failures} times in a row (last: {what}); {note}"
+                    ) from e
+                pause = min(next(backoff), left)
+                log.warning(
+                    "AWS %s: %s (network, %d of %d); %s in %.0f s",
+                    req.instance_type,
+                    what,
+                    network_failures,
+                    NETWORK_RETRIES,
+                    f"resending the same RunInstances (ClientToken {pending.token})"
+                    if pending is not None
+                    else "next sweep",
+                    pause,
+                )
+                await self.sleep(pause)
+                continue
             except NoCapacity as e:
+                pending = None  # the resent request got an answer
+                network_failures = 0
                 refusals += 1
                 unsupported.update(e.unsupported)
                 now = self.clock()
                 waited = (now - start).total_seconds()
                 left = (deadline - now).total_seconds()
+                if e.quota:
+                    # Every region tried refused for its vCPU quota (one region: the
+                    # sweep stopped there). With only some regions held, the others'
+                    # capacity refusals are what is waited out, below.
+                    quota_since = quota_since or now
+                    held = (now - quota_since).total_seconds()
+                    where = e.quota_regions if multi_region else []
+                    in_where = f" in {', '.join(where)}" if where else ""
+                    if held >= QUOTA_WAIT_S or left <= 0:
+                        log.warning(
+                            "AWS %s: the vCPU quota is still exceeded%s after %.0f s; giving up",
+                            req.instance_type,
+                            in_where,
+                            held,
+                        )
+                        raise VcpuQuotaHeld(e.instance_type, held, where) from None
+                    pause = min(next(backoff), left, QUOTA_WAIT_S - held)
+                    log.warning(
+                        "AWS %s: vCPU quota still held (VcpuLimitExceeded)%s, most likely by "
+                        "the host just terminated (waited %.0f s, up to %d s); next sweep "
+                        "in %.0f s",
+                        req.instance_type,
+                        in_where,
+                        held,
+                        QUOTA_WAIT_S,
+                        pause,
+                    )
+                    await self.sleep(pause)
+                    continue
+                quota_since = None
                 if not e.transient or left <= 0:
                     log.warning(
                         "AWS %s capacity: %s (waited %.0f s); giving up",
@@ -595,7 +1083,10 @@ class AwsEc2Provider:
                         waited,
                     )
                     raise NoCapacity(
-                        e.instance_type, e.refused, waited_s=waited if refusals > 1 else None
+                        e.instance_type,
+                        e.refused,
+                        waited_s=waited if refusals > 1 else None,
+                        regions=e.regions,
                     ) from None
                 pause = min(next(backoff), left)
                 log.warning(
@@ -608,22 +1099,54 @@ class AwsEc2Provider:
                 )
                 await self.sleep(pause)
                 continue
-            if refusals:
+            if refusals or network_failures:
                 waited = (self.clock() - start).total_seconds()
                 log.warning(
-                    "AWS %s capacity: launched %s in %s (waited %.0f s)",
+                    "AWS %s capacity: launched %s in %s (waited %.0f s)%s",
                     req.instance_type,
                     host.host_id,
                     host.info["az"],
                     waited,
+                    " by resending the unanswered RunInstances" if pending is not None else "",
                 )
             return host
 
+    async def _give_up_launch(self, pending: _PendingLaunch | None) -> str:
+        """Before failing on the network: an unanswered RunInstances may have launched an
+        instance; find it by its ClientToken and terminate it. If EC2 cannot even be
+        asked, say so: the instance carries the run's `loom:ttl` tags and its own TTL
+        shutdown, so the reaper and its watchdog end it."""
+        if pending is None:
+            return "no RunInstances was pending"
+        for delay in (0.0, *TERMINATE_RETRY_S):
+            if delay:
+                await self.sleep(delay)
+            try:
+                left = await asyncio.to_thread(self._abandon, pending)
+            except NETWORK_ERRORS as e:
+                log.warning("could not check RunInstances %s: %s", pending.token, e)
+                continue
+            if left:
+                log.warning("terminated %s left by RunInstances %s", left, pending.token)
+                return f"terminated {', '.join(left)}, launched by RunInstances {pending.token}"
+            return f"RunInstances {pending.token} launched nothing"
+        log.error(
+            "RunInstances %s may have launched an instance that could not be checked; it is "
+            "tagged loom:ttl=%s and shuts itself down then (bench reap also finds it)",
+            pending.token,
+            ttl_tag_value(pending.ttl_at),
+        )
+        return (
+            f"RunInstances {pending.token} could not be checked: any instance it launched "
+            f"is tagged loom:ttl={ttl_tag_value(pending.ttl_at)} and shuts itself down then"
+        )
+
     # -- host state -----------------------------------------------------------
 
-    def _describe(self, host_id: str) -> dict[str, Any] | None:
+    def _describe(self, host_id: str, region: str | None = None) -> dict[str, Any] | None:
+        ec2 = self._client("ec2", region or self.settings.region)
         try:
-            resp = self.ec2.describe_instances(InstanceIds=[host_id])
+            resp = ec2.describe_instances(InstanceIds=[host_id])
         except ClientError as e:
             if _error_code(e) == "InvalidInstanceID.NotFound":
                 return None
@@ -635,7 +1158,7 @@ class AwsEc2Provider:
 
     async def check_host(self, host: Host) -> dict[str, Any]:
         """Describe the instance; raise `SpotInterrupted`/`HostLost` if it is gone."""
-        inst = await asyncio.to_thread(self._describe, host.host_id)
+        inst = await asyncio.to_thread(self._describe, host.host_id, self._host_region(host))
         lost = host_loss(inst, host.host_id, host.launched_at, self.clock())
         if lost is not None:
             raise lost
@@ -659,7 +1182,7 @@ class AwsEc2Provider:
     async def _ssm_online(self, host: Host) -> bool:
         await self.check_host(host)
         resp = await asyncio.to_thread(
-            self.ssm.describe_instance_information,
+            self._client("ssm", self._host_region(host)).describe_instance_information,
             Filters=[{"Key": "InstanceIds", "Values": [host.host_id]}],
         )
         return any(i.get("PingStatus") == "Online" for i in resp["InstanceInformationList"])
@@ -669,8 +1192,10 @@ class AwsEc2Provider:
             await self.check_host(host)
 
         experiment = host.request.tags[EXPERIMENT_TAG]
+        # SSM commands go to the host's region; their output still lands in the bucket,
+        # in the primary region (SSM finds the bucket's region itself).
         return await run_script(
-            self.ssm,
+            self._client("ssm", self._host_region(host)),
             host.host_id,
             script,
             timeout_s=timeout_s,
@@ -691,6 +1216,7 @@ class AwsEc2Provider:
         return render_script(
             "start_engine",
             WARM=int(warm),
+            # The HF token secret's region (the primary), wherever the host runs.
             REGION=self.settings.region,
             HF_SECRET_ID=self.settings.hf_token_secret_name,
             IMAGE=launch.image,
@@ -734,6 +1260,7 @@ class AwsEc2Provider:
         info: dict[str, Any] = {
             **system,
             "instance_type": host.info.get("instance_type"),
+            "region": self._host_region(host),
             "az": host.info.get("az"),
             "ami": host.info.get("ami"),
         }
@@ -986,21 +1513,52 @@ class AwsEc2Provider:
 
     # -- teardown ------------------------------------------------------------------
 
-    def _terminate(self, host_id: str) -> None:
+    def _terminate(self, host_id: str, region: str | None = None) -> None:
         try:
-            self.ec2.terminate_instances(InstanceIds=[host_id])
+            self._client("ec2", region or self.settings.region).terminate_instances(
+                InstanceIds=[host_id]
+            )
         except ClientError as e:
             if _error_code(e) != "InvalidInstanceID.NotFound":
                 raise
 
-    async def _wait_terminated(self, host_id: str) -> None:
+    async def _terminate_retrying(self, host_id: str, region: str | None = None) -> None:
+        """`terminate_instances`, resent after a network error (it is idempotent) up to
+        len(TERMINATE_RETRY_S) times: a timed-out call must never leave the instance up.
+        If EC2 stays unreachable it raises; the runner then reports the teardown failed,
+        and the instance's own TTL shutdown and the reaper remain."""
+        for attempt, delay in enumerate((*TERMINATE_RETRY_S, None), start=1):
+            try:
+                await asyncio.to_thread(self._terminate, host_id, region)
+                return
+            except NETWORK_ERRORS as e:
+                if delay is None:
+                    raise
+                log.warning(
+                    "terminating %s: %s (network, attempt %d); retrying in %.0f s",
+                    host_id,
+                    f"{type(e).__name__}: {e}",
+                    attempt,
+                    delay,
+                )
+                await self.sleep(delay)
+
+    async def _wait_terminated(self, host_id: str, region: str | None = None) -> None:
         """Until the instance is `terminated` (or gone), at most TERMINATE_WAIT_S: it holds
         its vCPUs against the on-demand quota until then. Billing already stopped at
-        shutting-down; a timeout is logged, not raised (the instance is going anyway)."""
+        shutting-down; a timeout is logged, not raised (the instance is going anyway).
+        A describe that fails on the network is just one more poll."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + TERMINATE_WAIT_S
         while True:
-            inst = await asyncio.to_thread(self._describe, host_id)
+            try:
+                inst = await asyncio.to_thread(self._describe, host_id, region)
+            except NETWORK_ERRORS as e:
+                log.warning("describing %s while it terminates: %s; polling on", host_id, e)
+                if loop.time() > deadline:
+                    return
+                await self.sleep(self.settings.poll_interval_s)
+                continue
             if inst is None or inst["State"]["Name"] == "terminated":
                 return
             if loop.time() > deadline:
@@ -1014,9 +1572,12 @@ class AwsEc2Provider:
             await self.sleep(self.settings.poll_interval_s)
 
     async def teardown(self, host: Host) -> None:
-        await asyncio.to_thread(self._terminate, host.host_id)
+        region = self._host_region(host)
+        await self._terminate_retrying(host.host_id, region)
         self.weights.forget(host.host_id)
-        await self._wait_terminated(host.host_id)
+        await self._wait_terminated(host.host_id, region)
 
     async def reap(self, now: datetime) -> list[str]:
-        return await asyncio.to_thread(aws_reaper.reap, self.ec2, now)
+        """`aws_reaper.reap` in every configured region."""
+        clients = [self._client("ec2", r) for r in self.settings.region_names]
+        return await asyncio.to_thread(aws_reaper.reap_regions, clients, now)

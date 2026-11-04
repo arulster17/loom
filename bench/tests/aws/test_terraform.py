@@ -9,7 +9,8 @@ from loom_bench.providers import aws_ec2, aws_reaper, runpod_reaper_lambda
 from loom_bench.providers.aws_ec2 import AwsSettings
 
 TF_DIR = Path(__file__).resolve().parents[3] / "infra" / "aws" / "bench"
-TF_FILES = sorted(TF_DIR.glob("*.tf"))
+# The root module and its local modules (modules/host_network), not provider caches.
+TF_FILES = sorted(p for p in TF_DIR.rglob("*.tf") if ".terraform" not in p.parts)
 
 
 def tf_text() -> str:
@@ -69,6 +70,41 @@ def test_security_group_has_no_ingress() -> None:
     assert not re.search(r"^\s*ingress\s*\{", text, re.MULTILINE)
     assert "ingress_rule" not in text
     assert "aws_security_group_rule" not in text
+
+
+def test_every_extra_host_region_gets_a_network_the_reaper_and_the_runner_policy() -> None:
+    regions_tf = (TF_DIR / "regions.tf").read_text()
+    variables = (TF_DIR / "variables.tf").read_text()
+    block = re.search(r'variable "extra_host_regions" \{(.*?)\n\}', variables, re.DOTALL)
+    assert block
+    supported = re.findall(r'"(us-[a-z]+-\d)"', block.group(1).split("validation")[0])
+    assert supported == ["us-east-2", "us-west-2"]
+    for region in supported:
+        alias = region.replace("-", "_")
+        assert f'alias  = "{alias}"' in regions_tf and f'region = "{region}"' in regions_tf
+        module = re.search(rf'module "host_network_{alias}" \{{(.*?)\n\}}', regions_tf, re.DOTALL)
+        assert module, region
+        assert f'contains(var.extra_host_regions, "{region}")' in module.group(1)
+        assert f"aws = aws.{alias}" in module.group(1)
+    assert "host_regions  = concat([var.region], var.extra_host_regions)" in regions_tf
+    # The one reaper Lambda reaps every host region: its env and its role's ARNs.
+    reaper_tf = (TF_DIR / "reaper.tf").read_text()
+    assert 'LOOM_REAPER_REGIONS = join(",", local.host_regions)' in reaper_tf
+    assert "LOOM_REAPER_REGIONS" in Path(aws_reaper.__file__).read_text()
+    assert "local.ec2_arn" not in reaper_tf  # every ARN there is per host region
+    runner = (TF_DIR / "runner_policy.tf").read_text()
+    assert "local.ec2_arn" not in runner and "${var.region}" not in runner
+    assert "local.host_security_group_arns" in runner
+
+
+def test_settings_yaml_lists_the_extra_regions_as_settings_read_them() -> None:
+    outputs = (TF_DIR / "outputs.tf").read_text()
+    pattern = r"extra_regions\s*=\s*\[for m in local.extra_host_networks : \{(.*?)\}\]"
+    m = re.search(pattern, outputs)
+    assert m
+    keys = set(re.findall(r"(\w+)\s*=", m.group(1)))
+    assert keys == {"region", "security_group_id", "subnet_ids"}
+    assert keys <= set(aws_ec2.AwsRegion.model_fields)
 
 
 def test_runpod_reaper_lambda_points_at_its_module() -> None:

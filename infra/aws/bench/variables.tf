@@ -1,7 +1,20 @@
 variable "region" {
-  description = "Region for the bucket, instance role, reaper and GPU hosts."
+  description = "Primary region: the bucket, the reaper Lambdas and the first GPU host region (IAM, so the instance role, is global)."
   type        = string
   default     = "us-east-1"
+}
+
+variable "extra_host_regions" {
+  description = "More regions GPU hosts may launch in when var.region has no capacity, in sweep order. Each gets a no-ingress security group in its default VPC, and the reaper and runner policy cover it. Supported: us-east-2, us-west-2 (regions.tf)."
+  type        = list(string)
+  default     = ["us-east-2", "us-west-2"]
+
+  validation {
+    condition = alltrue([
+      for r in var.extra_host_regions : contains(["us-east-2", "us-west-2"], r)
+    ]) && length(distinct(var.extra_host_regions)) == length(var.extra_host_regions)
+    error_message = "extra_host_regions may list us-east-2 and us-west-2, each at most once (add a provider alias and module in regions.tf for another)."
+  }
 }
 
 variable "name_prefix" {

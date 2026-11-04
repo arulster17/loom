@@ -1,5 +1,6 @@
 # Scheduled TTL reaper: terminates loom:managed instances and deletes unattached
-# loom:managed volumes whose loom:ttl has passed, independent of any laptop.
+# loom:managed volumes whose loom:ttl has passed, independent of any laptop. It runs in
+# var.region and reaps every host region (local.host_regions, regions.tf).
 
 data "archive_file" "reaper" {
   type        = "zip"
@@ -44,7 +45,7 @@ data "aws_iam_policy_document" "reaper" {
   statement {
     sid       = "TerminateManagedInstances"
     actions   = ["ec2:TerminateInstances"]
-    resources = ["${local.ec2_arn}:instance/*"]
+    resources = [for a in local.host_ec2_arns : "${a}:instance/*"]
 
     condition {
       test     = "StringEquals"
@@ -56,7 +57,7 @@ data "aws_iam_policy_document" "reaper" {
   statement {
     sid       = "DeleteManagedVolumes"
     actions   = ["ec2:DeleteVolume"]
-    resources = ["${local.ec2_arn}:volume/*"]
+    resources = [for a in local.host_ec2_arns : "${a}:volume/*"]
 
     condition {
       test     = "StringEquals"
@@ -86,6 +87,8 @@ resource "aws_lambda_function" "reaper" {
     variables = {
       LOOM_REAPER_MAX_AGE_HOURS = tostring(var.reaper_max_age_hours)
       LOOM_REAPER_DRY_RUN       = tostring(var.reaper_dry_run)
+      # EC2 is regional: one Lambda here reaps every region hosts may run in.
+      LOOM_REAPER_REGIONS = join(",", local.host_regions)
     }
   }
 

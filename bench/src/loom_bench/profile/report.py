@@ -223,28 +223,49 @@ def build_report(
     goodput = goodput_loads(roots, exp_ids)
     ratios = []
     for workload, cell_a, cell_b in compare:
-        pa = _goodput_point(points, goodput, cell_a, workload)
-        pb = _goodput_point(points, goodput, cell_b, workload)
-        fa = next((f for f in fits if f.cell == cell_a and f.workload == workload), None)
-        fb = next((f for f in fits if f.cell == cell_b and f.workload == workload), None)
-        if pa and pb and fa and fb:
+        # Both sides from the same experiment: cells of different experiments share names
+        # (e.g. a profiling run's fixed load points next to a sweep's searched goodput).
+        found = False
+        for exp in exp_ids:
+            pa = _goodput_point(points, goodput, cell_a, workload, exp)
+            pb = _goodput_point(points, goodput, cell_b, workload, exp)
+            fa = _fit(fits, exp, cell_a, workload)
+            fb = _fit(fits, exp, cell_b, workload)
+            if not (pa and pb and fa and fb):
+                continue
+            found = True
+            if pa.load_mode != "open_loop" or pb.load_mode != "open_loop":
+                # A closed-loop "goodput" is a concurrency, not a request rate.
+                skipped.append(f"ratio {cell_b}/{cell_a} on {workload} in {exp[:8]}: closed loop")
+                continue
             ratios.append(explain_ratio(pa, pb, fa, fb, points))
-        else:
+        if not found:
             skipped.append(f"ratio {cell_b}/{cell_a} on {workload}: missing goodput or fit")
     return RooflineReport(theory_rows(setups), points, fits, goodput, ratios, skipped)
 
 
 def _goodput_point(
-    points: Sequence[PointSummary], goodput: dict[tuple[str, str, str], float], cell: str, wl: str
+    points: Sequence[PointSummary],
+    goodput: dict[tuple[str, str, str], float],
+    cell: str,
+    wl: str,
+    exp: str,
 ) -> PointSummary | None:
     for p in points:
         if (
-            p.cell == cell
+            p.experiment == exp
+            and p.cell == cell
             and p.workload == wl
-            and goodput.get((p.experiment, cell, wl)) == p.load_value
+            and goodput.get((exp, cell, wl)) == p.load_value
         ):
             return p
     return None
+
+
+def _fit(fits: Sequence[StepFit], exp: str, cell: str, wl: str) -> StepFit | None:
+    return next(
+        (f for f in fits if f.experiment == exp and f.cell == cell and f.workload == wl), None
+    )
 
 
 # -- rendering -------------------------------------------------------------------------

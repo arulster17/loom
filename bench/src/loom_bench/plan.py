@@ -10,10 +10,11 @@ host key, so each image gets its own pod). Every timing assumption is in `AWS_TI
 from __future__ import annotations
 
 import math
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -530,15 +531,40 @@ def host_price(exp: Experiment, cell: Cell, prices: PriceBook) -> tuple[Micros, 
         return 0, Market.LOCAL.value, ["not billed (local endpoint)"]
     hw = cell.hardware
     terms = aws_accrual_terms()
+    # The provider may launch in any configured region where prices.yaml prices the
+    # instance type (`AwsEc2Provider._sweep_regions`), so plan at the worst of them.
+    regions = [hw["region"]] + [
+        r for r in terms.regions if r != hw["region"] and _aws_priced(prices, r, hw)
+    ]
+    priced = [_aws_region_price(prices, r, hw, terms) for r in regions]
+    worst = max(range(len(priced)), key=lambda i: priced[i][0])
+    per_hour, market, notes = priced[worst]
+    if len(regions) > 1:
+        each = ", ".join(f"{r} {format_usd(p[0])}/h" for r, p in zip(regions, priced, strict=True))
+        notes = [*notes, f"worst of the regions it may launch in ({each}): {regions[worst]}"]
+    return per_hour, market, notes
+
+
+def _aws_priced(prices: PriceBook, region: str, hw: Mapping[str, Any]) -> bool:
+    try:
+        prices.instance("aws", region, hw["instance_type"])
+        return prices.region("aws", region).storage is not None
+    except KeyError:
+        return False
+
+
+def _aws_region_price(
+    prices: PriceBook, region: str, hw: Mapping[str, Any], terms: AwsAccrualTerms
+) -> tuple[Micros, str, list[str]]:
     notes: list[str] = []
-    instance = _instance(prices, hw["region"], hw["instance_type"])
+    instance = _instance(prices, region, hw["instance_type"])
     if not instance.verified:
         notes.append(f"unverified instance price: {instance.note}")
-    storage = _storage(prices, hw["region"])
+    storage = _storage(prices, region)
     if not storage.verified:
         notes.append(f"unverified storage price included: {storage.note}")
     quote = prices.instance_price(
-        "aws", hw["region"], hw["instance_type"], Market(hw["market"]), allow_unverified=True
+        "aws", region, hw["instance_type"], Market(hw["market"]), allow_unverified=True
     )
     per_hour = quote.per_hour
     if quote.market is Market.SPOT:
@@ -557,6 +583,7 @@ class AwsAccrualTerms:
     spot_multiplier: Decimal
     root_volume_gb: int
     max_ttl_s: int
+    regions: tuple[str, ...] = ()  # every configured region; empty when unconfigured
 
 
 def aws_accrual_terms() -> AwsAccrualTerms:
@@ -565,7 +592,9 @@ def aws_accrual_terms() -> AwsAccrualTerms:
 
     try:
         s = load_aws_settings()
-        return AwsAccrualTerms(s.spot_price_multiplier, s.root_volume_gb, s.max_ttl_s)
+        return AwsAccrualTerms(
+            s.spot_price_multiplier, s.root_volume_gb, s.max_ttl_s, tuple(s.region_names)
+        )
     except (ValidationError, FileNotFoundError):
         f = AwsSettings.model_fields
         return AwsAccrualTerms(
