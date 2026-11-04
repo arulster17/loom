@@ -1,0 +1,44 @@
+# APPROVED 2026-11-04 (cap $3.25), NOT RUN: run aws-smoke-trtllm-divergence.yaml first.
+#
+# The part of 46938d1f (qwen3-8b-trtllm-vs-vllm-aws, 2026-11-04) that its trtllm-bf16 cell
+# lost: the quality suite. Its load sweep completed (27 runs) and stays in 46938d1f; this
+# runs only the eval, on the same cell (variant copied from qwen3-8b-trtllm-vs-vllm-aws, so
+# config hash ae3b5705..., which pairs these evals with that sweep), with that run's
+# quality settings (suite qwen3-8b, subset phase0-strict, 3 replicates, no item limit),
+# gated against 46938d1f's stored vLLM BF16 evals and divergence reference instead of a
+# baseline cell. In 46938d1f the divergence check took TensorRT-LLM down (see
+# aws-smoke-trtllm-divergence.yaml); since d550c1e it runs on the last pass, one scoring
+# request at a time.
+#
+# Budget (bench plan, 2026-11-04, $1.8829/h with the root volume): one host, 68.3 min,
+# estimate $2.14; worst case (to its 100 min TTL) $3.14; cap $3.25.
+name: qwen3-8b-trtllm-bf16-quality-aws
+description: 46938d1f's trtllm-bf16 quality suite, quality only, gated against 46938d1f's stored vLLM BF16 evals.
+model: qwen3-8b
+provider:
+  kind: aws_ec2
+  region: us-east-1
+  instance_type: g6e.xlarge
+  market: on_demand
+  disk_gb: 200
+variants:
+  - name: trtllm-bf16
+    engine:
+      name: trtllm
+      version: "1.4.0rc2"
+      image: nvcr.io/nvidia/tensorrt-llm/release@sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a
+    host_group: trtllm-bf16
+workloads: []
+quality:
+  suite: qwen3-8b
+  subset: phase0-strict
+  replicates: 3
+  # 46938d1f's vllm-bf16 cell: stored evals (3 passes) and divergence reference.
+  baseline:
+    experiment: 46938d1f-3022-4695-a0b9-29b18c06eaea
+    config_hash: "48f3d8d1850a0b1bfc6f454ee35a29902d4dc858ed984252defa8ffe5f621375"
+budget:
+  max_spend: "$3.25"
+  ttl_minutes: 100
+  accrual_interval_s: 15
+seed: 0

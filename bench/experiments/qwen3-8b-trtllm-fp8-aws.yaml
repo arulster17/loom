@@ -1,0 +1,59 @@
+# APPROVED 2026-11-04 (cap $9.00), NOT RUN: run aws-smoke-trtllm-divergence.yaml first.
+#
+# The cell 46938d1f (qwen3-8b-trtllm-vs-vllm-aws, 2026-11-04) never reached: its trtllm-fp8
+# host launched in us-east-2 and was read as lost by a DescribeInstances that did not see
+# it yet (fixed in d550c1e). The runner has no resume and no cell filter, so this spec runs
+# exactly that cell: the variant, workloads, search shapes, windows, repetitions, SLO and
+# quality settings of qwen3-8b-trtllm-vs-vllm-aws (bench/tests/aws/test_aws_resume.py
+# checks they stay equal), so config hash 55b35655... as there. Its gate is against
+# 46938d1f's stored vLLM BF16 evals and divergence reference instead of a baseline cell.
+#
+# Budget (bench plan, 2026-11-04, $1.8829/h with the root volume): one host, 213.5 min
+# (3.56 h, as the trtllm-fp8 host of 46938d1f's plan), estimate $6.70; worst case (to its
+# 285 min TTL) $8.94; cap $9.00.
+name: qwen3-8b-trtllm-fp8-aws
+description: 46938d1f's missing trtllm-fp8 cell (TensorRT-LLM 1.4.0rc2 FP8), chat and 1k/1k at SLO, gated against 46938d1f's stored vLLM BF16 evals.
+model: qwen3-8b
+provider:
+  kind: aws_ec2
+  region: us-east-1
+  instance_type: g6e.xlarge
+  market: on_demand
+  disk_gb: 200
+variants:
+  - name: trtllm-fp8
+    model: qwen3-8b-fp8-modelopt
+    host_group: b
+workloads:
+  - profile: chat-sharegpt
+    load:
+      mode: open_loop
+      search: {lo: 2.25, hi: 16, rel_tol: 0.05, max_points: 5, scale: geometric, step: 1.5, descend: 3}
+      duration_s: 255
+      warmup_s: 45
+      drain_timeout_s: 60
+  - profile: fixed-1k-1k
+    load:
+      mode: open_loop
+      search: {lo: 1.0, hi: 6, rel_tol: 0.05, max_points: 4, scale: geometric, step: 1.5, descend: 2}
+      duration_s: 240
+      warmup_s: 60
+      drain_timeout_s: 60
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+quality:
+  suite: qwen3-8b
+  subset: phase0-strict
+  replicates: 3
+  # 46938d1f's vllm-bf16 cell: stored evals (3 passes) and divergence reference.
+  baseline:
+    experiment: 46938d1f-3022-4695-a0b9-29b18c06eaea
+    config_hash: "48f3d8d1850a0b1bfc6f454ee35a29902d4dc858ed984252defa8ffe5f621375"
+budget:
+  max_spend: "$9.00"
+  ttl_minutes: 285
+  accrual_interval_s: 15
+seed: 0

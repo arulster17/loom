@@ -1,0 +1,58 @@
+# APPROVED 2026-11-04 (cap $2.25), NOT RUN. The smoke for qwen3-8b-trtllm-bf16-quality-aws
+# and qwen3-8b-trtllm-fp8-aws: the path that failed in 46938d1f.
+#
+# 46938d1f (qwen3-8b-trtllm-vs-vllm-aws, 2026-11-04) lost trtllm-bf16's quality suite:
+# pass 1 scored every task, then the divergence check's 48 prompt-logprobs requests (16 at
+# a time) took TensorRT-LLM's LLM down ("HTTP 500: loom prompt logprobs: RuntimeError: LLM
+# is shutting down"), and pass 2 found the engine dead. Its smokes never sent that load:
+# aws-smoke-trtllm and aws-smoke-trtllm-fp8 ran at item limit 4, which also caps the
+# divergence at 4 prompts. The fix (d550c1e) scores prompt logprobs one request at a time
+# inside trtllm-serve and runs the divergence on a suite's last pass.
+#
+# So this smoke runs the eval exactly as the follow-ups do, per pass: suite qwen3-8b,
+# subset phase0-strict, no item limit (every task at full size, then the full 48-prompt
+# divergence scored through the prompt-logprobs route), gated against 46938d1f's stored
+# vLLM BF16 evals and reference, as both follow-ups are. One pass per cell instead of
+# three (replicates 1): a pass is the tasks and then the divergence, which is 46938d1f's
+# crash sequence (one full task pass, then the scoring), and three passes of both cells do
+# not fit the cap. Both TensorRT-LLM cells share one host (one host group): trtllm-fp8
+# starts warm after trtllm-bf16. No workloads: load on both engines already ran
+# (46938d1f's trtllm-bf16, e3694f45's trtllm-fp8); the follow-ups' quality path is what is
+# new. Config hashes are 46938d1f's (the host group is not in them).
+#
+# Budget (bench plan, 2026-11-04, $1.8829/h with the root volume): one host, 57.7 min,
+# estimate $1.81; worst case (to its 71 min TTL) $2.23; cap $2.25.
+name: aws-smoke-trtllm-divergence
+description: TensorRT-LLM BF16 and FP8 full-size eval and 48-prompt divergence, one pass each, gated against 46938d1f's stored vLLM BF16 evals.
+model: qwen3-8b
+smoke: true
+provider:
+  kind: aws_ec2
+  region: us-east-1
+  instance_type: g6e.xlarge
+  market: on_demand
+  disk_gb: 200
+variants:
+  - name: trtllm-bf16
+    engine:
+      name: trtllm
+      version: "1.4.0rc2"
+      image: nvcr.io/nvidia/tensorrt-llm/release@sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a
+    host_group: trtllm
+  - name: trtllm-fp8
+    model: qwen3-8b-fp8-modelopt
+    host_group: trtllm
+workloads: []
+quality:
+  suite: qwen3-8b
+  subset: phase0-strict
+  replicates: 1
+  # 46938d1f's vllm-bf16 cell: stored full-size evals (3 passes) and divergence reference.
+  baseline:
+    experiment: 46938d1f-3022-4695-a0b9-29b18c06eaea
+    config_hash: "48f3d8d1850a0b1bfc6f454ee35a29902d4dc858ed984252defa8ffe5f621375"
+budget:
+  max_spend: "$2.25"
+  ttl_minutes: 71
+  accrual_interval_s: 15
+seed: 0
