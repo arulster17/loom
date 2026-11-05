@@ -8,7 +8,7 @@ intervals over repeated runs, and **quality non-inferiority against BF16** (a pa
 statistical gate on GSM8K, IFEval, tool calling and JSON-schema tasks, plus logprob
 divergence). A config that is faster but does not pass the gate does not ship. The
 platform half (an OpenAI-compatible gateway with prepaid, double-entry billing, and a web
-app) is built to its first milestone on branch `phase1-m1`, not in this branch; it is
+app) is built to its first milestone on branch `phase1-m1`, not on `main`; it is
 tested locally on a mock GPU backend, not yet serving real traffic.
 
 All results below come from real GPU runs on RunPod and AWS, $142.40 of recorded GPU
@@ -190,7 +190,7 @@ flowchart LR
     DB --> RE["reports, compare, reproduce, roofline"]
     PF --> RE
   end
-  subgraph Platform["Platform (Phase 1 M1, branch phase1-m1, not in this branch)"]
+  subgraph Platform["Platform (Phase 1 M1, branch phase1-m1, not on main)"]
     CL["OpenAI SDK client"] --> GW["gateway: keys, rate limits, balance reserve"]
     GW -->|mTLS| PP["pod proxy"]
     PP --> PD["engine pod"]
@@ -202,7 +202,7 @@ flowchart LR
   RE -.->|prices from measured cost at SLO| GW
 ```
 
-The platform code (gateway, billing, web) is on branch `phase1-m1`, not in this branch.
+The platform code (gateway, billing, web) is on branch `phase1-m1`, not on `main`.
 Its M1 acceptance runs on the local compose stack with mock pods
 (`docs/phase1-m1-acceptance.md` on that branch): gateway p50 added overhead 4.9 ms,
 0 micro-dollars of balance overshoot under 64 concurrent requests, a revoked key refused
@@ -214,7 +214,7 @@ including aborted streams and a killed pod.
 - **Phase 0, Benchmark Lab: done and accepted** (2026-10-31). Checklist:
   [docs/phase0-acceptance.md](docs/phase0-acceptance.md).
 - **Phase 1, M1 (whole platform locally, mock backend): built on branch `phase1-m1`,
-  paused.** It is not in this branch. Real pods on RunPod are the next milestone.
+  paused.** It is not on `main`. Real pods on RunPod are the next milestone.
 - **Perf track (profiling and roofline, TensorRT-LLM, speculative decoding): runs done**
   (2026-11-03 to 2026-11-05), results above. Open follow-ups, none approved or run:
   Nsight Compute on the XQA kernel, a TensorRT-LLM variant with the tool-parser spaces
