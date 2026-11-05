@@ -296,6 +296,26 @@ of the GPU can. Loom captures one through vLLM's built-in torch profiler.
    carrying prefill are grouped as "mixed" (`step_shapes`). It writes per-step
    milliseconds, the step shapes and the top kernels to `window.json` and a `profile` event.
 
+**TensorRT-LLM** (1.4.0rc2, PyTorch backend) is profiled the same way, through its own
+runtime API (added 2026-11-04, not yet run on a GPU; `aws-smoke-trtllm-why.yaml` is its
+smoke):
+
+- Nothing changes at launch, so a profiled cell keeps its config hash. The window's
+  `POST /start_profile` names the trace directory, the step count and the first step
+  (`{"output_dir", "num_steps", "start_step"}`, its `StartProfileRequest`; other fields
+  are refused). The engine records `num_steps` steps (`max_iterations` in the spec, which
+  TensorRT-LLM honours), writes `trtllm-trace-<id>-rank-<r>.json` and stops by itself;
+  `/stop_profile` returns once that file is written. A refused start is not retried
+  without the body, because TensorRT-LLM's default directory (`/tmp` in its container)
+  is not collected.
+- The trace directory is fixed at `/var/lib/loom/profiles`. On AWS every TensorRT-LLM
+  container gets that bind mount, because the mount is decided from the launch alone.
+- TensorRT-LLM labels each iteration once, `step[DECODE bs=<n>]` or `step[EXTEND bs=<n>
+  toks=<m>]`. The overlap scheduler adds a second `step[...] sample` scope for sampling.
+  The analysis counts only the bare labels. EXTEND steps are the "mixed" group, since
+  their label does not give the decode count. Its XQA and masked multi-head attention
+  kernels count as attention.
+
 **Profiled windows never count.** They are not recorded in `bench_runs`, so they are not
 in goodput, latency, cost or the search. The profiler slows the steps it records; each
 window keeps its own ITL next to the ITL just before it (`profiler_slowdown`) only to

@@ -627,6 +627,28 @@ async def _completions(server: MockServer, request: Request) -> Response:
 # ---------------------------------------------------------------- app
 
 
+# TensorRT-LLM 1.4.0rc2's StartProfileRequest fields (extra="forbid": others are a 422).
+TRTLLM_PROFILE_FIELDS = frozenset({"output_dir", "num_steps", "start_step", "activities"})
+
+
+def _trtllm_recorder(body: dict[str, Any]) -> StepRecorder:
+    """A TensorRT-LLM style session from its /start_profile body. The mock writes where
+    its config says (`profile_dir`, the simulated host's view of `output_dir`)."""
+    extra = sorted(set(body) - TRTLLM_PROFILE_FIELDS)
+    if extra:
+        raise ApiError(422, f"extra fields not permitted: {extra}")
+    out_dir, steps, start = body.get("output_dir"), body.get("num_steps"), body.get("start_step", 0)
+    if not isinstance(out_dir, str) or not out_dir.startswith("/"):
+        raise ApiError(400, "output_dir must be an absolute path (Loom always names it)")
+    if steps is not None and (not isinstance(steps, int) or steps < 1):
+        raise ApiError(422, "num_steps must be a positive integer")
+    if not isinstance(start, int) or start < 0:
+        raise ApiError(422, "start_step must be >= 0")
+    return StepRecorder(
+        prefix="mock", max_iterations=steps or 0, delay_iterations=start, style="trtllm"
+    )
+
+
 def create_app(config: MockConfig | None = None) -> FastAPI:
     config = config or MockConfig()
     server = MockServer(config)
@@ -690,6 +712,9 @@ def create_app(config: MockConfig | None = None) -> FastAPI:
             raise ApiError(409, "a profiling session is already running")
         raw = await request.body()
         body = json.loads(raw) if raw else {}
+        if config.profile_api == "trtllm":
+            server.engine.recorder = _trtllm_recorder(body)
+            return Response(status_code=200)
         server.engine.recorder = StepRecorder(
             prefix=str(body.get("profile_prefix") or "mock"),
             max_iterations=int(body.get("max_iterations") or 0),

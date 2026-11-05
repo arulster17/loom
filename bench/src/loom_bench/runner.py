@@ -375,7 +375,11 @@ def _engine_args(cell: Cell) -> dict[str, Any]:
     if cell.mock is None:
         return dict(cell.spec.engine.args)
     defaults = MockConfig().model_dump()
-    return {k: v for k, v in cell.mock.model_dump().items() if k != "models" and v != defaults[k]}
+    return {
+        k: v
+        for k, v in cell.mock.model_dump().items()
+        if k != "models" and (k not in defaults or v != defaults[k])
+    }
 
 
 class _Executor:

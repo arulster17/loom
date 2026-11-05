@@ -4,10 +4,13 @@ trace, break it down.
 Two halves:
 
 - `run_capture` runs inside `bench job run` on the GPU host, next to the load
-  generator: at `start_after_s` it POSTs `/start_profile` (with vLLM's per-session
-  bounds `max_iterations` / `delay_iterations` / `profile_prefix`), at `stop_after_s`
-  `/stop_profile`, which flushes the trace. Times are reported against the job's t0,
-  the clock the request records use.
+  generator: at `start_after_s` it POSTs `/start_profile`, at `stop_after_s`
+  `/stop_profile`, which flushes the trace. The start body is the engine's own
+  (`start_body`): vLLM's per-session bounds `max_iterations` / `delay_iterations` /
+  `profile_prefix`, or TensorRT-LLM's `output_dir` / `num_steps` / `start_step` (it
+  records `num_steps` steps, writes the trace and stops by itself; /stop_profile then
+  returns once that write is done). Times are reported against the job's t0, the
+  clock the request records use.
 - `run_profiles` runs in the runner after a cell's measured load points: one window
   per (workload, load value) in the experiment's `profile:` section. It builds the job,
   has the provider run it and collect the trace (`collect_profile`: on RunPod a root
@@ -29,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import numpy as np
 
-from loom_bench.profile.spec import ProfileCapture, ProfileSpec
+from loom_bench.profile.spec import ProfileApi, ProfileCapture, ProfileSpec
 
 if TYPE_CHECKING:
     from loom_bench.experiment import Cell, WorkloadEntry
@@ -51,15 +54,28 @@ async def _post(http: httpx.AsyncClient, path: str, body: dict[str, Any] | None)
     return resp.status_code, resp.text[:300]
 
 
-async def run_capture(base_url: str, capture: ProfileCapture, t0: float) -> dict[str, Any]:
-    """Start and stop the engine's profiler on schedule; never raises (the load job's
-    result must come back either way). Returns what happened, for the job's meta."""
-    out: dict[str, Any] = {"prefix": capture.prefix}
-    body = {
+def start_body(capture: ProfileCapture) -> dict[str, Any]:
+    """The /start_profile body for the capture's engine API."""
+    if capture.api == "trtllm":
+        # TensorRT-LLM 1.4.0rc2 StartProfileRequest (extra fields are a 422). It has no
+        # prefix: the trace is trtllm-trace-<time>-<id>-rank-<rank>.json in output_dir.
+        return {
+            "output_dir": capture.output_dir,
+            "num_steps": capture.max_iterations,
+            "start_step": capture.delay_iterations,
+        }
+    return {
         "profile_prefix": capture.prefix,
         "max_iterations": capture.max_iterations,
         "delay_iterations": capture.delay_iterations,
     }
+
+
+async def run_capture(base_url: str, capture: ProfileCapture, t0: float) -> dict[str, Any]:
+    """Start and stop the engine's profiler on schedule; never raises (the load job's
+    result must come back either way). Returns what happened, for the job's meta."""
+    out: dict[str, Any] = {"prefix": capture.prefix, "api": capture.api}
+    body = start_body(capture)
     timeout = httpx.Timeout(30.0, read=capture.stop_timeout_s)
     async with httpx.AsyncClient(
         base_url=engine_root(base_url), timeout=timeout, trust_env=False
@@ -68,8 +84,9 @@ async def run_capture(base_url: str, capture: ProfileCapture, t0: float) -> dict
             await asyncio.sleep(max(0.0, t0 + capture.start_after_s - time.perf_counter()))
             out["start_s"] = time.perf_counter() - t0
             status, text = await _post(http, "/start_profile", body)
-            if 400 <= status < 500 and status != 409:
-                # An engine without per-session options: start with its defaults.
+            if capture.api == "vllm" and 400 <= status < 500 and status != 409:
+                # A vLLM without per-session options: start with its defaults. Never
+                # TensorRT-LLM: its default output_dir is not the collected directory.
                 out["start_options_refused"] = f"{status}: {text}"
                 status, text = await _post(http, "/start_profile", None)
             out["start_status"] = status
@@ -128,7 +145,7 @@ async def collect_profile(provider: Any, host: Host, run_id: str, spec: ProfileS
     return bytes(data)
 
 
-def capture_for(spec: ProfileSpec, run_id: str) -> ProfileCapture:
+def capture_for(spec: ProfileSpec, run_id: str, api: ProfileApi = "vllm") -> ProfileCapture:
     return ProfileCapture(
         start_after_s=spec.settle_s,
         stop_after_s=spec.settle_s + spec.capture_s,
@@ -136,7 +153,20 @@ def capture_for(spec: ProfileSpec, run_id: str) -> ProfileCapture:
         max_iterations=spec.max_iterations,
         delay_iterations=spec.delay_iterations,
         stop_timeout_s=spec.stop_timeout_s,
+        api=api,
+        output_dir=spec.trace_dir if api == "trtllm" else None,
     )
+
+
+def profile_api(cell: Cell) -> ProfileApi:
+    """The profiler API a cell's engine speaks: its launch engine's, or on the mock the
+    one its simulated engine imitates (`MockConfig.profile_api`)."""
+    engine = cell.launch.engine
+    if engine == "mock":
+        return cell.mock.profile_api if cell.mock is not None else "vllm"
+    if engine == "trtllm":
+        return "trtllm"
+    return "vllm"
 
 
 def window_load(entry: WorkloadEntry, spec: ProfileSpec) -> Any:
@@ -182,7 +212,8 @@ async def run_profiles(ex: Any, host: Host, cell: Cell, endpoint: Endpoint) -> N
         ex.guard.check_next(spec.window_s(ex.est.run_overhead_s(profile)), what=f"profile {label}")
         seed = derive_seed(ex.exp.seed, entry.name, value, "profile")
         job = ex._job(cell, endpoint, load, profile, value, seed)
-        job = job.model_copy(update={"profile": capture_for(spec, job.run_id), "sample_gpu": False})
+        capture = capture_for(spec, job.run_id, profile_api(cell))
+        job = job.model_copy(update={"profile": capture, "sample_gpu": False})
         out_dir = ex.run_dir / "profiles" / job.run_id
         try:
             result = await ex.guard.guarded(ex.provider.run_job(host, job))

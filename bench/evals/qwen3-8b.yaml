@@ -190,6 +190,14 @@ sanity_limits:
 # phase0-strict adds tool_calling_strict (135 items, ~2 min) to phase0. Its items pair with
 # a phase0 run's on the four shared tasks, so a run of it gates against a phase0 baseline
 # on those, and reports the strict task as not gated until a baseline has run it too.
+#
+# gsm8k-only keeps a config change that only touches decoding honest without a full gate
+# (qwen3-8b-trtllm-fp8-cudagraph-aws: CUDA-graph padding). The divergence half scores
+# the reference teacher-forced, a prefill pass, so it never runs the decode CUDA graphs
+# such a change swaps; GSM8K's long chain-of-thought decodes at every batch size the eval
+# reaches (up to its 16 in flight), and one flipped token derails the answer. Its items
+# pair with a phase0 run's GSM8K.
 subsets:
   phase0: [gsm8k, ifeval, tool_calling, json_schema]
   phase0-strict: [gsm8k, ifeval, tool_calling, tool_calling_strict, json_schema]
+  gsm8k-only: [gsm8k]

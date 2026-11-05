@@ -1,0 +1,99 @@
+# PROPOSED 2026-11-04, NOT APPROVED, NOT RUN. The smoke for
+# qwen3-8b-trtllm-bf16-profile-aws.yaml and qwen3-8b-trtllm-fp8-cudagraph-aws.yaml: every
+# path they take that no real machine has run, at smoke scale, on one host.
+#
+# New on real hardware:
+# - TensorRT-LLM's runtime profiler: POST /start_profile with a StartProfileRequest body
+#   (output_dir, num_steps, start_step), the engine stopping itself after num_steps,
+#   /stop_profile, the trace (trtllm-trace-<id>-rank-0.json) landing in the bind-mounted
+#   /var/lib/loom/profiles of the engine's Docker container, collect_profile.sh archiving
+#   it, and trace.py reading its step[DECODE bs=N] / step[EXTEND ...] labels and kernel
+#   names. Both load modes the real windows use (closed loop, open loop), on BF16 and on
+#   the padded FP8.
+# - cuda_graph_config {enable_padding: true, max_batch_size: 128} in the LLM-API options
+#   (the engine must start with it and capture its graphs).
+# - The gsm8k-only subset gated against 46938d1f's stored vLLM BF16 evals, with the
+#   divergence half on the padded cell; store_output_text on a TensorRT-LLM cell.
+# Not repeated here: stock trtllm-fp8 (it ran in 08204560; its profile window takes the
+# same path as trtllm-bf16's), and the load runs themselves (46938d1f, 08204560).
+#
+# The variants are the real specs' own (bench/tests/aws/test_aws_trtllm_why.py fails if
+# they drift apart); the cells share their config hashes, as smokes do.
+#
+# Budget (bench plan, 2026-11-04, against a copy of the results DB, $1.8829/h with the
+# root volume): one host, 61.8 min, estimate $1.94; worst case (to its 80 min TTL) $2.51;
+# cap $2.55. bench/tests/aws/test_aws_trtllm_why.py checks the plan fits.
+name: aws-smoke-trtllm-why
+description: TensorRT-LLM profile windows (BF16 and padded FP8) and the CUDA-graph padding variant at smoke scale, gsm8k-only gated against stored vLLM BF16 evals.
+model: qwen3-8b
+smoke: true
+provider:
+  kind: aws_ec2
+  region: us-east-1
+  instance_type: g6e.xlarge
+  market: on_demand
+  disk_gb: 200
+variants:
+  - name: trtllm-bf16
+    engine:
+      name: trtllm
+      version: "1.4.0rc2"
+      image: nvcr.io/nvidia/tensorrt-llm/release@sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a
+    host_group: trtllm
+  - name: trtllm-fp8-cudagraph-pad
+    model: qwen3-8b-fp8-modelopt
+    engine:
+      name: trtllm
+      args:
+        cuda_graph_config:
+          enable_padding: true
+          max_batch_size: 128
+    host_group: trtllm
+    store_output_text: true
+workloads:
+  - profile: fixed-1k-1k
+    overrides: {output_len: 128}
+    load:
+      mode: closed_loop
+      values: [4]
+      duration_s: 20
+      warmup_requests: 2
+      drain_timeout_s: 30
+  - profile: chat-sharegpt
+    overrides: {max_output_len: 64}
+    load:
+      mode: open_loop
+      values: [1]
+      duration_s: 15
+      warmup_s: 3
+      drain_timeout_s: 15
+repetitions: 1
+allow_single_run: true
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+profile:
+  windows:
+    - workload: fixed-1k-1k
+    - workload: chat-sharegpt
+  settle_s: 15
+  capture_s: 8
+  max_iterations: 32
+  tail_s: 3
+  drain_timeout_s: 15
+  trace_dir: /var/lib/loom/profiles
+  max_trace_mb: 256
+quality:
+  suite: qwen3-8b
+  subset: gsm8k-only
+  replicates: 1
+  # full size: a stored baseline pairs item for item, so a limited smoke would be refused
+  baseline:
+    experiment: 46938d1f-3022-4695-a0b9-29b18c06eaea
+    config_hash: "48f3d8d1850a0b1bfc6f454ee35a29902d4dc858ed984252defa8ffe5f621375"
+budget:
+  max_spend: "$2.55"
+  ttl_minutes: 80
+  accrual_interval_s: 15
+seed: 0

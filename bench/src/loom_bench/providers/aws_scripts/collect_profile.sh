@@ -7,7 +7,7 @@
 # host, and /stop_profile has returned (the engine flushed every worker's trace) before
 # this runs. The client container (CLIENT_UID) never mounts TRACE_DIR.
 
-[ -d "$TRACE_DIR" ] || fail "no trace directory $TRACE_DIR: was the engine started with --profiler-config torch_profiler_dir=$TRACE_DIR?"
+[ -d "$TRACE_DIR" ] || fail "no trace directory $TRACE_DIR: was the engine started with --profiler-config torch_profiler_dir=$TRACE_DIR (vLLM), or did /start_profile name another output_dir (TensorRT-LLM)?"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 (cd "$TRACE_DIR" && find . -maxdepth 3 -type f -print0) >"$work/files"

@@ -216,7 +216,9 @@ that sequence's KV read.
 - **What is not established:** which part of the per-sequence work is slower. Candidates
   are attention over the KV cache on sm_89, per-request sampling and bookkeeping, or the
   missing CUDA graphs (next section). A profile window (`profile:` in the spec) on this
-  cell would settle it; it has not been run.
+  cell would settle it; it has not been run. Proposed:
+  `bench/experiments/qwen3-8b-trtllm-bf16-profile-aws.yaml` profiles this cell at the
+  loads of vLLM's 14d959e5 windows (1k/1k at 16 and 64 in flight, chat 2.25 req/s).
 
 ### FP8: fast steps, then a cliff above about 32 running requests
 
@@ -242,7 +244,12 @@ Per repetition, FP8's step time is bimodal (08204560):
   batches.
 - **The test, not yet run:** a variant with `cuda_graph_config: {enable_padding: true}`,
   which pads to captured sizes, or an explicit batch list. With a profile window it would
-  confirm or rule this out.
+  confirm or rule this out. Proposed:
+  `bench/experiments/qwen3-8b-trtllm-fp8-cudagraph-aws.yaml`. It runs
+  `trtllm-fp8-cudagraph-pad` (`enable_padding: true, max_batch_size: 128`, its own config
+  hash) next to stock FP8 on one host, at chat 2.619 and 3.375 req/s, 3 runs each. It
+  adds a profile window at 3.375 on each cell and one GSM8K pass gated against stored vLLM
+  BF16.
 - **Context only, not a paired comparison:** vLLM's own FP8 weights plus FP8 KV on an L40S
   held chat at 5.239 req/s in the config sweep (7a8237d0, RunPod, RedHat checkpoint). If
   the cliff is the graph-size default, it is what costs TensorRT-LLM FP8 most of its FP8

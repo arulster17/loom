@@ -1,0 +1,104 @@
+# PROPOSED 2026-11-04, NOT APPROVED, NOT RUN. Run aws-smoke-trtllm-why.yaml first.
+#
+# Whether TensorRT-LLM 1.4.0rc2 FP8's step-time cliff is its CUDA-graph batch sizes.
+# In 08204560 (cell 55b35655) some chat runs went bimodal: running batch <= ~20 kept ITL
+# p50 at 16-19 ms, batch 34-50 put it at 47-50 ms (2.619 req/s r0, 2.756 r2, 3.375 r0
+# and r2; 1k/1k 1.107 r0/r1). TensorRT-LLM's default cuda_graph_config captures
+# decode-only batches 1-31, 32, 64 and 128 with enable_padding false, so a decode batch of
+# 33-63 matches no graph and runs eagerly, launch by launch (llm_args.py,
+# BaseCudaGraphConfig._generate_cuda_graph_batch_sizes, at v1.4.0rc2).
+#
+# Two cells on one host:
+# - trtllm-fp8-cudagraph-pad: the same FP8 serving config with
+#   cuda_graph_config {enable_padding: true, max_batch_size: 128}: graphs for 1, 2, 4,
+#   8, 16, 24, ..., 128, and every decode batch up to 128 rounds up to the next one. Its
+#   own config hash (the options are in the launch), so it never mixes with stock.
+# - trtllm-fp8: stock, 55b35655 as in 08204560, the same-host control. Its runs add to
+#   that cell's.
+# At chat 2.619 req/s (1 of 3 stock runs collapsed) and 3.375 (2 of 3), 3 runs each. If
+# padding is the cause, the padded cell keeps ITL p50 near 17 ms in all 6 while stock
+# collapses in some: with stock's rates, 6 clean stock-config runs would happen ~1% of the
+# time. 2.49 req/s is left out: none of its 3 stock runs collapsed.
+# A profile window at 3.375 on each cell shows decode step time by batch size
+# (trace.step_shapes): stock's 33-63 against padded's, and GPU idle between kernels.
+#
+# Quality (gsm8k-only, 1 pass, against 46938d1f's stored vLLM BF16 evals): padding
+# changes which kernel shapes decode runs, not the model, so a full gate would only
+# repeat 08204560's. The divergence half is teacher-forced (prefill), so it never runs a
+# decode CUDA graph and cannot see a padding bug on its own; GSM8K decodes long chains of
+# thought at every batch the eval reaches (16 in flight: 3, 5-7 and 9-15 are padded) and
+# one wrong token derails an answer. The stock cell's pass on the same host is the
+# reference for the padded one; both are also gated against BF16. The padded cell keeps
+# its load runs' output text (store_output_text, not in the hash) so outputs at batch
+# 33-63, where only load runs go, can be read.
+#
+# Budget (bench plan, 2026-11-04, against a copy of the results DB, $1.8829/h with the
+# root volume): one host, 2.07 h (cold start 19.4 min, warm restart 6.4, eval setup 5.0,
+# 12 load runs 75.0, 2 windows 7.8, 2 GSM8K passes 9.2), estimate $3.91; worst case (to
+# its 160 min TTL) $5.02; cap $5.05. bench/tests/aws/test_aws_trtllm_why.py checks the
+# plan fits.
+name: qwen3-8b-trtllm-fp8-cudagraph-aws
+description: TensorRT-LLM 1.4.0rc2 FP8 with CUDA-graph padding (enable_padding, graphs up to 128) against stock FP8 (55b35655) on chat where stock's step time went bimodal, with profile windows.
+model: qwen3-8b
+provider:
+  kind: aws_ec2
+  region: us-east-1
+  instance_type: g6e.xlarge
+  market: on_demand
+  disk_gb: 200
+variants:
+  - name: trtllm-fp8-cudagraph-pad
+    model: qwen3-8b-fp8-modelopt
+    engine:
+      name: trtllm
+      args:
+        cuda_graph_config:
+          enable_padding: true
+          max_batch_size: 128
+    host_group: trtllm-fp8
+    store_output_text: true
+  - name: trtllm-fp8
+    model: qwen3-8b-fp8-modelopt
+    # named so the profile section knows the engine; the registry row's own, so the
+    # config hash stays 55b35655
+    engine:
+      name: trtllm
+    host_group: trtllm-fp8
+workloads:
+  - profile: chat-sharegpt
+    load:
+      mode: open_loop
+      # exactly 08204560's search points, so the stock runs pair with its
+      values: [2.619489972287021, 3.375]
+      duration_s: 255
+      warmup_s: 45
+      drain_timeout_s: 60
+repetitions: 3
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+profile:
+  windows:
+    - workload: chat-sharegpt
+      load_values: [3.375]
+  settle_s: 45
+  capture_s: 20
+  max_iterations: 400
+  tail_s: 5
+  drain_timeout_s: 15
+  trace_dir: /var/lib/loom/profiles
+  max_trace_mb: 256
+quality:
+  suite: qwen3-8b
+  subset: gsm8k-only
+  replicates: 1
+  # 46938d1f's vllm-bf16 cell: stored evals (3 passes) and divergence reference.
+  baseline:
+    experiment: 46938d1f-3022-4695-a0b9-29b18c06eaea
+    config_hash: "48f3d8d1850a0b1bfc6f454ee35a29902d4dc858ed984252defa8ffe5f621375"
+budget:
+  max_spend: "$5.05"
+  ttl_minutes: 160
+  accrual_interval_s: 15
+seed: 0

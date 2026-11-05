@@ -1,0 +1,83 @@
+# PROPOSED 2026-11-04, NOT APPROVED, NOT RUN. Run aws-smoke-trtllm-why.yaml first.
+#
+# Why TensorRT-LLM 1.4.0rc2 BF16's per-sequence step cost is higher than vLLM v0.30's on
+# the same L40S (reports/8b-trtllm-v1, roofline: 0.40 vs 0.32 ms per sequence on chat,
+# 0.455 vs 0.336 on 1k/1k; the fixed part about the same). A torch-profiler window on
+# the trtllm-bf16 cell of 46938d1f, at the loads where vLLM was profiled in 14d959e5
+# (qwen3-8b-profile-aws, same g6e.xlarge, same window shape): 1k/1k closed loop at 16 and
+# 64 in flight (pure decode at known batch sizes, two points of the per-sequence slope),
+# and chat at 2.25 req/s (the load the coordinator named; vLLM's window was at 2.213).
+# `bench profile analyze` splits each window's GPU time into GEMM, attention, quantize,
+# sampling, other kernels and GPU idle, overall and per decode batch size
+# (trace.step_shapes): which of them grows faster per sequence in TensorRT-LLM is the
+# answer.
+#
+# The variant is 46938d1f's trtllm-bf16, copied: TensorRT-LLM profiles at run time (its
+# /start_profile names the trace directory and step count), so nothing changes at launch
+# and the cell keeps config hash ae3b5705...; its measured runs here add to that cell's.
+# Profile windows are never load runs (loom_bench.profile.capture). Load settings match
+# 46938d1f (chat) and 14d959e5 (1k/1k), so the runs pair with both.
+#
+# max_iterations is TensorRT-LLM's num_steps, which it honours (vLLM v0.30 ignored it and
+# recorded the whole capture): 400 steps is ~13-16 s at these loads' ~33-40 ms steps,
+# inside capture_s, so the trace is written before /stop_profile.
+#
+# No quality section: nothing about this cell's serving config changed (its gate ran in
+# 9647a23b).
+#
+# Budget (bench plan, 2026-11-04, against a copy of the results DB, $1.8829/h with the
+# root volume): one host, 57.3 min (cold start 20.5, 6 load runs 24.5, 3 windows 10.7),
+# estimate $1.80; worst case (to its 80 min TTL) $2.51; cap $2.55.
+# bench/tests/aws/test_aws_trtllm_why.py checks the plan fits.
+name: qwen3-8b-trtllm-bf16-profile-aws
+description: TensorRT-LLM 1.4.0rc2 BF16 (46938d1f's trtllm-bf16 cell) with torch-profiler windows at 1k/1k 16 and 64 in flight and chat 2.25 req/s, against vLLM's 14d959e5 windows.
+model: qwen3-8b
+provider:
+  kind: aws_ec2
+  region: us-east-1
+  instance_type: g6e.xlarge
+  market: on_demand
+  disk_gb: 200
+variants:
+  - name: trtllm-bf16
+    engine:
+      name: trtllm
+      version: "1.4.0rc2"
+      image: nvcr.io/nvidia/tensorrt-llm/release@sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a
+    host_group: trtllm-bf16
+workloads:
+  - profile: fixed-1k-1k
+    load:
+      mode: closed_loop
+      values: [16, 64]
+      duration_s: 150
+      warmup_requests: 2
+      drain_timeout_s: 60
+  - profile: chat-sharegpt
+    load:
+      mode: open_loop
+      values: [2.25]
+      duration_s: 255
+      warmup_s: 45
+      drain_timeout_s: 60
+repetitions: 2
+slo:
+  ttft_ms: {p95: 1000}
+  tpot_ms: {p95: 50}
+  max_error_rate: 0.01
+profile:
+  windows:
+    - workload: fixed-1k-1k
+    - workload: chat-sharegpt
+  settle_s: 45
+  capture_s: 20
+  max_iterations: 400
+  tail_s: 5
+  drain_timeout_s: 15
+  trace_dir: /var/lib/loom/profiles
+  max_trace_mb: 256
+budget:
+  max_spend: "$2.55"
+  ttl_minutes: 80
+  accrual_interval_s: 15
+seed: 0

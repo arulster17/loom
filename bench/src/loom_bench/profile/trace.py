@@ -1,8 +1,8 @@
 """Break an engine trace's GPU time into what the GPU was doing.
 
 Input: PyTorch profiler traces (Chrome trace JSON, `.json` or `.json.gz`, as vLLM's
-`--profiler-config` writes them, one file per GPU worker), or a `.tar.gz` holding
-them (what a Loom profile window uploads).
+`--profiler-config` or TensorRT-LLM's runtime `/start_profile` writes them, one file per
+GPU worker), or a `.tar.gz` holding them (what a Loom profile window uploads).
 
 Every GPU kernel is put in one category by its name (`CATEGORIES`, first match
 wins). The trace's time on each GPU is then split exclusively: where kernels of
@@ -22,6 +22,15 @@ to the next step's start (the LM head and sampling run after the annotated forwa
 the gap to the next step is the GPU waiting on the CPU). vLLM v0.30 ignores the
 per-session `max_iterations` (smoke a183a857 recorded every step of the capture), so
 the requested count is only a last resort.
+
+TensorRT-LLM 1.4.0rc2 (PyTorch backend) labels each executor iteration once with a bare
+`step[DECODE bs=<generation requests>]` or `step[EXTEND bs=<context requests>
+toks=<context tokens>]` (`PyExecutor._build_step_scope_label`). With the overlap
+scheduler the sampling of an iteration runs in a second scope with a suffix
+(`step[...] sample`); only the bare labels are step boundaries (`TRTLLM_STEP`, anchored).
+An EXTEND label does not say how many generation requests ride along, so those steps
+form the `mixed` group, as vLLM's steps with prefill do. When a trace has TensorRT-LLM
+step labels, only they count; vLLM's patterns are not looked at.
 """
 
 from __future__ import annotations
@@ -49,7 +58,9 @@ CATEGORIES: tuple[tuple[str, re.Pattern[str]], ...] = (
         "attention",
         re.compile(
             r"flash|fmha|attention|attn|paged|reshape_and_cache|flashinfer|BatchDecode|BatchPrefill"
-            r"|merge_state|rotary|rope",
+            r"|merge_state|rotary|rope"
+            # TensorRT-LLM's decode attention: XQA and masked multi-head attention kernels
+            r"|xqa|mmha|multihead|kernel_mha",
             re.I,
         ),
     ),
@@ -86,6 +97,22 @@ STEP_ANNOTATION = re.compile(
 )
 # vLLM v0.30's step name: prefill requests (tokens), decode requests (tokens).
 STEP_SHAPE = re.compile(r"execute_context_(\d+)\((\d+)\)_generation_(\d+)\((\d+)\)")
+# TensorRT-LLM 1.4.0rc2's bare per-iteration label; `step[...] sample` does not match.
+TRTLLM_STEP = re.compile(r"^step\[(DECODE|EXTEND) bs=(\d+)(?: toks=(\d+))?\]$")
+
+
+def step_shape(name: str) -> tuple[int, int, int] | None:
+    """(prefill requests, prefill tokens, decode requests) from a step label of either
+    engine; None if it is not one. TensorRT-LLM's EXTEND label has no decode count (0)."""
+    m = TRTLLM_STEP.match(name)
+    if m:
+        if m[1] == "DECODE":
+            return 0, 0, int(m[2])
+        return int(m[2]), int(m[3] or 0), 0
+    v = STEP_SHAPE.search(name)
+    if v:
+        return int(v[1]), int(v[2]), int(v[3])
+    return None
 
 
 # torch.compile (Inductor) fuses FP8 activation quantization into the RMSNorm / SiLU
@@ -239,7 +266,7 @@ def step_shapes(
     from its start to the next step's start, so it includes the LM head, sampling and the
     GPU waiting for the next step. Pure-decode steps are grouped by batch size; steps
     carrying prefill form one `mixed` group. Milliseconds."""
-    parsed = [(t, STEP_SHAPE.search(n)) for t, n in sorted(steps)]
+    parsed = [(t, step_shape(n)) for t, n in sorted(steps)]
     if len(parsed) < 2 or not all(m for _, m in parsed):
         return []
     bounds = [t for t, _ in parsed]
@@ -247,7 +274,7 @@ def step_shapes(
     groups: dict[tuple[str, int], list[tuple[float, dict[str, float], int]]] = defaultdict(list)
     for (t, m), (t_next, _), cats in zip(parsed, parsed[1:], periods, strict=False):
         assert m is not None
-        prefill_reqs, prefill_tokens, decode_reqs = int(m[1]), int(m[2]), int(m[3])
+        prefill_reqs, prefill_tokens, decode_reqs = m
         key = ("decode", decode_reqs) if prefill_reqs == 0 else ("mixed", 0)
         groups[key].append(((t_next - t) / 1000, cats, prefill_tokens))
     out: list[dict[str, Any]] = []
@@ -277,9 +304,12 @@ def analyze_events(
     """One breakdown per GPU device in `events` (times in the trace's microseconds)."""
     by_dev: dict[int, list[tuple[float, float, str]]] = defaultdict(list)
     names: dict[int, dict[str, list[float]]] = defaultdict(lambda: defaultdict(lambda: [0, 0.0]))
-    step_ranges: dict[int, list[tuple[float, float]]] = defaultdict(list)
-    step_names: dict[int, list[tuple[float, str]]] = defaultdict(list)
-    cpu_steps = 0
+    # per labelling scheme ("trtllm", "vllm"): GPU step annotations by device, CPU count
+    step_names: dict[str, dict[int, list[tuple[float, str]]]] = {
+        "trtllm": defaultdict(list),
+        "vllm": defaultdict(list),
+    }
+    cpu_steps = {"trtllm": 0, "vllm": 0}
     for ev in events:
         if ev.get("ph") != "X":
             continue
@@ -295,13 +325,25 @@ def analyze_events(
             agg[1] += dur
         elif cat in {"gpu_memcpy", "gpu_memset"}:
             by_dev[_device(ev)].append((ts, ts + dur, "memcpy"))
-        elif cat == "gpu_user_annotation" and STEP_ANNOTATION.search(name):
-            step_ranges[_device(ev)].append((ts, ts + dur))
-            step_names[_device(ev)].append((ts, name))
-        elif cat == "user_annotation" and STEP_ANNOTATION.search(name):
-            cpu_steps += 1
+        elif cat in {"gpu_user_annotation", "user_annotation"}:
+            scheme = (
+                "trtllm"
+                if TRTLLM_STEP.match(name)
+                else "vllm"
+                if STEP_ANNOTATION.search(name)
+                else None
+            )
+            if scheme is None:
+                continue
+            if cat == "gpu_user_annotation":
+                step_names[scheme][_device(ev)].append((ts, name))
+            else:
+                cpu_steps[scheme] += 1
     if not by_dev:
         raise ValueError("the trace has no GPU kernel events")
+    trt = bool(cpu_steps["trtllm"] or any(step_names["trtllm"].values()))
+    gpu_steps = step_names["trtllm" if trt else "vllm"]
+    cpu_count = cpu_steps["trtllm" if trt else "vllm"]
     out = []
     for dev in sorted(by_dev):
         segments = _segments(by_dev[dev])
@@ -312,10 +354,10 @@ def analyze_events(
         end = max(e for _, e, _ in by_dev[dev])
         ms = {k: excl.get(k, 0.0) / 1000 for k in (*ORDER, "idle")}
         n_steps, how = None, None
-        if step_ranges.get(dev):
-            n_steps, how = len(step_ranges[dev]), "gpu annotations"
-        elif cpu_steps:
-            n_steps, how = cpu_steps, "cpu annotations"
+        if gpu_steps.get(dev):
+            n_steps, how = len(gpu_steps[dev]), "gpu annotations"
+        elif cpu_count:
+            n_steps, how = cpu_count, "cpu annotations"
         elif steps:
             n_steps, how = steps, "requested max_iterations"
         top = sorted(names[dev].items(), key=lambda kv: -kv[1][1])[:15]
@@ -337,7 +379,7 @@ def analyze_events(
                     }
                     for n, (c, t) in top
                 ],
-                step_shapes=step_shapes(segments, step_names.get(dev, [])),
+                step_shapes=step_shapes(segments, gpu_steps.get(dev, [])),
             )
         )
     return out

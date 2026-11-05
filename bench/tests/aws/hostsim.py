@@ -41,6 +41,7 @@ from urllib.parse import unquote, urlparse
 from loom_bench.jobexec import execute_load_job
 from loom_bench.jobs import EvalJob, LoadJob, TokenizerSpec
 from loom_bench.mock.config import MockConfig
+from loom_bench.profile.spec import TRTLLM_TRACE_DIR
 from loom_bench.providers.mock import _start_server, _stop_server
 from loom_bench.quality.runner import execute_eval_job
 from loom_bench.tokenize import hf_cache_folder
@@ -122,10 +123,15 @@ def mounted_trace_dir(script: str) -> str | None:
     `--profiler-config`) and bind-mounts it at the same host path, else None: an unmounted
     directory stays inside the container, where the host's collection cannot see it."""
     cmd = array(script, "ENGINE_CMD")
-    if "--profiler-config" not in cmd:
-        return None
-    path = json.loads(cmd[cmd.index("--profiler-config") + 1]).get("torch_profiler_dir")
     mounts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--volume"]
+    if is_trtllm(script):
+        # TensorRT-LLM profiles at run time into the output_dir its /start_profile names,
+        # which Loom always sets to TRTLLM_TRACE_DIR
+        path: str | None = TRTLLM_TRACE_DIR
+    elif "--profiler-config" in cmd:
+        path = json.loads(cmd[cmd.index("--profiler-config") + 1]).get("torch_profiler_dir")
+    else:
+        return None
     return path if f"{path}:{path}" in mounts else None
 
 
@@ -240,6 +246,8 @@ class HostSim(FakeSsm):
             host_dir = self.root / instance / trace_dir.lstrip("/")
             host_dir.mkdir(parents=True, exist_ok=True)
             profile = {"profile_dir": str(host_dir)}
+            if is_trtllm(script):
+                profile["profile_api"] = "trtllm"
         cfg = MockConfig(
             **{
                 "time_scale": 0.01,

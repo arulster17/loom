@@ -31,13 +31,13 @@ from pydantic import (
 )
 
 from loom_bench.cost import CostAllocation
-from loom_bench.engines import render_launch, validate_engine_env
+from loom_bench.engines import profiler_trace_dir, render_launch, validate_engine_env
 from loom_bench.jobs import TokenizerSpec
 from loom_bench.loadgen.arrivals import parse_arrivals
 from loom_bench.loadgen.base import LOAD_GENERATORS
 from loom_bench.mock.config import MockConfig
 from loom_bench.money import parse_usd
-from loom_bench.profile.spec import ProfileSpec, check_profile
+from loom_bench.profile.spec import ProfileSpec, check_cell_profile, check_profile
 from loom_bench.provenance import canonical_json, config_hash
 from loom_bench.providers.base import EngineLaunch
 from loom_bench.quality.suite import Suite, load_suite
@@ -519,6 +519,9 @@ class Experiment(_Strict):
                 variant_args={
                     v.name: dict((v.engine.args if v.engine else None) or {}) for v in self.variants
                 },
+                variant_engines={
+                    v.name: v.engine.name if v.engine else None for v in self.variants
+                },
             )
         return self
 
@@ -916,6 +919,14 @@ def expand(exp: Experiment, registry: Registry) -> list[Cell]:
     keys = [c.key for c in cells]
     if len(set(keys)) != len(keys):
         raise ExpansionError(f"duplicate cell keys: {keys}")
+    if exp.profile is not None and exp.provider.kind != "mock":
+        for c in cells:
+            try:
+                check_cell_profile(
+                    exp.profile, engine=c.launch.engine, trace_dir=profiler_trace_dir(c.launch)
+                )
+            except ValueError as e:
+                raise ExpansionError(f"cell {c.key}: {e}") from None
     if exp.provider.kind == "local" and len(cells) != 1:
         raise ExpansionError(
             "the local provider benchmarks one running endpoint: declare one variant, no sweep"

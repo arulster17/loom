@@ -23,6 +23,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from loom_bench.profile.spec import TRTLLM_TRACE_DIR
 from loom_bench.providers.base import EngineLaunch
 from loom_bench.registry import ModelSpec
 
@@ -326,6 +327,10 @@ def trtllm_options(spec: ModelSpec) -> dict[str, Any]:
             raise ValueError(f"invalid TensorRT-LLM option name {key!r}")
         if key in _RESERVED_FLAGS["trtllm"]:
             raise ValueError(f"engine arg {key!r} is set from the registry; change it there")
+        if key == "profiler_config":
+            raise ValueError(
+                "profiler_config is vLLM's; TensorRT-LLM profiles at runtime (profile: section)"
+            )
         if key == "speculative_config":
             raise ValueError(
                 "speculative_config on trtllm is not wired: its draft checkpoint would not "
@@ -536,8 +541,14 @@ DOCKER_ENGINE_FLAGS: dict[str, tuple[str, ...]] = {
 
 
 def profiler_trace_dir(launch: EngineLaunch) -> str | None:
-    """Where a vLLM launch's torch profiler writes traces (`--profiler-config`'s
-    `torch_profiler_dir`), or None when it is not profiled."""
+    """Where a launch's torch profiler writes traces, or None when it cannot profile.
+
+    vLLM: `--profiler-config`'s `torch_profiler_dir` (None without it). TensorRT-LLM:
+    always `TRTLLM_TRACE_DIR`, the `output_dir` a profile window names in its
+    /start_profile body; its runtime profiling needs nothing at launch, so the launch
+    (and its config hash) is the same whether a window ever runs."""
+    if launch.engine == "trtllm":
+        return TRTLLM_TRACE_DIR
     if launch.engine != "vllm":
         return None
     raw = _flag_value(launch.args, "--profiler-config")
@@ -559,9 +570,10 @@ def docker_run_argv(launch: EngineLaunch, *, weights_dir: str, container_name: s
     the engine starts with `HF_HUB_OFFLINE=1` and never sees a Hugging Face token.
     `launch.env` is passed by name only (`-e NAME`); the caller exports the values.
     The port is published on loopback only: load is generated on the host itself.
-    A profiled vLLM launch gets its trace directory bind-mounted at the same path, so the
-    host's collection script (aws_scripts/collect_profile.sh) finds the traces where the
-    profile section says they are. Engine-specific flags: `DOCKER_ENGINE_FLAGS`.
+    A profiled vLLM launch, and every TensorRT-LLM one (whose profiling is decided at run
+    time), gets its trace directory bind-mounted at the same path, so the host's
+    collection script (aws_scripts/collect_profile.sh) finds the traces where the profile
+    section says they are. Engine-specific flags: `DOCKER_ENGINE_FLAGS`.
     """
     if launch.engine not in ENTRYPOINTS:
         raise ValueError(f"no container entrypoint for engine {launch.engine!r}")
