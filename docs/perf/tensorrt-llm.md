@@ -7,6 +7,11 @@ with the roofline in [reports/8b-trtllm-v1/roofline](../../reports/8b-trtllm-v1/
 Every figure traces to a run id: 46938d1f (vLLM BF16 and TensorRT-LLM BF16 load runs),
 9647a23b (TensorRT-LLM BF16 evals), 08204560 (TensorRT-LLM FP8 load runs and evals).
 
+Update (2026-11-05): the two open "why"s are answered by profiling and a padded-graph
+variant ("Why: what the profiles and the padded variant showed", below; report
+[reports/8b-trtllm-why-v1](../../reports/8b-trtllm-why-v1/README.md); runs 71e2c32c,
+ad5b1408, smoke d35e631b).
+
 ## The short version (how to explain this in an interview)
 
 TensorRT-LLM is NVIDIA's own serving engine. It is the main engine at inference platforms
@@ -215,10 +220,8 @@ that sequence's KV read.
   chat 2.25).
 - **What is not established:** which part of the per-sequence work is slower. Candidates
   are attention over the KV cache on sm_89, per-request sampling and bookkeeping, or the
-  missing CUDA graphs (next section). A profile window (`profile:` in the spec) on this
-  cell would settle it; it has not been run. Proposed:
-  `bench/experiments/qwen3-8b-trtllm-bf16-profile-aws.yaml` profiles this cell at the
-  loads of vLLM's 14d959e5 windows (1k/1k at 16 and 64 in flight, chat 2.25 req/s).
+  missing CUDA graphs (next section). **Answered 2026-11-05 (71e2c32c): attention.**
+  See "Why: what the profiles and the padded variant showed".
 
 ### FP8: fast steps, then a cliff above about 32 running requests
 
@@ -242,14 +245,9 @@ Per repetition, FP8's step time is bimodal (08204560):
   without a graph, launching kernels one by one from Python. FP8's short steps make that
   overhead visible. BF16's per-sequence growth may include the same effect at its larger
   batches.
-- **The test, not yet run:** a variant with `cuda_graph_config: {enable_padding: true}`,
-  which pads to captured sizes, or an explicit batch list. With a profile window it would
-  confirm or rule this out. Proposed:
-  `bench/experiments/qwen3-8b-trtllm-fp8-cudagraph-aws.yaml`. It runs
-  `trtllm-fp8-cudagraph-pad` (`enable_padding: true, max_batch_size: 128`, its own config
-  hash) next to stock FP8 on one host, at chat 2.619 and 3.375 req/s, 3 runs each. It
-  adds a profile window at 3.375 on each cell and one GSM8K pass gated against stored vLLM
-  BF16.
+- **Tested 2026-11-05 (ad5b1408): confirmed.** With `cuda_graph_config:
+  {enable_padding: true, max_batch_size: 128}` the cliff is gone on the same arrivals
+  that trigger it. See "Why: what the profiles and the padded variant showed".
 - **Context only, not a paired comparison:** vLLM's own FP8 weights plus FP8 KV on an L40S
   held chat at 5.239 req/s in the config sweep (7a8237d0, RunPod, RedHat checkpoint). If
   the cliff is the graph-size default, it is what costs TensorRT-LLM FP8 most of its FP8
@@ -333,6 +331,139 @@ model's output to the tool's schema.
   gauges and the roofline fit, not profiled.**
 - **Engine defaults only.** No TensorRT-LLM tuning (chunked prefill, CUDA-graph padding,
   `max_num_tokens`) was tried, by design.
+
+## Why: what the profiles and the padded variant showed (2026-11-05)
+
+Three runs on AWS g6e.xlarge (1x L40S), $6.70 in all: smoke d35e631b ($1.33),
+71e2c32c (TensorRT-LLM BF16 with torch-profiler windows, $2.19), ad5b1408 (FP8 stock vs
+CUDA-graph padding, $3.18). vLLM's side is its own profile run 14d959e5 (same instance
+type, same window shape), re-analysed with the same code. Every number below is in
+[reports/8b-trtllm-why-v1/tables.md](../../reports/8b-trtllm-why-v1/tables.md).
+
+### 1. Why TensorRT-LLM BF16 is slower than vLLM BF16: attention, not the GEMMs
+
+**Verdict.** The extra time per decode step is almost all attention. TensorRT-LLM's
+decode-attention kernel (XQA, `kernel_mha`) takes 14–19% longer per step than vLLM's
+FlashAttention split-KV kernel. Its attention-side work as a whole is 17–46% higher, depending
+on the batch. The matrix multiplies are the same kernels at the same speed in both engines.
+
+Decode steps at matched batch sizes (ms per step; TensorRT-LLM / vLLM):
+
+| Batch | Step | GEMM | Attention | Step gap | Of which attention |
+|---|---|---|---|---|---|
+| 1 | 22.34 / 22.19 | 20.85 / 20.85 | 1.09 / 0.83 | +0.16 | +0.26 |
+| 16 (1k-1k) | 29.91 / 28.60 | 22.73 / 22.25 | 6.67 / 5.67 | +1.31 | +1.00 |
+| 21–27 (chat, ~2.2 req/s) | 31.3–33.2 / 29.1–30.9 | 23.3–23.7 / 22.8–23.1 | 7.5–9.1 / 5.6–7.1 | +1.3 to +3.1 | +1.1 to +2.6 |
+| 64 (1k-1k) | 50.77 / 43.76 | 24.55 / 24.00 | 25.58 / 18.93 | +7.01 | +6.65 |
+
+- **The GEMM kernel is not the cause.** The trace shows TensorRT-LLM running the generic
+  SM80 kernel `cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x2` (100% of its
+  GEMM time at batch 16). vLLM runs that very kernel too: 93% of its GEMM time at batch
+  16, and the same 32x32 variant leads both at chat loads.
+  - For BF16 linear layers both engines go through PyTorch to cuBLAS. cuBLAS picks the
+    kernel by matrix shape, not by engine.
+  - GEMM time per step matches within 0.3–0.6 ms (2–3%) at every batch.
+  - At batch 1 it is identical: 20.85 ms, reading 15.14 GB at 726 GB/s, 84% of the
+    L40S's 864 GB/s peak.
+  - An SM89-tuned BF16 kernel might be faster on both engines. That would not explain
+    the gap between them.
+- **The gap grows with the batch, through attention.**
+  - Step gap: +0.16 ms at batch 1, +1.3 ms at 16, about +2 ms at chat's 21–27, +7.0 ms at 64.
+  - Attention accounts for 76% of it at 16 and 95% at 64. GEMMs add 0.3–0.6 ms.
+    TensorRT-LLM's normalization and activation kernels are 0.2–0.3 ms faster.
+  - From 16 to 64 in flight each extra sequence costs 0.435 ms of step time on
+    TensorRT-LLM and 0.316 ms on vLLM (1.38x). Attention alone is 0.394 vs 0.276 ms
+    (1.43x).
+  - The client-side fit from the load runs gave 0.455 vs 0.336 ms per sequence on 1k-1k
+    (roofline). The trace accounts for that difference.
+- **Why it moves the SLO knee:** under the 50 ms TPOT target, about 2 ms more per step at
+  batch ~25 is enough to make TensorRT-LLM miss the SLO at a lower load (1.355 vs 2.25 req/s).
+- **What we can't conclude:**
+  - *Why* XQA is slower on this GPU. The torch trace times kernels, not their memory
+    traffic or occupancy; Nsight Compute would say. Possible causes are its tiling or
+    split heuristics for BF16 KV on sm_89, or the KV page size (32 tokens vs vLLM's 16).
+    None is tested.
+  - Whether another TensorRT-LLM attention backend (for example its FlashInfer backend)
+    closes the gap. Not run.
+  - Exact context lengths. The 1k-1k windows are closed loops whose requests started
+    together, so the context at each window depends on timing. The chat windows (open
+    loop, near-equal load) are the fairest pairing and show the same direction.
+  - The batch-1 row pairs a TensorRT-LLM chat smoke window with vLLM's 1k-1k window.
+    Contexts differ.
+  - Per-sequence slopes fitted *inside* the chat windows (batches 20–27) are unreliable.
+    They even point the other way, because the range is narrow and the context mix shifts
+    with batch. The per-batch level gap is the result.
+- **CUDA graphs are not the BF16 story at these loads.** The chat and 1k-1k steady
+  batches (16, 21–27, 64) all have graphs. Batches without a graph appeared only while
+  the 64-request batch refilled: one step each at 35, 42, 49 and 56. Those steps had 12–64
+  ms of GPU idle, against about 0.1 ms with a graph. That is the same mechanism as the FP8
+  cliff below.
+
+### 2. The FP8 cliff is the CUDA-graph batch sizes: padding fixes it
+
+**Verdict: yes.** The test used the same arrival traces that push stock FP8 into its slow
+state. Padded FP8 stayed fast in every run.
+
+- **Paired by construction.** Each load and repetition replays the same seeded arrivals in
+  every cell; the measured request rates match to the digit.
+  - Stock FP8 (55b35655) collapsed on exactly the same three of six traces in both its
+    runs: chat 2.619 rep 0, and 3.375 reps 0 and 2. ITL p50 went to 49–51 ms or TPOT p95
+    to 48–54 ms, with the running batch averaging 40–45 and peaking at 72–74.
+  - So the cliff is deterministic given the arrivals, not host noise.
+  - Padded FP8 (2d964304, `enable_padding: true, max_batch_size: 128`) ran those same
+    six traces at ITL p50 16.8–18.4 ms and TPOT p95 22.5–24.8 ms, 0 of 6 slow.
+- **Padded runs did go above 32 running requests** (peaks of 38–40). Those batches padded
+  up to the 40-request graph and stayed fast. Stock runs that crossed 32 ran eagerly.
+  Each slow step keeps more requests in flight, so the batch climbed to 72–74 and stayed
+  slow.
+- **The mechanism is shown, though not in an FP8 cliff trace.**
+  - The BF16 trace shows batches without a graph leaving the GPU idle 12–64 ms per step,
+    while the CPU launches kernels one by one.
+  - FP8's GPU work per step is only about 17–20 ms, so that launch time decides its step:
+    47–50 ms.
+  - Both FP8 profile windows at 3.375 ran after their cell's measured runs, at batches
+    15–30, where both configs have graphs. Their steps match to within 0.1 ms. The cliff
+    state itself was not captured in a trace.
+- **What it buys.** Padded FP8 held the SLO at every tested load. Its goodput is at least
+  3.375 req/s on chat, against stock's 2.49–2.62.
+  - Its cost is $0.1237 per 1M blended tokens, against $0.1859 for vLLM BF16, so at most
+    0.67x vLLM's cost. That is an upper bound, because the knee was not bracketed.
+  - It is a comparison point, not a ranked row:
+    - The goodput search did not bracket the knee.
+    - Its gate was GSM8K and divergence only. GSM8K was +0.28 points vs vLLM BF16, and
+      divergence was KL 0.0141, the same as stock.
+    - It would inherit stock FP8's tool_calling_strict failure, because that is the same
+      engine and grammar.
+  - The leaderboard keeps stock FP8 at "quality gate failed". As of this report, a later
+    and narrower gate no longer clears an earlier failure (`report.analyze.effective_gate`).
+- **What we can't conclude:**
+  - Where the padded knee is.
+  - Whether an explicit batch list without padding does as well.
+  - The cliff's exact launch cost per step on FP8, since no trace of it was captured.
+
+### 3. The batch-4 attention anomaly (FP8 KV cache, light load)
+
+- **What happened.** In the smoke's padded FP8 windows, decode steps at batch 4 took
+  79.5 ms. 67.4 ms of that was attention, in
+  `mmha::masked_multihead_attention_kernel<bf16, fp8_e4m3>`, TensorRT-LLM's older
+  masked multi-head attention (MMHA) kernel.
+  - At batch 5 in the same window (padded to 8) the step took 14.0 ms, with 1.65 ms
+    of attention in the XQA kernel.
+  - BF16 at batch 4 used XQA: 1.63 ms.
+  - So with an FP8 KV cache at small batches the engine falls back to MMHA, and MMHA is
+    about 40x slower here.
+- **It is not caused by padding.** Stock FP8's own smoke (e3694f45) ran at batches 1–3
+  with ITL p50 of 38–79 ms in 11 of 12 runs, against about 24 ms for BF16. Padded FP8's
+  smoke runs at batches 2–4 show the same (55.6 and 79.1 ms).
+- **Why we think the fallback happens.** TensorRT-LLM's XQA runner (1.4.0rc2,
+  `decoderXQARunner.cpp`, `mayHavePerfGain`) uses XQA only when KV heads x batch x
+  multi-block count is large enough against the 142 SMs. Qwen3-8B has 8 KV heads, so a
+  batch of 4 gives few blocks.
+  - We did not trace the exact rule that runs in this path (rc2's `XqaDispatcher`), so
+    the threshold is not confirmed.
+- **Impact.** Light-load FP8 latency only. At the loads that set goodput (batches 15+)
+  every step used XQA. Still, it is a large TensorRT-LLM FP8 latency problem at low
+  concurrency, and worth reporting upstream.
 
 ## Choosing the version (checked 2026-11-02)
 

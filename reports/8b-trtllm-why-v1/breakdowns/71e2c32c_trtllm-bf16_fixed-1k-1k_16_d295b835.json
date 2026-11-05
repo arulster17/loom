@@ -1,0 +1,185 @@
+{
+ "experiment": "71e2c32c-ed94-4e09-9142-015b96b6745f",
+ "engine": "trtllm",
+ "window": {
+  "run_id": "d295b835-a24f-4b83-9344-d5bb582d2bca",
+  "cell": "trtllm-bf16",
+  "workload": "fixed-1k-1k",
+  "load_value": 16.0,
+  "client_latency": {
+   "profiled": {
+    "tokens": 8928,
+    "itl_p50_ms": 30.17357999988235,
+    "itl_mean_ms": 35.80225115871407
+   },
+   "before": {
+    "tokens": 11440,
+    "itl_p50_ms": 28.954722499975105,
+    "itl_mean_ms": 30.07983218680078
+   },
+   "profiler_slowdown": 1.0420952920515225
+  },
+  "capture": {
+   "prefix": "loom-d295b835-a24f-4b83-9344-d5bb582d2bca",
+   "api": "trtllm",
+   "start_s": 45.00075503199969,
+   "start_status": 200,
+   "stop_s": 65.00061187999972,
+   "stop_status": 200,
+   "stopped_s": 65.004770388
+  }
+ },
+ "trace_bytes": 8939513,
+ "ranks": [
+  {
+   "source": "./trtllm-trace-1793844714-69ffabee-rank-0.json",
+   "device": 0,
+   "window_ms": 11963.69535498047,
+   "busy_ms": 11913.090705078126,
+   "kernels": 153600,
+   "steps": 400,
+   "step_source": "gpu annotations",
+   "category_ms": {
+    "gemm": 9092.671569335938,
+    "attention": 2667.5677265625,
+    "allreduce": 0.0,
+    "quant": 0.0,
+    "sampling": 5.2334404296875,
+    "memcpy": 11.04950048828125,
+    "other": 136.56846826171875,
+    "idle": 50.60464990234375
+   },
+   "category_share": {
+    "gemm": 0.7600219914953511,
+    "attention": 0.22297188681355007,
+    "allreduce": 0.0,
+    "quant": 0.0,
+    "sampling": 0.000437443471636782,
+    "memcpy": 0.0009235859122475364,
+    "other": 0.011415241211810487,
+    "idle": 0.004229851095403989
+   },
+   "per_step_ms": {
+    "gemm": 22.731678923339846,
+    "attention": 6.6689193164062495,
+    "allreduce": 0.0,
+    "quant": 0.0,
+    "sampling": 0.01308360107421875,
+    "memcpy": 0.027623751220703124,
+    "other": 0.3414211706542969,
+    "idle": 0.1265116247558594
+   },
+   "top_kernels": [
+    {
+     "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x2_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x2_tn_align8",
+     "category": "gemm",
+     "count": 58000,
+     "total_ms": 9092.671556999918
+    },
+    {
+     "name": "kernel_mha",
+     "category": "attention",
+     "count": 14400,
+     "total_ms": 2582.6070519999994
+    },
+    {
+     "name": "kernel_cutlass_kernel_flashinfernormkernelsfused_add_rmsnormFusedAddRMSNormKernel_object_at__tensorptrbf16gmemalign128oi64409640961_tensorptrbf16gmemalign128oi6",
+     "category": "other",
+     "count": 28800,
+     "total_ms": 87.81212799999417
+    },
+    {
+     "name": "void tensorrt_llm::_v1::kernels::applyBiasRopeUpdateKVCacheV2<__nv_bfloat16, __nv_bfloat16, 256, 128, false, false, false, true, tensorrt_llm::_v1::kernels::KVB",
+     "category": "attention",
+     "count": 14400,
+     "total_ms": 46.704696000000645
+    },
+    {
+     "name": "void tensorrt_llm::_v1::kernels::fusedQKNormRopeKernel<128, false, __nv_bfloat16>(__nv_bfloat16 const*, __nv_bfloat16*, int, int, int, bool, int, float, __nv_bf",
+     "category": "attention",
+     "count": 14400,
+     "total_ms": 38.48457699999988
+    },
+    {
+     "name": "silu_and_mul_kernel",
+     "category": "other",
+     "count": 14400,
+     "total_ms": 29.03722200000003
+    },
+    {
+     "name": "tensorrt_llm::batch_manager::kv_cache_manager_v2::copyBatchBlockOffsetsToDeviceKernel(int const*, int*, int, int, int, int const*, int const*, int const*)",
+     "category": "other",
+     "count": 400,
+     "total_ms": 4.595678999999995
+    },
+    {
+     "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::ArgMaxOps<float>, unsigned int, long, 4, 4> >(at::native::ReduceOp<float, at::nat",
+     "category": "sampling",
+     "count": 400,
+     "total_ms": 4.365930999999996
+    },
+    {
+     "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::opera",
+     "category": "other",
+     "count": 400,
+     "total_ms": 3.83977500000001
+    },
+    {
+     "name": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::detail::TensorInfo<c10::BFloat16, unsigned ",
+     "category": "other",
+     "count": 400,
+     "total_ms": 3.4901310000000056
+    },
+    {
+     "name": "void at::native::(anonymous namespace)::indexSelectSmallIndex<int, int, unsigned int, 1, 1, -2>(at::cuda::detail::TensorInfo<int, unsigned int>, at::cuda::detai",
+     "category": "other",
+     "count": 400,
+     "total_ms": 1.920995000000005
+    },
+    {
+     "name": "void at::native::vectorized_elementwise_kernel<4, at::native::compare_scalar_kernel<int>(at::TensorIteratorBase&, at::native::(anonymous namespace)::OpType, int",
+     "category": "other",
+     "count": 800,
+     "total_ms": 1.095436999999997
+    },
+    {
+     "name": "kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKernel_object_at__tensorptrbf16gmemalign128oi64409640961_tensorptrbf16gmemalign16o40961_tensorptrbf16gm",
+     "category": "other",
+     "count": 400,
+     "total_ms": 1.0836920000000008
+    },
+    {
+     "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::S",
+     "category": "other",
+     "count": 400,
+     "total_ms": 0.9030190000000046
+    },
+    {
+     "name": "void at::native::_scatter_gather_elementwise_kernel<128, 8, at::native::_cuda_scatter_gather_internal_kernel<true, at::native::OpaqueType<4>, long>::operator()<",
+     "category": "other",
+     "count": 400,
+     "total_ms": 0.876661000000001
+    }
+   ],
+   "step_shapes": [
+    {
+     "kind": "decode",
+     "batch": 16,
+     "steps": 399,
+     "step_ms_p50": 29.892740234375,
+     "step_ms_mean": 29.907486351376487,
+     "category_ms": {
+      "gemm": 22.731696238888233,
+      "attention": 6.667042889205435,
+      "allreduce": 0.0,
+      "quant": 0.0,
+      "sampling": 0.01308382773339599,
+      "memcpy": 0.027679672814849624,
+      "other": 0.34142246607730264,
+      "idle": 0.12656125420974312
+     }
+    }
+   ]
+  }
+ ]
+}

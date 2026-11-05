@@ -1,0 +1,185 @@
+{
+ "experiment": "d35e631b-3bf4-4b08-af5b-cd7cd155a817",
+ "engine": "trtllm",
+ "window": {
+  "run_id": "4bd7ee8d-f840-4b52-8ccc-bf0623ed8aaf",
+  "cell": "trtllm-bf16",
+  "workload": "chat-sharegpt",
+  "load_value": 1.0,
+  "client_latency": {
+   "profiled": {
+    "tokens": 324,
+    "itl_p50_ms": 23.815444500087324,
+    "itl_mean_ms": 25.711962895061166
+   },
+   "before": {
+    "tokens": 368,
+    "itl_p50_ms": 24.021603000051073,
+    "itl_mean_ms": 25.495808603260482
+   },
+   "profiler_slowdown": 0.9914177875654964
+  },
+  "capture": {
+   "prefix": "loom-4bd7ee8d-f840-4b52-8ccc-bf0623ed8aaf",
+   "api": "trtllm",
+   "start_s": 15.000580421999985,
+   "start_status": 200,
+   "stop_s": 23.00036170899989,
+   "stop_status": 200,
+   "stopped_s": 23.003931913000088
+  }
+ },
+ "trace_bytes": 697581,
+ "ranks": [
+  {
+   "source": "./trtllm-trace-1793839942-a9c5465b-rank-0.json",
+   "device": 0,
+   "window_ms": 714.9511040039063,
+   "busy_ms": 710.7937382812501,
+   "kernels": 12288,
+   "steps": 32,
+   "step_source": "gpu annotations",
+   "category_ms": {
+    "gemm": 667.3400581054688,
+    "attention": 34.74608740234375,
+    "allreduce": 0.0,
+    "quant": 0.0,
+    "sampling": 0.298818359375,
+    "memcpy": 0.1836923828125,
+    "other": 8.22508203125,
+    "idle": 4.15736572265625
+   },
+   "category_share": {
+    "gemm": 0.9334065705587365,
+    "attention": 0.04859924994556537,
+    "allreduce": 0.0,
+    "quant": 0.0,
+    "sampling": 0.0004179563577166913,
+    "memcpy": 0.0002569299939307407,
+    "other": 0.01150439797237527,
+    "idle": 0.005814895171675314
+   },
+   "per_step_ms": {
+    "gemm": 20.8543768157959,
+    "attention": 1.085815231323242,
+    "allreduce": 0.0,
+    "quant": 0.0,
+    "sampling": 0.00933807373046875,
+    "memcpy": 0.005740386962890625,
+    "other": 0.2570338134765625,
+    "idle": 0.1299176788330078
+   },
+   "top_kernels": [
+    {
+     "name": "std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, float, false, true, true, false, 7, false, c",
+     "category": "gemm",
+     "count": 3456,
+     "total_ms": 553.6829330000021
+    },
+    {
+     "name": "std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, float, false, true, true, false, 6, false, c",
+     "category": "gemm",
+     "count": 1184,
+     "total_ms": 113.6571259999999
+    },
+    {
+     "name": "kernel_mha",
+     "category": "attention",
+     "count": 1152,
+     "total_ms": 28.35495399999999
+    },
+    {
+     "name": "kernel_cutlass_kernel_flashinfernormkernelsfused_add_rmsnormFusedAddRMSNormKernel_object_at__tensorptrbf16gmemalign128oi64409640961_tensorptrbf16gmemalign128oi6",
+     "category": "other",
+     "count": 2304,
+     "total_ms": 5.315942000000009
+    },
+    {
+     "name": "void tensorrt_llm::_v1::kernels::applyBiasRopeUpdateKVCacheV2<__nv_bfloat16, __nv_bfloat16, 256, 128, false, false, false, true, tensorrt_llm::_v1::kernels::KVB",
+     "category": "attention",
+     "count": 1152,
+     "total_ms": 3.48230599999998
+    },
+    {
+     "name": "void tensorrt_llm::_v1::kernels::fusedQKNormRopeKernel<128, false, __nv_bfloat16>(__nv_bfloat16 const*, __nv_bfloat16*, int, int, int, bool, int, float, __nv_bf",
+     "category": "attention",
+     "count": 1152,
+     "total_ms": 2.9089419999999833
+    },
+    {
+     "name": "silu_and_mul_kernel",
+     "category": "other",
+     "count": 1152,
+     "total_ms": 1.5477030000000203
+    },
+    {
+     "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::ArgMaxOps<float>, unsigned int, long, 4, 4> >(at::native::ReduceOp<float, at::nat",
+     "category": "sampling",
+     "count": 32,
+     "total_ms": 0.23862500000000003
+    },
+    {
+     "name": "tensorrt_llm::batch_manager::kv_cache_manager_v2::copyBatchBlockOffsetsToDeviceKernel(int const*, int*, int, int, int, int const*, int const*, int const*)",
+     "category": "other",
+     "count": 32,
+     "total_ms": 0.196353
+    },
+    {
+     "name": "void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<at::native::index_kernel_impl<at::native::OpaqueType<2> >(at::TensorIteratorBase&",
+     "category": "other",
+     "count": 32,
+     "total_ms": 0.107361
+    },
+    {
+     "name": "void at::native::vectorized_elementwise_kernel<4, at::native::compare_scalar_kernel<int>(at::TensorIteratorBase&, at::native::(anonymous namespace)::OpType, int",
+     "category": "other",
+     "count": 64,
+     "total_ms": 0.09257700000000002
+    },
+    {
+     "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::opera",
+     "category": "other",
+     "count": 32,
+     "total_ms": 0.08550500000000003
+    },
+    {
+     "name": "void at::native::(anonymous namespace)::indexSelectSmallIndex<int, int, unsigned int, 1, 1, -2>(at::cuda::detail::TensorInfo<int, unsigned int>, at::cuda::detai",
+     "category": "other",
+     "count": 32,
+     "total_ms": 0.08486600000000001
+    },
+    {
+     "name": "kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKernel_object_at__tensorptrbf16gmemalign128oi64409640961_tensorptrbf16gmemalign16o40961_tensorptrbf16gm",
+     "category": "other",
+     "count": 32,
+     "total_ms": 0.07408
+    },
+    {
+     "name": "void at::native::_scatter_gather_elementwise_kernel<128, 8, at::native::_cuda_scatter_gather_internal_kernel<true, at::native::OpaqueType<4>, long>::operator()<",
+     "category": "other",
+     "count": 32,
+     "total_ms": 0.07107600000000001
+    }
+   ],
+   "step_shapes": [
+    {
+     "kind": "decode",
+     "batch": 1,
+     "steps": 31,
+     "step_ms_p50": 22.341818359375,
+     "step_ms_mean": 22.34243831905242,
+     "category_ms": {
+      "gemm": 20.8543621156754,
+      "attention": 1.085788117439516,
+      "allreduce": 0.0,
+      "quant": 0.0,
+      "sampling": 0.009333748109879032,
+      "memcpy": 0.005741793724798387,
+      "other": 0.25702787928427423,
+      "idle": 0.13018463331653227
+     }
+    }
+   ]
+  }
+ ]
+}

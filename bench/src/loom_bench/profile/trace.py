@@ -124,10 +124,19 @@ INDUCTOR_NON_GEMM = re.compile(r"^triton_(poi|red|per)_")
 INDUCTOR_QUANT = re.compile(r"scaled_mm|quant|fp8|e4m3|abs_clamp|clamp.*reciprocal", re.I)
 
 
+# Normalization kernels are "other" (fused with a quantize: "quant") whatever library
+# they come from: TensorRT-LLM 1.4.0rc2 runs FlashInfer's FusedAddRMSNorm, whose name the
+# attention pattern ("flashinfer") would otherwise claim (71e2c32c: 0.2-0.8 ms a step).
+NORM = re.compile(r"rms_?norm|layer_?norm", re.I)
+QUANT = re.compile(r"quant|fp8|e4m3", re.I)
+
+
 def categorize(name: str) -> str:
     inductor = bool(INDUCTOR_NON_GEMM.match(name))
     if inductor and INDUCTOR_QUANT.search(name):
         return "quant"
+    if NORM.search(name):
+        return "quant" if QUANT.search(name) else "other"
     for cat, pat in CATEGORIES:
         if inductor and cat == "gemm":
             continue

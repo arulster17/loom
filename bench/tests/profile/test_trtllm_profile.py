@@ -271,3 +271,16 @@ async def test_trtllm_style_windows_on_the_mock_provider(ctx: RunnerContext) -> 
     (rank,) = win["breakdown"]["ranks"]
     assert 0 < rank["steps"] <= 12 and rank["step_source"] == "gpu annotations"
     assert rank["source"].startswith("trtllm-trace-")
+
+
+def test_normalization_kernels_are_other_whatever_library_they_come_from() -> None:
+    # TensorRT-LLM 1.4.0rc2 runs FlashInfer's FusedAddRMSNorm; "flashinfer" alone would
+    # file it under attention (71e2c32c: 0.2-0.8 ms a step).
+    flashinfer_norm = (
+        "kernel_cutlass_kernel_flashinfernormkernelsfused_add_rmsnormFusedAddRMSNormKernel"
+        "_object_at__tensorptrbf16gmem"
+    )
+    assert categorize(flashinfer_norm) == "other"
+    assert categorize("triton_red_fused_fused_add_rms_norm_2") == "other"
+    assert categorize("fused_add_rms_norm_static_fp8_quant_kernel") == "quant"
+    assert categorize("void tensorrt_llm::_v1::kernels::fusedQKNormRopeKernel<128>") == "attention"

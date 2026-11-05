@@ -1,0 +1,220 @@
+{
+ "experiment": "d35e631b-3bf4-4b08-af5b-cd7cd155a817",
+ "engine": "trtllm",
+ "window": {
+  "run_id": "e126bfc3-e6ea-4182-9cb8-335041a72b75",
+  "cell": "trtllm-fp8-cudagraph-pad",
+  "workload": "chat-sharegpt",
+  "load_value": 1.0,
+  "client_latency": {
+   "profiled": {
+    "tokens": 431,
+    "itl_p50_ms": 79.20120599987968,
+    "itl_mean_ms": 68.9266115475633
+   },
+   "before": {
+    "tokens": 342,
+    "itl_p50_ms": 55.42115599996578,
+    "itl_mean_ms": 47.69943647953071
+   },
+   "profiler_slowdown": 1.429078924299749
+  },
+  "capture": {
+   "prefix": "loom-e126bfc3-e6ea-4182-9cb8-335041a72b75",
+   "api": "trtllm",
+   "start_s": 15.000873186999797,
+   "start_status": 200,
+   "stop_s": 23.001047293999818,
+   "stop_status": 200,
+   "stopped_s": 23.004653737999888
+  }
+ },
+ "trace_bytes": 1092046,
+ "ranks": [
+  {
+   "source": "./trtllm-trace-1793840629-72157f3b-rank-0.json",
+   "device": 0,
+   "window_ms": 1573.47073828125,
+   "busy_ms": 1563.9947817382813,
+   "kernels": 14235,
+   "steps": 32,
+   "step_source": "gpu annotations",
+   "category_ms": {
+    "gemm": 472.7017446289062,
+    "attention": 1061.0866982421876,
+    "allreduce": 0.0,
+    "quant": 5.4676611328125,
+    "sampling": 0.3310751953125,
+    "memcpy": 0.23561181640625,
+    "other": 24.17199072265625,
+    "idle": 9.47595654296875
+   },
+   "category_share": {
+    "gemm": 0.3004197873709763,
+    "attention": 0.6743606172182426,
+    "allreduce": 0.0,
+    "quant": 0.0034749048709892074,
+    "sampling": 0.00021041077362146787,
+    "memcpy": 0.00014974019578121672,
+    "other": 0.015362211787338384,
+    "idle": 0.006022327783050878
+   },
+   "per_step_ms": {
+    "gemm": 14.77192951965332,
+    "attention": 33.15895932006836,
+    "allreduce": 0.0,
+    "quant": 0.17086441040039063,
+    "sampling": 0.010346099853515625,
+    "memcpy": 0.007362869262695313,
+    "other": 0.7553747100830078,
+    "idle": 0.2961236419677734
+   },
+   "top_kernels": [
+    {
+     "name": "void tensorrt_llm::_v1::kernels::mmha::masked_multihead_attention_kernel<__nv_bfloat16, __nv_fp8_e4m3, __nv_fp8_e4m3, tensorrt_llm::_v1::kernels::KVBlockArray, ",
+     "category": "attention",
+     "count": 612,
+     "total_ms": 1020.8050309999994
+    },
+    {
+     "name": "void tensorrt_llm::_v1::kernels::cuda_core_gemm::cudaCoreGemmV2<__nv_fp8_e4m3, __nv_bfloat16, 8, 2, 128>(__nv_fp8_e4m3 const*, __nv_fp8_e4m3 const*, float const",
+     "category": "gemm",
+     "count": 2160,
+     "total_ms": 147.45227000000003
+    },
+    {
+     "name": "void tensorrt_llm::_v1::kernels::cuda_core_gemm::cudaCoreGemmV2<__nv_fp8_e4m3, __nv_bfloat16, 4, 2, 128>(__nv_fp8_e4m3 const*, __nv_fp8_e4m3 const*, float const",
+     "category": "gemm",
+     "count": 2160,
+     "total_ms": 144.5656260000001
+    },
+    {
+     "name": "sm89_xmma_gemm_e4m3bf16_e4m3f32_f32_tn_n_tilesize128x128x64_stage3_warpsize2x2x1_tensor16x8x32_execute_kernel__5x_cublas",
+     "category": "gemm",
+     "count": 252,
+     "total_ms": 108.46318600000008
+    },
+    {
+     "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x2_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x2_tn_align8",
+     "category": "gemm",
+     "count": 32,
+     "total_ms": 55.35762599999999
+    },
+    {
+     "name": "kernel_mha",
+     "category": "attention",
+     "count": 540,
+     "total_ms": 21.311436000000004
+    },
+    {
+     "name": "sm89_xmma_gemm_e4m3bf16_e4m3f32_f32_tn_n_tilesize256x128x64_stage4_warpsize4x2x1_tensor16x8x32_execute_kernel__5x_cublas",
+     "category": "gemm",
+     "count": 36,
+     "total_ms": 16.863034
+    },
+    {
+     "name": "kernel_cutlass_kernel_flashinfernormkernelsfused_add_rmsnormFusedAddRMSNormKernel_object_at__tensorptrbf16gmemalign128oi64409640961_tensorptrbf16gmemalign128oi6",
+     "category": "other",
+     "count": 2304,
+     "total_ms": 11.478285000000016
+    },
+    {
+     "name": "fmha_v2_flash_attention_e4m3_fp32_64_32_S_q_paged_kv_128_causal_sm89_kernel_nl",
+     "category": "attention",
+     "count": 72,
+     "total_ms": 11.002211999999998
+    },
+    {
+     "name": "silu_and_mul_kernel",
+     "category": "other",
+     "count": 1152,
+     "total_ms": 10.735530999999991
+    },
+    {
+     "name": "void tensorrt_llm::_v1::common::scaleMatrixPerTensorVec<true, float>(__nv_fp8_e4m3*, float const*, __nv_bfloat16 const*, long)",
+     "category": "quant",
+     "count": 2304,
+     "total_ms": 5.467701999999944
+    },
+    {
+     "name": "void tensorrt_llm::_v1::kernels::fusedQKNormRopeKernel<128, false, __nv_bfloat16>(__nv_bfloat16 const*, __nv_bfloat16*, int, int, int, bool, int, float, __nv_bf",
+     "category": "attention",
+     "count": 1152,
+     "total_ms": 4.939203999999987
+    },
+    {
+     "name": "void tensorrt_llm::_v1::kernels::applyBiasRopeUpdateKVCacheV2<__nv_bfloat16, __nv_fp8_e4m3, 256, 128, false, false, false, true, tensorrt_llm::_v1::kernels::KVB",
+     "category": "attention",
+     "count": 540,
+     "total_ms": 1.9034359999999966
+    },
+    {
+     "name": "void tensorrt_llm::_v1::kernels::applyBiasRopeUpdateKVCacheV2<__nv_bfloat16, __nv_fp8_e4m3, 256, 128, false, false, true, false, tensorrt_llm::_v1::kernels::KVB",
+     "category": "attention",
+     "count": 72,
+     "total_ms": 1.1254550000000003
+    },
+    {
+     "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::ArgMaxOps<float>, unsigned int, long, 4, 4> >(at::native::ReduceOp<float, at::nat",
+     "category": "sampling",
+     "count": 32,
+     "total_ms": 0.259683
+    }
+   ],
+   "step_shapes": [
+    {
+     "kind": "decode",
+     "batch": 4,
+     "steps": 15,
+     "step_ms_p50": 79.1221298828125,
+     "step_ms_mean": 79.50531201171876,
+     "category_ms": {
+      "gemm": 11.358251529947916,
+      "attention": 67.41174488932292,
+      "allreduce": 0.0,
+      "quant": 0.147368359375,
+      "sampling": 0.00998388671875,
+      "memcpy": 0.0056091796875,
+      "other": 0.31286162109375,
+      "idle": 0.25949248046875
+     }
+    },
+    {
+     "kind": "decode",
+     "batch": 5,
+     "steps": 14,
+     "step_ms_p50": 13.89987109375,
+     "step_ms_mean": 14.027778215680803,
+     "category_ms": {
+      "gemm": 11.564684988839286,
+      "attention": 1.654613734654018,
+      "allreduce": 0.0,
+      "quant": 0.1523733956473214,
+      "sampling": 0.01048939732142857,
+      "memcpy": 0.0077245047433035716,
+      "other": 0.34115638950892857,
+      "idle": 0.29673580496651786
+     }
+    },
+    {
+     "kind": "mixed",
+     "batch": null,
+     "steps": 2,
+     "step_ms_p50": 93.23972998046875,
+     "step_ms_mean": 85.34476245117187,
+     "category_ms": {
+      "gemm": 64.45606958007812,
+      "attention": 12.603441162109375,
+      "allreduce": 0.0,
+      "quant": 0.488532470703125,
+      "sampling": 0.012192626953125,
+      "memcpy": 0.018032958984375,
+      "other": 7.19052490234375,
+      "idle": 0.57596875
+     },
+     "prefill_tokens_mean": 1814.5
+    }
+   ]
+  }
+ ]
+}

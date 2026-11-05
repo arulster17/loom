@@ -823,19 +823,54 @@ def _latest_scores(config: str, eval_runs: Sequence[BenchEvalRun]) -> dict[str, 
     return {task: max(rows, key=_recency) for task, rows in by_task.items()}
 
 
+# Worst first: which of two gate verdicts on one config stands when they disagree.
+_GATE_SEVERITY = {"fail": 3, "inconclusive": 2, "review": 1, "pass": 0}
+
+
+def _gated_tasks(gate: BenchGateDecision) -> set[str]:
+    return {
+        str(t["task"])
+        for t in (gate.details or {}).get("tasks") or []
+        if isinstance(t, Mapping) and "task" in t
+    }
+
+
+def effective_gate(gates: Iterable[BenchGateDecision]) -> BenchGateDecision | None:
+    """The gate decision that stands for one candidate config: the latest, unless an
+    earlier one was worse on tasks the latest did not run.
+
+    A narrower gate run later (e.g. a GSM8K-only pass on 2026-11-05 for 55b35655) must
+    not clear an earlier failure on a task it never re-ran (that config's
+    tool_calling_strict FAIL). A later gate that re-ran every task of the earlier one
+    replaces it.
+    """
+    ordered = sorted(gates, key=_recency)
+    if not ordered:
+        return None
+    latest = ordered[-1]
+    covered = _gated_tasks(latest)
+    out = latest
+    for g in reversed(ordered[:-1]):
+        worse = _GATE_SEVERITY.get(g.decision, 0) > _GATE_SEVERITY.get(out.decision, 0)
+        if worse and not _gated_tasks(g) <= covered:
+            out = g
+    return out
+
+
 def quality_for(
     config: str,
     eval_runs: Iterable[BenchEvalRun],
     gate_decisions: Iterable[BenchGateDecision],
 ) -> Quality | None:
-    """Latest per-task scores of `config`, deltas vs its gate baseline, and the gate verdict.
+    """Latest per-task scores of `config`, deltas vs its gate baseline, and the gate verdict
+    (`effective_gate`: a later, narrower gate does not clear an earlier failure).
 
     A config that is only ever a gate's baseline gets gate "baseline". None when the
     store has neither eval runs nor gate decisions for it.
     """
     evals = list(eval_runs)
     gates = list(gate_decisions)
-    gate = max((g for g in gates if g.candidate_config_hash == config), key=_recency, default=None)
+    gate = effective_gate(g for g in gates if g.candidate_config_hash == config)
     is_baseline = any(g.baseline_config_hash == config for g in gates)
     scores = _latest_scores(config, evals)
     if not scores and gate is None and not is_baseline:

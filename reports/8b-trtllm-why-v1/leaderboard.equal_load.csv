@@ -1,0 +1,41 @@
+model,workload,load_mode,load,config,metric,value,value_lo,value_hi,value_ci_method,slo_met,significantly_lower,verdict
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.25,vllm-bf16,ttft_ms.p50,164.3965,137.6311,196.367,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.25,vllm-bf16,ttft_ms.p95,310.3891,298.4975,322.7544,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.25,vllm-bf16,tpot_ms.p50,34.8002,33.5967,36.0469,log_t,True,True,vllm-bf16 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.25,vllm-bf16,tpot_ms.p95,40.2447,36.2403,44.6916,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.25,vllm-bf16,e2e_ms.p95,24326.3862,20750.2259,28518.8734,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.25,trtllm-bf16,ttft_ms.p50,173.7961,165.8122,182.1644,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.25,trtllm-bf16,ttft_ms.p95,330.6798,319.5896,342.1547,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.25,trtllm-bf16,tpot_ms.p50,38.7006,37.8409,39.5797,log_t,True,False,vllm-bf16 lower
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.25,trtllm-bf16,tpot_ms.p95,46.8445,44.5911,49.2118,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,chat-sharegpt,open_loop,2.25,trtllm-bf16,e2e_ms.p95,27109.8985,24935.6632,29473.7137,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,vllm-bf16,ttft_ms.p50,183.6832,179.8696,187.5777,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,vllm-bf16,ttft_ms.p95,254.6957,239.8047,270.5114,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,vllm-bf16,tpot_ms.p50,42.709,41.5304,43.9211,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,vllm-bf16,tpot_ms.p95,44.6698,44.2745,45.0687,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,vllm-bf16,e2e_ms.p95,45896.8075,45509.943,46286.9607,log_t,True,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,trtllm-bf16,ttft_ms.p50,244.7706,135.3376,442.6902,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,trtllm-bf16,ttft_ms.p95,408.1786,132.5575,1256.8871,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,trtllm-bf16,tpot_ms.p50,53.3819,41.2055,69.1566,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,trtllm-bf16,tpot_ms.p95,57.8289,39.7395,84.1527,log_t,False,False,no significant difference
+Qwen/Qwen3-8B,fixed-1k-1k,open_loop,1.0,trtllm-bf16,e2e_ms.p95,59453.1021,40814.8734,86602.5312,log_t,False,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,2.619489972,trtllm-fp8,ttft_ms.p50,107.5595,102.7214,112.6254,log_t,True,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,2.619489972,trtllm-fp8,ttft_ms.p95,174.5642,159.0179,191.6304,log_t,True,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,2.619489972,trtllm-fp8,tpot_ms.p50,19.4015,18.6933,20.1365,log_t,True,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,2.619489972,trtllm-fp8,tpot_ms.p95,29.4256,19.4827,44.4428,log_t,True,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,2.619489972,trtllm-fp8,e2e_ms.p95,15834.538,12992.5139,19298.2357,log_t,True,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,2.619489972,trtllm-fp8-cudagraph-pad,ttft_ms.p50,105.372,97.6193,113.7404,log_t,True,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,2.619489972,trtllm-fp8-cudagraph-pad,ttft_ms.p95,169.2693,132.9986,215.4316,log_t,True,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,2.619489972,trtllm-fp8-cudagraph-pad,tpot_ms.p50,19.3497,17.7545,21.0882,log_t,True,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,2.619489972,trtllm-fp8-cudagraph-pad,tpot_ms.p95,23.3673,21.0327,25.961,log_t,True,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,2.619489972,trtllm-fp8-cudagraph-pad,e2e_ms.p95,14579.2936,11626.9928,18281.2362,log_t,True,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,3.375,trtllm-fp8,ttft_ms.p50,133.9677,109.5285,163.8599,log_t,False,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,3.375,trtllm-fp8,ttft_ms.p95,202.3896,177.8361,230.3332,log_t,False,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,3.375,trtllm-fp8,tpot_ms.p50,37.2461,22.4883,61.6888,log_t,False,False,trtllm-fp8-cudagraph-pad lower
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,3.375,trtllm-fp8,tpot_ms.p95,40.3703,25.7582,63.2716,log_t,False,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,3.375,trtllm-fp8,e2e_ms.p95,26569.3851,16474.9178,42848.9072,log_t,False,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,3.375,trtllm-fp8-cudagraph-pad,ttft_ms.p50,109.7334,101.4475,118.696,log_t,True,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,3.375,trtllm-fp8-cudagraph-pad,ttft_ms.p95,183.2965,173.1227,194.0682,log_t,True,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,3.375,trtllm-fp8-cudagraph-pad,tpot_ms.p50,20.7718,19.3826,22.2605,log_t,True,True,trtllm-fp8-cudagraph-pad lower
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,3.375,trtllm-fp8-cudagraph-pad,tpot_ms.p95,23.7975,21.7688,26.0153,log_t,True,False,no significant difference
+nvidia/Qwen3-8B-FP8,chat-sharegpt,open_loop,3.375,trtllm-fp8-cudagraph-pad,e2e_ms.p95,15508.6549,14196.9337,16941.5721,log_t,True,False,no significant difference

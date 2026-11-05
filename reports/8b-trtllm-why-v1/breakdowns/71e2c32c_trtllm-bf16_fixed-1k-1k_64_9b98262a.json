@@ -1,0 +1,356 @@
+{
+ "experiment": "71e2c32c-ed94-4e09-9142-015b96b6745f",
+ "engine": "trtllm",
+ "window": {
+  "run_id": "9b98262a-3922-4e1a-8e8c-1fe94b4b38ec",
+  "cell": "trtllm-bf16",
+  "workload": "fixed-1k-1k",
+  "load_value": 64.0,
+  "client_latency": {
+   "profiled": {
+    "tokens": 17808,
+    "itl_p50_ms": 53.93543449986282,
+    "itl_mean_ms": 59.96773209136354
+   },
+   "before": {
+    "tokens": 28736,
+    "itl_p50_ms": 50.14400850018319,
+    "itl_mean_ms": 50.137436164149484
+   },
+   "profiler_slowdown": 1.0756107481847164
+  },
+  "capture": {
+   "prefix": "loom-9b98262a-3922-4e1a-8e8c-1fe94b4b38ec",
+   "api": "trtllm",
+   "start_s": 45.000809132000086,
+   "start_status": 200,
+   "stop_s": 65.00014287700014,
+   "stop_status": 200,
+   "stopped_s": 68.81366968900011
+  }
+ },
+ "trace_bytes": 10335284,
+ "ranks": [
+  {
+   "source": "./trtllm-trace-1793844961-aa82b9ec-rank-0.json",
+   "device": 0,
+   "window_ms": 19909.844965820314,
+   "busy_ms": 19758.124902343752,
+   "kernels": 123731,
+   "steps": 293,
+   "step_source": "gpu annotations",
+   "category_ms": {
+    "gemm": 11020.74969140625,
+    "attention": 7433.871508300781,
+    "allreduce": 0.0,
+    "quant": 0.0,
+    "sampling": 6.6467568359375,
+    "memcpy": 754.6199809570312,
+    "other": 542.23696484375,
+    "idle": 151.7200634765625
+   },
+   "category_share": {
+    "gemm": 0.5535326724203942,
+    "attention": 0.3733766647134962,
+    "allreduce": 0.0,
+    "quant": 0.0,
+    "sampling": 0.0003338427218970384,
+    "memcpy": 0.03790185118229221,
+    "other": 0.027234615125061024,
+    "idle": 0.007620353836859293
+   },
+   "per_step_ms": {
+    "gemm": 37.613480175447954,
+    "attention": 25.371575113654544,
+    "allreduce": 0.0,
+    "quant": 0.0,
+    "sampling": 0.02268517691446246,
+    "memcpy": 2.5754948155530073,
+    "other": 1.8506381052687713,
+    "idle": 0.5178159163022611
+   },
+   "top_kernels": [
+    {
+     "name": "kernel_mha",
+     "category": "attention",
+     "count": 10548,
+     "total_ms": 7028.749528999996
+    },
+    {
+     "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_tn_align8",
+     "category": "gemm",
+     "count": 1718,
+     "total_ms": 4588.954587000001
+    },
+    {
+     "name": "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_32x3_tn",
+     "category": "gemm",
+     "count": 9936,
+     "total_ms": 3262.7082179999948
+    },
+    {
+     "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align8",
+     "category": "gemm",
+     "count": 19692,
+     "total_ms": 2139.7813400000045
+    },
+    {
+     "name": "ampere_bf16_s16816gemm_bf16_64x64_ldg8_f2f_stages_64x5_tn",
+     "category": "gemm",
+     "count": 9756,
+     "total_ms": 778.2166309999998
+    },
+    {
+     "name": "silu_and_mul_kernel",
+     "category": "other",
+     "count": 10548,
+     "total_ms": 275.712344999992
+    },
+    {
+     "name": "kernel_cutlass_kernel_flashinfernormkernelsfused_add_rmsnormFusedAddRMSNormKernel_object_at__tensorptrbf16gmemalign128oi64409640961_tensorptrbf16gmemalign128oi6",
+     "category": "other",
+     "count": 21096,
+     "total_ms": 239.6429259999949
+    },
+    {
+     "name": "fmha_v2_flash_attention_bf16_64_32_S_q_paged_kv_128_causal_sm89_kernel_nl",
+     "category": "attention",
+     "count": 396,
+     "total_ms": 212.9607700000002
+    },
+    {
+     "name": "std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, float, false, true, true, false, 7, false, c",
+     "category": "gemm",
+     "count": 648,
+     "total_ms": 103.98085800000011
+    },
+    {
+     "name": "void tensorrt_llm::_v1::kernels::applyBiasRopeUpdateKVCacheV2<__nv_bfloat16, __nv_bfloat16, 256, 128, false, false, false, false, tensorrt_llm::_v1::kernels::KV",
+     "category": "attention",
+     "count": 396,
+     "total_ms": 82.09728699999998
+    },
+    {
+     "name": "void tensorrt_llm::_v1::kernels::fusedQKNormRopeKernel<128, false, __nv_bfloat16>(__nv_bfloat16 const*, __nv_bfloat16*, int, int, int, bool, int, float, __nv_bf",
+     "category": "attention",
+     "count": 10548,
+     "total_ms": 74.39591200000766
+    },
+    {
+     "name": "void tensorrt_llm::_v1::kernels::applyBiasRopeUpdateKVCacheV2<__nv_bfloat16, __nv_bfloat16, 256, 128, false, false, false, true, tensorrt_llm::_v1::kernels::KVB",
+     "category": "attention",
+     "count": 10548,
+     "total_ms": 35.865313999999486
+    },
+    {
+     "name": "ampere_bf16_s16816gemm_bf16_64x128_ldg8_f2f_stages_64x3_tn",
+     "category": "gemm",
+     "count": 252,
+     "total_ms": 32.955666
+    },
+    {
+     "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x2_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x2_tn_align8",
+     "category": "gemm",
+     "count": 149,
+     "total_ms": 29.922587
+    },
+    {
+     "name": "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, fa",
+     "category": "gemm",
+     "count": 9900,
+     "total_ms": 27.19491900000165
+    }
+   ],
+   "step_shapes": [
+    {
+     "kind": "decode",
+     "batch": 1,
+     "steps": 6,
+     "step_ms_p50": 22.19843408203125,
+     "step_ms_mean": 22.228829182942707,
+     "category_ms": {
+      "gemm": 20.885251220703125,
+      "attention": 0.93875,
+      "allreduce": 0.0,
+      "quant": 0.0,
+      "sampling": 0.009306640625,
+      "memcpy": 0.014383870442708334,
+      "other": 0.25423006184895836,
+      "idle": 0.12690738932291667
+     }
+    },
+    {
+     "kind": "decode",
+     "batch": 14,
+     "steps": 1,
+     "step_ms_p50": 41.80142626953125,
+     "step_ms_mean": 41.80142626953125,
+     "category_ms": {
+      "gemm": 22.7044541015625,
+      "attention": 7.18747998046875,
+      "allreduce": 0.0,
+      "quant": 0.0,
+      "sampling": 0.011998046875,
+      "memcpy": 11.4354111328125,
+      "other": 0.3357099609375,
+      "idle": 0.126373046875
+     }
+    },
+    {
+     "kind": "decode",
+     "batch": 21,
+     "steps": 1,
+     "step_ms_p50": 34.2970830078125,
+     "step_ms_mean": 34.2970830078125,
+     "category_ms": {
+      "gemm": 23.3015126953125,
+      "attention": 10.496408203125,
+      "allreduce": 0.0,
+      "quant": 0.0,
+      "sampling": 0.01356787109375,
+      "memcpy": 0.00912255859375,
+      "other": 0.33920849609375,
+      "idle": 0.13726318359375
+     }
+    },
+    {
+     "kind": "decode",
+     "batch": 28,
+     "steps": 1,
+     "step_ms_p50": 39.20982177734375,
+     "step_ms_mean": 39.20982177734375,
+     "category_ms": {
+      "gemm": 23.6085576171875,
+      "attention": 13.7494140625,
+      "allreduce": 0.0,
+      "quant": 0.0,
+      "sampling": 0.01680029296875,
+      "memcpy": 0.00784130859375,
+      "other": 0.3374140625,
+      "idle": 1.48979443359375
+     }
+    },
+    {
+     "kind": "decode",
+     "batch": 35,
+     "steps": 1,
+     "step_ms_p50": 62.89556396484375,
+     "step_ms_mean": 62.89556396484375,
+     "category_ms": {
+      "gemm": 24.57695263671875,
+      "attention": 17.2284130859375,
+      "allreduce": 0.0,
+      "quant": 0.0,
+      "sampling": 0.01760009765625,
+      "memcpy": 0.00556982421875,
+      "other": 0.3982392578125,
+      "idle": 20.6687890625
+     }
+    },
+    {
+     "kind": "decode",
+     "batch": 42,
+     "steps": 1,
+     "step_ms_p50": 59.8591259765625,
+     "step_ms_mean": 59.8591259765625,
+     "category_ms": {
+      "gemm": 24.61941552734375,
+      "attention": 20.5138720703125,
+      "allreduce": 0.0,
+      "quant": 0.0,
+      "sampling": 0.01852783203125,
+      "memcpy": 0.00563330078125,
+      "other": 0.41651220703125,
+      "idle": 14.2851650390625
+     }
+    },
+    {
+     "kind": "decode",
+     "batch": 49,
+     "steps": 1,
+     "step_ms_p50": 61.5949462890625,
+     "step_ms_mean": 61.5949462890625,
+     "category_ms": {
+      "gemm": 24.67703271484375,
+      "attention": 24.05496435546875,
+      "allreduce": 0.0,
+      "quant": 0.0,
+      "sampling": 0.02025634765625,
+      "memcpy": 0.0056318359375,
+      "other": 0.43039990234375,
+      "idle": 12.4066611328125
+     }
+    },
+    {
+     "kind": "decode",
+     "batch": 56,
+     "steps": 1,
+     "step_ms_p50": 116.00756787109376,
+     "step_ms_mean": 116.00756787109376,
+     "category_ms": {
+      "gemm": 24.61535302734375,
+      "attention": 27.3851982421875,
+      "allreduce": 0.0,
+      "quant": 0.0,
+      "sampling": 0.02182421875,
+      "memcpy": 0.00672119140625,
+      "other": 0.43929931640625,
+      "idle": 63.539171875
+     }
+    },
+    {
+     "kind": "decode",
+     "batch": 63,
+     "steps": 1,
+     "step_ms_p50": 56.22204296875,
+     "step_ms_mean": 56.22204296875,
+     "category_ms": {
+      "gemm": 24.611630859375,
+      "attention": 30.72684423828125,
+      "allreduce": 0.0,
+      "quant": 0.0,
+      "sampling": 0.0234560546875,
+      "memcpy": 0.0068154296875,
+      "other": 0.460162109375,
+      "idle": 0.39313427734375
+     }
+    },
+    {
+     "kind": "decode",
+     "batch": 64,
+     "steps": 267,
+     "step_ms_p50": 54.2816376953125,
+     "step_ms_mean": 50.774447218077015,
+     "category_ms": {
+      "gemm": 24.55007057035639,
+      "attention": 25.579831047372426,
+      "allreduce": 0.0,
+      "quant": 0.0,
+      "sampling": 0.023335573575023406,
+      "memcpy": 0.09210243665145132,
+      "other": 0.4082196552405197,
+      "idle": 0.12088793122366573
+     }
+    },
+    {
+     "kind": "mixed",
+     "batch": null,
+     "steps": 11,
+     "step_ms_p50": 619.2421000976562,
+     "step_ms_mean": 518.6688196022727,
+     "category_ms": {
+      "gemm": 374.8450882457386,
+      "attention": 39.067469815340914,
+      "allreduce": 0.0,
+      "quant": 0.0,
+      "sampling": 0.017527299360795452,
+      "memcpy": 65.3140126953125,
+      "other": 38.92287060546875,
+      "idle": 0.5018509410511364
+     },
+     "prefill_tokens_mean": 5957.818181818182
+    }
+   ]
+  }
+ ]
+}
