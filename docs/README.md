@@ -14,8 +14,8 @@
 - [quality-gate.md](quality-gate.md): eval suites, the gate's decision rule, sample sizes, logprob divergence, sanity checks.
 - [perf/roofline-and-profiling.md](perf/roofline-and-profiling.md): why the numbers come out as they do: decode-step floors (`bench roofline`), achieved share per config, the fp8-kv8 2.4x explained, engine profile windows (`profile:`, `bench profile analyze`).
 - [cost-model.md](cost-model.md): $/1M tokens at SLO: goodput, allocation, CIs, what the hourly price includes, margins.
-- [perf/tensorrt-llm.md](perf/tensorrt-llm.md): TensorRT-LLM as a third engine: what it does differently from vLLM, the pinned version and its API gaps, the proposed comparison and its quote.
-- [perf/speculative-decoding.md](perf/speculative-decoding.md): speculative decoding in plain words, the Qwen3-8B n-gram vs EAGLE3 study (proposed) and why EAGLE3 did not help the 70B on 4x L40S.
+- [perf/tensorrt-llm.md](perf/tensorrt-llm.md): TensorRT-LLM as a third engine: what it does differently from vLLM, the pinned version and its API gaps, the measured comparison (46938d1f, 9647a23b, 08204560) and the profiled "why" (71e2c32c, ad5b1408).
+- [perf/speculative-decoding.md](perf/speculative-decoding.md): speculative decoding in plain words, the Qwen3-8B n-gram vs EAGLE3 study (measured, 53e4c107) and why EAGLE3 did not help the 70B on 4x L40S.
 - [site.md](site.md): the public results site: snapshot export, build, deployment, waitlist form.
 
 ## Write-ups
