@@ -98,7 +98,7 @@ def _candidate(suite: Path, baseline: dict[str, str], subset: str = "now", **ove
     doc = {
         "name": "fp8-like",
         "variants": [
-            {"name": "noisy-kernels", "mock": {**JITTER, "logprob_noise": 0.3}},
+            {"name": "noisy-kernels", "mock": {**JITTER, "logprob_noise": 0.1}},
             {"name": "broken", "mock": {**JITTER, "degrade": 0.3, "logprob_noise": 3.0}},
         ],
         "workloads": [],
