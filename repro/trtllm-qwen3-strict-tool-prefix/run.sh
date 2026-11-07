@@ -4,7 +4,7 @@
 #
 # Needs: Docker with the NVIDIA runtime, one GPU that holds the model (an L40S 48 GB for
 # Qwen3-8B BF16), internet for the image and weights. Prints three accuracies on the same
-# 45 items: plain tools, strict tools (stock parser), strict tools (parser with the space
+# 45 items: plain tools, strict tools (stock parser), strict tools (parser with both spaces
 # restored). Everything else is identical between the last two runs.
 #
 #   ./run.sh                                   # Qwen/Qwen3-8B BF16

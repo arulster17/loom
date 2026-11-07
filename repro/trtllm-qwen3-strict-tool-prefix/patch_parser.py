@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Apply the one-character fix to the installed Qwen3 tool parser (run inside the image).
+"""Apply the fix to the installed Qwen3 tool parser (run inside the image).
 
-Changes the strict-tools structural tag's forced prefix from `{"name":"` to `{"name": "`,
-which is what Qwen3's chat template writes. Fails loudly if the line is not found once.
+Restores the two spaces Qwen3's chat template writes and the strict-tools structural tag
+drops: after `"name":` and after `"arguments":`. Restoring only the first is not enough:
+the grammar then still rejects the template's call at the space before `{`. Fails loudly
+if the line is not found exactly once.
 """
 
 import importlib.util
 import sys
 from pathlib import Path
 
-OLD = """begin='<tool_call>\\n{"name":"' + name"""
-NEW = """begin='<tool_call>\\n{"name": "' + name"""
+OLD = """begin='<tool_call>\\n{"name":"' + name + '", "arguments":',"""
+NEW = """begin='<tool_call>\\n{"name": "' + name + '", "arguments": ',"""
 
 spec = importlib.util.find_spec("tensorrt_llm.serve.tool_parser.qwen3_tool_parser")
 if spec is None or spec.origin is None:

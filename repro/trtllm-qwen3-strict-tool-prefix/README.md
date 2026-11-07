@@ -15,8 +15,11 @@ v1.4.0rc2 and on main at 03d4be4):
 begin='<tool_call>\n{"name":"' + name + '", "arguments":',
 ```
 
-Qwen3's chat template, and so its training data, writes `{"name": "` with a space after
-the colon. vLLM's hermes structural tag writes it with the space too. Forcing the
+Qwen3's chat template, and so its training data, writes `{"name": "` and
+`"arguments": {` with a space after each colon. vLLM's hermes structural tag writes the
+spaces too. Run through xgrammar with Qwen3's tokenizer, the stock tag rejects the
+template's own call at the space after `"name":`; with only that space restored it still
+rejects at the space after `"arguments":`; with both restored it accepts the whole call. Forcing the
 model off its usual tokens just before it names the function changes which function it
 picks when it has several to choose from.
 
@@ -28,7 +31,7 @@ picks when it has several to choose from.
 | `repro.py` | Standard-library client: sends the 45 items, counts right-function calls |
 | `items.json` | 45 items, each with 3 functions to choose from and the right one |
 | `template_check.py` | No GPU work: prints the template's tool call next to the forced prefix |
-| `patch_parser.py` | The one-character fix, applied inside the image for the third run |
+| `patch_parser.py` | The fix (both spaces restored), applied inside the image for the third run |
 | `options.yaml` | `guided_decoding_backend: xgrammar` (strict tools need a grammar backend) |
 | `make_items.py` | Loom only: regenerates `items.json` from Loom's tool_calling data |
 
@@ -48,7 +51,8 @@ three times (greedy, non-thinking, `tool_choice: auto`):
 
 1. plain tools, stock parser;
 2. strict tools (`"strict": true`, `additionalProperties: false`), stock parser;
-3. strict tools, parser patched to `{"name": "`. Nothing else changes from run 2.
+3. strict tools, parser patched to `{"name": "` ... `"arguments": ` (both spaces).
+   Nothing else changes from run 2.
 
 Output goes to `out/`: `summary.txt`, one `.jsonl` per run with every reply, the server
 logs and `versions.txt`.
