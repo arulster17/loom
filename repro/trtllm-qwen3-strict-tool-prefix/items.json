@@ -1,0 +1,4679 @@
+{
+ "source": "Loom tool_calling data version 2 (sha256 af62bc3274f1f225de222bca2d33747d41350f2794cab97b9a73e413cc4b09b0), category 'multiple'",
+ "items": [
+  {
+   "id": "m-weather-1",
+   "query": "Do I need an umbrella in Bergen today?",
+   "expected_function": "get_weather",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ],
+         "description": "Temperature unit"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "find_route",
+      "description": "Directions between two places.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "origin": {
+         "type": "string"
+        },
+        "destination": {
+         "type": "string"
+        },
+        "mode": {
+         "type": "string",
+         "enum": [
+          "driving",
+          "walking",
+          "cycling",
+          "transit"
+         ]
+        }
+       },
+       "required": [
+        "origin",
+        "destination",
+        "mode"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_thermostat",
+      "description": "Set the home thermostat.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "temperature": {
+         "type": "number"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "temperature",
+        "unit"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-thermo-1",
+   "query": "Turn the house temperature down to 19 celsius.",
+   "expected_function": "set_thermostat",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ],
+         "description": "Temperature unit"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_thermostat",
+      "description": "Set the home thermostat.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "temperature": {
+         "type": "number"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "temperature",
+        "unit"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_timer",
+      "description": "Start a countdown timer.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "minutes": {
+         "type": "integer"
+        },
+        "label": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "minutes"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-timer-1",
+   "query": "Give me a 7 minute timer for the eggs.",
+   "expected_function": "set_timer",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "create_reminder",
+      "description": "Remind the user about something later.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "string"
+        },
+        "days_from_now": {
+         "type": "integer"
+        },
+        "notify": {
+         "type": "boolean",
+         "description": "Send a push notification"
+        }
+       },
+       "required": [
+        "text",
+        "days_from_now"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_timer",
+      "description": "Start a countdown timer.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "minutes": {
+         "type": "integer"
+        },
+        "label": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "minutes"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_event",
+      "description": "Add an event to the calendar.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "date": {
+         "type": "string",
+         "description": "YYYY-MM-DD"
+        },
+        "start_time": {
+         "type": "string",
+         "description": "24-hour HH:MM"
+        },
+        "duration_minutes": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "title",
+        "date",
+        "start_time",
+        "duration_minutes"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-reminder-1",
+   "query": "In 3 days remind me to water the plants. No push notification.",
+   "expected_function": "create_reminder",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "create_reminder",
+      "description": "Remind the user about something later.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "string"
+        },
+        "days_from_now": {
+         "type": "integer"
+        },
+        "notify": {
+         "type": "boolean",
+         "description": "Send a push notification"
+        }
+       },
+       "required": [
+        "text",
+        "days_from_now"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_timer",
+      "description": "Start a countdown timer.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "minutes": {
+         "type": "integer"
+        },
+        "label": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "minutes"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_event",
+      "description": "Add an event to the calendar.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "date": {
+         "type": "string",
+         "description": "YYYY-MM-DD"
+        },
+        "start_time": {
+         "type": "string",
+         "description": "24-hour HH:MM"
+        },
+        "duration_minutes": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "title",
+        "date",
+        "start_time",
+        "duration_minutes"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-event-1",
+   "query": "Add 'Piano lesson' to my calendar on 2026-10-20 at 17:00 for 30 minutes.",
+   "expected_function": "create_event",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "create_reminder",
+      "description": "Remind the user about something later.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "string"
+        },
+        "days_from_now": {
+         "type": "integer"
+        },
+        "notify": {
+         "type": "boolean",
+         "description": "Send a push notification"
+        }
+       },
+       "required": [
+        "text",
+        "days_from_now"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_timer",
+      "description": "Start a countdown timer.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "minutes": {
+         "type": "integer"
+        },
+        "label": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "minutes"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_event",
+      "description": "Add an event to the calendar.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "date": {
+         "type": "string",
+         "description": "YYYY-MM-DD"
+        },
+        "start_time": {
+         "type": "string",
+         "description": "24-hour HH:MM"
+        },
+        "duration_minutes": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "title",
+        "date",
+        "start_time",
+        "duration_minutes"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-currency-1",
+   "query": "Change 500 euros into Polish zloty.",
+   "expected_function": "convert_currency",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_stock_price",
+      "description": "Latest price of a listed stock.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "ticker": {
+         "type": "string"
+        },
+        "exchange": {
+         "type": "string",
+         "enum": [
+          "NASDAQ",
+          "NYSE",
+          "LSE"
+         ]
+        }
+       },
+       "required": [
+        "ticker"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "convert_currency",
+      "description": "Convert an amount of money between currencies.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "amount": {
+         "type": "number"
+        },
+        "from_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. USD"
+        },
+        "to_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. EUR"
+        }
+       },
+       "required": [
+        "amount",
+        "from_currency",
+        "to_currency"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "calculate_tip",
+      "description": "Work out a restaurant tip.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "bill_amount": {
+         "type": "number"
+        },
+        "tip_percent": {
+         "type": "number"
+        },
+        "split": {
+         "type": "integer",
+         "description": "Number of people sharing; defaults to 1"
+        }
+       },
+       "required": [
+        "bill_amount",
+        "tip_percent"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-stock-1",
+   "query": "Price of KO on the NYSE?",
+   "expected_function": "get_stock_price",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_stock_price",
+      "description": "Latest price of a listed stock.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "ticker": {
+         "type": "string"
+        },
+        "exchange": {
+         "type": "string",
+         "enum": [
+          "NASDAQ",
+          "NYSE",
+          "LSE"
+         ]
+        }
+       },
+       "required": [
+        "ticker"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "convert_currency",
+      "description": "Convert an amount of money between currencies.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "amount": {
+         "type": "number"
+        },
+        "from_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. USD"
+        },
+        "to_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. EUR"
+        }
+       },
+       "required": [
+        "amount",
+        "from_currency",
+        "to_currency"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "calculate_tip",
+      "description": "Work out a restaurant tip.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "bill_amount": {
+         "type": "number"
+        },
+        "tip_percent": {
+         "type": "number"
+        },
+        "split": {
+         "type": "integer",
+         "description": "Number of people sharing; defaults to 1"
+        }
+       },
+       "required": [
+        "bill_amount",
+        "tip_percent"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-tip-1",
+   "query": "Our bill is 90 and we want to leave 12 percent.",
+   "expected_function": "calculate_tip",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_stock_price",
+      "description": "Latest price of a listed stock.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "ticker": {
+         "type": "string"
+        },
+        "exchange": {
+         "type": "string",
+         "enum": [
+          "NASDAQ",
+          "NYSE",
+          "LSE"
+         ]
+        }
+       },
+       "required": [
+        "ticker"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "convert_currency",
+      "description": "Convert an amount of money between currencies.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "amount": {
+         "type": "number"
+        },
+        "from_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. USD"
+        },
+        "to_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. EUR"
+        }
+       },
+       "required": [
+        "amount",
+        "from_currency",
+        "to_currency"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "calculate_tip",
+      "description": "Work out a restaurant tip.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "bill_amount": {
+         "type": "number"
+        },
+        "tip_percent": {
+         "type": "number"
+        },
+        "split": {
+         "type": "integer",
+         "description": "Number of people sharing; defaults to 1"
+        }
+       },
+       "required": [
+        "bill_amount",
+        "tip_percent"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-route-1",
+   "query": "Driving directions from Lyon to Geneva.",
+   "expected_function": "find_route",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "book_table",
+      "description": "Reserve a restaurant table.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "restaurant": {
+         "type": "string"
+        },
+        "party_size": {
+         "type": "integer"
+        },
+        "time": {
+         "type": "string",
+         "description": "24-hour HH:MM"
+        }
+       },
+       "required": [
+        "restaurant",
+        "party_size",
+        "time"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "find_route",
+      "description": "Directions between two places.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "origin": {
+         "type": "string"
+        },
+        "destination": {
+         "type": "string"
+        },
+        "mode": {
+         "type": "string",
+         "enum": [
+          "driving",
+          "walking",
+          "cycling",
+          "transit"
+         ]
+        }
+       },
+       "required": [
+        "origin",
+        "destination",
+        "mode"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ],
+         "description": "Temperature unit"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-table-1",
+   "query": "Get a table for 3 at Olive & Thyme at 13:00.",
+   "expected_function": "book_table",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "book_table",
+      "description": "Reserve a restaurant table.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "restaurant": {
+         "type": "string"
+        },
+        "party_size": {
+         "type": "integer"
+        },
+        "time": {
+         "type": "string",
+         "description": "24-hour HH:MM"
+        }
+       },
+       "required": [
+        "restaurant",
+        "party_size",
+        "time"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "find_route",
+      "description": "Directions between two places.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "origin": {
+         "type": "string"
+        },
+        "destination": {
+         "type": "string"
+        },
+        "mode": {
+         "type": "string",
+         "enum": [
+          "driving",
+          "walking",
+          "cycling",
+          "transit"
+         ]
+        }
+       },
+       "required": [
+        "origin",
+        "destination",
+        "mode"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ],
+         "description": "Temperature unit"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-translate-1",
+   "query": "Translate 'thank you very much' to Italian.",
+   "expected_function": "translate_text",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "define_word",
+      "description": "Dictionary definition of a word.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "word": {
+         "type": "string"
+        },
+        "language": {
+         "type": "string",
+         "description": "Dictionary language; defaults to English"
+        }
+       },
+       "required": [
+        "word"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "translate_text",
+      "description": "Translate text into another language.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "string"
+        },
+        "target_language": {
+         "type": "string",
+         "description": "Language name or ISO 639-1 code"
+        }
+       },
+       "required": [
+        "text",
+        "target_language"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search_books",
+      "description": "Search the library catalogue.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "max_results": {
+         "type": "integer",
+         "description": "Defaults to 10"
+        },
+        "available_only": {
+         "type": "boolean",
+         "description": "Only books that can be borrowed now"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-define-1",
+   "query": "Define the word 'sonder'.",
+   "expected_function": "define_word",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "define_word",
+      "description": "Dictionary definition of a word.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "word": {
+         "type": "string"
+        },
+        "language": {
+         "type": "string",
+         "description": "Dictionary language; defaults to English"
+        }
+       },
+       "required": [
+        "word"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "translate_text",
+      "description": "Translate text into another language.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "string"
+        },
+        "target_language": {
+         "type": "string",
+         "description": "Language name or ISO 639-1 code"
+        }
+       },
+       "required": [
+        "text",
+        "target_language"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search_books",
+      "description": "Search the library catalogue.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "max_results": {
+         "type": "integer",
+         "description": "Defaults to 10"
+        },
+        "available_only": {
+         "type": "boolean",
+         "description": "Only books that can be borrowed now"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-books-1",
+   "query": "Look for books on sourdough baking that are on the shelf now.",
+   "expected_function": "search_books",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "define_word",
+      "description": "Dictionary definition of a word.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "word": {
+         "type": "string"
+        },
+        "language": {
+         "type": "string",
+         "description": "Dictionary language; defaults to English"
+        }
+       },
+       "required": [
+        "word"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "translate_text",
+      "description": "Translate text into another language.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "string"
+        },
+        "target_language": {
+         "type": "string",
+         "description": "Language name or ISO 639-1 code"
+        }
+       },
+       "required": [
+        "text",
+        "target_language"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search_books",
+      "description": "Search the library catalogue.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "max_results": {
+         "type": "integer",
+         "description": "Defaults to 10"
+        },
+        "available_only": {
+         "type": "boolean",
+         "description": "Only books that can be borrowed now"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-cart-1",
+   "query": "Add 2 units of product ZX-900 to my order.",
+   "expected_function": "add_to_cart",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "add_to_cart",
+      "description": "Add a product to the shopping cart.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "product_id": {
+         "type": "string"
+        },
+        "quantity": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "product_id",
+        "quantity"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search_books",
+      "description": "Search the library catalogue.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "max_results": {
+         "type": "integer",
+         "description": "Defaults to 10"
+        },
+        "available_only": {
+         "type": "boolean",
+         "description": "Only books that can be borrowed now"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "compute_area",
+      "description": "Area of a simple shape.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "shape": {
+         "type": "string",
+         "enum": [
+          "circle",
+          "rectangle",
+          "triangle"
+         ]
+        },
+        "dimensions": {
+         "type": "array",
+         "items": {
+          "type": "number"
+         },
+         "description": "circle: [radius]; rectangle: [width, height]; triangle: [base, height]"
+        }
+       },
+       "required": [
+        "shape",
+        "dimensions"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-area-1",
+   "query": "I need the area of a 6 by 9 rectangle.",
+   "expected_function": "compute_area",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "add_to_cart",
+      "description": "Add a product to the shopping cart.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "product_id": {
+         "type": "string"
+        },
+        "quantity": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "product_id",
+        "quantity"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search_books",
+      "description": "Search the library catalogue.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "max_results": {
+         "type": "integer",
+         "description": "Defaults to 10"
+        },
+        "available_only": {
+         "type": "boolean",
+         "description": "Only books that can be borrowed now"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "compute_area",
+      "description": "Area of a simple shape.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "shape": {
+         "type": "string",
+         "enum": [
+          "circle",
+          "rectangle",
+          "triangle"
+         ]
+        },
+        "dimensions": {
+         "type": "array",
+         "items": {
+          "type": "number"
+         },
+         "description": "circle: [radius]; rectangle: [width, height]; triangle: [base, height]"
+        }
+       },
+       "required": [
+        "shape",
+        "dimensions"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-area-2",
+   "query": "A circular pond has a radius of 4 metres. What is its area?",
+   "expected_function": "compute_area",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "compute_area",
+      "description": "Area of a simple shape.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "shape": {
+         "type": "string",
+         "enum": [
+          "circle",
+          "rectangle",
+          "triangle"
+         ]
+        },
+        "dimensions": {
+         "type": "array",
+         "items": {
+          "type": "number"
+         },
+         "description": "circle: [radius]; rectangle: [width, height]; triangle: [base, height]"
+        }
+       },
+       "required": [
+        "shape",
+        "dimensions"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "convert_currency",
+      "description": "Convert an amount of money between currencies.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "amount": {
+         "type": "number"
+        },
+        "from_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. USD"
+        },
+        "to_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. EUR"
+        }
+       },
+       "required": [
+        "amount",
+        "from_currency",
+        "to_currency"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_thermostat",
+      "description": "Set the home thermostat.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "temperature": {
+         "type": "number"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "temperature",
+        "unit"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ],
+         "description": "Temperature unit"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-weather-2",
+   "query": "Temperature in Cairo in fahrenheit, please.",
+   "expected_function": "get_weather",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "compute_area",
+      "description": "Area of a simple shape.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "shape": {
+         "type": "string",
+         "enum": [
+          "circle",
+          "rectangle",
+          "triangle"
+         ]
+        },
+        "dimensions": {
+         "type": "array",
+         "items": {
+          "type": "number"
+         },
+         "description": "circle: [radius]; rectangle: [width, height]; triangle: [base, height]"
+        }
+       },
+       "required": [
+        "shape",
+        "dimensions"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "convert_currency",
+      "description": "Convert an amount of money between currencies.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "amount": {
+         "type": "number"
+        },
+        "from_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. USD"
+        },
+        "to_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. EUR"
+        }
+       },
+       "required": [
+        "amount",
+        "from_currency",
+        "to_currency"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_thermostat",
+      "description": "Set the home thermostat.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "temperature": {
+         "type": "number"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "temperature",
+        "unit"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ],
+         "description": "Temperature unit"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-currency-2",
+   "query": "What do 40 Australian dollars come to in New Zealand dollars?",
+   "expected_function": "convert_currency",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "compute_area",
+      "description": "Area of a simple shape.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "shape": {
+         "type": "string",
+         "enum": [
+          "circle",
+          "rectangle",
+          "triangle"
+         ]
+        },
+        "dimensions": {
+         "type": "array",
+         "items": {
+          "type": "number"
+         },
+         "description": "circle: [radius]; rectangle: [width, height]; triangle: [base, height]"
+        }
+       },
+       "required": [
+        "shape",
+        "dimensions"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "convert_currency",
+      "description": "Convert an amount of money between currencies.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "amount": {
+         "type": "number"
+        },
+        "from_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. USD"
+        },
+        "to_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. EUR"
+        }
+       },
+       "required": [
+        "amount",
+        "from_currency",
+        "to_currency"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_thermostat",
+      "description": "Set the home thermostat.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "temperature": {
+         "type": "number"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "temperature",
+        "unit"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ],
+         "description": "Temperature unit"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-reminder-2",
+   "query": "Remind me tomorrow to call the bank, with a notification.",
+   "expected_function": "create_reminder",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "create_reminder",
+      "description": "Remind the user about something later.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "string"
+        },
+        "days_from_now": {
+         "type": "integer"
+        },
+        "notify": {
+         "type": "boolean",
+         "description": "Send a push notification"
+        }
+       },
+       "required": [
+        "text",
+        "days_from_now"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "book_table",
+      "description": "Reserve a restaurant table.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "restaurant": {
+         "type": "string"
+        },
+        "party_size": {
+         "type": "integer"
+        },
+        "time": {
+         "type": "string",
+         "description": "24-hour HH:MM"
+        }
+       },
+       "required": [
+        "restaurant",
+        "party_size",
+        "time"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "add_to_cart",
+      "description": "Add a product to the shopping cart.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "product_id": {
+         "type": "string"
+        },
+        "quantity": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "product_id",
+        "quantity"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "find_route",
+      "description": "Directions between two places.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "origin": {
+         "type": "string"
+        },
+        "destination": {
+         "type": "string"
+        },
+        "mode": {
+         "type": "string",
+         "enum": [
+          "driving",
+          "walking",
+          "cycling",
+          "transit"
+         ]
+        }
+       },
+       "required": [
+        "origin",
+        "destination",
+        "mode"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-table-2",
+   "query": "Reserve Sakura Garden for a group of 10 at 20:45.",
+   "expected_function": "book_table",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "create_reminder",
+      "description": "Remind the user about something later.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "string"
+        },
+        "days_from_now": {
+         "type": "integer"
+        },
+        "notify": {
+         "type": "boolean",
+         "description": "Send a push notification"
+        }
+       },
+       "required": [
+        "text",
+        "days_from_now"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "book_table",
+      "description": "Reserve a restaurant table.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "restaurant": {
+         "type": "string"
+        },
+        "party_size": {
+         "type": "integer"
+        },
+        "time": {
+         "type": "string",
+         "description": "24-hour HH:MM"
+        }
+       },
+       "required": [
+        "restaurant",
+        "party_size",
+        "time"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "add_to_cart",
+      "description": "Add a product to the shopping cart.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "product_id": {
+         "type": "string"
+        },
+        "quantity": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "product_id",
+        "quantity"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "find_route",
+      "description": "Directions between two places.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "origin": {
+         "type": "string"
+        },
+        "destination": {
+         "type": "string"
+        },
+        "mode": {
+         "type": "string",
+         "enum": [
+          "driving",
+          "walking",
+          "cycling",
+          "transit"
+         ]
+        }
+       },
+       "required": [
+        "origin",
+        "destination",
+        "mode"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-alarm-1",
+   "query": "Set an alarm for 5:50 am every Monday, Wednesday and Friday, labelled 'Early shift'.",
+   "expected_function": "set_alarm",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "set_timer",
+      "description": "Start a countdown timer.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "minutes": {
+         "type": "integer"
+        },
+        "label": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "minutes"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_alarm",
+      "description": "Set an alarm clock.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "time": {
+         "type": "string",
+         "description": "24-hour HH:MM"
+        },
+        "repeat_days": {
+         "type": "array",
+         "items": {
+          "type": "string",
+          "enum": [
+           "mon",
+           "tue",
+           "wed",
+           "thu",
+           "fri",
+           "sat",
+           "sun"
+          ]
+         },
+         "description": "Days the alarm repeats on; omit for a one-off alarm"
+        },
+        "label": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "time"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_reminder",
+      "description": "Remind the user about something later.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "string"
+        },
+        "days_from_now": {
+         "type": "integer"
+        },
+        "notify": {
+         "type": "boolean",
+         "description": "Send a push notification"
+        }
+       },
+       "required": [
+        "text",
+        "days_from_now"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-timer-2",
+   "query": "Count down 20 minutes and label it 'Tea'.",
+   "expected_function": "set_timer",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "set_alarm",
+      "description": "Set an alarm clock.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "time": {
+         "type": "string",
+         "description": "24-hour HH:MM"
+        },
+        "repeat_days": {
+         "type": "array",
+         "items": {
+          "type": "string",
+          "enum": [
+           "mon",
+           "tue",
+           "wed",
+           "thu",
+           "fri",
+           "sat",
+           "sun"
+          ]
+         },
+         "description": "Days the alarm repeats on; omit for a one-off alarm"
+        },
+        "label": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "time"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_timer",
+      "description": "Start a countdown timer.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "minutes": {
+         "type": "integer"
+        },
+        "label": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "minutes"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_reminder",
+      "description": "Remind the user about something later.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "string"
+        },
+        "days_from_now": {
+         "type": "integer"
+        },
+        "notify": {
+         "type": "boolean",
+         "description": "Send a push notification"
+        }
+       },
+       "required": [
+        "text",
+        "days_from_now"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-units-1",
+   "query": "How many ounces are in 340 grams?",
+   "expected_function": "convert_units",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "convert_currency",
+      "description": "Convert an amount of money between currencies.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "amount": {
+         "type": "number"
+        },
+        "from_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. USD"
+        },
+        "to_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. EUR"
+        }
+       },
+       "required": [
+        "amount",
+        "from_currency",
+        "to_currency"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "convert_units",
+      "description": "Convert a measurement from one unit to another.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "value": {
+         "type": "number"
+        },
+        "from_unit": {
+         "type": "string",
+         "enum": [
+          "millimeters",
+          "centimeters",
+          "meters",
+          "kilometers",
+          "inches",
+          "feet",
+          "miles",
+          "grams",
+          "kilograms",
+          "ounces",
+          "pounds",
+          "liters",
+          "gallons"
+         ]
+        },
+        "to_unit": {
+         "type": "string",
+         "enum": [
+          "millimeters",
+          "centimeters",
+          "meters",
+          "kilometers",
+          "inches",
+          "feet",
+          "miles",
+          "grams",
+          "kilograms",
+          "ounces",
+          "pounds",
+          "liters",
+          "gallons"
+         ]
+        }
+       },
+       "required": [
+        "value",
+        "from_unit",
+        "to_unit"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "compute_area",
+      "description": "Area of a simple shape.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "shape": {
+         "type": "string",
+         "enum": [
+          "circle",
+          "rectangle",
+          "triangle"
+         ]
+        },
+        "dimensions": {
+         "type": "array",
+         "items": {
+          "type": "number"
+         },
+         "description": "circle: [radius]; rectangle: [width, height]; triangle: [base, height]"
+        }
+       },
+       "required": [
+        "shape",
+        "dimensions"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-currency-3",
+   "query": "What is 1,000 Mexican pesos in US dollars?",
+   "expected_function": "convert_currency",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "convert_units",
+      "description": "Convert a measurement from one unit to another.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "value": {
+         "type": "number"
+        },
+        "from_unit": {
+         "type": "string",
+         "enum": [
+          "millimeters",
+          "centimeters",
+          "meters",
+          "kilometers",
+          "inches",
+          "feet",
+          "miles",
+          "grams",
+          "kilograms",
+          "ounces",
+          "pounds",
+          "liters",
+          "gallons"
+         ]
+        },
+        "to_unit": {
+         "type": "string",
+         "enum": [
+          "millimeters",
+          "centimeters",
+          "meters",
+          "kilometers",
+          "inches",
+          "feet",
+          "miles",
+          "grams",
+          "kilograms",
+          "ounces",
+          "pounds",
+          "liters",
+          "gallons"
+         ]
+        }
+       },
+       "required": [
+        "value",
+        "from_unit",
+        "to_unit"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "calculate_loan_payment",
+      "description": "Monthly payment on a fixed-rate loan.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "principal": {
+         "type": "number"
+        },
+        "annual_rate_percent": {
+         "type": "number"
+        },
+        "term_months": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "principal",
+        "annual_rate_percent",
+        "term_months"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "convert_currency",
+      "description": "Convert an amount of money between currencies.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "amount": {
+         "type": "number"
+        },
+        "from_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. USD"
+        },
+        "to_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. EUR"
+        }
+       },
+       "required": [
+        "amount",
+        "from_currency",
+        "to_currency"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-loan-1",
+   "query": "What's the monthly payment on 15000 borrowed at 4.5% over 48 months?",
+   "expected_function": "calculate_loan_payment",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "calculate_tip",
+      "description": "Work out a restaurant tip.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "bill_amount": {
+         "type": "number"
+        },
+        "tip_percent": {
+         "type": "number"
+        },
+        "split": {
+         "type": "integer",
+         "description": "Number of people sharing; defaults to 1"
+        }
+       },
+       "required": [
+        "bill_amount",
+        "tip_percent"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "convert_currency",
+      "description": "Convert an amount of money between currencies.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "amount": {
+         "type": "number"
+        },
+        "from_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. USD"
+        },
+        "to_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. EUR"
+        }
+       },
+       "required": [
+        "amount",
+        "from_currency",
+        "to_currency"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "calculate_loan_payment",
+      "description": "Monthly payment on a fixed-rate loan.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "principal": {
+         "type": "number"
+        },
+        "annual_rate_percent": {
+         "type": "number"
+        },
+        "term_months": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "principal",
+        "annual_rate_percent",
+        "term_months"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-hotel-1",
+   "query": "Get me a twin room in Porto for 2 people, 4 nights from 2027-05-02.",
+   "expected_function": "book_hotel",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "book_table",
+      "description": "Reserve a restaurant table.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "restaurant": {
+         "type": "string"
+        },
+        "party_size": {
+         "type": "integer"
+        },
+        "time": {
+         "type": "string",
+         "description": "24-hour HH:MM"
+        }
+       },
+       "required": [
+        "restaurant",
+        "party_size",
+        "time"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search_flights",
+      "description": "Search for flights.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "origin": {
+         "type": "string",
+         "description": "IATA airport code, e.g. SFO"
+        },
+        "destination": {
+         "type": "string",
+         "description": "IATA airport code, e.g. JFK"
+        },
+        "departure_date": {
+         "type": "string",
+         "description": "YYYY-MM-DD"
+        },
+        "return_date": {
+         "type": "string",
+         "description": "YYYY-MM-DD; omit for a one-way trip"
+        },
+        "passengers": {
+         "type": "object",
+         "properties": {
+          "adults": {
+           "type": "integer"
+          },
+          "children": {
+           "type": "integer"
+          }
+         },
+         "required": [
+          "adults",
+          "children"
+         ]
+        },
+        "cabin": {
+         "type": "string",
+         "enum": [
+          "economy",
+          "premium_economy",
+          "business",
+          "first"
+         ],
+         "description": "Defaults to economy"
+        }
+       },
+       "required": [
+        "origin",
+        "destination",
+        "departure_date",
+        "passengers"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "book_hotel",
+      "description": "Book a hotel room.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "check_in": {
+         "type": "string",
+         "description": "YYYY-MM-DD"
+        },
+        "nights": {
+         "type": "integer"
+        },
+        "guests": {
+         "type": "integer"
+        },
+        "room_type": {
+         "type": "string",
+         "enum": [
+          "single",
+          "double",
+          "twin",
+          "suite"
+         ]
+        },
+        "breakfast_included": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "city",
+        "check_in",
+        "nights",
+        "guests"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-flight-1",
+   "query": "Flights from AMS to BCN on 2026-12-05, returning 2026-12-09, for 1 adult and 1 child.",
+   "expected_function": "search_flights",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "book_hotel",
+      "description": "Book a hotel room.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "check_in": {
+         "type": "string",
+         "description": "YYYY-MM-DD"
+        },
+        "nights": {
+         "type": "integer"
+        },
+        "guests": {
+         "type": "integer"
+        },
+        "room_type": {
+         "type": "string",
+         "enum": [
+          "single",
+          "double",
+          "twin",
+          "suite"
+         ]
+        },
+        "breakfast_included": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "city",
+        "check_in",
+        "nights",
+        "guests"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "find_route",
+      "description": "Directions between two places.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "origin": {
+         "type": "string"
+        },
+        "destination": {
+         "type": "string"
+        },
+        "mode": {
+         "type": "string",
+         "enum": [
+          "driving",
+          "walking",
+          "cycling",
+          "transit"
+         ]
+        }
+       },
+       "required": [
+        "origin",
+        "destination",
+        "mode"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search_flights",
+      "description": "Search for flights.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "origin": {
+         "type": "string",
+         "description": "IATA airport code, e.g. SFO"
+        },
+        "destination": {
+         "type": "string",
+         "description": "IATA airport code, e.g. JFK"
+        },
+        "departure_date": {
+         "type": "string",
+         "description": "YYYY-MM-DD"
+        },
+        "return_date": {
+         "type": "string",
+         "description": "YYYY-MM-DD; omit for a one-way trip"
+        },
+        "passengers": {
+         "type": "object",
+         "properties": {
+          "adults": {
+           "type": "integer"
+          },
+          "children": {
+           "type": "integer"
+          }
+         },
+         "required": [
+          "adults",
+          "children"
+         ]
+        },
+        "cabin": {
+         "type": "string",
+         "enum": [
+          "economy",
+          "premium_economy",
+          "business",
+          "first"
+         ],
+         "description": "Defaults to economy"
+        }
+       },
+       "required": [
+        "origin",
+        "destination",
+        "departure_date",
+        "passengers"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-table-3",
+   "query": "Reserve a table at Trattoria Sole for 5 people at 7pm.",
+   "expected_function": "book_table",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "find_nearby",
+      "description": "Places of one type near a location.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "location": {
+         "type": "object",
+         "properties": {
+          "latitude": {
+           "type": "number"
+          },
+          "longitude": {
+           "type": "number"
+          }
+         },
+         "required": [
+          "latitude",
+          "longitude"
+         ]
+        },
+        "place_type": {
+         "type": "string",
+         "enum": [
+          "restaurant",
+          "cafe",
+          "pharmacy",
+          "atm",
+          "gas_station",
+          "hospital"
+         ]
+        },
+        "radius_meters": {
+         "type": "integer",
+         "description": "Defaults to 1000"
+        },
+        "open_now": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "location",
+        "place_type"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "book_hotel",
+      "description": "Book a hotel room.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "check_in": {
+         "type": "string",
+         "description": "YYYY-MM-DD"
+        },
+        "nights": {
+         "type": "integer"
+        },
+        "guests": {
+         "type": "integer"
+        },
+        "room_type": {
+         "type": "string",
+         "enum": [
+          "single",
+          "double",
+          "twin",
+          "suite"
+         ]
+        },
+        "breakfast_included": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "city",
+        "check_in",
+        "nights",
+        "guests"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "book_table",
+      "description": "Reserve a restaurant table.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "restaurant": {
+         "type": "string"
+        },
+        "party_size": {
+         "type": "integer"
+        },
+        "time": {
+         "type": "string",
+         "description": "24-hour HH:MM"
+        }
+       },
+       "required": [
+        "restaurant",
+        "party_size",
+        "time"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-nearby-1",
+   "query": "Is there a hospital within 3 km of 51.5072, -0.1276?",
+   "expected_function": "find_nearby",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ],
+         "description": "Temperature unit"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "find_route",
+      "description": "Directions between two places.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "origin": {
+         "type": "string"
+        },
+        "destination": {
+         "type": "string"
+        },
+        "mode": {
+         "type": "string",
+         "enum": [
+          "driving",
+          "walking",
+          "cycling",
+          "transit"
+         ]
+        }
+       },
+       "required": [
+        "origin",
+        "destination",
+        "mode"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "find_nearby",
+      "description": "Places of one type near a location.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "location": {
+         "type": "object",
+         "properties": {
+          "latitude": {
+           "type": "number"
+          },
+          "longitude": {
+           "type": "number"
+          }
+         },
+         "required": [
+          "latitude",
+          "longitude"
+         ]
+        },
+        "place_type": {
+         "type": "string",
+         "enum": [
+          "restaurant",
+          "cafe",
+          "pharmacy",
+          "atm",
+          "gas_station",
+          "hospital"
+         ]
+        },
+        "radius_meters": {
+         "type": "integer",
+         "description": "Defaults to 1000"
+        },
+        "open_now": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "location",
+        "place_type"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-route-2",
+   "query": "How do I get from Union Station to Navy Pier on public transport?",
+   "expected_function": "find_route",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "search_flights",
+      "description": "Search for flights.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "origin": {
+         "type": "string",
+         "description": "IATA airport code, e.g. SFO"
+        },
+        "destination": {
+         "type": "string",
+         "description": "IATA airport code, e.g. JFK"
+        },
+        "departure_date": {
+         "type": "string",
+         "description": "YYYY-MM-DD"
+        },
+        "return_date": {
+         "type": "string",
+         "description": "YYYY-MM-DD; omit for a one-way trip"
+        },
+        "passengers": {
+         "type": "object",
+         "properties": {
+          "adults": {
+           "type": "integer"
+          },
+          "children": {
+           "type": "integer"
+          }
+         },
+         "required": [
+          "adults",
+          "children"
+         ]
+        },
+        "cabin": {
+         "type": "string",
+         "enum": [
+          "economy",
+          "premium_economy",
+          "business",
+          "first"
+         ],
+         "description": "Defaults to economy"
+        }
+       },
+       "required": [
+        "origin",
+        "destination",
+        "departure_date",
+        "passengers"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "find_nearby",
+      "description": "Places of one type near a location.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "location": {
+         "type": "object",
+         "properties": {
+          "latitude": {
+           "type": "number"
+          },
+          "longitude": {
+           "type": "number"
+          }
+         },
+         "required": [
+          "latitude",
+          "longitude"
+         ]
+        },
+        "place_type": {
+         "type": "string",
+         "enum": [
+          "restaurant",
+          "cafe",
+          "pharmacy",
+          "atm",
+          "gas_station",
+          "hospital"
+         ]
+        },
+        "radius_meters": {
+         "type": "integer",
+         "description": "Defaults to 1000"
+        },
+        "open_now": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "location",
+        "place_type"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "find_route",
+      "description": "Directions between two places.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "origin": {
+         "type": "string"
+        },
+        "destination": {
+         "type": "string"
+        },
+        "mode": {
+         "type": "string",
+         "enum": [
+          "driving",
+          "walking",
+          "cycling",
+          "transit"
+         ]
+        }
+       },
+       "required": [
+        "origin",
+        "destination",
+        "mode"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-email-1",
+   "query": "Email finance@corp.example with the subject 'Q3 budget' and the body 'The numbers are attached.'",
+   "expected_function": "send_email",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "create_task",
+      "description": "Add a task to the to-do list.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "priority": {
+         "type": "string",
+         "enum": [
+          "low",
+          "medium",
+          "high"
+         ],
+         "description": "Defaults to medium"
+        },
+        "due_date": {
+         "type": "string",
+         "description": "YYYY-MM-DD"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "title"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_reminder",
+      "description": "Remind the user about something later.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "string"
+        },
+        "days_from_now": {
+         "type": "integer"
+        },
+        "notify": {
+         "type": "boolean",
+         "description": "Send a push notification"
+        }
+       },
+       "required": [
+        "text",
+        "days_from_now"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "send_email",
+      "description": "Send an email.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "to": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         },
+         "description": "Recipient email addresses"
+        },
+        "subject": {
+         "type": "string"
+        },
+        "body": {
+         "type": "string"
+        },
+        "cc": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         },
+         "description": "Addresses to copy in"
+        },
+        "high_priority": {
+         "type": "boolean",
+         "description": "Flag the email as high priority; defaults to false"
+        }
+       },
+       "required": [
+        "to",
+        "subject",
+        "body"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-task-1",
+   "query": "Put 'Renew car insurance' on my to-do list, high priority, due 2026-11-30.",
+   "expected_function": "create_task",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "send_email",
+      "description": "Send an email.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "to": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         },
+         "description": "Recipient email addresses"
+        },
+        "subject": {
+         "type": "string"
+        },
+        "body": {
+         "type": "string"
+        },
+        "cc": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         },
+         "description": "Addresses to copy in"
+        },
+        "high_priority": {
+         "type": "boolean",
+         "description": "Flag the email as high priority; defaults to false"
+        }
+       },
+       "required": [
+        "to",
+        "subject",
+        "body"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_reminder",
+      "description": "Remind the user about something later.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "string"
+        },
+        "days_from_now": {
+         "type": "integer"
+        },
+        "notify": {
+         "type": "boolean",
+         "description": "Send a push notification"
+        }
+       },
+       "required": [
+        "text",
+        "days_from_now"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_task",
+      "description": "Add a task to the to-do list.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "priority": {
+         "type": "string",
+         "enum": [
+          "low",
+          "medium",
+          "high"
+         ],
+         "description": "Defaults to medium"
+        },
+        "due_date": {
+         "type": "string",
+         "description": "YYYY-MM-DD"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "title"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-reminder-3",
+   "query": "Remind me in two weeks to 'book the dentist', and send me a notification.",
+   "expected_function": "create_reminder",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "create_task",
+      "description": "Add a task to the to-do list.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "priority": {
+         "type": "string",
+         "enum": [
+          "low",
+          "medium",
+          "high"
+         ],
+         "description": "Defaults to medium"
+        },
+        "due_date": {
+         "type": "string",
+         "description": "YYYY-MM-DD"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "title"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_alarm",
+      "description": "Set an alarm clock.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "time": {
+         "type": "string",
+         "description": "24-hour HH:MM"
+        },
+        "repeat_days": {
+         "type": "array",
+         "items": {
+          "type": "string",
+          "enum": [
+           "mon",
+           "tue",
+           "wed",
+           "thu",
+           "fri",
+           "sat",
+           "sun"
+          ]
+         },
+         "description": "Days the alarm repeats on; omit for a one-off alarm"
+        },
+        "label": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "time"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_reminder",
+      "description": "Remind the user about something later.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "string"
+        },
+        "days_from_now": {
+         "type": "integer"
+        },
+        "notify": {
+         "type": "boolean",
+         "description": "Send a push notification"
+        }
+       },
+       "required": [
+        "text",
+        "days_from_now"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-lights-1",
+   "query": "Dim the office lights to 15%.",
+   "expected_function": "set_lights",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "set_thermostat",
+      "description": "Set the home thermostat.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "temperature": {
+         "type": "number"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "temperature",
+        "unit"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "play_playlist",
+      "description": "Play one of the user's saved playlists.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "name": {
+         "type": "string"
+        },
+        "shuffle": {
+         "type": "boolean",
+         "description": "Defaults to false"
+        },
+        "repeat": {
+         "type": "string",
+         "enum": [
+          "off",
+          "one",
+          "all"
+         ],
+         "description": "Defaults to off"
+        }
+       },
+       "required": [
+        "name"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_lights",
+      "description": "Control the smart lights in a room.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "room": {
+         "type": "string"
+        },
+        "turn_on": {
+         "type": "boolean",
+         "description": "true switches the lights on, false switches them off"
+        },
+        "brightness": {
+         "type": "integer",
+         "description": "Percent, 0 to 100"
+        },
+        "color": {
+         "type": "string",
+         "enum": [
+          "warm_white",
+          "cool_white",
+          "red",
+          "green",
+          "blue",
+          "purple"
+         ]
+        }
+       },
+       "required": [
+        "room",
+        "turn_on"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-thermo-2",
+   "query": "Heat the house to 72 degrees Fahrenheit.",
+   "expected_function": "set_thermostat",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "set_lights",
+      "description": "Control the smart lights in a room.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "room": {
+         "type": "string"
+        },
+        "turn_on": {
+         "type": "boolean",
+         "description": "true switches the lights on, false switches them off"
+        },
+        "brightness": {
+         "type": "integer",
+         "description": "Percent, 0 to 100"
+        },
+        "color": {
+         "type": "string",
+         "enum": [
+          "warm_white",
+          "cool_white",
+          "red",
+          "green",
+          "blue",
+          "purple"
+         ]
+        }
+       },
+       "required": [
+        "room",
+        "turn_on"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "play_playlist",
+      "description": "Play one of the user's saved playlists.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "name": {
+         "type": "string"
+        },
+        "shuffle": {
+         "type": "boolean",
+         "description": "Defaults to false"
+        },
+        "repeat": {
+         "type": "string",
+         "enum": [
+          "off",
+          "one",
+          "all"
+         ],
+         "description": "Defaults to off"
+        }
+       },
+       "required": [
+        "name"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_thermostat",
+      "description": "Set the home thermostat.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "temperature": {
+         "type": "number"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "temperature",
+        "unit"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-music-1",
+   "query": "Shuffle my 'Chill Mix' playlist.",
+   "expected_function": "play_playlist",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "set_lights",
+      "description": "Control the smart lights in a room.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "room": {
+         "type": "string"
+        },
+        "turn_on": {
+         "type": "boolean",
+         "description": "true switches the lights on, false switches them off"
+        },
+        "brightness": {
+         "type": "integer",
+         "description": "Percent, 0 to 100"
+        },
+        "color": {
+         "type": "string",
+         "enum": [
+          "warm_white",
+          "cool_white",
+          "red",
+          "green",
+          "blue",
+          "purple"
+         ]
+        }
+       },
+       "required": [
+        "room",
+        "turn_on"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_thermostat",
+      "description": "Set the home thermostat.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "temperature": {
+         "type": "number"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "temperature",
+        "unit"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "play_playlist",
+      "description": "Play one of the user's saved playlists.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "name": {
+         "type": "string"
+        },
+        "shuffle": {
+         "type": "boolean",
+         "description": "Defaults to false"
+        },
+        "repeat": {
+         "type": "string",
+         "enum": [
+          "off",
+          "one",
+          "all"
+         ],
+         "description": "Defaults to off"
+        }
+       },
+       "required": [
+        "name"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-products-1",
+   "query": "Browse clothing that's in stock, best rated first.",
+   "expected_function": "filter_products",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "add_to_cart",
+      "description": "Add a product to the shopping cart.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "product_id": {
+         "type": "string"
+        },
+        "quantity": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "product_id",
+        "quantity"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search_books",
+      "description": "Search the library catalogue.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "max_results": {
+         "type": "integer",
+         "description": "Defaults to 10"
+        },
+        "available_only": {
+         "type": "boolean",
+         "description": "Only books that can be borrowed now"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "filter_products",
+      "description": "Browse the store's products in a category, with optional filters.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "category": {
+         "type": "string",
+         "enum": [
+          "electronics",
+          "books",
+          "clothing",
+          "home",
+          "toys",
+          "sports"
+         ]
+        },
+        "max_price": {
+         "type": "number"
+        },
+        "min_rating": {
+         "type": "number",
+         "description": "Average star rating, 1 to 5"
+        },
+        "in_stock_only": {
+         "type": "boolean"
+        },
+        "sort_by": {
+         "type": "string",
+         "enum": [
+          "price_low_to_high",
+          "price_high_to_low",
+          "rating",
+          "newest"
+         ]
+        }
+       },
+       "required": [
+        "category"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-cart-2",
+   "query": "Add 5 of item KB-220 to my cart.",
+   "expected_function": "add_to_cart",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "filter_products",
+      "description": "Browse the store's products in a category, with optional filters.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "category": {
+         "type": "string",
+         "enum": [
+          "electronics",
+          "books",
+          "clothing",
+          "home",
+          "toys",
+          "sports"
+         ]
+        },
+        "max_price": {
+         "type": "number"
+        },
+        "min_rating": {
+         "type": "number",
+         "description": "Average star rating, 1 to 5"
+        },
+        "in_stock_only": {
+         "type": "boolean"
+        },
+        "sort_by": {
+         "type": "string",
+         "enum": [
+          "price_low_to_high",
+          "price_high_to_low",
+          "rating",
+          "newest"
+         ]
+        }
+       },
+       "required": [
+        "category"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "track_package",
+      "description": "Delivery status of a parcel.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "carrier": {
+         "type": "string",
+         "enum": [
+          "UPS",
+          "FedEx",
+          "DHL",
+          "USPS"
+         ]
+        },
+        "tracking_number": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "carrier",
+        "tracking_number"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "add_to_cart",
+      "description": "Add a product to the shopping cart.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "product_id": {
+         "type": "string"
+        },
+        "quantity": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "product_id",
+        "quantity"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-track-1",
+   "query": "What's the status of FedEx tracking number 771234567890?",
+   "expected_function": "track_package",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "send_email",
+      "description": "Send an email.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "to": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         },
+         "description": "Recipient email addresses"
+        },
+        "subject": {
+         "type": "string"
+        },
+        "body": {
+         "type": "string"
+        },
+        "cc": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         },
+         "description": "Addresses to copy in"
+        },
+        "high_priority": {
+         "type": "boolean",
+         "description": "Flag the email as high priority; defaults to false"
+        }
+       },
+       "required": [
+        "to",
+        "subject",
+        "body"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "add_to_cart",
+      "description": "Add a product to the shopping cart.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "product_id": {
+         "type": "string"
+        },
+        "quantity": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "product_id",
+        "quantity"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "track_package",
+      "description": "Delivery status of a parcel.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "carrier": {
+         "type": "string",
+         "enum": [
+          "UPS",
+          "FedEx",
+          "DHL",
+          "USPS"
+         ]
+        },
+        "tracking_number": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "carrier",
+        "tracking_number"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-invoice-1",
+   "query": "Invoice customer K-88 in Canadian dollars: 1 x 'Website audit' at 950, payable in 7 days.",
+   "expected_function": "create_invoice",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "calculate_tip",
+      "description": "Work out a restaurant tip.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "bill_amount": {
+         "type": "number"
+        },
+        "tip_percent": {
+         "type": "number"
+        },
+        "split": {
+         "type": "integer",
+         "description": "Number of people sharing; defaults to 1"
+        }
+       },
+       "required": [
+        "bill_amount",
+        "tip_percent"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "convert_currency",
+      "description": "Convert an amount of money between currencies.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "amount": {
+         "type": "number"
+        },
+        "from_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. USD"
+        },
+        "to_currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. EUR"
+        }
+       },
+       "required": [
+        "amount",
+        "from_currency",
+        "to_currency"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_invoice",
+      "description": "Create an invoice for a customer.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "customer_id": {
+         "type": "string"
+        },
+        "line_items": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "product": {
+            "type": "string"
+           },
+           "quantity": {
+            "type": "integer"
+           },
+           "unit_price": {
+            "type": "number"
+           }
+          },
+          "required": [
+           "product",
+           "quantity",
+           "unit_price"
+          ]
+         }
+        },
+        "currency": {
+         "type": "string",
+         "description": "ISO 4217 code, e.g. EUR"
+        },
+        "due_in_days": {
+         "type": "integer",
+         "description": "Defaults to 30"
+        }
+       },
+       "required": [
+        "customer_id",
+        "line_items",
+        "currency"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-account-1",
+   "query": "Register the username 'pnair' with email pnair@example.in, address 12 MG Road, Bengaluru 560001, India, and opt in to the newsletter.",
+   "expected_function": "create_account",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "send_email",
+      "description": "Send an email.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "to": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         },
+         "description": "Recipient email addresses"
+        },
+        "subject": {
+         "type": "string"
+        },
+        "body": {
+         "type": "string"
+        },
+        "cc": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         },
+         "description": "Addresses to copy in"
+        },
+        "high_priority": {
+         "type": "boolean",
+         "description": "Flag the email as high priority; defaults to false"
+        }
+       },
+       "required": [
+        "to",
+        "subject",
+        "body"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_task",
+      "description": "Add a task to the to-do list.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "priority": {
+         "type": "string",
+         "enum": [
+          "low",
+          "medium",
+          "high"
+         ],
+         "description": "Defaults to medium"
+        },
+        "due_date": {
+         "type": "string",
+         "description": "YYYY-MM-DD"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "title"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_account",
+      "description": "Open a customer account.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "username": {
+         "type": "string"
+        },
+        "email": {
+         "type": "string"
+        },
+        "address": {
+         "type": "object",
+         "description": "Postal address",
+         "properties": {
+          "street": {
+           "type": "string",
+           "description": "Street and house number"
+          },
+          "city": {
+           "type": "string"
+          },
+          "postal_code": {
+           "type": "string"
+          },
+          "country": {
+           "type": "string",
+           "description": "ISO 3166-1 alpha-2 code, e.g. DE"
+          }
+         },
+         "required": [
+          "street",
+          "city",
+          "postal_code",
+          "country"
+         ]
+        },
+        "newsletter": {
+         "type": "boolean",
+         "description": "Subscribe to the newsletter; defaults to false"
+        }
+       },
+       "required": [
+        "username",
+        "email",
+        "address"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-workout-1",
+   "query": "Log a 30 minute rowing session.",
+   "expected_function": "log_workout",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "create_event",
+      "description": "Add an event to the calendar.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "date": {
+         "type": "string",
+         "description": "YYYY-MM-DD"
+        },
+        "start_time": {
+         "type": "string",
+         "description": "24-hour HH:MM"
+        },
+        "duration_minutes": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "title",
+        "date",
+        "start_time",
+        "duration_minutes"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "set_timer",
+      "description": "Start a countdown timer.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "minutes": {
+         "type": "integer"
+        },
+        "label": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "minutes"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "log_workout",
+      "description": "Record a completed workout.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "activity": {
+         "type": "string",
+         "enum": [
+          "running",
+          "cycling",
+          "swimming",
+          "rowing",
+          "walking"
+         ]
+        },
+        "duration_minutes": {
+         "type": "integer"
+        },
+        "distance_km": {
+         "type": "number"
+        },
+        "avg_heart_rate": {
+         "type": "integer",
+         "description": "Beats per minute"
+        }
+       },
+       "required": [
+        "activity",
+        "duration_minutes"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-image-1",
+   "query": "Resize img_701 to 300 by 250 pixels and output a PNG.",
+   "expected_function": "resize_image",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "convert_units",
+      "description": "Convert a measurement from one unit to another.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "value": {
+         "type": "number"
+        },
+        "from_unit": {
+         "type": "string",
+         "enum": [
+          "millimeters",
+          "centimeters",
+          "meters",
+          "kilometers",
+          "inches",
+          "feet",
+          "miles",
+          "grams",
+          "kilograms",
+          "ounces",
+          "pounds",
+          "liters",
+          "gallons"
+         ]
+        },
+        "to_unit": {
+         "type": "string",
+         "enum": [
+          "millimeters",
+          "centimeters",
+          "meters",
+          "kilometers",
+          "inches",
+          "feet",
+          "miles",
+          "grams",
+          "kilograms",
+          "ounces",
+          "pounds",
+          "liters",
+          "gallons"
+         ]
+        }
+       },
+       "required": [
+        "value",
+        "from_unit",
+        "to_unit"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "compute_area",
+      "description": "Area of a simple shape.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "shape": {
+         "type": "string",
+         "enum": [
+          "circle",
+          "rectangle",
+          "triangle"
+         ]
+        },
+        "dimensions": {
+         "type": "array",
+         "items": {
+          "type": "number"
+         },
+         "description": "circle: [radius]; rectangle: [width, height]; triangle: [base, height]"
+        }
+       },
+       "required": [
+        "shape",
+        "dimensions"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "resize_image",
+      "description": "Resize a stored image.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "image_id": {
+         "type": "string"
+        },
+        "width": {
+         "type": "integer",
+         "description": "Pixels"
+        },
+        "height": {
+         "type": "integer",
+         "description": "Pixels"
+        },
+        "keep_aspect_ratio": {
+         "type": "boolean",
+         "description": "Defaults to true"
+        },
+        "output_format": {
+         "type": "string",
+         "enum": [
+          "png",
+          "jpeg",
+          "webp"
+         ],
+         "description": "Defaults to the input format"
+        }
+       },
+       "required": [
+        "image_id",
+        "width",
+        "height"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-bmi-1",
+   "query": "Calculate the BMI for 58 kg and 165 cm.",
+   "expected_function": "calculate_bmi",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "convert_units",
+      "description": "Convert a measurement from one unit to another.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "value": {
+         "type": "number"
+        },
+        "from_unit": {
+         "type": "string",
+         "enum": [
+          "millimeters",
+          "centimeters",
+          "meters",
+          "kilometers",
+          "inches",
+          "feet",
+          "miles",
+          "grams",
+          "kilograms",
+          "ounces",
+          "pounds",
+          "liters",
+          "gallons"
+         ]
+        },
+        "to_unit": {
+         "type": "string",
+         "enum": [
+          "millimeters",
+          "centimeters",
+          "meters",
+          "kilometers",
+          "inches",
+          "feet",
+          "miles",
+          "grams",
+          "kilograms",
+          "ounces",
+          "pounds",
+          "liters",
+          "gallons"
+         ]
+        }
+       },
+       "required": [
+        "value",
+        "from_unit",
+        "to_unit"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "log_workout",
+      "description": "Record a completed workout.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "activity": {
+         "type": "string",
+         "enum": [
+          "running",
+          "cycling",
+          "swimming",
+          "rowing",
+          "walking"
+         ]
+        },
+        "duration_minutes": {
+         "type": "integer"
+        },
+        "distance_km": {
+         "type": "number"
+        },
+        "avg_heart_rate": {
+         "type": "integer",
+         "description": "Beats per minute"
+        }
+       },
+       "required": [
+        "activity",
+        "duration_minutes"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "calculate_bmi",
+      "description": "Body mass index from weight and height.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "weight_kg": {
+         "type": "number"
+        },
+        "height_cm": {
+         "type": "number"
+        }
+       },
+       "required": [
+        "weight_kg",
+        "height_cm"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "m-translate-2",
+   "query": "Translate 'See you tomorrow' into Portuguese.",
+   "expected_function": "translate_text",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "send_email",
+      "description": "Send an email.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "to": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         },
+         "description": "Recipient email addresses"
+        },
+        "subject": {
+         "type": "string"
+        },
+        "body": {
+         "type": "string"
+        },
+        "cc": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         },
+         "description": "Addresses to copy in"
+        },
+        "high_priority": {
+         "type": "boolean",
+         "description": "Flag the email as high priority; defaults to false"
+        }
+       },
+       "required": [
+        "to",
+        "subject",
+        "body"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "define_word",
+      "description": "Dictionary definition of a word.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "word": {
+         "type": "string"
+        },
+        "language": {
+         "type": "string",
+         "description": "Dictionary language; defaults to English"
+        }
+       },
+       "required": [
+        "word"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "translate_text",
+      "description": "Translate text into another language.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "string"
+        },
+        "target_language": {
+         "type": "string",
+         "description": "Language name or ISO 639-1 code"
+        }
+       },
+       "required": [
+        "text",
+        "target_language"
+       ]
+      }
+     }
+    }
+   ]
+  }
+ ]
+}
