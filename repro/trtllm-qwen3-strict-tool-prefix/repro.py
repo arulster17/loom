@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Count how often Qwen3 calls the right function, with plain vs strict tools.
 
-Standard library only. Each item offers 3 functions and a request that one of them
+Standard library only. Each item offers 3 or 4 functions and a request that one of them
 answers; the model must call that one. Requests are greedy (temperature 0), non-thinking,
 tool_choice "auto", one at a time.
 

@@ -10,7 +10,7 @@ tools. See "Result". The numbers under "What Loom saw" come from Loom's quality 
 With strict tools, TensorRT-LLM's `qwen3` tool parser constrains the call with an
 xgrammar structural tag. The tag fires on `<tool_call>` and forces this text
 (`tensorrt_llm/serve/tool_parser/qwen3_tool_parser.py`, `structure_info`; the same on
-v1.4.0rc2 and on main at 03d4be4):
+v1.4.0rc2 and on main as of fe6938a, 2026-11-08; the file last changed in 03d4be4, #16866):
 
 ```python
 begin='<tool_call>\n{"name":"' + name + '", "arguments":',
@@ -20,8 +20,9 @@ Qwen3's chat template, and so its training data, writes `{"name": "` and
 `"arguments": {` with a space after each colon. vLLM's hermes structural tag writes the
 spaces too. Run through xgrammar with Qwen3's tokenizer, the stock tag rejects the
 template's own call at the space after `"name":`; with only that space restored it still
-rejects at the space after `"arguments":`; with both restored it accepts the whole call. Forcing the
-model off its usual tokens just before it names the function changes which function it
+rejects at the space after `"arguments":`; with both restored it accepts the whole call
+(xgrammar 0.1.32, as 1.4.0rc2 pins it, and the same with 0.2.8, which main now pins).
+Forcing the model off its usual tokens just before it names the function changes which function it
 picks when it has several to choose from.
 
 ## Files
@@ -30,7 +31,7 @@ picks when it has several to choose from.
 |---|---|
 | `run.sh` | The whole repro: versions, weights, template check, then three runs |
 | `repro.py` | Standard-library client: sends the 45 items, counts right-function calls |
-| `items.json` | 45 items, each with 3 functions to choose from and the right one |
+| `items.json` | 45 items (40 offer 3 functions, 5 offer 4) and the function each should call |
 | `template_check.py` | No GPU work: prints the template's tool call next to the forced prefix |
 | `patch_parser.py` | The fix (both spaces restored), applied inside the image for the third run |
 | `options.yaml` | `guided_decoding_backend: xgrammar` (strict tools need a grammar backend) |
@@ -39,8 +40,12 @@ picks when it has several to choose from.
 
 ## Run
 
-Needs Docker with the NVIDIA runtime and a GPU that holds the model (an L40S 48 GB for
-Qwen3-8B BF16, about 30 min including downloads):
+Needs, on the host: Docker with the NVIDIA container runtime, `nvidia-smi`, `curl` and
+`python3` (the client is standard library only), internet access for the image and
+weights, and a GPU that holds the model (an L40S 48 GB for Qwen3-8B BF16, about 30 min
+including downloads). The container runs as root and writes the weights into
+`$HOME/.cache/huggingface` (override with `HF_CACHE=...`), so the files it adds there are
+owned by root.
 
 ```bash
 ./run.sh
@@ -61,12 +66,16 @@ logs and `versions.txt`.
 
 ## What Loom saw (TensorRT-LLM 1.4.0rc2, L40S, Qwen3-8B)
 
-- tool_calling_strict, all 135 items: BF16 −13.8 points vs vLLM BF16, FP8 −11.4.
+- tool_calling_strict, all 135 items, mean of 3 greedy passes: BF16 84.0% and FP8 86.4%,
+  against 97.8% for vLLM 0.30.0 BF16 with the same strict tools (−13.8 and −11.4 points).
+  With plain tools TensorRT-LLM scored 97.8% (BF16) and 98.3% (FP8), so FP8 lost 11.9
+  points to strict tools on its own numbers.
 - BF16 strict has 22 failures. 18 are the wrong function, all on the 45 items with several
   functions (this set). Plain tools: no failures on these 45.
 - Example, `m-thermo-1`: "Turn the house temperature down to 19 celsius." became
   `get_weather(city="house")` instead of `set_thermostat`.
-- Seen in two separate runs (0.837 and 0.844 strict).
+- Seen in two separate BF16 runs: 0.837 in a one-pass run, and 0.840 in the three-pass
+  gate run (passes 0.837, 0.837, 0.844).
 
 ## Result
 
@@ -90,14 +99,19 @@ NVIDIA L40S, 595.91.07
 `m-thermo-1`, "Turn the house temperature down to 19 celsius.":
 
 - plain: `set_thermostat({"temperature": 19, "unit": "celsius"})`
-- strict, stock: `get_weather({"city": "New York", "unit": "celsius"})` (Loom's gate run
-  got `get_weather(city="house")`; same wrong function, different made-up city)
+- strict, stock: `get_weather({"city": "New York", "unit": "celsius"})` (Loom's BF16 gate
+  run stored `get_weather(city="house")` and its FP8 gate run `get_weather(city="New York")`:
+  the made-up city varies, the wrong function does not)
 - strict, patched: `set_thermostat({"temperature": 19, "unit": "celsius"})`
 
 The 18 strict-stock misses (`result-bf16/strict-stock.txt`): m-thermo-1, m-timer-1,
 m-currency-1, m-route-1, m-table-1, m-translate-1, m-cart-1, m-currency-2, m-alarm-1,
 m-timer-2, m-currency-3, m-nearby-1, m-email-1, m-music-1, m-track-1, m-image-1,
-m-bmi-1, m-translate-2. The count matches the 18 wrong-function failures Loom's gate saw.
+m-bmi-1, m-translate-2. These are the same 18 items as the 18 wrong-function failures in
+Loom's BF16 gate run (and in its earlier one-pass BF16 run). The wrong function picked
+differs on a few of them (e.g. `m-translate-1`: `search_books` here, `define_word` in the
+gate run). The gate sent its requests differently (a seed, up to 16 at a time,
+`--max_seq_len 32768`, perf-metric options on the server), so it is not this script.
 
 `template_check.txt` shows the mismatch at the token level: the template's prefix
 tokenizes as `... '":', 'Ġ"'`, the forced one as `... '":"'`, a token the chat template
