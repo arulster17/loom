@@ -36,11 +36,11 @@ and exits 2.
 Run from the repo root. `ACC` is a scratch directory for mock results.
 
 ```bash
-cd /Users/mathurs/Projects/loom
+cd <path-to-loom>
 uv sync
 ACC=$(mktemp -d); echo $ACC
 MOCK=sqlite:///$ACC/mock.db                                  # mock runs go here
-REAL=sqlite:////Users/mathurs/Projects/loom/results/loom.db  # the real results DB
+REAL=sqlite:///$PWD/results/loom.db                          # the real results DB
 ```
 
 Which database each command touches:

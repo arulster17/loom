@@ -348,8 +348,8 @@ on 2026-11-03:
 | Region | AMI id | Default VPC | g6e.xlarge AZs |
 |---|---|---|---|
 | us-east-1 | `ami-028357be7d5b15c53` | | 1a, 1b, 1c, 1d |
-| us-east-2 | `ami-089d4ee74147726da` | `vpc-0f2e136abaa3440f2` | 2a, 2b, 2c |
-| us-west-2 | `ami-0fec8acfc603e6e16` | `vpc-06835f42c895f74dc` | 2a, 2b, 2c, 2d |
+| us-east-2 | `ami-089d4ee74147726da` | `vpc-…` | 2a, 2b, 2c |
+| us-west-2 | `ami-0fec8acfc603e6e16` | `vpc-…` | 2a, 2b, 2c, 2d |
 
 Prices from the AWS Price List API (publication 2026-11-03, effective 2026-11-01).
 g6e.xlarge is $1.861/h on demand and gp3 is $0.08/GB-month in all three regions, so a
@@ -384,11 +384,11 @@ from the bucket and uploads to it are each billed once.
    extra_regions:
      - region: us-east-2
        security_group_id: sg-…        # terraform output extra_host_networks
-       subnet_ids: [subnet-02e2f9fe5fe799627, subnet-03a93c5765f027fe4, subnet-096c4bbaf7acab9b8]
+       subnet_ids: [subnet-…, subnet-…, subnet-…]
        ami_id: ami-089d4ee74147726da
      - region: us-west-2
        security_group_id: sg-…
-       subnet_ids: [subnet-0462ea6f142aea107, subnet-06b1b2f7e71a45df8, subnet-08c8337b0a0c61430, subnet-0fedcbf1191fbd3d9]
+       subnet_ids: [subnet-…, subnet-…, subnet-…, subnet-…]
        ami_id: ami-0fec8acfc603e6e16
    ```
 

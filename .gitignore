@@ -42,3 +42,7 @@ inference-platform-build-prompt.md
 # Claude Code agent worktrees
 .claude/worktrees/
 .playwright-mcp/
+
+# Local-only: dev-stack certs/keys and issue drafts (.dev/), scratch work
+.dev/
+/scratchpad/

@@ -324,7 +324,7 @@ read-only calls:
 
 | Check | Found |
 |---|---|
-| Identity | `arn:aws:iam::735792833179:user/arul-cli`, with `AdministratorAccess` (the narrower `loom-bench-runner` policy is not attached; it would also work) |
+| Identity | `arn:aws:iam::<account-id>:user/<admin-user>`, with `AdministratorAccess` (the narrower `loom-bench-runner` policy is not attached; it would also work) |
 | Quotas | on-demand G/VT `L-DB2E81BA` = 4 vCPU (one g6e.xlarge), spot `L-3819A6DF` = 0 |
 | g6e.xlarge offerings | us-east-1a, b, c, d; not 1e or 1f (two of the six configured subnets: `Unsupported`, tried and skipped) |
 | On-demand price | $1.861/h (Price List API, effective 2026-10-01), as in `bench/prices.yaml` |
