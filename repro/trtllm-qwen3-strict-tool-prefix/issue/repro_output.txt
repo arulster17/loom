@@ -1,0 +1,19 @@
+Qwen3-8B chat template, assistant reply for the correct call:
+  "<tool_call>\n{\"name\": \"set_thermostat\", \"arguments\": {\"temperature\": 19, \"unit\": \"celsius\"}}\n</tool_call>"
+  tokens: ['<tool_call>', '\n', '{"', 'name', '":', ' "', 'set', '_', 'ther', 'mostat', '",', ' "', 'arguments', '":', ' {"', 'temperature', '":', ' ', '1', '9', ',', ' "', 'unit', '":', ' "', 'c', 'elsius', '"}}\n', '</tool_call>']
+
+== TensorRT-LLM 1.4.0rc2 qwen3 structure_info (as shipped)
+tag begin for set_thermostat: "<tool_call>\n{\"name\":\"set_thermostat\", \"arguments\":"
+REJECTED token 5: id 330 ' "'
+  accepted so far: '<tool_call>\n{"name":'
+  the grammar allows 3 tokens here, e.g. ['"', '"g', '"s']
+
+== only the space after "name": restored
+tag begin for set_thermostat: "<tool_call>\n{\"name\": \"set_thermostat\", \"arguments\":"
+REJECTED token 14: id 5212 ' {"'
+  accepted so far: '<tool_call>\n{"name": "set_thermostat", "arguments":'
+  the grammar allows 5 tokens here, e.g. ['{', '{\n', '{\n\n', '{\n\n\n', '{"']
+
+== spaced as the chat template (suggested fix)
+tag begin for set_thermostat: "<tool_call>\n{\"name\": \"set_thermostat\", \"arguments\": "
+ACCEPTED all 29 tokens of the template's reply; <|im_end|> ends: True
