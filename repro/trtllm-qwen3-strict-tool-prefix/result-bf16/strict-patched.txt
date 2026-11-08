@@ -1,0 +1,19 @@
+--- m-thermo-1 (strict) query: 'Turn the house temperature down to 19 celsius.'
+{
+ "role": "assistant",
+ "content": "",
+ "reasoning_content": "",
+ "reasoning": null,
+ "tool_calls": [
+  {
+   "id": "chatcmpl-tool-ac9683d2fc114db68b544c6f08673862",
+   "type": "function",
+   "function": {
+    "name": "set_thermostat",
+    "arguments": "{\"temperature\": 19, \"unit\": \"celsius\"}"
+   }
+  }
+ ]
+}
+---
+strict: 45/45 called the expected function

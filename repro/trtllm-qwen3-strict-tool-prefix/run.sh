@@ -30,7 +30,7 @@ in_image() {
 }
 
 echo "== versions"
-in_image python3 -c 'import tensorrt_llm, xgrammar, transformers; print("tensorrt_llm", tensorrt_llm.__version__, "| xgrammar", xgrammar.__version__, "| transformers", transformers.__version__)' 2>&1 | tail -1 | tee "$OUT/versions.txt"
+in_image python3 -c 'from importlib.metadata import version as v; print(" | ".join(f"{p} {v(p)}" for p in ("tensorrt_llm", "xgrammar", "transformers")))' 2>&1 | tail -1 | tee "$OUT/versions.txt"
 docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}' | tee -a "$OUT/versions.txt"
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader | tee -a "$OUT/versions.txt"
 
@@ -74,7 +74,8 @@ run strict-stock strict
 docker logs "$NAME" >"$OUT/server-stock.log" 2>&1
 
 serve patched
-docker logs "$NAME" 2>&1 | grep -m1 patched
+docker logs "$NAME" >"$OUT/server-patched.log" 2>&1
+grep -m1 patched "$OUT/server-patched.log"  # not `docker logs | grep -m1`: SIGPIPE under pipefail
 run strict-patched strict
 docker logs "$NAME" >"$OUT/server-patched.log" 2>&1
 

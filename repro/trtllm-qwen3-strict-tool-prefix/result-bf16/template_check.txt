@@ -1,0 +1,43 @@
+
+=============
+== PyTorch ==
+=============
+
+NVIDIA Release 26.09 (build 453215200)
+PyTorch Version 2.14.0a0+b2c75dd
+Container image Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+Copyright (c) 2014-2024 Facebook Inc.
+Copyright (c) 2011-2014 Idiap Research Institute (Ronan Collobert)
+Copyright (c) 2012-2014 Deepmind Technologies    (Koray Kavukcuoglu)
+Copyright (c) 2011-2012 NEC Laboratories America (Koray Kavukcuoglu)
+Copyright (c) 2011-2013 NYU                      (Clement Farabet)
+Copyright (c) 2006-2010 NEC Laboratories America (Ronan Collobert, Leon Bottou, Iain Melvin, Jason Weston)
+Copyright (c) 2006      Idiap Research Institute (Samy Bengio)
+Copyright (c) 2001-2004 Idiap Research Institute (Ronan Collobert, Samy Bengio, Johnny Mariethoz)
+Copyright (c) 2015      Google Inc.
+Copyright (c) 2015      Yangqing Jia
+Copyright (c) 2013-2016 The Caffe contributors
+All rights reserved.
+
+Various files include modifications (c) NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+
+GOVERNING TERMS: The software and materials are governed by the NVIDIA Software License Agreement
+(found at https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/)
+and the Product-Specific Terms for NVIDIA AI Products
+(found at https://www.nvidia.com/en-us/agreements/enterprise-software/product-specific-terms-for-ai-products/).
+
+NOTE: CUDA Forward Compatibility mode ENABLED.
+  Using CUDA 13.4 driver version 615.71.09 with kernel driver version 595.91.07.
+  See https://docs.nvidia.com/deploy/cuda-compatibility/ for details.
+
+NOTE: The SHMEM allocation limit is set to the default of 64MB.  This may be
+   insufficient for PyTorch.  NVIDIA recommends the use of the following flags:
+   docker run --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 ...
+
+Skipping import of cpp extensions due to incompatible torch version 2.14.0a0+b2c75dd062.nv26.09 for torchao version 0.15.0             Please see https://github.com/pytorch/ao/issues/2919 for more info
+[TensorRT-LLM] TensorRT LLM version: 1.4.0rc2
+  class ResponseFormat(OpenAIBaseModel):
+chat template writes:    "<tool_call>\n{\"name\": \"set_thermostat\", \"arguments\": {\"temperature\": 19, \"unit\": \"celsius\"}}\n</tool_call>"
+strict tag forces begin: "<tool_call>\n{\"name\":\"set_thermostat\", \"arguments\":"
+template prefix: "<tool_call>\n{\"name\": \"" ['<tool_call>', 'Ċ', '{"', 'name', '":', 'Ġ"']
+forced prefix:   "<tool_call>\n{\"name\":\"" ['<tool_call>', 'Ċ', '{"', 'name', '":"']
