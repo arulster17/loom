@@ -134,7 +134,11 @@ What these say:
   (tokenizer, chat template and xgrammar; no GPU) shows the grammar rejecting the
   template's own tokens and accepting them once the spaces are restored. SGLang's
   `Qwen25Detector` has the same string, a plausible but untested cause of SGLang's
-  strict-tool failure above. Not yet reported upstream.
+  strict-tool failure above. On GPU (Qwen3-8B BF16, L40S), a 45-request multi-tool test
+  scored 27/45 with the stock grammar and 45/45 with both spaces restored (repro on branch
+  [`trtllm-qwen3-strict-repro`](https://github.com/arulster17/loom/tree/trtllm-qwen3-strict-repro/repro)).
+  Reported upstream as [NVIDIA/TensorRT-LLM#21903](https://github.com/NVIDIA/TensorRT-LLM/issues/21903),
+  with a fix in [PR #21906](https://github.com/NVIDIA/TensorRT-LLM/pull/21906) (open, in review).
 - **Speculative decoding: EAGLE3 about 2x faster per token on chat, at every load.**
   TPOT p50 fell 2.00-2.31x with EAGLE3 (2.29-2.34 tokens per verify step), 1.01-1.08x
   with n-gram, which finds little to copy in chat; on code edits, which copy the prompt,
@@ -217,8 +221,8 @@ including aborted streams and a killed pod.
   paused.** It is not on `main`. Real pods on RunPod are the next milestone.
 - **Perf track (profiling and roofline, TensorRT-LLM, speculative decoding): runs done**
   (2026-11-03 to 2026-11-05), results above. Open follow-ups, none approved or run:
-  Nsight Compute on the XQA kernel, a TensorRT-LLM variant with the tool-parser spaces
-  restored and gated again, the padded FP8 knee, and settling the EAGLE3 IFEval gate.
+  Nsight Compute on the XQA kernel, re-running the full quality gate on TensorRT-LLM with
+  the tool-parser fix (only the 45-request strict-tool repro has been run), the padded FP8 knee, and settling the EAGLE3 IFEval gate.
 - The public results site is built but not published.
 
 **GPU spend:** $142.40 recorded in the results database across 41 experiments, smokes and
