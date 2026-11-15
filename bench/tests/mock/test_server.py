@@ -591,7 +591,9 @@ def test_metrics_counters_move_and_prefix_cache(make_client):
 
 
 def test_client_disconnect_aborts_request(make_client):
-    c = make_client(time_scale=0.05)
+    # Real-time simulation: the 2000-token answer takes ~12 s, so it is surely still
+    # running when checked (sped up, it can finish before the check on a busy machine).
+    c = make_client(time_scale=1.0)
     body = {
         "model": MODEL,
         "messages": [{"role": "user", "content": "long"}],
