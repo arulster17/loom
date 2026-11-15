@@ -14,7 +14,8 @@ in-process for the Lab, and `docker compose up` runs the whole platform on it
 
 Python dependencies are locked in `uv.lock`. The workspace root (`pyproject.toml`) holds
 the dev tools (pytest, ruff, moto, ...); the package is `bench/` (`loom-bench`, CLI
-`bench`).
+`bench`). pytest's own settings (test paths, options, markers) are in `pytest.ini`, which
+pytest reads before `pyproject.toml`.
 
 ## Setup
 
@@ -67,7 +68,7 @@ LOOM_TEST_DATABASE_URL=postgresql+psycopg://loom:loom@localhost:5432/loom \
   uv run pytest -q -m postgres          # or drop -m to run everything
 ```
 
-Markers (`pyproject.toml`): `postgres`, `redis`, `slow`, `network` and `acceptance` (the last two
+Markers (`pytest.ini`): `postgres`, `redis`, `slow`, `network` and `acceptance` (the last two
 deselected unless asked for with `-m network` or `-m acceptance`).
 Default per-test timeout is 120 s.
 
