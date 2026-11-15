@@ -135,8 +135,8 @@ What these say:
   template's own tokens and accepting them once the spaces are restored. SGLang's
   `Qwen25Detector` has the same string, a plausible but untested cause of SGLang's
   strict-tool failure above. On GPU (Qwen3-8B BF16, L40S), a 45-request multi-tool test
-  scored 27/45 with the stock grammar and 45/45 with both spaces restored (repro on branch
-  [`trtllm-qwen3-strict-repro`](https://github.com/arulster17/loom/tree/trtllm-qwen3-strict-repro/repro)).
+  scored 27/45 with the stock grammar and 45/45 with both spaces restored (repro in
+  [repro/trtllm-qwen3-strict-tool-prefix](repro/trtllm-qwen3-strict-tool-prefix/)).
   Reported upstream as [NVIDIA/TensorRT-LLM#21903](https://github.com/NVIDIA/TensorRT-LLM/issues/21903),
   with a fix in [PR #21906](https://github.com/NVIDIA/TensorRT-LLM/pull/21906) (open, in review).
 - **Speculative decoding: EAGLE3 about 2x faster per token on chat, at every load.**
