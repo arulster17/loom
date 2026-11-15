@@ -1,0 +1,3 @@
+# --extra_llm_api_options. Strict tools (and response_format) need a grammar backend;
+# trtllm-serve has none by default.
+guided_decoding_backend: xgrammar
