@@ -1,0 +1,99 @@
+{
+  "model": "qwen3-8b",
+  "temperature": 0.0,
+  "seed": 1234,
+  "chat_template_kwargs": {
+    "enable_thinking": false
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "Turn the house temperature down to 19 celsius."
+    }
+  ],
+  "max_tokens": 512,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Current weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string",
+              "description": "City name"
+            },
+            "unit": {
+              "type": "string",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "description": "Temperature unit"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "additionalProperties": false
+        },
+        "strict": true
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "set_thermostat",
+        "description": "Set the home thermostat.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "temperature": {
+              "type": "number"
+            },
+            "unit": {
+              "type": "string",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ]
+            }
+          },
+          "required": [
+            "temperature",
+            "unit"
+          ],
+          "additionalProperties": false
+        },
+        "strict": true
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "set_timer",
+        "description": "Start a countdown timer.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "minutes": {
+              "type": "integer"
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "minutes"
+          ],
+          "additionalProperties": false
+        },
+        "strict": true
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "stream": false
+}

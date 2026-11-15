@@ -1,0 +1,37 @@
+  m-thermo-1     expected set_thermostat         got wrong_function: ['get_weather']
+--- m-thermo-1 (strict) query: 'Turn the house temperature down to 19 celsius.'
+{
+ "role": "assistant",
+ "content": "",
+ "reasoning_content": "",
+ "reasoning": null,
+ "tool_calls": [
+  {
+   "id": "chatcmpl-tool-6b38f073957d44b8840f6416931e36c0",
+   "type": "function",
+   "function": {
+    "name": "get_weather",
+    "arguments": "{\"city\": \"New York\", \"unit\": \"celsius\"}"
+   }
+  }
+ ]
+}
+---
+  m-timer-1      expected set_timer              got wrong_function: ['create_event']
+  m-currency-1   expected convert_currency       got wrong_function: ['get_stock_price']
+  m-route-1      expected find_route             got wrong_function: ['get_weather']
+  m-table-1      expected book_table             got wrong_function: ['get_weather']
+  m-translate-1  expected translate_text         got wrong_function: ['search_books']
+  m-cart-1       expected add_to_cart            got wrong_function: ['compute_area']
+  m-currency-2   expected convert_currency       got wrong_function: ['get_weather']
+  m-alarm-1      expected set_alarm              got wrong_function: ['create_reminder']
+  m-timer-2      expected set_timer              got wrong_function: ['create_reminder']
+  m-currency-3   expected convert_currency       got wrong_function: ['calculate_loan_payment']
+  m-nearby-1     expected find_nearby            got wrong_function: ['get_weather']
+  m-email-1      expected send_email             got wrong_function: ['create_task']
+  m-music-1      expected play_playlist          got wrong_function: ['set_thermostat']
+  m-track-1      expected track_package          got wrong_function: ['send_email']
+  m-image-1      expected resize_image           got wrong_function: ['compute_area']
+  m-bmi-1        expected calculate_bmi          got wrong_function: ['log_workout']
+  m-translate-2  expected translate_text         got wrong_function: ['define_word']
+strict: 27/45 called the expected function
