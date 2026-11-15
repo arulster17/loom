@@ -51,6 +51,9 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Upstream bug repros: standalone scripts run inside vendor images, kept byte-identical
+# to what was reported.
+extend-exclude = ["repro"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
