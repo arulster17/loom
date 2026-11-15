@@ -436,6 +436,7 @@ only matter once there is a public URL, real users or real money.
 | R12 | web | Admin credit adjustments are keyed by a new audit id, so a resubmit or a second tab posts the credit again | A per-form token as the ledger idempotency key | M3 |
 | R13 | web | Signing out through Auth.js's own endpoint skips revoking playground keys | Revoke in `events.signOut` | M3 |
 | R14 | web | No upper bound on a key's spend limit (bigint overflow shows "Something went wrong") | Bound it | M3 |
+| R15 | tests / CI | The suite is flaky in CI: the same commit passed and failed `bench` 15 minutes apart (PR #1). `services/gateway/tests/test_gateway_api.py::test_503_pool_states` takes the first message on the shared `loom:pool:wake` channel, which a parallel test's wake can be; `bench/tests/runner/test_quality_e2e.py` (and earlier `test_stored_baseline.py`, partly fixed in 16292fa) expects a borderline cell to `pass` the gate on simulated noisy output, and some runs land just past the margin (`review`), after which the rest of the xdist group fails on its stored rows | Wait for the message naming this test's model; make the e2e quality fixtures deterministic (or give the pass cell a clear margin) so the outcome cannot flip; make dependent tests not cascade; then run CI repeatedly (e.g. 10x) to confirm no flakes remain | M2 |
 
 Policy questions from the same review, for the user before M3: whether
 `LOOM_ADMIN_EMAILS` should grant admin outside dev (today it grants in prod too and never
