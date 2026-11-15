@@ -819,6 +819,9 @@ class Acceptance:
             "model": MODELS[0],
             "messages": [{"role": "user", "content": self.prompt()}],
             "max_tokens": 400,
+            # Both cases cut the stream after 10 content chunks; the mock's reply length
+            # depends on the (random) prompt and can be shorter than that.
+            "min_tokens": 100,
             "stream": True,
             "stream_options": {"include_usage": True, "continuous_usage_stats": True},
         }
