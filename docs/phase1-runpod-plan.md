@@ -414,6 +414,35 @@ Each milestone ends with a stop for the user's go-ahead before the next paid one
 | M4 | Serving smoke on RunPod: one 8B pod, then one 70B FP8 pod, through the real gateway | Cap $20 | mTLS path works and refuses a request without our client certificate and from another IP; usage equals the engine's tokens exactly, including a client abort and a pod terminated mid-stream [acceptance]; cold start, gateway-to-pod RTT and GPU metrics recorded; load test through the gateway at the Lab's goodput reports TTFT and tokens/s within the Lab's intervals plus the RTT [deliverable 4]; engine log holds no prompt text; teardown verified |
 | M5 | Go-live in the chosen mode (invite-only preview unless decided otherwise) | Cap $35 for the window, then the mode's cost | Both models live, Stripe test mode [deliverable 3]; dashboards show cost per 1M served next to the Lab prediction; the M4 checks pass again on both models; a written acceptance note like `phase0-acceptance.md` |
 
+### Follow-ups from the M1 pre-merge review (2026-11-15)
+
+A third review of the M1 code before it merged into `main` found no M1 blockers. These
+must be fixed (each with a regression test) before the milestone named, because they
+only matter once there is a public URL, real users or real money.
+
+| # | Area | Defect | Fix direction | Before |
+|---|---|---|---|---|
+| R1 | gateway | After the stream deadline, `_pump` (`proxy.py`) writes the error chunk and the final send with no time bound; a client that stops reading blocks settle indefinitely while the reservation expires at 660 s, so delivered tokens go unbilled | Settle before the trailing writes, or bound them like `_send_shutdown` (1 s) | M3 |
+| R2 | gateway | A `reserve` whose reply is lost (Redis socket timeout) answers 503 "nothing reserved", but the script can still run when Redis recovers and nothing releases it: a 3 s Redis stall can hold keys and orgs at their concurrency and balance limits for ~11 min | Best-effort, idempotent `release` on a Redis error from reserve; also answer a Postgres error in `load_from_postgres` with 503, not 500 | M3 |
+| R3 | gateway | A non-streaming request cut at the timeout bills $0, and the allowlist lets a client force maximum work (`n=16`, `max_tokens` 16,384, `ignore_eos`, `min_tokens`): free GPU time for a funded key | User decision: bill the reservation (or an elapsed-time estimate) on a non-stream timeout, or refuse `ignore_eos`/`min_tokens`/large `n × max_tokens` without streaming | M3 |
+| R4 | gateway | A non-streaming response whose settle is slow near the deadline is charged `ok` but answered 502; a retrying client pays twice | Do not turn a settled request into a 502 | M3 |
+| R5 | billing | The `redis_behind` heal (`reconcile.py`) reads Redis `usage`, then INCRBYs: two workers reconciling at once both heal, leaving a permanent over-count (balance understated) | Compare-and-heal atomically in Lua, or one elected reconciler | M3 |
+| R6 | billing | The drift check, and so the heal, runs only when the whole usage stream is consumed, which under steady traffic is almost never; "heals within a minute" after Redis loss fails under load | Heal `redis_behind` without requiring `drained` (P ≤ U2 holds anyway); poll briefly instead of skipping for the other direction | M3 |
+| R7 | billing | `loom_org_credit_total` / `loom_org_credit_version` (and the webhook lookups by `kind`+`org_id`+`external_ref`) scan every usage transaction of the org on each call (every loaded org, every minute) | Partial index on `ledger_transactions (org_id) WHERE kind <> 'usage'`, plus a credit rollup or a partial index on entries | M5 |
+| R8 | billing / ops | Append-only and zero-sum triggers can be disabled or replaced by the table owner, and every service connects as the owner (superuser in compose) | Separate migrator/owner role from a runtime role with INSERT/SELECT and EXECUTE only; `production_problems` checks it; correct contracts §3 | M3 |
+| R9 | billing | A non-UTF-8 stream field fails decoding before `process()`, never reaches the dead-letter path, and wedges the consumer (stream grows under `noeviction`) | Decode inside `process`, dead-letter on failure | M3 |
+| R10 | billing | Posted `usage_events` rows can still be updated (clearing `ledger_transaction_id` re-debits them); key spend usage is not healed after a Redis reload | Trigger forbidding changes once posted; heal key usage like org usage | M5 |
+| R11 | web | The magic-link limit runs only in the app's server action; Auth.js's own `POST /api/auth/signin/nodemailer` sends mail unchecked (inbox flooding, SMTP quota) | Check the limit where Auth.js sends (`signIn` callback on `verificationRequest`, or a wrapped `sendVerificationRequest`) | M3 |
+| R12 | web | Admin credit adjustments are keyed by a new audit id, so a resubmit or a second tab posts the credit again | A per-form token as the ledger idempotency key | M3 |
+| R13 | web | Signing out through Auth.js's own endpoint skips revoking playground keys | Revoke in `events.signOut` | M3 |
+| R14 | web | No upper bound on a key's spend limit (bigint overflow shows "Something went wrong") | Bound it | M3 |
+| R15 | tests / CI | The suite is flaky in CI: the same commit passed and failed `bench` 15 minutes apart (PR #1). `services/gateway/tests/test_gateway_api.py::test_503_pool_states` takes the first message on the shared `loom:pool:wake` channel, which a parallel test's wake can be; `bench/tests/runner/test_quality_e2e.py` (and earlier `test_stored_baseline.py`, partly fixed in 16292fa) expects a borderline cell to `pass` the gate on simulated noisy output, and some runs land just past the margin (`review`), after which the rest of the xdist group fails on its stored rows | Wait for the message naming this test's model; make the e2e quality fixtures deterministic (or give the pass cell a clear margin) so the outcome cannot flip; make dependent tests not cascade; then run CI repeatedly (e.g. 10x) to confirm no flakes remain | M2 |
+
+Policy questions from the same review, for the user before M3: whether
+`LOOM_ADMIN_EMAILS` should grant admin outside dev (today it grants in prod too and never
+revokes, and Google linking is on by default), and whether admins may approve or credit
+their own org outside dev.
+
 ## 14. Risks
 
 - **2x H100 SXM stock** has been "Low" each time we checked. If the 70B pod is lost and

@@ -1,0 +1,10 @@
+# Used by BuildKit for apps/web/Dockerfile (context: repo root). Only the web app and
+# the model registry are needed.
+**
+!apps/web/**
+!config/models.yaml
+apps/web/node_modules
+apps/web/.next
+apps/web/.env*
+apps/web/coverage
+apps/web/tsconfig.tsbuildinfo

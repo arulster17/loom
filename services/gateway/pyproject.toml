@@ -1,0 +1,20 @@
+[project]
+name = "loom-gateway"
+version = "0.1.0"
+description = "Loom API gateway: OpenAI-compatible public API, auth, limits, credit reservation, routing, metering"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = [
+    "loom-platform",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx[http2]>=0.27",
+    "prometheus-client>=0.20",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/loom_gateway"]

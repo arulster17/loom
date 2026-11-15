@@ -136,6 +136,160 @@ def test_completions_usage_and_streaming(client):
     assert events[-2]["usage"] == data["usage"]
 
 
+CONTINUOUS = {"include_usage": True, "continuous_usage_stats": True}
+
+
+def test_chat_continuous_usage_stats(client):
+    body = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Write a story."}],
+        "max_tokens": 25,
+        "stream_options": CONTINUOUS,
+    }
+    events = stream_events(client, "/v1/chat/completions", body)
+    assert events[-1] == "[DONE]"
+    final = events[-2]["usage"]
+    chunks = events[:-2]
+    # Every chunk carries the running count: 0 on the role chunk, then one per token.
+    running = [c["usage"] for c in chunks]
+    assert [u["completion_tokens"] for u in running] == list(range(len(chunks)))
+    assert {u["prompt_tokens"] for u in running} == {final["prompt_tokens"]}
+    assert all(u["total_tokens"] == u["prompt_tokens"] + u["completion_tokens"] for u in running)
+    # As in vLLM, cached-token details are reported only in the final usage.
+    assert all("prompt_tokens_details" not in u for u in running)
+    assert running[-1]["completion_tokens"] == final["completion_tokens"]
+    assert "prompt_tokens_details" in final
+
+
+def test_continuous_usage_needs_include_usage(client):
+    body = {
+        "model": MODEL,
+        "prompt": "Once upon",
+        "max_tokens": 5,
+        "stream_options": {"continuous_usage_stats": True},
+    }
+    events = stream_events(client, "/v1/completions", body)
+    assert all("usage" not in e for e in events[:-1])
+
+
+def test_completions_continuous_usage_stats(client):
+    body = {"model": MODEL, "prompt": "The batch", "max_tokens": 12, "ignore_eos": True}
+    events = stream_events(client, "/v1/completions", {**body, "stream_options": CONTINUOUS})
+    chunks, final = events[:-2], events[-2]["usage"]
+    assert [c["usage"]["completion_tokens"] for c in chunks] == list(range(1, 13))
+    assert final["completion_tokens"] == 12
+    assert {c["usage"]["prompt_tokens"] for c in chunks} == {TOK.count("The batch")}
+
+
+def test_tool_call_streaming_continuous_usage(client):
+    body = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Weather in Rome?"}],
+        "tools": [WEATHER_TOOL],
+        "max_tokens": 200,
+        "stream_options": CONTINUOUS,
+    }
+    events = stream_events(client, "/v1/chat/completions", body)
+    chunks, final = events[:-2], events[-2]["usage"]
+    assert chunks[-1]["usage"]["completion_tokens"] == final["completion_tokens"]
+    assert chunks[0]["usage"]["completion_tokens"] == 0
+
+
+def test_aborted_stream_last_usage_counts_tokens_received(make_client):
+    """A stream that drops mid-way: the last chunk's usage equals the tokens received."""
+    c = make_client(abort_rate=1.0)
+    body = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 40,
+        "ignore_eos": True,
+        "stream": True,
+        "stream_options": CONTINUOUS,
+    }
+    for _ in range(5):
+        received: list[dict] = []
+        with (
+            pytest.raises(httpx.RemoteProtocolError),
+            c.stream("POST", "/v1/chat/completions", json=body) as response,
+        ):
+            for line in response.iter_lines():
+                if line.startswith("data: {"):
+                    received.append(json.loads(line[6:]))
+        tokens = sum(1 for e in received if e["choices"][0]["delta"].get("content"))
+        if received:
+            assert received[-1]["usage"]["completion_tokens"] == tokens
+
+
+def _per_choice(chunks: list[dict]) -> dict[int, list[dict]]:
+    out: dict[int, list[dict]] = {}
+    for c in chunks:
+        assert len(c["choices"]) == 1  # vLLM: one choice per chunk
+        out.setdefault(c["choices"][0]["index"], []).append(c)
+    return out
+
+
+def test_chat_n_choices(client):
+    body = {"model": MODEL, "messages": [{"role": "user", "content": "Tell a story."}]}
+    one = chat(client, "Tell a story.", max_tokens=60).json()
+    data = client.post("/v1/chat/completions", json={**body, "max_tokens": 60, "n": 3}).json()
+    assert [c["index"] for c in data["choices"]] == [0, 1, 2]
+    texts = [c["message"]["content"] for c in data["choices"]]
+    assert texts[0] == one["choices"][0]["message"]["content"]  # n=1 output unchanged
+    assert len(set(texts)) == 3  # siblings are sampled apart
+    usage = data["usage"]
+    # vLLM: the prompt once, completion tokens summed over the choices.
+    assert usage["prompt_tokens"] == one["usage"]["prompt_tokens"]
+    assert usage["completion_tokens"] == sum(TOK.count(t) for t in texts)
+
+
+def test_chat_n_streaming_per_choice_continuous_usage(client):
+    body = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Write a long story."}],
+        "max_tokens": 300,
+        "n": 3,
+        "stream_options": CONTINUOUS,
+    }
+    events = stream_events(client, "/v1/chat/completions", body)
+    assert events[-1] == "[DONE]"
+    final = events[-2]["usage"]
+    by_choice = _per_choice(events[:-2])
+    assert sorted(by_choice) == [0, 1, 2]
+    totals = []
+    for chunks in by_choice.values():
+        # Each chunk carries its own choice's running count (role chunk 0, then 1, 2, ...).
+        counts = [c["usage"]["completion_tokens"] for c in chunks]
+        assert counts == list(range(len(chunks)))
+        assert {c["usage"]["prompt_tokens"] for c in chunks} == {final["prompt_tokens"]}
+        totals.append(counts[-1])
+    assert final["completion_tokens"] == sum(totals)
+    assert len(set(totals)) > 1  # choices of different lengths
+    # The choices are interleaved, as the engine samples them in the same steps.
+    order = [e["choices"][0]["index"] for e in events[:-2]]
+    assert order != sorted(order)
+
+
+def test_completions_n_streaming_and_prompt_list(client):
+    body = {"model": MODEL, "prompt": "The batch", "max_tokens": 12, "ignore_eos": True, "n": 2}
+    events = stream_events(client, "/v1/completions", {**body, "stream_options": CONTINUOUS})
+    by_choice = _per_choice(events[:-2])
+    assert {i: [c["usage"]["completion_tokens"] for c in cs] for i, cs in by_choice.items()} == {
+        0: list(range(1, 13)),
+        1: list(range(1, 13)),
+    }
+    assert events[-2]["usage"]["completion_tokens"] == 24
+    assert events[-2]["usage"]["prompt_tokens"] == TOK.count("The batch")
+
+    prompts = ["What is 2 + 2?", "What is 3 * 4?"]
+    data = client.post(
+        "/v1/completions", json={"model": MODEL, "prompt": prompts, "max_tokens": 10, "n": 2}
+    ).json()
+    assert [c["index"] for c in data["choices"]] == [0, 1, 2, 3]
+    assert all("The answer is 12." in c["text"] for c in data["choices"][2:])
+    assert data["usage"]["prompt_tokens"] == sum(TOK.count(p) for p in prompts)
+    assert data["usage"]["completion_tokens"] == sum(TOK.count(c["text"]) for c in data["choices"])
+
+
 def test_completions_prompt_list(client):
     prompts = ["What is 2 + 2?", "What is 3 * 4?"]
     data = client.post(
@@ -194,7 +348,7 @@ def test_errors_are_openai_shaped(client):
 
     assert_openai_error(client.post("/v1/chat/completions", json={"model": MODEL}), 400)
     assert_openai_error(chat(client, "hi", max_tokens="many"), 400)
-    assert_openai_error(chat(client, "hi", n=2), 400)
+    assert_openai_error(chat(client, "hi", n=17), 400)
     assert_openai_error(chat(client, "hi", logprobs=True, top_logprobs=50), 400)
     assert_openai_error(client.post("/v1/completions", content=b"{nope"), 400)
     assert_openai_error(client.get("/v1/nothing"), 404)
