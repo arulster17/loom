@@ -30,6 +30,7 @@ picks when it has several to choose from.
 | File | What it does |
 |---|---|
 | `run.sh` | The whole repro: versions, weights, template check, then three runs |
+| `run_pod.sh` | `run.sh` without Docker, for a machine already running the pinned image (e.g. a RunPod pod) |
 | `repro.py` | Standard-library client: sends the 45 items, counts right-function calls |
 | `items.json` | 45 items (40 offer 3 functions, 5 offer 4) and the function each should call |
 | `template_check.py` | No GPU work: prints the template's tool call next to the forced prefix |
@@ -52,6 +53,10 @@ owned by root.
 # FP8 (fits ~24 GB):
 MODEL=nvidia/Qwen3-8B-FP8 REVISION=2cebc4c89e25abc17668c81b01dceaf3d8b914d5 ./run.sh
 ```
+
+On a machine that already is the TensorRT-LLM container (a pod started from the same
+pinned image), run `./run_pod.sh` instead. It takes the same `MODEL`/`REVISION` and does the
+same steps without Docker; set `IMAGE_REF` so `versions.txt` records the image.
 
 It serves the model with `trtllm-serve --tool_parser qwen3` and runs the same 45 requests
 three times (greedy, non-thinking, `tool_choice: auto`):
