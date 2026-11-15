@@ -12,6 +12,7 @@ import pytest
 
 from loom_platform.pool import PoolState, Replica, set_pool, wake_key
 from loom_platform.pricing import Price, cost_micros, max_cost_micros, prompt_tokens_upper_bound
+from loom_platform.testing import wait_for_message
 
 pytestmark = [pytest.mark.postgres, pytest.mark.redis]
 
@@ -425,8 +426,7 @@ async def test_503_pool_states(stack, redis_client):
     assert e.value.code == "model_unavailable"
     assert e.value.response.headers["retry-after"] == "450"
     assert await redis_client.exists(wake_key(stack.big))
-    msg = await pubsub.get_message(timeout=2)
-    assert msg is not None and msg["data"] in (stack.big, stack.big.encode())
+    assert await wait_for_message(pubsub, stack.big)
     await pubsub.aclose()
 
     # warming: Retry-After from the hash

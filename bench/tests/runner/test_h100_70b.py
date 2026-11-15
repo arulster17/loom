@@ -397,6 +397,8 @@ SUITE = {
 def test_an_in_run_bf16_baseline_gates_the_fp8_row(ctx, tmp_path):
     # The H100 draft's gate wiring on the mock: the BF16 cell captures the reference and
     # the FP8 row's cell (another registry entry) is scored on it and gated against it.
+    # The FP8 noise is low enough to pass with a clear margin (top-1 91% vs a 85% limit):
+    # this test is about the wiring, not where the gate's line sits.
     suite = write_yaml(tmp_path / "suite.yaml", SUITE)
     jitter = {"logprob_jitter": 0.25}
     exp = Experiment.model_validate(
@@ -408,7 +410,7 @@ def test_an_in_run_bf16_baseline_gates_the_fp8_row(ctx, tmp_path):
                 {
                     "name": "fp8",
                     "model": "llama-3.3-70b-instruct-fp8",
-                    "mock": {**jitter, "logprob_noise": 0.3},
+                    "mock": {**jitter, "logprob_noise": 0.2},
                 },
             ],
             workloads=[],

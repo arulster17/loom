@@ -13,6 +13,7 @@ the server is not reachable, the tests skip; when it is set, unreachable is an e
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -96,6 +97,21 @@ async def redis_client() -> AsyncIterator[aioredis.Redis]:
         yield client
     finally:
         await client.aclose()
+
+
+async def wait_for_message(
+    pubsub: aioredis.client.PubSub, data: str, within_s: float = 2.0
+) -> bool:
+    """Whether `data` arrives on the subscribed channels within `within_s` seconds. Other
+    messages are skipped: channels like loom:pool:wake are shared with tests running in
+    parallel (and other sessions on the same Redis), so the first message may be theirs."""
+    want = (data, data.encode())
+    deadline = asyncio.get_running_loop().time() + within_s
+    while (left := deadline - asyncio.get_running_loop().time()) > 0:
+        msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=min(left, 0.1))
+        if msg is not None and msg["data"] in want:
+            return True
+    return False
 
 
 # ------------------------------------------------------------------ factories

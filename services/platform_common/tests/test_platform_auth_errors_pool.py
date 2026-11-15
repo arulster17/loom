@@ -16,7 +16,7 @@ from loom_platform.auth import (
 from loom_platform.limiter import ReserveResult
 from loom_platform.pool import PoolState, Replica, get_pool, request_wake, set_pool, wake_key
 from loom_platform.settings import PlatformSettings
-from loom_platform.testing import create_api_key, create_org
+from loom_platform.testing import create_api_key, create_org, wait_for_message
 
 RECORD = AuthRecord(
     key_id=uuid.uuid4(), org_id=uuid.uuid4(), org_status="active", revoked=False,
@@ -128,13 +128,9 @@ async def test_pool_state_round_trip_and_wake(redis_client):
     assert got.routable and got.replicas == ready.replicas and got.updated_at_ms > 0
     pubsub = redis_client.pubsub()
     await pubsub.subscribe("loom:pool:wake")
+    await pubsub.get_message(timeout=1)  # subscribe confirmation
     assert await request_wake(redis_client, model)
     assert not await request_wake(redis_client, model)
-    msg = None
-    for _ in range(20):
-        msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
-        if msg:
-            break
-    assert msg is not None and msg["data"] == model.encode()
+    assert await wait_for_message(pubsub, model)
     await pubsub.aclose()
     await redis_client.delete(f"loom:pool:{model}", wake_key(model))
