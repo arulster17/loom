@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 ## Branches and docs
-- Phase 1 M1 work is on `phase1-m1` (origin), not `main`. Plan: `docs/phase1-runpod-plan.md`; overall plan and user decisions: `docs/PLAN.md`.
+- Phase 1 M1 (the platform on the mock) is merged into `main`; M2 is next. Plan: `docs/phase1-runpod-plan.md`; overall plan and user decisions: `docs/PLAN.md`.
 - Interfaces between platform services are fixed in `docs/phase1-contracts.md`. Changing one means changing that doc, `services/platform_common` (`loom_platform`) and its tests in the same change.
 
 ## Python (uv workspace; members in root `pyproject.toml`)
