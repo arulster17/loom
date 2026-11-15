@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import itertools
+import hashlib
 import json
 import math
 import random
@@ -177,7 +177,13 @@ class MockServer:
         self.engine = AsyncEngine(config)
         self.ready_at = math.inf
         self._faults = random.Random(config.seed)
-        self._jitter_draws = itertools.count()
+        # Jitter draws are keyed by content, not arrival order, so concurrent scoring
+        # requests get the same jitter in every run. The salt (the config, less its temp
+        # profile dir) keeps two differently configured servers from drawing the same
+        # jitter for a text, which would cancel it out of their divergence.
+        salt = config.model_dump_json(exclude={"profile_dir"}).encode()
+        self._jitter_salt = hashlib.blake2b(salt, digest_size=16).digest()
+        self._jitter_seen: dict[bytes, int] = {}
 
     def check_ready(self) -> None:
         if time.monotonic() < self.ready_at:
@@ -320,10 +326,23 @@ class MockServer:
             k=k,
             noise=self.config.logprob_noise,
             jitter=self.config.logprob_jitter,
-            draw=next(self._jitter_draws),
+            draw=self._jitter_draw(tokens),
             vocab=vocab,
         )
         return entries
+
+    def _jitter_draw(self, tokens: Sequence[str]) -> int:
+        """The n-th scoring of a text on this server gets draw n of that text: scoring
+        it twice still differs (the noise floor), but not by request order."""
+        h = hashlib.blake2b(self._jitter_salt, digest_size=16)
+        for t in tokens:
+            data = t.encode()
+            h.update(len(data).to_bytes(4, "big"))
+            h.update(data)
+        key = h.digest()
+        n = self._jitter_seen.get(key, 0)
+        self._jitter_seen[key] = n + 1
+        return int.from_bytes(hashlib.blake2b(key + n.to_bytes(8, "big"), digest_size=8).digest())
 
 
 def _usage(prompts: Iterable[Sequence[tuple[Generation, SimSequence]]]) -> dict[str, Any]:

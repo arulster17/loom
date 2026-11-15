@@ -236,6 +236,16 @@ def mock_engine():
 
 
 @pytest.fixture
+def realtime_engine():
+    """Simulated time at real speed: a 4000-token answer takes ~25 s, so it is surely still
+    running when checked (sped up, it can finish into socket buffers on a busy machine
+    before the client looks)."""
+    config = MockConfig(models=["qwen3-8b"], time_scale=1.0, abort_rate=0.0)
+    with serve_asgi(create_app(config)) as port:
+        yield port
+
+
+@pytest.fixture
 def aborting_engine():
     config = MockConfig(models=["qwen3-8b"], time_scale=0.001, abort_rate=1.0)
     with serve_asgi(create_app(config)) as port:
@@ -289,8 +299,8 @@ async def test_chat_through_proxy_with_continuous_usage(certs, mock_engine, star
     assert tok.json()["count"] == final["prompt_tokens"]
 
 
-async def test_client_abort_cancels_the_engine_request(certs, mock_engine, start_proxy):
-    _, port = await start_proxy(mock_engine)
+async def test_client_abort_cancels_the_engine_request(certs, realtime_engine, start_proxy):
+    _, port = await start_proxy(realtime_engine)
     body = {
         "model": "qwen3-8b",
         "messages": [{"role": "user", "content": "long"}],
@@ -304,10 +314,10 @@ async def test_client_abort_cancels_the_engine_request(certs, mock_engine, start
     ):
         lines = r.aiter_lines()
         await anext(lines)
-        assert await asyncio.to_thread(engine_running, mock_engine) == 1
+        assert await asyncio.to_thread(engine_running, realtime_engine) == 1
         # Leaving the block closes the stream; the client gives up mid-response.
     deadline = time.monotonic() + 5
-    while await asyncio.to_thread(engine_running, mock_engine) != 0:
+    while await asyncio.to_thread(engine_running, realtime_engine) != 0:
         assert time.monotonic() < deadline, "engine still running the aborted request"
         await asyncio.sleep(0.02)
 
