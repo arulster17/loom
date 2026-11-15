@@ -22,8 +22,11 @@ from sqlalchemy import select
 
 from loom_bench.experiment import EXPERIMENTS_DIR, Experiment, expand, load_experiment
 from loom_bench.jobs import LoadJob
+from loom_bench.metrics.aggregate import aggregate_runs
+from loom_bench.metrics.summary import RunSummary
 from loom_bench.registry import load_registry
 from loom_bench.runner import next_search_load
+from loom_bench.slo import Slo, SloVerdict, slo_met
 from loom_bench.store.db import session_scope
 from loom_bench.store.models import BenchRun
 
@@ -152,17 +155,27 @@ def test_a_knee_above_its_start_still_bisects_and_one_below_its_floor_only_desce
 
 # The pod's mock engine keeps up with any offered load up to KNEE req/s and not above it:
 # before each load job the pod simulator sets its step cost from the job's rate. Below the
-# knee a step takes ~11 ms (TPOT well under the SLO's 50 ms, a request lives ~1 s, inside
-# the drain timeout); above it 100 ms, so TPOT fails and a request needs ~8 s, so the ones
-# in flight at the window's end outlive the drain and are cancelled. A hard knee keeps the
-# verdicts deterministic at a few requests per window (a batch-dependent step cost gives a
-# soft knee, and 3 repetitions of ~4 requests then fail the CI upper bound at random).
+# knee a step takes ~11 ms, so a request lives ~0.5 s, well inside the drain timeout;
+# above it 200 ms, so a request needs at least 8 s, longer than the window and the drain
+# together: no measured request completes, the ones in flight at the window's end are
+# cancelled, and the point fails with no data for any SLO check. Each step is a real
+# sleep, and under CPU contention each one ends late, so a fast request's life grows with
+# its step count: 40 output tokens rather than 80 keep it inside the drain (with 80, a
+# fast run under `-n auto` plus CPU load had a request cancelled). A hard knee keeps the
+# verdicts deterministic at a few requests per window (a batch-dependent step cost gives
+# a soft knee, and 3 repetitions of ~4 requests then fail the CI upper bound at random).
+# At test scale the SLO keeps only the spec's error-rate bound (R15). Its TTFT and TPOT
+# bounds never fail an overloaded point here (it has no latencies), but they can fail a
+# fast one on CPU timing: the mock runs in real time, and the verdict is the upper end of
+# a log-scale 95% interval over 3 repetitions (t = 4.3), so one repetition whose p95 TTFT
+# a stall lifts from ~20 ms to ~185 ms (or TPOT from ~12 ms to ~27 ms) puts the bound over
+# 1000 ms (50 ms). bench/tests/analysis/test_slo.py tests the latency rule itself.
 # 1.8 sits between the spec's floor and start: 3.375 and 2.25 fail, 1.5 passes, then it
 # bisects.
 KNEE = 1.8
 FAST = {"step_base_ms": 10.0, "decode_ms_per_seq": 0.5, "prefill_ms_per_token": 0.02}
-SLOW = {"step_base_ms": 100.0, "decode_ms_per_seq": 0.5, "prefill_ms_per_token": 0.02}
-OUTPUT_LEN = 80
+SLOW = {"step_base_ms": 200.0, "decode_ms_per_seq": 0.5, "prefill_ms_per_token": 0.02}
+OUTPUT_LEN = 40
 WINDOW = {"duration_s": 3.0, "warmup_s": 0.5, "drain_timeout_s": 1.5, "scrape_interval_s": 0.2}
 EVAL_MARK = "BENCH_CMD=(quality job)"
 
@@ -187,12 +200,14 @@ class KneePodSim(two.RecordingPodSim):
 
 
 def at_test_scale(path: Path, tmp: Path) -> Experiment:
-    """The spec's model, provider, variants, search, repetitions and SLO; short requests
-    and windows so a point takes seconds."""
+    """The spec's model, provider, variants, search and repetitions, and its SLO's error
+    rate bound without the latency bounds (above); short requests and windows so a point
+    takes seconds."""
     doc = yaml.safe_load(path.read_text())
     for w in doc["workloads"]:
         w["overrides"] = {"input_len": 32, "output_len": OUTPUT_LEN}
         w["load"].update(WINDOW)
+    doc["slo"] = {"max_error_rate": doc["slo"]["max_error_rate"]}
     doc["budget"] = {"max_spend": "$2", "ttl_minutes": 100, "accrual_interval_s": 0.2}
     return Experiment.model_validate(doc)
 
@@ -223,6 +238,27 @@ def _goodput(ctx, outcome, cell: str) -> dict:
     return row
 
 
+def _verdicts(ctx, cell: str, slo: Slo) -> dict[float, SloVerdict]:
+    """Each point's SLO verdict, recomputed from its stored runs as the runner made it."""
+    by_load: dict[float, list[RunSummary]] = {}
+    for r in _runs(ctx, cell):
+        by_load.setdefault(r.load_value, []).append(RunSummary.model_validate(r.summary))
+    return {x: slo_met(slo, aggregate_runs(runs)) for x, runs in by_load.items()}
+
+
+def _explain(cell: str, verdicts: dict[float, SloVerdict]) -> str:
+    """Each point's verdict and every check's observed value (CI upper bound) and target."""
+    lines = [f"{cell}, SLO checks per point:"]
+    for x, v in verdicts.items():
+        checks = "; ".join(
+            f"{c.metric} {'no data' if c.observed is None else f'{c.observed:.4g}'}"
+            f" vs {c.target:g}{'' if c.passed else ' FAILED'}"
+            for c in v.checks
+        )
+        lines.append(f"  {x:.4g} req/s {'met' if v.met else 'missed'}: {checks}")
+    return "\n".join(lines)
+
+
 def test_the_run_completes_with_every_run_recorded(fail_run):
     outcome, _, ctx, cells, _ = fail_run
     assert outcome.status.value == "completed", outcome.reason
@@ -231,30 +267,40 @@ def test_the_run_completes_with_every_run_recorded(fail_run):
         assert {r.status for r in _runs(ctx, c.key)} == {"completed"}
 
 
-def test_each_cell_descends_from_its_failing_start_then_bisects(fail_run):
+def test_each_cell_descends_from_its_failing_start_then_bisects(fail_run, tmp_path):
     outcome, _, ctx, cells, _ = fail_run
-    load = load_experiment(FAIL).workloads[0].load
+    exp = at_test_scale(FAIL, tmp_path)
+    load = exp.workloads[0].load
     s = load.search
-    assert s is not None
+    assert s is not None and exp.slo is not None
     for c in cells:
         order = _points(_runs(ctx, c.key))
         met = {x: m for x, m in _goodput(ctx, outcome, c.key)["points"]}
         history = [(x, met[x]) for x in order]
-        assert history == _trajectory(load, KNEE)
+        verdicts = _verdicts(ctx, c.key, exp.slo)
+        why = f"{history}\n{_explain(c.key, verdicts)}"
+        assert {x: v.met for x, v in verdicts.items()} == met, why
+        assert history == _trajectory(load, KNEE), why
         assert branches(history, s.lo, s.step) == {
             "descent": True,
             "bisection": True,
             "passed": True,
-        }, history
+        }, why
+        # Each verdict for a reason CPU timing cannot change (above): an overloaded point
+        # completes no measured request, so no check has data; a fast one has no errors.
+        for x, v in verdicts.items():
+            if x > KNEE:
+                assert all(ch.observed is None for ch in v.checks), why
+            else:
+                assert [(ch.metric, ch.observed) for ch in v.checks] == [("error_rate", 0)], why
 
 
 def test_an_overloaded_point_drains_then_cancels_its_stragglers(fail_run):
     _, _, ctx, cells, _ = fail_run
     for c in cells:
         runs = _runs(ctx, c.key)
-        assert {r.load_value for r in runs if r.summary["counts"]["aborted"]} == {
-            r.load_value for r in runs if r.load_value > KNEE
-        }
+        aborted = [(r.load_value, r.summary["counts"]["aborted"]) for r in runs]
+        assert {x for x, n in aborted if n} == {x for x, _ in aborted if x > KNEE}, aborted
         for r in runs:
             assert r.summary["client"]["unsent"] == 0  # every arrival was sent
             spent = (r.finished_at - r.started_at).total_seconds()
