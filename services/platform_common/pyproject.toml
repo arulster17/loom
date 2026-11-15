@@ -1,0 +1,24 @@
+[project]
+name = "loom-platform"
+version = "0.1.0"
+description = "Loom platform shared code: settings, Postgres schema and ledger, API keys, pricing, Redis contracts"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = [
+    # The model registry and its prices (config/models.yaml) live in loom_bench.registry.
+    "loom-bench",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "psycopg[binary,pool]>=3.2",
+    "redis[hiredis]>=5.1",
+]
+
+[project.scripts]
+loom-migrate = "loom_platform.migrate:main"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/loom_platform"]

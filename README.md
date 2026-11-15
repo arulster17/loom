@@ -8,7 +8,7 @@ intervals over repeated runs, and **quality non-inferiority against BF16** (a pa
 statistical gate on GSM8K, IFEval, tool calling and JSON-schema tasks, plus logprob
 divergence). A config that is faster but does not pass the gate does not ship. The
 platform half (an OpenAI-compatible gateway with prepaid, double-entry billing, and a web
-app) is built to its first milestone on branch `phase1-m1`, not on `main`; it is
+app) is built to its first milestone (M1); it is
 tested locally on a mock GPU backend, not yet serving real traffic.
 
 All results below come from real GPU runs on RunPod and AWS, $142.40 of recorded GPU
@@ -194,7 +194,7 @@ flowchart LR
     DB --> RE["reports, compare, reproduce, roofline"]
     PF --> RE
   end
-  subgraph Platform["Platform (Phase 1 M1, branch phase1-m1, not on main)"]
+  subgraph Platform["Platform (Phase 1 M1, local, mock backend)"]
     CL["OpenAI SDK client"] --> GW["gateway: keys, rate limits, balance reserve"]
     GW -->|mTLS| PP["pod proxy"]
     PP --> PD["engine pod"]
@@ -206,9 +206,9 @@ flowchart LR
   RE -.->|prices from measured cost at SLO| GW
 ```
 
-The platform code (gateway, billing, web) is on branch `phase1-m1`, not on `main`.
+The platform code is in `services/` (gateway, billing, pod proxy) and `apps/web/`.
 Its M1 acceptance runs on the local compose stack with mock pods
-(`docs/phase1-m1-acceptance.md` on that branch): gateway p50 added overhead 4.9 ms,
+([docs/phase1-m1-acceptance.md](docs/phase1-m1-acceptance.md)): gateway p50 added overhead 4.9 ms,
 0 micro-dollars of balance overshoot under 64 concurrent requests, a revoked key refused
 3 ms after the revoke commits, and usage in the ledger equal to the engine's token counts,
 including aborted streams and a killed pod.
@@ -217,8 +217,9 @@ including aborted streams and a killed pod.
 
 - **Phase 0, Benchmark Lab: done and accepted** (2026-10-31). Checklist:
   [docs/phase0-acceptance.md](docs/phase0-acceptance.md).
-- **Phase 1, M1 (whole platform locally, mock backend): built on branch `phase1-m1`,
-  paused.** It is not on `main`. Real pods on RunPod are the next milestone.
+- **Phase 1, M1 (whole platform locally, mock backend): built and accepted locally**
+  (2026-11-01), merged to `main`. Real pods on RunPod are the next milestone; review
+  follow-ups to fix first are in [docs/phase1-runpod-plan.md](docs/phase1-runpod-plan.md#follow-ups-from-the-m1-pre-merge-review-2026-11-15).
 - **Perf track (profiling and roofline, TensorRT-LLM, speculative decoding): runs done**
   (2026-11-03 to 2026-11-05), results above. Open follow-ups, none approved or run:
   Nsight Compute on the XQA kernel, re-running the full quality gate on TensorRT-LLM with
@@ -244,7 +245,7 @@ uv run bench site build                              # results site in site/_bui
 
 `uv run pytest -q` runs the test suite. With Docker, `docker compose up -d postgres`
 gives the default results database instead of SQLite (unset `LOOM_DATABASE_URL`). The
-platform stack and its acceptance run are on branch `phase1-m1`.
+platform stack and its acceptance run: [docs/local-dev.md](docs/local-dev.md#m1-acceptance).
 
 ## Docs
 
