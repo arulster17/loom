@@ -1222,25 +1222,41 @@ class Acceptance:
         check(rep is not None, f"{MODELS[0]} has no ready replica")
         assert rep is not None
         # From the manager's container, on the compose network like the gateway: the
-        # pod's proxy at its pool URL, with the gateway's client certificate.
-        out = docker(
+        # pod's proxy at its pool URL, with the gateway's client certificate. The pod
+        # token goes into a 0600 file in the container over stdin, never on a command
+        # line (`docker exec -e` would show it in the exec's inspect and process list).
+        cid = container(self.stack, POOLMGR)
+        token_file = f"/tmp/loom-probe-token-{secrets.token_hex(4)}"
+        docker(
             "exec",
             "-i",
-            "-e",
-            f"LOOM_PROBE_POD_TOKEN={rep['token']}",
-            container(self.stack, POOLMGR),
-            "python",
-            "-",
-            "--api-key",
-            key,
-            "--pairs",
-            "400",
-            "--pod-url",
-            str(rep["url"]),
-            "--server-name",
-            str(rep["server_name"]),
-            input_text=probe,
+            cid,
+            "sh",
+            "-c",
+            f'umask 077 && cat > "{token_file}"',
+            input_text=str(rep["token"]),
         )
+        try:
+            out = docker(
+                "exec",
+                "-i",
+                cid,
+                "python",
+                "-",
+                "--api-key",
+                key,
+                "--pairs",
+                "400",
+                "--pod-url",
+                str(rep["url"]),
+                "--server-name",
+                str(rep["server_name"]),
+                "--token-file",
+                token_file,
+                input_text=probe,
+            )
+        finally:
+            docker("exec", cid, "rm", "-f", token_file)
         result = json.loads(out.strip().splitlines()[-1])
         # The gateway's own view: time from receipt to dispatch and the settle call.
         metrics = httpx.get(self.stack.gateway_metrics, timeout=10).text

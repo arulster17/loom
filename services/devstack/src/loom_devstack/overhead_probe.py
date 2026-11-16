@@ -5,7 +5,7 @@ Runs inside a container on the compose network (the acceptance script pipes this
 paths start from the same place:
 
 - direct: the pod's proxy at its pool URL (`--pod-url`, server name `--server-name`, the
-  pod's token in `LOOM_PROBE_POD_TOKEN`) with the gateway's client certificate, i.e.
+  pod's token in the file `--token-file`) with the gateway's client certificate, i.e.
   exactly the gateway's own upstream request (mTLS, TLS 1.3). Without `--pod-url`, M1's
   mock pod: `https://<pod>:8443` and the token file `<certs>/<pod>.token`;
 - gateway: `http://gateway:8080/v1/chat/completions` with an API key.
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import ssl
 import statistics
 import time
@@ -36,6 +35,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--pod", default="mock-pod-1")
     p.add_argument("--pod-url", help="the replica's URL from the pool hash")
     p.add_argument("--server-name", help="the replica's TLS server name (its pod id)")
+    p.add_argument("--token-file", type=Path, help="a file holding the replica's pod token")
     p.add_argument("--model", default="qwen3-8b")
     p.add_argument("--certs", type=Path, default=Path("/certs"))
     p.add_argument("--api-key", required=True)
@@ -47,9 +47,8 @@ def main(argv: list[str] | None = None) -> None:
     certs: Path = args.certs
     ctx = ssl.create_default_context(cafile=str(certs / "ca.crt"))
     ctx.load_cert_chain(str(certs / "gateway.crt"), str(certs / "gateway.key"))
-    token = os.environ.get("LOOM_PROBE_POD_TOKEN") or (
-        (certs / f"{args.pod}.token").read_text().strip()
-    )
+    token_file: Path = args.token_file or certs / f"{args.pod}.token"
+    token = token_file.read_text().strip()
     server_name = args.server_name or args.pod
     body = {
         "model": args.model,

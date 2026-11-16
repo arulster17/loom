@@ -28,7 +28,9 @@
 
 Outside `LOOM_ENV=dev` the manager refuses to start without the CA, the client
 certificate, the SSH key, the lease bucket, and (with the serving config) a non-empty
-`gateway_egress_cidrs` and a provider other than `local`/`fake`.
+`gateway_egress_cidrs` and a provider other than `local`/`fake`. With `provider: runpod`
+the proxy bundle and the lease bucket are required in dev too: the placeholders exist
+only for `local`/`fake`.
 """
 
 from __future__ import annotations
@@ -98,6 +100,13 @@ class PoolmgrSettings(PlatformSettings):
     def production_problems(self, config: ServingConfig | None = None) -> list[str]:
         """The platform's checks plus the manager's own (see the module docstring)."""
         problems = super().production_problems()
+        if config is not None and config.provider == "runpod":
+            # Whatever LOOM_ENV is: no paid pod is ever bootstrapped with the dev
+            # placeholder bundle or without lease records (spec §11).
+            if not self.poolmgr_proxy_bundle:
+                problems.append("LOOM_POOLMGR_PROXY_BUNDLE is not set (provider runpod)")
+            if not self.poolmgr_lease_bucket:
+                problems.append("LOOM_POOLMGR_LEASE_BUCKET is not set (provider runpod)")
         if self.env == "dev":
             return problems
         # Dev-only knobs (compose and the acceptance).

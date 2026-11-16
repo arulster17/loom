@@ -74,7 +74,7 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_DATABASE_URL` | `postgresql://loom:loom@localhost:5432/loom_platform` | all (web: as `DATABASE_URL`) |
 | `LOOM_REDIS_URL` | `redis://localhost:6379/0` | gateway, billing, pool manager, poolsim, web (model status fallback; sign-in rate limit) |
 | `LOOM_MODELS_YAML` | repo `config/models.yaml` | gateway, billing |
-| `LOOM_SERVING_YAML` | repo `config/serving.yaml`; gateway image and compose: that file | gateway (cold-start estimates, §10; a missing file gives every model 300 s), pool manager (M2). Loaded by `loom_platform.serving.load_serving` |
+| `LOOM_SERVING_YAML` | repo `config/serving.yaml`; gateway image and compose: that file | gateway (cold-start estimates, §10; a missing file gives every model 300 s, a present but invalid one stops it at start), pool manager (M2). Loaded by `loom_platform.serving.load_serving` |
 | `LOOM_USAGE_STREAM` | `loom:usage` | gateway, billing, pool manager (its demand signal, read with `XREAD`, no consumer group) |
 | `LOOM_AUTH_CACHE_TTL_S` | 4 | gateway |
 | `LOOM_REQUEST_TIMEOUT_S` / `LOOM_RESERVATION_GRACE_S` | 600 / 60 | gateway (reservation TTL = their sum) |
@@ -658,7 +658,7 @@ available there is no fallback. A request to a model with no ready replica retur
 |---|---|---|
 | `ready` with replicas | Route (least in-flight) | |
 | `warming` | 503 "starting up" | `retry_after_s` (remaining cold-start estimate) |
-| `cold` or no hash | `request_wake(model)`, then 503 "starting up" | `retry_after_s`, else the model's cold-start estimate: `cold_start_estimate_s` in `config/serving.yaml` (8B 240 s, 70B 450 s from the measured cold starts), 300 s for a model not there or with no file (`LOOM_SERVING_YAML`, §2) |
+| `cold` or no hash | `request_wake(model)`, then 503 "starting up" | `retry_after_s`, else the model's cold-start estimate: `cold_start_estimate_s` in `config/serving.yaml` (8B 240 s, 70B 450 s from the measured cold starts), 300 s for a model not there or with no file (`LOOM_SERVING_YAML`, §2). A file that exists but fails validation is a config error: the gateway refuses to start (fail fast), it never falls back |
 | `unavailable` | `request_wake(model)`, then 503 "no GPU capacity" | `retry_after_s` (default 300) |
 
 `replicas` is a JSON list of `{id, url, server_name, token}`. The gateway reads the hash

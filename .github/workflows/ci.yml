@@ -52,6 +52,9 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen
       - run: uv run loom-podproxy-bundle --check --out "$RUNNER_TEMP/podproxy-bundle"
+      - run: >-
+          uv run pytest -q -m network services/podproxy/tests/test_podproxy_bundle.py
+          services/podproxy/tests/test_podproxy_bundle_dirty.py
 
   # The Next.js web app (apps/web): lint, types, unit tests, and the integration tests
   # against a real Postgres, migrated by the platform's own runner (uv run loom-migrate).

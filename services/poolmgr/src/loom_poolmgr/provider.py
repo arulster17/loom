@@ -60,11 +60,13 @@ class Deployment:
     gpu_type_id: str  # RunPod id, from RUNPOD_GPU_TYPE_IDS[spec.hardware.gpu]
     gpu_count: int  # spec.hardware.gpus_per_replica
     container_disk_gb: int  # placement.container_disk_gb[model_id]
-    # bench/prices.yaml's price of spec.hardware.instance_types.runpod; None for local/fake
-    # providers (no price check).
+    # bench/prices.yaml's price of spec.hardware.instance_types.runpod: the price check, and
+    # the spend when RunPod reports no costPerHr. None with `provider: local`
+    # (`build_deployments`): no price check and nothing accrues to the month's spend.
+    # Tests on the fake provider set their own.
     listed_price_per_hr_micros: int | None
     # The container disk's price per hour (bench/prices.yaml storage), added to RunPod's
-    # costPerHr for spend; 0 when unknown.
+    # costPerHr for spend; 0 when unknown, and with `provider: local`.
     disk_per_hr_micros: int = 0
 
 

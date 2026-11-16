@@ -40,7 +40,7 @@ from loom_bench.registry import REPO_ROOT, load_registry
 from loom_platform.db import libpq_url
 from loom_platform.pool import get_pool, request_wake
 from loom_platform.pricing import servable
-from loom_platform.serving import load_serving
+from loom_platform.serving import LOCAL_PROVIDERS, load_serving
 from loom_platform.settings import enforce_environment
 from loom_podproxy.bundle import LOCK_DEFAULT, read_lock  # type: ignore[import-untyped]
 from loom_poolmgr import spend, store
@@ -48,6 +48,7 @@ from loom_poolmgr.bootstrap import ProxyBundle, start_command
 from loom_poolmgr.leases import LeaseRecords, MemoryLeaseRecords, S3LeaseRecords
 from loom_poolmgr.local import LocalServing
 from loom_poolmgr.manager import (
+    CaExpiring,
     ManagerLocked,
     PoolManager,
     SshIdentity,
@@ -88,10 +89,13 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _bundle(settings: PoolmgrSettings) -> ProxyBundle:
-    """The pinned proxy bundle, checked against config/serving-artifacts.lock. In dev
-    without one (the local backend installs nothing), a placeholder."""
+def _bundle(settings: PoolmgrSettings, provider: str) -> ProxyBundle:
+    """The pinned proxy bundle, checked against config/serving-artifacts.lock. Only the
+    local and fake providers (which install nothing) may run without one: a placeholder.
+    `provider: runpod` always needs the real one, whatever LOOM_ENV is (spec §11)."""
     if settings.poolmgr_proxy_bundle is None:
+        if provider not in LOCAL_PROVIDERS:
+            raise ValueError(f"provider {provider} needs LOOM_POOLMGR_PROXY_BUNDLE")
         data = b"loom-poolmgr dev: no proxy bundle"
         return ProxyBundle(data, hashlib.sha256(data).hexdigest())
     lock = read_lock(REPO_ROOT / LOCK_DEFAULT)
@@ -109,6 +113,14 @@ async def _run(settings: PoolmgrSettings) -> int:
         print("loom-poolmgr: provider fake is for tests only", file=sys.stderr)
         return 2
     enforce_environment(settings, "loom-poolmgr", settings.production_problems(config))
+    if config.provider not in LOCAL_PROVIDERS and not settings.poolmgr_lease_bucket:
+        print(f"loom-poolmgr: provider {config.provider} needs a lease bucket", file=sys.stderr)
+        return 2
+    try:
+        bundle = _bundle(settings, config.provider)
+    except (OSError, ValueError) as e:
+        print(f"loom-poolmgr: proxy bundle: {e}", file=sys.stderr)
+        return 2
     if settings.allow_cidrs and config.provider != "local":
         print("loom-poolmgr: LOOM_POOLMGR_ALLOW_CIDRS is for provider local", file=sys.stderr)
         return 2
@@ -180,7 +192,7 @@ async def _run(settings: PoolmgrSettings) -> int:
         leases=leases,
         pki=pki,
         ssh=ssh,
-        bundle=_bundle(settings),
+        bundle=bundle,
         servable=tuple(m.id for m in servable(registry)),
         usage_stream=settings.usage_stream,
         metrics=metrics,
@@ -192,6 +204,9 @@ async def _run(settings: PoolmgrSettings) -> int:
         except ManagerLocked as e:
             print(f"loom-poolmgr: {e}", file=sys.stderr)
             return 1
+        except CaExpiring as e:
+            print(f"loom-poolmgr: {e}", file=sys.stderr)
+            return 2
         # Served only once the lock is held and adoption is done: the image's
         # HEALTHCHECK reads it, so `docker compose up --wait` means a running manager.
         if settings.poolmgr_metrics_port:

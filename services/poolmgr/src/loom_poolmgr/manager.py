@@ -165,6 +165,11 @@ class PodLost(RuntimeError):
     """RunPod no longer lists the pod, or lists it EXITED/TERMINATED."""
 
 
+class CaExpiring(RuntimeError):
+    """The pod CA expires within `server_cert_renew_before_s`: every certificate issued
+    from it would be due for renewal at once (spec §11)."""
+
+
 class BootstrapTimeout(RuntimeError):
     """No first token within `bootstrap_timeout_s` of the create."""
 
@@ -218,12 +223,15 @@ def build_deployments(
 ) -> dict[str, Deployment]:
     """One `Deployment` per model in `config.models` (`config.check_registry` passed)."""
     out: dict[str, Deployment] = {}
+    # The local backend's pods cost nothing: no listed price (no price check) and no disk
+    # price, so nothing accrues to the month's spend (spec §11).
+    local = config.provider == "local"
     for model_id, served in config.models.items():
         spec = registry.get(model_id)
         instance_type = spec.hardware.instance_types.runpod
         listed = (
             None
-            if instance_type is None
+            if instance_type is None or local
             else prices.instance_price(
                 "runpod",
                 RUNPOD_PRICE_REGION,
@@ -234,9 +242,13 @@ def build_deployments(
         )
         disk_gb = config.placement.container_disk_gb[model_id]
         try:
-            disk = math.ceil(
-                prices.storage_per_hour(
-                    "runpod", RUNPOD_PRICE_REGION, disk_gb, allow_unverified=True
+            disk = (
+                0
+                if local
+                else math.ceil(
+                    prices.storage_per_hour(
+                        "runpod", RUNPOD_PRICE_REGION, disk_gb, allow_unverified=True
+                    )
                 )
             )
         except KeyError:
@@ -280,6 +292,9 @@ class _Pod:
 
     row: PodRow
     task: asyncio.Task[None] | None = None  # the create/bootstrap, while it runs
+    # SSH maintenance (adoption's re-key, lease renewal, certificate renewal): at most one
+    # in flight per pod, never awaited by a tick (spec §11).
+    maint_task: asyncio.Task[None] | None = None
     endpoints: Endpoints | None = None
     token: str | None = field(default=None, repr=False)  # never logged or stored
     routable: bool = False  # in the pool hash
@@ -449,6 +464,7 @@ class PoolManager:
         self._lock_conn: psycopg.AsyncConnection[Any] | None = None
         self._in_tick = False
         self._stopped = False
+        self._ca_warned = False
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -458,6 +474,12 @@ class PoolManager:
         a live row (failure: `failed`, terminate), terminate orphans (`terminated_by =
         manager`), mark rows whose pod is gone `terminated` (`terminated_by = runpod`),
         and rewrite every pool hash from scratch. Returns once adoption has finished."""
+        left = self._ca_left(self.clock())
+        if left <= self.config.lifecycle.server_cert_renew_before_s:
+            raise CaExpiring(
+                f"the pod CA expires in {left / 86400:.1f} days, within server_cert_renew_before_s"
+                f" ({self.config.lifecycle.server_cert_renew_before_s} s): issue a new CA"
+            )
         conn = await psycopg.AsyncConnection.connect(libpq_url(self.database_url), autocommit=True)
         try:
             cur = await conn.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (LOCK_NAME,))
@@ -847,7 +869,39 @@ class PoolManager:
                 elif now - pod.last_progress >= h.progress_stall_s:
                     await self._fail(pod, "progress_stall", now=now)
                     return
-        await self._maintain(pod, now)
+        self._start_maintenance(pod, now)
+
+    def _ca_left(self, now: float) -> float:
+        """Seconds until the pod CA expires."""
+        return self.pki.ca.cert.not_valid_after_utc.timestamp() - now
+
+    def _cert_due(self, pod: _Pod, now: float) -> bool:
+        """The pod's server certificate is due for renewal, and the CA can issue one that
+        is not (otherwise: an error, once, and no re-key on every tick)."""
+        lc = self.config.lifecycle
+        expires = pod.cert_not_after
+        if pod.state != "ready" or expires is None or expires - now > lc.server_cert_renew_before_s:
+            return False
+        if self._ca_left(now) <= lc.server_cert_renew_before_s:
+            if not self._ca_warned:
+                self._ca_warned = True
+                log.error(
+                    "the pod CA expires in %.0f s, within server_cert_renew_before_s: no "
+                    "certificate renewals until the manager runs with a new CA",
+                    self._ca_left(now),
+                )
+            return False
+        return True
+
+    def _start_maintenance(self, pod: _Pod, now: float) -> None:
+        """Start the pod's SSH maintenance (lease, certificate) as its own task when due
+        and none is in flight: a hung pod never stalls the tick."""
+        if pod.maint_task is not None and not pod.maint_task.done():
+            return
+        lease_due = now - pod.last_lease >= self.config.lifecycle.lease_renew_every_s
+        if not lease_due and not self._cert_due(pod, now):
+            return
+        pod.maint_task = self._spawn(self._maintain(pod, now), f"maintenance of {pod.pod_id}")
 
     async def _maintain(self, pod: _Pod, now: float) -> None:
         """Lease renewal and certificate renewal, when due."""
@@ -857,11 +911,7 @@ class PoolManager:
             if pod.state not in ("ready", "draining"):
                 return
         expires = pod.cert_not_after
-        if (
-            pod.state == "ready"
-            and expires is not None
-            and expires - now <= lc.server_cert_renew_before_s
-        ):
+        if expires is not None and self._cert_due(pod, now):
             try:
                 await self._rekey(pod, new_token=False)
                 log.info("renewed the server certificate of pod %s", pod.pod_id)
@@ -871,7 +921,7 @@ class PoolManager:
                     await self._fail(pod, "certificate_expired", now=now)
 
     async def _check_draining(self, pod: _Pod, now: float) -> None:
-        await self._maintain(pod, now)
+        self._start_maintenance(pod, now)
         if pod.state != "draining":
             return
         elapsed = now - (pod.drain_started if pod.drain_started is not None else now)
@@ -1518,7 +1568,13 @@ class PoolManager:
         # token) before a re-key starts.
         await self._publish_all(now)
         if adopt:
-            await asyncio.gather(*(self._adopt(pod, info) for pod, info in adopt))
+            # Each pod's re-key runs in its maintenance slot, so the first ticks never
+            # start a second SSH session on it; start() waits for them (not a tick).
+            tasks = []
+            for pod, info in adopt:
+                pod.maint_task = self._spawn(self._adopt(pod, info), f"adoption of {pod.pod_id}")
+                tasks.append(pod.maint_task)
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self._publish_all(self.clock())
 
     async def _adopt(self, pod: _Pod, info: PodInfo) -> None:

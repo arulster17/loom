@@ -53,7 +53,8 @@ def upstream_client(s: GatewaySettings) -> httpx.AsyncClient:
 
 def serving_cold_starts() -> dict[str, int]:
     """`cold_start_estimate_s` per model from config/serving.yaml (`LOOM_SERVING_YAML`
-    honoured). No file there: nothing, so every model gets DEFAULT_COLD_START_S."""
+    honoured). No file there: nothing, so every model gets DEFAULT_COLD_START_S. A file
+    that exists but does not validate raises (the gateway fails fast at start; spec §11)."""
     path = serving_path()
     try:
         cfg = load_serving(path, check_registry=False)

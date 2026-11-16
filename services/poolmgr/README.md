@@ -90,6 +90,11 @@ and `local-capacity` are queued on `loom:poolmgr:admin` and applied on its next 
 Outside `LOOM_ENV=dev` it refuses to start without the CA, the client certificate, the
 SSH key, the lease bucket, the proxy bundle, the state directory and a non-empty
 `gateway_egress_cidrs`; it refuses `provider: local|fake` and the dev-only variables.
+With `provider: runpod` the proxy bundle and the lease bucket are required in dev too
+(the placeholders are for `local` only, so no paid pod is bootstrapped with them). It
+also refuses to start when the CA expires within `server_cert_renew_before_s`, and logs
+an error (without re-keying) if the CA gets that close while it runs. Local pods have no
+price: no price check and nothing accrues to the month's spend.
 
 Metrics: `loom_poolmgr_pods{model,state}`, `loom_poolmgr_cold_start_seconds{model,stage}`,
 `loom_poolmgr_creates_total{model,result}`, `loom_poolmgr_replacements_total{model,why}`,
@@ -119,7 +124,12 @@ serving:
    /opt/loom/proxy-venv` (the `venv` module and `ensurepip`-less venvs present) and
    `python3 -m pip --python /opt/loom/proxy-venv/bin/python install --no-index
    --find-links` from the shipped bundle; the bundle's wheels match the image's Python
-   version and platform; `loom-podproxy --help` runs from the venv.
+   version and platform; `loom-podproxy --help` runs from the venv. **Two different
+   `python3`s:** `serve_bootstrap` runs over SSH and finds `python3` on sshd's session
+   `PATH`, while `serve_engine` resolves it on PID 1's `PATH` (the image's environment,
+   which may put a venv first). Check both on the pinned image: which interpreter each
+   finds, that the bootstrap one has `venv` and `pip`, and that they agree or the
+   difference is harmless.
 2. **Users and isolation.** `useradd` exists and uids for `loomproxy` / `loomengine` are
    free; `/etc/loom/proxy/*` is 0600 `loomproxy`; `serve_engine`'s check that
    `loomengine` cannot read `/etc/loom/proxy/*` or `/proc/1/environ` passes (it prints
