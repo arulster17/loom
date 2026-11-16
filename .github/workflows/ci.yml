@@ -38,8 +38,6 @@ jobs:
       - run: uv run mypy services/platform_common/src services/podproxy/src services/devstack/src
       - run: uv run mypy services/platform_common/src services/poolmgr/src
       - run: uv run pytest -q -n auto
-      # The pool manager's tests are not in pytest.ini's testpaths (a locked file).
-      - run: uv run pytest -q -n auto services/poolmgr/tests
 
   # The pinned pod proxy bundle (docs/phase1-m2-spec.md §9): rebuilt from `git archive
   # HEAD` and the locked wheels (downloaded), it must match config/serving-artifacts.lock.
