@@ -323,7 +323,8 @@ race.
 - Every `lease_renew_every_s` the manager runs `serve_lease.sh <epoch>` over SSH (an
   atomic write of `/run/loom/lease`). It then writes the S3 lease record
   `s3://<bucket>/serving/leases/<pod id>` (JSON `{pod_id, pod_name, model, lease_until,
-  written_at}`; the bucket is `LOOM_POOLMGR_LEASE_BUCKET`). A failed SSH renewal is
+  written_at}`, both times ISO 8601 with a UTC offset as `datetime.isoformat()` writes
+  them; the bucket is `LOOM_POOLMGR_LEASE_BUCKET`). A failed SSH renewal is
   retried each tick. The pod stays in routing: the watchdog decides, and the manager marks
   the pod `failed` only when `lease_until` is within 2 renewal periods.
 - A dead control plane costs at most `lease_ttl_s` of GPU time per pod: $1.10 for the 8B
@@ -361,11 +362,13 @@ A pod is reaped when **all** of these hold:
 - its id is valid;
 - it is older than 2 hours (it covers a pod stuck before its container starts);
 - its lease record is missing, or `written_at` is more than 2 hours ago. A failure to read
-  S3 (other than not-found) fails closed for that run.
+  S3 (other than a missing key; a missing bucket counts as a failure) fails closed: the
+  run raises and deletes nothing, bench pods included. A record that cannot be parsed
+  never leads to a reap.
 
 The existing fail-closed rules apply to the union of both rules: nothing is deleted on a
 bad listing, at most `max_per_run` per run, and dry run is the default. The bench TTL rule
-never matches a `loom-serve-` name, and the serving rule never matches a bench name
+never matches a `loom-serve-` name, whatever `LOOM_RUNPOD_REAPER_PREFIX` is, and the serving rule never matches a bench name
 (`loom-bench-...-<ttl>-<hex>`) or anything else. Both directions are tested. boto3 is
 imported only when the serving rule is enabled, so the bench Lambda stays stdlib-only.
 
@@ -411,10 +414,13 @@ Caddy.** The proxy tests are its specification. It already does the token check,
 allowlist before the handshake, `/tokenize`, and error shapes the gateway depends on;
 Caddy would have to re-implement and re-prove them. Changes:
 
-- **SIGHUP** reloads certificate, key, CA, token and allowlist from their files. New
-  connections use the new ones and open connections are kept. A reload that fails to
-  parse keeps the old configuration and logs at error.
-- **Bundle.** `loom-podproxy-bundle` builds one tarball holding the `loom-podproxy` wheel
+- **SIGHUP** reloads certificate, key, CA, token and allowlist from their files (the
+  allowlist from a new `--allow-ip-file PATH`, one CIDR or address per line). New
+  connections use the new ones and open connections are kept. A reload is all or
+  nothing: if any file fails to parse, the whole old configuration stays and an error is
+  logged.
+- **Bundle.** `loom-podproxy-bundle --out DIR [--lock FILE]` (lock default
+  `config/serving-artifacts.lock`, committed) builds one tarball holding the `loom-podproxy` wheel
   and its locked dependency wheels (h11, httpx and their dependencies; nothing from the
   vLLM image's site-packages). It records the tarball's sha256 in
   `config/serving-artifacts.lock`. Bootstrap ships it on SSH stdin, checks the sha256,
