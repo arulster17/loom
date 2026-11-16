@@ -1,0 +1,25 @@
+[project]
+name = "loom-poolmgr"
+version = "0.1.0"
+description = "Loom pool manager: creates, bootstraps, health-checks, drains and terminates serving pods"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = [
+    "loom-platform",
+    "loom-bench",
+    "loom-podproxy",
+    "cryptography>=43",
+    "httpx>=0.27",
+    "boto3>=1.34",
+    "prometheus-client>=0.20",
+]
+
+[project.scripts]
+loom-poolmgr = "loom_poolmgr.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/loom_poolmgr"]
