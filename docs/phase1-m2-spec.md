@@ -451,8 +451,19 @@ kept for M1's fixed-replica checks only if a test still needs them). poolsim sta
 repo for its own tests and is no longer started by compose. The committed
 `serving.yaml` keeps `gateway_egress_cidrs: []` (pinned by a test), so with `provider:
 local` the manager adds `LOOM_POOLMGR_ALLOW_CIDRS` (comma-separated; dev only, refused
-outside `LOOM_ENV=dev`) to the proxies' allowlist; compose sets it to the compose
-network's fixed subnet. The locked
+outside `LOOM_ENV=dev`) to the proxies' allowlist; compose gives the network the
+gateway and poolmgr share a fixed `ipam` subnet and sets `LOOM_POOLMGR_ALLOW_CIDRS` to
+CIDRs inside it (never wider). The committed file's `idle_stop_s` (1800, pinned by a
+test) is too long for an acceptance run, so a second dev-only setting,
+`LOOM_POOLMGR_IDLE_STOP_S` (refused outside dev), overrides every model's
+`idle_stop_s`; compose sets it to 600 (longer than the ~4-minute M1 acceptance, so no
+model goes cold mid-run). `loom-m2-acceptance` forces its checks from outside with:
+no capacity, a dev-only `loom-poolmgr local-capacity off|on` (admin queue; refused
+unless `provider: local`); spend cap, a synthetic terminated `serving_pods` row whose
+cost puts month-to-date over the cap, deleted afterwards together with any
+`serving_spend_alerts` rows it caused, then `reset`. The poolmgr service shares the
+gateway's Redis, Postgres database and usage stream. CI runs `loom-podproxy-bundle
+--check` as its own job with network access (not in the main test job). The locked
 `test_devstack_compose.py` still reads the `poolsim`, `mock-pod-1` and `mock-pod-2`
 service definitions, so they stay in `docker-compose.yml` under `profiles: ["poolsim"]`
 (defined, not started by `docker compose up`), and the default stack runs `poolmgr`. `loom-m1-acceptance` drives
