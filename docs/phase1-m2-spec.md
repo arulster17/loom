@@ -250,8 +250,10 @@ parallel across models.
 - **Spend guard**, checked before the row is written:
   `month_to_date + listed_price x lease_ttl_s <= monthly_cap`. `month_to_date` sums
   `cost_per_hr_micros x billed hours` over this UTC month's rows, running pods counted up
-  to now. Refused: no pod, pool `unavailable` (reason `spend_cap`), alert. Alerts fire
-  once per (month, fraction) through `serving_spend_alerts`. The guard **never**
+  to now. Refused: no pod, pool `unavailable` (reason `spend_cap`), an error log line
+  and `loom_poolmgr_creates_total{result="spend_cap"}` (not a `serving_spend_alerts`
+  row). Fraction alerts (50/80/100% of month-to-date spend) fire once per (month,
+  fraction) through `serving_spend_alerts`. The guard **never**
   terminates a running healthy pod; that is an admin action (plan §5).
 - **No capacity** (`RunpodApiError.no_capacity`, or no US datacenter with stock): the row
   is `terminated` with `failure = no_capacity`, and the pool goes `unavailable` (reason
@@ -455,14 +457,14 @@ items.
 | Piece | How |
 |---|---|
 | `runpod_api.RunpodApi` | Imported as is (sync; called with `asyncio.to_thread`). Add `user_agent=` (default `loom-bench`; the manager sends `loom-poolmgr`) and `public_port(pod, port)`, generalising `public_ssh` |
-| `runpod.pod_loss`, `base.capacity_backoff` / `CAPACITY_BACKOFF_S`, `RUNPOD_GPU_TYPE_IDS` | Imported as is |
+| `runpod.pod_loss`, `RUNPOD_GPU_TYPE_IDS` | Imported as is (capacity retries follow `serving.yaml` `capacity.backoff_s`, whose default equals the bench's `CAPACITY_BACKOFF_S`) |
 | `RunpodProvider._create` cleanup, the price refusal, `_wait_for_ssh` | Logic re-implemented in `loom_poolmgr.runpod` (the class needs an experiment spec, S3 and the job user). The cleanup and refusal are small enough to copy with their tests |
 | `runpod_ssh` (`OpenSshExec`, `SshTarget`, `run_detached`, `generate_keypair`) | Imported as is; `generate_keypair` gains a `comment=` argument |
 | `engines.render_launch`, `engine_process_argv` | Imported as is |
 | `prices.load_prices().instance_price` | Listed price for the ratio check |
 | `aws_ssm.render_script`, `parse_markers`, `stage_offsets`, `common.sh` (`stage`, `sysinfo`, `fail`) | Imported for the serving scripts |
 | `pod_start.sh`, `start_engine.sh` | Copied to `loom_poolmgr/scripts/serve_*.sh` and changed as §5 says. The bench scripts are not touched |
-| `FakeRunpod` (`bench/tests/runpod/fakes.py`) | Moved to `loom_bench.providers.runpod_fake` (with its pod fixture, `runpod_fake_pod.json`) so other packages can import it. `fakes.py` keeps a thin subclass whose pod template goes through its own `create_response_fixture`, because `test_runpod_provider.py` monkeypatches that name; the bench tests are unchanged. `FakePodExec` stays; the manager has its own `FakeServingExec` (it knows the serve scripts) in `loom_poolmgr.testing` |
+| `FakeRunpod` (`bench/tests/runpod/fakes.py`) | Moved to `loom_bench.providers.runpod_fake` (with its pod fixture, `runpod_fake_pod.json`) so other packages can import it. `fakes.py` keeps a thin subclass whose pod template goes through its own `create_response_fixture`, because `test_runpod_provider.py` monkeypatches that name; the bench tests are unchanged. `FakePodExec` stays; the manager has its own `FakeServingExec` (it knows the serve scripts) in `services/poolmgr/tests/poolmgr_fakes.py` (protected as a test file; `loom_poolmgr/testing.py` was not on the protected list, so the fakes live with the tests) |
 
 ## 11. Package layout and interfaces
 
@@ -481,8 +483,8 @@ services/poolmgr/
     store.py              # serving_pods queries
     pki.py                # CA load, issue server/client certs (devcerts reuses it)
     metrics.py            # Prometheus on LOOM_POOLMGR_METRICS_PORT (9102)
-    testing.py            # FakeServingExec, fake clock, pod network helpers
     scripts/serve_start.sh, serve_bootstrap.sh, serve_engine.sh, serve_lease.sh
+  tests/poolmgr_fakes.py  # FakeServingExec, FakeServingRunpod, fake clock (test-writer's)
   tests/test_poolmgr_*.py
 ```
 
@@ -497,7 +499,22 @@ class ServingProvider(Protocol):
 ```
 
 The clock is injected everywhere (`clock: Callable[[], float]`), so every timing rule is
-tested without sleeping.
+tested without sleeping. Timing rules, fixed after the wave 2a test review:
+
+- A periodic check is due when `clock() - last >= period` (`>=`, not `>`).
+- Every wait goes through the injected `sleep`, and every deadline is measured on the
+  injected clock. The bench's `run_detached` has its own real-time deadline
+  (`loop.time()`), so the manager enforces `bootstrap_timeout_s` and
+  `bootstrap_stall_s` itself (e.g. a `check_host` that raises).
+- `bootstrap_timeout_s` runs from the create (the row's `created_at`).
+- Idle time runs from the last demand the manager observed (a wake key, usage event or
+  in-flight request seen on some tick), not from `ready_at`.
+- Capacity retries follow the configured `capacity.backoff_s` (the bench's
+  `CAPACITY_BACKOFF_S` is only its default value).
+- `PoolManager(..., admin_queue=ADMIN_QUEUE)` and `push_admin(redis, op, *,
+  queue=ADMIN_QUEUE)` take the admin queue key, so parallel tests don't share one.
+- `reconcile_once()` is not re-entrant; `run()` calls it serially. Tests never run two
+  ticks of one manager concurrently.
 
 **Serve scripts** (the seam the script tests use). `loom_poolmgr.scripts.render(name,
 **values) -> str` has the bench's `render_script` contract: exactly the variables on the
@@ -530,7 +547,7 @@ CLI (admin, against the running manager's Postgres and Redis):
 | `loom-poolmgr warm <model>` | `request_wake` (pre-warm) |
 | `loom-poolmgr drain <pod id>` | Drain and terminate one pod |
 | `loom-poolmgr stop <model>` | Drain and terminate all of a model's pods; the model stays `cold` (wakes still start it) |
-| `loom-poolmgr reset <model>` | Clear `crash_loop` / `spend_cap` holds |
+| `loom-poolmgr reset <model>` | Clear `crash_loop` / `spend_cap` / `price_too_high` holds |
 | `loom-poolmgr issue-ca --out DIR` | Dev only: create a CA plus manager and gateway client certificates (as `loom-devcerts`) |
 
 Settings (`LOOM_POOLMGR_*`, `PlatformSettings` subclass): `SERVING_YAML`, `CA_CERT`,
