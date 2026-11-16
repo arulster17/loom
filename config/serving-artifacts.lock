@@ -1,0 +1,18 @@
+# Pinned serving artifacts (docs/phase1-m2-spec.md section 9). Written by
+# `loom-podproxy-bundle` from the committed tree; do not edit by hand. Bootstrap
+# checks the shipped proxy bundle against this sha256.
+
+[podproxy-bundle]
+file = "loom-podproxy-bundle-0.1.0.tar"
+sha256 = "50328490db14f2b010fc76a16120ee0e85a24de8dd50503c54048d9db6a62f83"
+python = "3.12"
+wheels = [
+    "anyio-4.15.1-py3-none-any.whl",
+    "certifi-2026.7.22-py3-none-any.whl",
+    "h11-0.16.0-py3-none-any.whl",
+    "httpcore-1.0.9-py3-none-any.whl",
+    "httpx-0.28.1-py3-none-any.whl",
+    "idna-3.20-py3-none-any.whl",
+    "loom_podproxy-0.1.0-py3-none-any.whl",
+    "typing_extensions-4.16.0-py3-none-any.whl",
+]
