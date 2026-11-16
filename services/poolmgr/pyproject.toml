@@ -14,6 +14,10 @@ dependencies = [
     "prometheus-client>=0.20",
 ]
 
+[project.optional-dependencies]
+# The local backend (provider local, compose) runs the bench mock engine as each pod.
+local = ["loom-bench[mock]"]
+
 [project.scripts]
 loom-poolmgr = "loom_poolmgr.cli:main"
 

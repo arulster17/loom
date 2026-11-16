@@ -57,7 +57,9 @@ retried while demand lasts, `capacity.backoff_s[n]` after the n-th consecutive r
 
 **Admin commands** (`loom-poolmgr drain|stop|reset`, another process) are pushed as JSON
 onto the Redis list `admin_queue` (default `ADMIN_QUEUE`; `{"op": "drain", "pod_id":
-...}`, `{"op": "stop", "model": ...}`, `{"op": "reset", "model": ...}`); each tick pops
+...}`, `{"op": "stop", "model": ...}`, `{"op": "reset", "model": ...}`, and the dev-only
+`{"op": "local_capacity", "capacity": "on"|"off"}`, which only `provider: local` obeys:
+`off` makes every create fail for capacity, the acceptance's switch); each tick pops
 them all first. `warm` is `request_wake`, as the gateway's.
 
 **Single writer.** `start()` takes `pg_try_advisory_lock(hashtext('loom-poolmgr'))` on a
@@ -104,6 +106,7 @@ from loom_platform.serving import ServingConfig
 from loom_poolmgr import bootstrap, health, spend, store
 from loom_poolmgr.bootstrap import LOOPBACK_ALLOW, PodSecrets, ProxyBundle
 from loom_poolmgr.leases import LeaseRecord, LeaseRecords, renew_on_pod
+from loom_poolmgr.local import LocalServing
 from loom_poolmgr.metrics import PoolmgrMetrics
 from loom_poolmgr.pki import Pki
 from loom_poolmgr.provider import (
@@ -253,8 +256,11 @@ def build_deployments(
 
 async def push_admin(redis: Redis, command: Mapping[str, str], *, queue: str = ADMIN_QUEUE) -> None:
     """Queue an admin command for the running manager (see the module docstring)."""
-    if command.get("op") not in ("drain", "stop", "reset"):
+    op = command.get("op")
+    if op not in ("drain", "stop", "reset", "local_capacity"):
         raise ValueError(f"unknown admin command {command!r}")
+    if op == "local_capacity" and command.get("capacity") not in ("on", "off"):
+        raise ValueError(f"local_capacity takes capacity on|off: {command!r}")
     await redis.rpush(queue, json.dumps(dict(command)))
 
 
@@ -385,6 +391,7 @@ class PoolManager:
         admin_queue: str = ADMIN_QUEUE,
         usage_stream: str = USAGE_STREAM,
         metrics: PoolmgrMetrics | None = None,
+        extra_allow: tuple[str, ...] = (),
     ) -> None:
         """
         - `config`: the validated serving.yaml (`loom_platform.serving.load_serving`).
@@ -406,6 +413,8 @@ class PoolManager:
         - `admin_queue`: the Redis list admin commands arrive on (`push_admin(queue=)`).
         - `usage_stream`: the gateway's usage stream (`LOOM_USAGE_STREAM`).
         - `metrics`: Prometheus metrics (default: a registry of its own).
+        - `extra_allow`: CIDRs added to every pod proxy's allowlist (dev only, the local
+          backend's `LOOM_POOLMGR_ALLOW_CIDRS`).
         """
         self.config = config
         self.deployments = dict(deployments)
@@ -424,6 +433,7 @@ class PoolManager:
         self.admin_queue = admin_queue
         self.usage_stream = usage_stream
         self.metrics = metrics or PoolmgrMetrics()
+        self.extra_allow = tuple(extra_allow)
         self._own_http = http is None
         self._pods: dict[uuid.UUID, _Pod] = {}
         self._holds: dict[str, str] = {}
@@ -650,6 +660,15 @@ class PoolManager:
                     log.warning("admin drain of pod %s (%s)", pod_id, pod.model)
                     await self._admin_remove(pod, now)
                     await self._publish(pod.model, now)
+            elif op == "local_capacity":
+                capacity = cmd.get("capacity")
+                if self.config.provider != "local" or not isinstance(self.provider, LocalServing):
+                    log.error("ignoring local_capacity: provider %s", self.config.provider)
+                elif capacity not in ("on", "off"):
+                    log.error("ignoring local_capacity %r", capacity)
+                else:
+                    self.provider.no_capacity = capacity == "off"
+                    log.warning("local backend: capacity %s (admin, dev)", capacity)
             else:
                 log.error("ignoring unknown admin command %r", op)
 
@@ -1286,7 +1305,8 @@ class PoolManager:
         )
 
     def _allow(self) -> tuple[str, ...]:
-        return tuple(self.config.network.gateway_egress_cidrs) or LOOPBACK_ALLOW
+        base = tuple(self.config.network.gateway_egress_cidrs) or LOOPBACK_ALLOW
+        return tuple(dict.fromkeys(base + self.extra_allow))
 
     async def _rekey(self, pod: _Pod, *, new_token: bool) -> None:
         """Deliver a new server certificate (and, with `new_token`, a new token) and have

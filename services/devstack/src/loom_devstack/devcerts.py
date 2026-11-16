@@ -6,9 +6,15 @@ Writes into one directory (default `.dev/certs`, gitignored; never commit it):
 |---|---|
 | `ca.crt`, `ca.key` | Loom dev CA (EC P-256, 1 year) |
 | `gateway.crt`, `gateway.key` | Gateway client certificate (CN `loom-gateway`, clientAuth) |
+| `<name>.crt`, `<name>.key` | A client certificate per `--client <name>` (CN `<name>`) |
 | `<pod>.crt`, `<pod>.key` | Pod proxy server certificate, SAN DNS `<pod>` (serverAuth) |
 | `<pod>.token` | That pod's `X-Loom-Pod-Token` value |
 | `<name>.secret` | A random shared secret per `--secret <name>` (`whsec_...`) |
+
+In compose, `--owner` gives the files to the host user (the container writes as root,
+and a root-owned 0600 `ca.key` in the checkout cannot be read back from the host).
+Compose issues `--client loom-poolmgr`: the pool manager's own client certificate; it
+also signs its local pods' server certificates with `ca.key`, the CA the gateway trusts.
 
 Idempotent: existing files are kept while they are valid for at least another day and
 chain to the CA, so re-running (every `docker compose up`) changes nothing. `--force`
@@ -211,6 +217,7 @@ def ensure_dev_certs(
     force: bool = False,
     key_mode: int = 0o600,
     secret_names: tuple[str, ...] = (),
+    clients: tuple[str, ...] = (),
 ) -> list[str]:
     """Create or refresh everything in `out`; returns the file stems (re)written."""
     if force and out.exists():
@@ -226,6 +233,12 @@ def ensure_dev_certs(
     if not _usable(load_issued(out, "gateway"), ca, ()):
         write_issued(out, "gateway", issue(ca, GATEWAY_CN, server=False), key_mode)
         written.append("gateway")
+    for client in clients:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", client) or client in ("ca", "gateway"):
+            raise ValueError(f"client name {client!r}: lowercase letters, digits and dashes")
+        if not _usable(load_issued(out, client), ca, ()):
+            write_issued(out, client, issue(ca, client, server=False), key_mode)
+            written.append(client)
     for pod in pods:
         if not _usable(load_issued(out, pod), ca, (pod,)):
             write_issued(out, pod, issue(ca, pod, server=True, dns_names=(pod,)), key_mode)
@@ -244,6 +257,17 @@ def ensure_dev_certs(
     return written
 
 
+def chown_all(out: Path, owner: str) -> None:
+    """`chown UID[:GID]` every file in `out` (modes unchanged)."""
+    uid_s, _, gid_s = owner.partition(":")
+    if not uid_s.isdigit() or (gid_s and not gid_s.isdigit()):
+        raise ValueError(f"--owner {owner!r}: numeric UID[:GID]")
+    uid, gid = int(uid_s), int(gid_s) if gid_s else -1
+    for path in sorted(out.iterdir()):
+        if path.is_file():
+            os.chown(path, uid, gid)
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="loom-devcerts", description=__doc__.splitlines()[0])
     p.add_argument("--out", type=Path, default=Path(os.environ.get("LOOM_DEV_CERTS", DEFAULT_DIR)))
@@ -257,6 +281,18 @@ def main(argv: list[str] | None = None) -> None:
         action="append",
         default=[],
         help="also keep a random shared secret in <name>.secret (e.g. stripe-stub-webhook)",
+    )
+    p.add_argument(
+        "--client",
+        action="append",
+        default=[],
+        help="also issue a client certificate <name>.crt with CN <name> (e.g. loom-poolmgr)",
+    )
+    p.add_argument(
+        "--owner",
+        metavar="UID[:GID]",
+        help="chown every file in --out to this user (dev: the container writes as root, "
+        "and the host user, e.g. WSL's rsync in loom-verify, must still read the CA key)",
     )
     p.add_argument("--force", action="store_true", help="discard everything, new CA")
     p.add_argument(
@@ -273,7 +309,10 @@ def main(argv: list[str] | None = None) -> None:
         force=args.force,
         key_mode=0o644 if args.readable_keys else 0o600,
         secret_names=tuple(args.secret),
+        clients=tuple(args.client),
     )
+    if args.owner:
+        chown_all(args.out, args.owner)
     print(f"{args.out}: " + (", ".join(written) + " written" if written else "up to date"))
 
 

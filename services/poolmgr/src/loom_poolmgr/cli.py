@@ -10,9 +10,10 @@ The admin commands act on the running manager's Postgres and Redis
     loom-poolmgr stop <model>          # drain and terminate a model's pods (stays cold)
     loom-poolmgr reset <model>         # clear crash_loop / spend_cap / price_too_high holds
     loom-poolmgr issue-ca --out DIR    # dev only: CA plus manager and gateway client certs
+    loom-poolmgr local-capacity off|on # dev only, provider local: creates fail for capacity
 
-`drain`, `stop` and `reset` queue a command the running manager picks up on its next
-tick (`loom_poolmgr.manager.push_admin`).
+`drain`, `stop`, `reset` and `local-capacity` queue a command the running manager picks
+up on its next tick (`loom_poolmgr.manager.push_admin`).
 """
 
 from __future__ import annotations
@@ -79,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
         "issue-ca", help="dev only: create a CA plus manager and gateway client certificates"
     )
     ca.add_argument("--out", type=Path, required=True, help="directory to write into")
+    cap = sub.add_parser(
+        "local-capacity",
+        help="dev only, provider local: off makes every create fail for capacity, on undoes it",
+    )
+    cap.add_argument("capacity", choices=("on", "off"))
     return p
 
 
@@ -94,6 +100,8 @@ def _bundle(settings: PoolmgrSettings) -> ProxyBundle:
 
 async def _run(settings: PoolmgrSettings) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    # httpx logs every health check and probe at INFO (one line per pod every few seconds).
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     config = load_serving(
         settings.poolmgr_serving_yaml, registry=load_registry(settings.models_yaml)
     )
@@ -101,6 +109,16 @@ async def _run(settings: PoolmgrSettings) -> int:
         print("loom-poolmgr: provider fake is for tests only", file=sys.stderr)
         return 2
     enforce_environment(settings, "loom-poolmgr", settings.production_problems(config))
+    if settings.allow_cidrs and config.provider != "local":
+        print("loom-poolmgr: LOOM_POOLMGR_ALLOW_CIDRS is for provider local", file=sys.stderr)
+        return 2
+    if settings.poolmgr_idle_stop_s is not None:
+        idle = settings.poolmgr_idle_stop_s
+        models = {m: s.model_copy(update={"idle_stop_s": idle}) for m, s in config.models.items()}
+        config = config.model_copy(update={"models": models})
+        logging.getLogger("loom_poolmgr").warning(
+            "LOOM_POOLMGR_IDLE_STOP_S: every model's idle_stop_s is %d s (dev)", idle
+        )
     registry = load_registry(settings.models_yaml)
     deployments = build_deployments(config, registry, load_prices())
     state = settings.poolmgr_state_dir or Path(tempfile.mkdtemp(prefix="loom-poolmgr-"))
@@ -151,8 +169,6 @@ async def _run(settings: PoolmgrSettings) -> int:
         )
         provider, pod_exec = local, local.exec
     metrics = PoolmgrMetrics()
-    if settings.poolmgr_metrics_port:
-        serve_metrics(metrics, settings.poolmgr_metrics_port)
     redis = Redis.from_url(settings.redis_url)
     manager = PoolManager(
         config,
@@ -168,6 +184,7 @@ async def _run(settings: PoolmgrSettings) -> int:
         servable=tuple(m.id for m in servable(registry)),
         usage_stream=settings.usage_stream,
         metrics=metrics,
+        extra_allow=settings.allow_cidrs,
     )
     try:
         try:
@@ -175,6 +192,10 @@ async def _run(settings: PoolmgrSettings) -> int:
         except ManagerLocked as e:
             print(f"loom-poolmgr: {e}", file=sys.stderr)
             return 1
+        # Served only once the lock is held and adoption is done: the image's
+        # HEALTHCHECK reads it, so `docker compose up --wait` means a running manager.
+        if settings.poolmgr_metrics_port:
+            serve_metrics(metrics, settings.poolmgr_metrics_port)
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -252,6 +273,9 @@ async def _admin(settings: PoolmgrSettings, args: argparse.Namespace) -> int:
         elif args.command == "drain":
             await push_admin(redis, {"op": "drain", "pod_id": args.pod_id})
             print(f"{args.pod_id}: drain queued")
+        elif args.command == "local-capacity":
+            await push_admin(redis, {"op": "local_capacity", "capacity": args.capacity})
+            print(f"local capacity {args.capacity} queued")
         else:
             await push_admin(redis, {"op": args.command, "model": args.model})
             print(f"{args.model}: {args.command} queued")
@@ -270,6 +294,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         written = write_dev_ca(args.out)
         print(f"{args.out}: {', '.join(written)} written")
         return
+    if args.command == "local-capacity":
+        provider = load_serving(settings.poolmgr_serving_yaml, check_registry=False).provider
+        if settings.env != "dev" or provider != "local":
+            print(
+                "loom-poolmgr local-capacity: dev only (LOOM_ENV=dev), provider local only "
+                f"(this serving file: {provider})",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
     if args.command == "run":
         code = asyncio.run(_run(settings))
     elif args.command == "status":

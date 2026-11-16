@@ -414,6 +414,22 @@ Each milestone ends with a stop for the user's go-ahead before the next paid one
 | M4 | Serving smoke on RunPod: one 8B pod, then one 70B FP8 pod, through the real gateway | Cap $20 | mTLS path works and refuses a request without our client certificate and from another IP; usage equals the engine's tokens exactly, including a client abort and a pod terminated mid-stream [acceptance]; cold start, gateway-to-pod RTT and GPU metrics recorded; load test through the gateway at the Lab's goodput reports TTFT and tokens/s within the Lab's intervals plus the RTT [deliverable 4]; engine log holds no prompt text; teardown verified |
 | M5 | Go-live in the chosen mode (invite-only preview unless decided otherwise) | Cap $35 for the window, then the mode's cost | Both models live, Stripe test mode [deliverable 3]; dashboards show cost per 1M served next to the Lab prediction; the M4 checks pass again on both models; a written acceptance note like `phase0-acceptance.md` |
 
+**M2 status (2026-11-16):** built on branch `phase1-m2-pool` to
+[phase1-m2-spec.md](phase1-m2-spec.md): `services/poolmgr` (lifecycle, health rules,
+leases and the pod watchdog, spend guard and alerts, restart and adoption), the reaper's
+serving rule, the pod proxy's SIGHUP reload and pinned bundle (it, not Caddy, runs on
+pods), `config/serving.yaml`, and a `local` backend so `docker compose up` runs the real
+manager instead of poolsim. Proved against `FakeRunpod` and `FakeServingExec` with a fake
+clock, with the gateway in the loop (items 20-22), and on the compose stack:
+`loom-m1-acceptance` passes all items with the manager writing the pools, and
+`loom-m2-acceptance` checks cold start, a pod killed mid-stream and replaced, no
+capacity, the spend cap and an idle stop. Deltas from this plan: the per-replica circuit
+breaker of §5 (3 errors in 30 s) is not built, the manager's health rules plus the
+gateway's 10 s per-request penalty cover it; the tie-break on
+`vllm:num_requests_waiting` (§7) is deferred to Phase 3, moot at one replica per model.
+What M4 must check on a real pod is listed in `services/poolmgr/README.md`. Pending: the
+branch review and the user's go-ahead before M3.
+
 ### Follow-ups from the M1 pre-merge review (2026-11-15)
 
 A third review of the M1 code before it merged into `main` found no M1 blockers. These

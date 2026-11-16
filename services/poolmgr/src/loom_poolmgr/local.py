@@ -11,9 +11,10 @@ hash code in the manager is the same as for RunPod.
 
 `cold_start_s` (`LOOM_POOLMGR_LOCAL_COLD_START_S`) delays a pod's `RUNNING` status, as
 an image pull would. `no_capacity` makes every create raise `NoCapacity` (the
-acceptance's switch). The proxies listen on `bind` and are advertised at `host` (in
-compose: `0.0.0.0` and the poolmgr service's name, with the compose network in
-`gateway_egress_cidrs`, which `provider: local` allows).
+acceptance's switch, set from outside by `loom-poolmgr local-capacity off`). The proxies
+listen on `bind` and are advertised at `host` (in compose: `0.0.0.0` and the poolmgr
+service's name, with CIDRs inside the compose network's fixed subnet added to their
+allowlist by `LOOM_POOLMGR_ALLOW_CIDRS`).
 
 Needs the bench's `mock` extra (FastAPI, uvicorn) installed next to the manager.
 """

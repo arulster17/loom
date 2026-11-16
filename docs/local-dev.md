@@ -110,9 +110,8 @@ its webhook secret is generated per stack into `.dev/certs`; for Stripe test mod
 | `redis` | 6379 | Limits, balances, usage stream, pool state |
 | `migrate` | | One-shot: `loom-migrate --create-database` |
 | `devcerts` | | One-shot: dev CA and certificates into `.dev/certs` |
-| `mock-pod-1` | none (8443 on the compose network) | Mock engine for `qwen3-8b` behind the mTLS pod proxy |
-| `mock-pod-2` | none (8443 on the compose network) | Same for `llama-3.3-70b-instruct-fp8` |
-| `poolsim` | | Pool state in Redis: which pod serves each model, simulated cold starts |
+| `poolmgr` | metrics 9102 | The pool manager on its local backend: starts a model's "pod" (the mock engine behind the mTLS pod proxy, inside this container) on demand, writes the pool state, drains idle pods |
+| `mock-pod-1`, `mock-pod-2`, `poolsim` | | M1's fixed mock pods and pool simulator, under the compose profile `poolsim` (not started by default; never together with `poolmgr`) |
 
 The end-to-end flow:
 
@@ -203,21 +202,25 @@ the gateway bills a stream the client aborted.
 
 ### Pool states: "model temporarily unavailable"
 
-`poolsim` seeds both models `ready` on their pods. To exercise the gateway's 503 +
-`Retry-After` path ([phase1-contracts.md §10](phase1-contracts.md#10-model-pools-and-model-temporarily-unavailable)):
+Models start cold, as on-demand serving does: the first request gets 503
+`model_unavailable` with `Retry-After`, the gateway publishes a wake, and the pool manager
+(`poolmgr`, [services/poolmgr/README.md](../services/poolmgr/README.md)) starts a local
+pod: `warming` (Retry-After counts down), then `ready` after about 30 to 40 s. A model
+without traffic for 10 minutes (`LOOM_POOLMGR_IDLE_STOP_S` in compose) goes back to
+cold ([phase1-contracts.md §10](phase1-contracts.md#10-model-pools-and-model-temporarily-unavailable)):
 
 ```bash
-docker compose exec poolsim loom-poolsim status
-docker compose exec poolsim loom-poolsim set qwen3-8b cold
-# next request: 503 model_unavailable, the gateway publishes a wake, poolsim moves the
-# model to warming (Retry-After counts down) and back to ready after 20 s
-docker compose exec poolsim loom-poolsim set qwen3-8b unavailable   # "no GPU capacity", 300 s
-docker compose exec poolsim loom-poolsim set qwen3-8b ready
+docker compose exec poolmgr loom-poolmgr status
+docker compose exec poolmgr loom-poolmgr warm qwen3-8b       # start it before the first request
+docker compose exec poolmgr loom-poolmgr stop qwen3-8b       # drain it: cold again
+docker compose exec poolmgr loom-poolmgr local-capacity off  # creates fail: "no GPU capacity"
+docker compose exec poolmgr loom-poolmgr local-capacity on
 ```
 
-`LOOM_POOLSIM_COLD_START_S` (default 20) sets the simulated cold start;
-`LOOM_POOLSIM_IDLE_STOP_S` (default 0, off) stops a model after that long without usage,
-as an on-demand pool would.
+`LOOM_POOLMGR_LOCAL_COLD_START_S` (default 20) sets the simulated image pull. M1's pool
+simulator is still there for its own tests: `docker compose --profile poolsim up -d
+poolsim` with the manager stopped (`docker compose stop poolmgr`), as both write the pool
+state.
 
 ### Load test
 

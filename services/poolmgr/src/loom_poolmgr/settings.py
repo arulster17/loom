@@ -18,6 +18,12 @@
 - `LOOM_POOLMGR_STATE_DIR`: where the manager keeps its per-pod SSH known_hosts files
   (and, in dev, a generated SSH key and CA); required outside dev (known_hosts must
   survive a restart), a temporary directory in dev when unset;
+- `LOOM_POOLMGR_ALLOW_CIDRS`: dev only, `provider: local` only: comma-separated CIDRs
+  added to the local pods' proxy allowlist (compose: its network's fixed subnet, so the
+  gateway container reaches them while `gateway_egress_cidrs` stays empty);
+- `LOOM_POOLMGR_IDLE_STOP_S`: dev only: replaces every model's `idle_stop_s` (unset: the
+  serving file's; compose sets 600, so `loom-m2-acceptance` sees an idle stop in minutes
+  while the M1 acceptance never sees a model go cold mid-run);
 - `RUNPOD_API_KEY`: the serving account's key (`provider: runpod` only).
 
 Outside `LOOM_ENV=dev` the manager refuses to start without the CA, the client
@@ -27,6 +33,7 @@ certificate, the SSH key, the lease bucket, and (with the serving config) a non-
 
 from __future__ import annotations
 
+import ipaddress
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
@@ -58,22 +65,46 @@ class PoolmgrSettings(PlatformSettings):
     poolmgr_local_cold_start_s: Annotated[float, Field(ge=0)] = DEFAULT_LOCAL_COLD_START_S
     poolmgr_local_host: str = "127.0.0.1"
     poolmgr_state_dir: Path | None = None
+    poolmgr_allow_cidrs: str = ""
+    poolmgr_idle_stop_s: Annotated[int, Field(ge=0)] | None = None
     runpod_api_key: SecretStr | None = Field(
         default=None, validation_alias=AliasChoices("RUNPOD_API_KEY", "runpod_api_key")
     )
 
-    @field_validator("poolmgr_lease_bucket", "runpod_api_key", mode="before")
+    @field_validator("poolmgr_lease_bucket", "runpod_api_key", "poolmgr_idle_stop_s", mode="before")
     @classmethod
     def _blank_is_unset(cls, v: object) -> object:
         if isinstance(v, str) and not v.strip():
             return None
         return v
 
+    @field_validator("poolmgr_allow_cidrs")
+    @classmethod
+    def _cidrs(cls, v: str) -> str:
+        for part in _split(v):
+            try:
+                ipaddress.ip_network(part, strict=False)
+            except ValueError:
+                raise ValueError(f"LOOM_POOLMGR_ALLOW_CIDRS: {part!r} is not a CIDR") from None
+        return v
+
+    @property
+    def allow_cidrs(self) -> tuple[str, ...]:
+        """`LOOM_POOLMGR_ALLOW_CIDRS` as a list (normalised, e.g. `10.0.0.0/24`)."""
+        return tuple(
+            str(ipaddress.ip_network(p, strict=False)) for p in _split(self.poolmgr_allow_cidrs)
+        )
+
     def production_problems(self, config: ServingConfig | None = None) -> list[str]:
         """The platform's checks plus the manager's own (see the module docstring)."""
         problems = super().production_problems()
         if self.env == "dev":
             return problems
+        # Dev-only knobs (compose and the acceptance).
+        if self.allow_cidrs:
+            problems.append("LOOM_POOLMGR_ALLOW_CIDRS is dev only")
+        if self.poolmgr_idle_stop_s is not None:
+            problems.append("LOOM_POOLMGR_IDLE_STOP_S is dev only")
         required = {
             "LOOM_POOLMGR_CA_CERT": self.poolmgr_ca_cert,
             "LOOM_POOLMGR_CA_KEY": self.poolmgr_ca_key,
@@ -94,6 +125,10 @@ class PoolmgrSettings(PlatformSettings):
             if config.provider == "runpod" and self.runpod_api_key is None:
                 problems.append("RUNPOD_API_KEY is not set")
         return problems
+
+
+def _split(value: str) -> list[str]:
+    return [p.strip() for p in value.split(",") if p.strip()]
 
 
 @lru_cache(maxsize=1)

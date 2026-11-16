@@ -10,6 +10,14 @@ page lists each M1 acceptance item with:
   them;
 - how to reproduce it on a laptop, for free.
 
+**From M2** the compose stack runs the pool manager on its local backend instead of
+poolsim and the two mock pod containers (docs/phase1-m2-spec.md §9). The driver is the
+same, with the manager in the loop: the flow first warms both models (`loom-poolmgr
+warm`); item a kills the pod's engine inside the poolmgr container and waits for the
+manager to replace the pod; item d's probe runs in the poolmgr container against the
+pool's replica URL; item f stops the model with `loom-poolmgr stop` instead of `loom-poolsim
+set cold`. The numbers below are M1's run on poolsim.
+
 Snapshot: 2026-11-01. Every number on this page is from one run of `loom-m1-acceptance`
 at commit `639f412` on a stack brought up from nothing (`docker compose down -v`,
 `.dev/certs` deleted, `up --build --wait`) on an Apple Silicon laptop (Docker Desktop).
