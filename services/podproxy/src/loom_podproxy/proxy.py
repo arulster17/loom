@@ -15,7 +15,12 @@ phase1-runpod-plan.md §4 and docs/phase1-contracts.md §9. One process per pod:
   engine aborts the request; when the engine goes away mid-response, drops the client
   connection without ending the body, so the client sees an incomplete response, never
   a clean end;
-- logs method, path, status, bytes and time per request; never bodies.
+- logs method, path, status, bytes and time per request; never bodies;
+- on SIGHUP re-reads its certificate, key, client CA, token file and allowlist file
+  (`--allow-ip-file`), all or nothing: when any one fails, the whole old configuration
+  stays and the error is logged. New connections use the new files; open ones are kept
+  (docs/phase1-m2-spec.md §9). An allowlist file with no entries is an error, never "any
+  source", at start and on reload.
 
 HTTP/1.1 (h11) with keep-alive; ALPN offers only `http/1.1`. Python and two small
 dependencies (h11, httpx) rather than a reverse-proxy binary: it runs in the test suite
@@ -38,7 +43,7 @@ import socket
 import ssl
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import h11
@@ -111,6 +116,21 @@ def parse_networks(values: Sequence[str]) -> tuple[IPNetwork, ...]:
     return tuple(out)
 
 
+def read_allowlist(path: Path) -> tuple[IPNetwork, ...]:
+    """One CIDR or address per line; blank lines are skipped. A file with no entry at all
+    raises: a truncated file must never open the proxy to any source."""
+    entries = [line.strip() for line in path.read_text().splitlines() if line.strip()]
+    if not entries:
+        raise ValueError(f"allowlist file {path} has no entries")
+    out: list[IPNetwork] = []
+    for entry in entries:
+        try:
+            out.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            raise ValueError(f"allowlist file {path}: not a CIDR or address: {entry!r}") from None
+    return tuple(out)
+
+
 def server_ssl_context(cert: Path, key: Path, client_ca: Path) -> ssl.SSLContext:
     """TLS 1.3 server context requiring a client certificate that chains to `client_ca`."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -167,6 +187,15 @@ class PodProxy:
         self._sockets: list[socket.socket] = []
         self._tasks: set[asyncio.Task[None]] = set()
         self._accepting: list[asyncio.Task[None]] = []
+
+    def reconfigure(self, config: ProxyConfig, ssl_context: ssl.SSLContext) -> None:
+        """Swap in a new token, allowlist and TLS context together. Connections accepted
+        from now on use them; open connections keep the TLS session they have. The
+        upstream and limits are fixed for the process's life."""
+        if config.upstream != self.config.upstream:
+            raise ValueError("the upstream cannot change on reload")
+        self.config = config
+        self.ssl_context = ssl_context
 
     # ------------------------------------------------------------ lifecycle
 
@@ -468,11 +497,55 @@ def _short(e: BaseException) -> str:
 
 def _read_token(token_file: Path | None) -> str:
     if token_file is not None:
-        return token_file.read_text().strip()
+        token = token_file.read_text().strip()
+        if not token:
+            raise ValueError(f"token file {token_file} is empty")
+        return token
     token = os.environ.get("LOOM_POD_TOKEN", "").strip()
     if not token:
-        raise SystemExit("give --token-file or set LOOM_POD_TOKEN")
+        raise ValueError("give --token-file or set LOOM_POD_TOKEN")
     return token
+
+
+@dataclass(frozen=True)
+class ProxyFiles:
+    """Where the proxy's reloadable settings come from. Without `token_file` the token is
+    $LOOM_POD_TOKEN, and without `allow_file` the allowlist is `allow_ips`: both fixed
+    for the process's life."""
+
+    cert: Path
+    key: Path
+    client_ca: Path
+    token_file: Path | None = None
+    allow_file: Path | None = None
+    allow_ips: tuple[IPNetwork, ...] = ()
+
+    def load(self) -> tuple[str, tuple[IPNetwork, ...], ssl.SSLContext]:
+        """(token, allowed networks, TLS context), every file read and checked; raises on
+        any failure."""
+        token = _read_token(self.token_file)
+        networks = read_allowlist(self.allow_file) if self.allow_file else self.allow_ips
+        return token, networks, server_ssl_context(self.cert, self.key, self.client_ca)
+
+
+def reload(proxy: PodProxy, files: ProxyFiles) -> bool:
+    """SIGHUP: all or nothing. On any failure the old configuration stays whole."""
+    try:
+        token, networks, ctx = files.load()
+        config = replace(proxy.config, token=token, allowed_networks=networks)
+        proxy.reconfigure(config, ctx)
+    except Exception as e:
+        log.error("reload failed, keeping the whole old configuration: %s", _short(e))
+        return False
+    log.info(
+        "reloaded certificate, key, client CA, token and allowlist (allowed sources: %s)",
+        _sources(config),
+    )
+    return True
+
+
+def _sources(config: ProxyConfig) -> str:
+    return ", ".join(map(str, config.allowed_networks)) or "any"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -502,33 +575,57 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="CIDR",
         help="source addresses allowed to connect (repeatable or comma-separated; default any)",
     )
+    p.add_argument(
+        "--allow-ip-file",
+        type=Path,
+        default=env("LOOM_PODPROXY_ALLOW_IP_FILE"),
+        metavar="PATH",
+        help="file of allowed source addresses, one CIDR or address per line, re-read on "
+        "SIGHUP; a file with no entries is an error (instead of --allow-ip)",
+    )
     p.add_argument("--log-level", default=env("LOOM_PODPROXY_LOG_LEVEL", "info"))
     return p
 
 
-async def serve(args: argparse.Namespace) -> None:
+def files_from_args(args: argparse.Namespace) -> ProxyFiles:
     for name in ("cert", "key", "client_ca"):
         if getattr(args, name) is None:
             raise SystemExit(f"--{name.replace('_', '-')} is required")
-    config = ProxyConfig(
-        token=_read_token(args.token_file),
-        upstream=args.upstream,
-        allowed_networks=parse_networks(args.allow_ip),
+    if args.allow_ip_file is not None and args.allow_ip:
+        raise SystemExit("give --allow-ip or --allow-ip-file, not both")
+    return ProxyFiles(
+        cert=args.cert,
+        key=args.key,
+        client_ca=args.client_ca,
+        token_file=args.token_file,
+        allow_file=args.allow_ip_file,
+        allow_ips=parse_networks(args.allow_ip),
     )
-    proxy = PodProxy(config, server_ssl_context(args.cert, args.key, args.client_ca))
+
+
+async def serve(args: argparse.Namespace) -> None:
+    files = files_from_args(args)
+    try:
+        token, networks, ctx = files.load()
+        config = ProxyConfig(token=token, upstream=args.upstream, allowed_networks=networks)
+    except (OSError, ValueError, ssl.SSLError) as e:
+        raise SystemExit(f"loom-podproxy: cannot start: {_short(e)}") from None
+    proxy = PodProxy(config, ctx)
     port = await proxy.start(args.host, args.port)
     log.info(
         "listening on %s:%d -> %s (allowed sources: %s)",
         args.host,
         port,
         config.upstream,
-        ", ".join(map(str, config.allowed_networks)) or "any",
+        _sources(config),
     )
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
+    with contextlib.suppress(NotImplementedError, AttributeError):  # no SIGHUP on Windows
+        loop.add_signal_handler(signal.SIGHUP, reload, proxy, files)
     try:
         await stop.wait()
     finally:

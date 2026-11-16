@@ -12,6 +12,8 @@ dependencies = [
 
 [project.scripts]
 loom-podproxy = "loom_podproxy.proxy:main"
+# Builds the pinned bundle serving pods install (docs/phase1-m2-spec.md §9). Stdlib only.
+loom-podproxy-bundle = "loom_podproxy.bundle:main"
 
 [build-system]
 requires = ["hatchling>=1.25"]
