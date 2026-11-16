@@ -478,6 +478,29 @@ class ServingProvider(Protocol):
 The clock is injected everywhere (`clock: Callable[[], float]`), so every timing rule is
 tested without sleeping.
 
+**Serve scripts** (the seam the script tests use). `loom_poolmgr.scripts.render(name,
+**values) -> str` has the bench's `render_script` contract: exactly the variables on the
+template's `# requires:` line, values quoted, `set -euo pipefail`, and the package's own
+`scripts/common.sh` (the generic `stage`, `sysinfo`, `fail` helpers copied from the bench)
+prepended. `required_vars(name)` lists them. Required variables:
+
+| Script | Requires | Reads from the pod env |
+|---|---|---|
+| `serve_start` (the start command) | `LEASE_FILE` (`/run/loom/lease`), `LEASE_POLL_S` (30), `STAGE_FILE`, `LOOM_ROOT`, `SSH_DIR`, `SSHD_CONFIG`, `GRAPHQL_URL` | `LOOM_LEASE_EPOCH`, `LOOM_SSH_PUBKEY`, and for the terminate call `RUNPOD_API_KEY`, `RUNPOD_POD_ID` |
+| `serve_lease` | `LEASE_FILE`, `LEASE_EPOCH` | |
+| `serve_bootstrap` | `PROXY_DIR` (`/etc/loom/proxy`), `PROXY_VENV` (`/opt/loom/proxy-venv`), `PROXY_PORT`, `UPSTREAM`, `BUNDLE_SHA256`, `PROXY_UID`, `ENGINE_UID` | secrets arrive on stdin after the script, never as variables |
+| `serve_engine` | as the bench's `start_engine` minus `JOB_UID`/`JOB_HOME`, plus `ENGINE_UID`, `PROXY_DIR` | |
+
+The watchdog terminates the pod as the bench's does: `python3 -c <terminate code>
+"$GRAPHQL_URL"` with the pod-scoped key from the environment, retried every 30 s. The
+script tests stub `python3`, `date`, `sshd` and the other binaries on `PATH`, as
+`bench/tests/runpod/test_runpod_scripts.py` does.
+
+**Manager API.** Wave 2a starts by committing the public surface as stubs
+(`PoolManager`, its constructor's injected parts, `start`/`reconcile_once`/`stop`, the
+`ServingProvider` and `LeaseRecords` protocols, `FakeServingExec`'s expected script
+names); the lifecycle tests are written against those stubs.
+
 CLI (admin, against the running manager's Postgres and Redis):
 
 | Command | Does |
