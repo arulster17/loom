@@ -547,6 +547,25 @@ Failure and restart rules, fixed after the wave 2a implementation review:
 - Adoption takes the model out of the pool hash before re-keying its pods.
 - Outside `LOOM_ENV=dev`, `LOOM_POOLMGR_STATE_DIR` is required (pods' known_hosts must
   survive a restart).
+
+Fixed after the final whole-branch review:
+
+- `provider: runpod` requires a real proxy bundle (`LOOM_POOLMGR_PROXY_BUNDLE`, whose
+  sha256 matches `config/serving-artifacts.lock`) and a lease bucket **whatever
+  `LOOM_ENV` is**: dev placeholders exist only for `local`/`fake`, so no paid pod is ever
+  bootstrapped with a placeholder.
+- Per-pod SSH maintenance (lease renewal, certificate re-key) runs as its own task, at
+  most one in flight per pod, so one hung pod never stalls the tick; health checks keep
+  their short timeouts.
+- `provider: local` deployments have no listed price: no price check and no spend
+  accrual (the M2 acceptance's spend-cap check uses its synthetic row).
+- The manager refuses to start when the CA expires within `server_cert_renew_before_s`
+  (and logs an error when it gets that close while running), instead of re-keying every
+  pod on every tick.
+- The gateway refuses to start on a present but invalid `serving.yaml` (fail fast on a
+  config error); only a missing file falls back to `DEFAULT_COLD_START_S`.
+- `devcerts` keeps its own issuing code (it gained `--client` and `--owner`); reusing
+  `loom_poolmgr.pki` there is left for later.
 - `bootstrap_timeout_s` runs from the create (the row's `created_at`).
 - Idle time runs from the last demand the manager observed (a wake key, usage event or
   in-flight request seen on some tick), not from `ready_at`.
