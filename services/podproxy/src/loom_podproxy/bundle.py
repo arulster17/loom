@@ -9,8 +9,10 @@ venv of the image's own Python; nothing comes from the engine image's site-packa
 Reproducible by construction, so the committed lock names what any checkout builds:
 
 - every input is a committed git blob from `git archive HEAD` (with `core.autocrlf` off,
-  so a CRLF Windows checkout and a Linux one read the same bytes); uncommitted changes
-  are not in the bundle;
+  so a CRLF Windows checkout and a Linux one read the same bytes). Uncommitted changes
+  would not be in the bundle, so it refuses to write the lock while its inputs
+  (`services/podproxy/pyproject.toml`, `services/podproxy/src`, `uv.lock`) have any
+  (`--check` still runs on a dirty tree and only reports);
 - the `loom-podproxy` wheel is written here, from those blobs and its `pyproject.toml`,
   with fixed timestamps, modes and order and no compression, rather than by a build
   backend whose version and zlib would leak into the bytes;
@@ -42,6 +44,8 @@ from typing import Any
 
 PACKAGE = "loom-podproxy"
 PACKAGE_DIR = "services/podproxy"  # in the repository
+# Everything the bundle is built from (the wheel's packages live under src/).
+INPUTS = (f"{PACKAGE_DIR}/pyproject.toml", f"{PACKAGE_DIR}/src", "uv.lock")
 LOCK_DEFAULT = "config/serving-artifacts.lock"  # relative to the repository root
 LOCK_TABLE = "podproxy-bundle"
 BUNDLE_DIR = "loom-podproxy-bundle"  # the one directory inside the tarball
@@ -110,14 +114,18 @@ def committed_files(repo: Path, *paths: str) -> dict[str, bytes]:
     return out
 
 
-def warn_if_dirty(repo: Path) -> None:
-    args = ("--no-optional-locks", "status", "--porcelain", "--", PACKAGE_DIR, "uv.lock")
-    status = git(repo, *args, blobs=False).decode().strip()
-    if status:
-        print(
-            "note: uncommitted changes are not in the bundle (built from HEAD):\n" + status,
-            file=sys.stderr,
-        )
+def uncommitted_changes(repo: Path) -> str:
+    """`git status --porcelain` for the bundle's inputs (`INPUTS`), untracked files
+    included; empty when clean. Line endings and file modes are not changes here: the
+    bundle reads committed blobs and sets its own modes, and a Windows checkout mirrored
+    into Linux differs from HEAD in exactly those. Tests are not inputs, so editing them
+    never blocks a build."""
+    args = (
+        *("-c", "core.autocrlf=input", "-c", "core.fileMode=false"),
+        *("--no-optional-locks", "status", "--porcelain", "--untracked-files=all"),
+        *("--", *INPUTS),
+    )
+    return git(repo, *args, blobs=False).decode().rstrip()
 
 
 # ---------------------------------------------------------------- markers (PEP 508)
@@ -514,7 +522,7 @@ class Bundle:
 
 
 def build(repo: Path, cache: Path | None) -> Bundle:
-    files = committed_files(repo, PACKAGE_DIR, "uv.lock")
+    files = committed_files(repo, *INPUTS)
     if "uv.lock" not in files or f"{PACKAGE_DIR}/pyproject.toml" not in files:
         raise BundleError("HEAD has no uv.lock or no podproxy pyproject.toml")
     own_name, own = build_wheel(files)
@@ -566,7 +574,15 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     try:
         repo = repo_root(args.repo or Path.cwd())
-        warn_if_dirty(repo)
+        dirty = uncommitted_changes(repo)
+        if dirty and not args.check:
+            raise BundleError(
+                f"refusing to write the lock: the bundle's inputs ({', '.join(INPUTS)}) have "
+                "uncommitted changes, and the bundle is built from HEAD, so the lock would "
+                f"not name this tree. Commit (or stash) them first:\n{dirty}"
+            )
+        if dirty:
+            print(f"note: uncommitted changes are not in the bundle:\n{dirty}", file=sys.stderr)
         cache = None if args.no_cache else (args.cache_dir or _default_cache())
         bundle = build(repo, cache)
         lock = args.lock or repo / LOCK_DEFAULT

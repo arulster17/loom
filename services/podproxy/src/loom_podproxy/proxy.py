@@ -19,8 +19,8 @@ phase1-runpod-plan.md §4 and docs/phase1-contracts.md §9. One process per pod:
 - on SIGHUP re-reads its certificate, key, client CA, token file and allowlist file
   (`--allow-ip-file`), all or nothing: when any one fails, the whole old configuration
   stays and the error is logged. New connections use the new files; open ones are kept
-  (docs/phase1-m2-spec.md §9). An allowlist file with no entries is an error, never "any
-  source", at start and on reload.
+  (docs/phase1-m2-spec.md §9). An allowlist file with no entries, or whose last line has
+  no newline (truncated), is an error, never "any source", at start and on reload.
 
 HTTP/1.1 (h11) with keep-alive; ALPN offers only `http/1.1`. Python and two small
 dependencies (h11, httpx) rather than a reverse-proxy binary: it runs in the test suite
@@ -117,11 +117,16 @@ def parse_networks(values: Sequence[str]) -> tuple[IPNetwork, ...]:
 
 
 def read_allowlist(path: Path) -> tuple[IPNetwork, ...]:
-    """One CIDR or address per line; blank lines are skipped. A file with no entry at all
-    raises: a truncated file must never open the proxy to any source."""
-    entries = [line.strip() for line in path.read_text().splitlines() if line.strip()]
+    """One CIDR or address per line, each ending in a newline; blank lines are skipped.
+    A file with no entry at all, or whose last entry has no newline after it, raises: a
+    truncated file must never open the proxy to any source, nor widen it (a cut-off
+    `10.0.0.0/16` reads as the valid, wider `10.0.0.0/1`)."""
+    text = path.read_text()
+    entries = [line.strip() for line in text.splitlines() if line.strip()]
     if not entries:
         raise ValueError(f"allowlist file {path} has no entries")
+    if text.rsplit("\n", 1)[-1].strip():
+        raise ValueError(f"allowlist file {path} looks truncated: its last line has no newline")
     out: list[IPNetwork] = []
     for entry in entries:
         try:
@@ -580,8 +585,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=env("LOOM_PODPROXY_ALLOW_IP_FILE"),
         metavar="PATH",
-        help="file of allowed source addresses, one CIDR or address per line, re-read on "
-        "SIGHUP; a file with no entries is an error (instead of --allow-ip)",
+        help="file of allowed source addresses, one CIDR or address per line (each ending "
+        "in a newline), re-read on SIGHUP; a file with no entries or no final newline is "
+        "an error (instead of --allow-ip)",
     )
     p.add_argument("--log-level", default=env("LOOM_PODPROXY_LOG_LEVEL", "info"))
     return p
@@ -603,8 +609,37 @@ def files_from_args(args: argparse.Namespace) -> ProxyFiles:
     )
 
 
+class _EarlyHup:
+    """SIGHUP's default action kills the process. `main` takes it over first thing, and a
+    SIGHUP that arrives before the proxy serves is remembered and applied once it does,
+    so files rewritten while it starts are read again."""
+
+    seen = False
+
+    @classmethod
+    def install(cls) -> None:
+        with contextlib.suppress(AttributeError, ValueError):  # no SIGHUP on Windows
+            signal.signal(signal.SIGHUP, cls._handler)
+
+    @classmethod
+    def _handler(cls, signum: int, frame: object) -> None:
+        cls.seen = True
+
+
 async def serve(args: argparse.Namespace) -> None:
+    _EarlyHup.install()  # in case serve() is called without main()
     files = files_from_args(args)
+    loop = asyncio.get_running_loop()
+    proxy: PodProxy | None = None
+
+    def on_hup() -> None:
+        if proxy is None:
+            _EarlyHup.seen = True
+        else:
+            reload(proxy, files)
+
+    with contextlib.suppress(NotImplementedError, AttributeError):  # no SIGHUP on Windows
+        loop.add_signal_handler(signal.SIGHUP, on_hup)
     try:
         token, networks, ctx = files.load()
         config = ProxyConfig(token=token, upstream=args.upstream, allowed_networks=networks)
@@ -619,13 +654,14 @@ async def serve(args: argparse.Namespace) -> None:
         config.upstream,
         _sources(config),
     )
+    if _EarlyHup.seen:
+        _EarlyHup.seen = False
+        log.info("SIGHUP received while starting: reloading")
+        reload(proxy, files)
     stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
-    with contextlib.suppress(NotImplementedError, AttributeError):  # no SIGHUP on Windows
-        loop.add_signal_handler(signal.SIGHUP, reload, proxy, files)
     try:
         await stop.wait()
     finally:
@@ -633,6 +669,7 @@ async def serve(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    _EarlyHup.install()
     args = build_parser().parse_args(argv)
     logging.basicConfig(
         level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s"

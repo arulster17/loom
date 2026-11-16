@@ -13,12 +13,14 @@ than `bench reap` (`runpod_reaper`) and acts on a resource only when all of thes
 - Serving pod (the second backstop behind the pod's own lease watchdog, phase1-m2-spec.md
   §6; only with `LOOM_RUNPOD_REAPER_SERVING=true` and `LOOM_RUNPOD_REAPER_LEASE_BUCKET`):
   its name is exactly `loom-serve-{model}-{created_epoch}-{nonce}`, its env has
-  `LOOM_MANAGED=true` and `LOOM_ROLE=serving`, it is older than 2 hours (by both its name
-  and RunPod's `createdAt`), and its S3 lease record `serving/leases/{pod_id}` is missing
-  or was written (`written_at`, never `lease_until`) more than 2 hours ago. A record that
-  cannot be parsed keeps the pod.
+  `LOOM_MANAGED=true` and `LOOM_ROLE=serving`, it is older than 2 hours (by its name's
+  epoch and, when the listing has one, RunPod's `createdAt`; only a missing `createdAt`
+  falls back to the name alone, and one that cannot be parsed keeps the pod), and its S3
+  lease record `serving/leases/{pod_id}` is missing or was written (`written_at`, never
+  `lease_until`) more than 2 hours ago. A record that cannot be parsed keeps the pod.
 
-The TTL rule never matches a `loom-serve-` name, whatever the prefix, and the serving rule
+The TTL rules (pods and volumes) never match a `loom-serve-` name, whatever the prefix,
+and the serving rule
 matches nothing but its own exact name.
 
 It fails closed: when a listing fails or returns anything but the expected shape, or a
@@ -314,10 +316,15 @@ def _stale_serving_pods(
             )
             kept += 1
             continue
-        # The younger of the two ages: the name's epoch and RunPod's own createdAt.
+        # The younger of the two ages: the name's epoch and RunPod's own createdAt. Only a
+        # missing createdAt falls back to the name; one that cannot be parsed keeps the pod.
         created = datetime.fromtimestamp(int(m.group("created")), UTC)
-        listed = _created_at(pod)
-        if listed is not None:
+        if pod.get("createdAt") is not None:
+            listed = _created_at(pod)
+            if listed is None:
+                log.warning("kept %s (%s): createdAt cannot be parsed", pod["id"], pod["name"])
+                kept += 1
+                continue
             created = max(created, listed)
         if now - created <= SERVING_MIN_AGE:
             kept += 1
@@ -360,6 +367,8 @@ def _expired_volumes(
     targets: list[Target] = []
     kept = 0
     for vol in volumes:
+        if vol["name"].startswith(SERVING_PREFIX):
+            continue  # whatever the prefix: the TTL rule never matches a serving name
         m = name_re.match(vol["name"])
         if m is None:
             continue
