@@ -133,8 +133,21 @@ models:
     max_replicas: 1
     idle_stop_s: 1800
     cold_start_estimate_s: 450
-    engine_env: {}                 # must equal the NCCL env 9f0853d7 ran with (validated)
+    engine_env: {NCCL_P2P_LEVEL: NVL}   # the env 9f0853d7's FP8 cell ran with (pinned by a test)
 ```
+
+**The committed `config/serving.yaml`** is the compose default: the values above with
+`provider: local` (the local backend, §9), so `gateway_egress_cidrs` may stay empty. The
+production file with `provider: runpod` and the control plane's egress IP is deployed in
+M3 (and the manager refuses `local`/`fake` outside `LOOM_ENV=dev`, §11). An explicit
+`load_serving(path)` wins over `LOOM_SERVING_YAML`, which wins over the default path (as
+`load_registry` does). Validation errors are `ValueError`s (Pydantic's
+`ValidationError` is one) whose message names the field.
+
+**Gateway without the file:** the `Router` loads the default `serving.yaml` itself
+(`LOOM_SERVING_YAML` honoured). If that names a missing file, every model gets
+`DEFAULT_COLD_START_S` and the gateway still starts. `create_app(cold_start_s=...)`
+overrides stay.
 
 Validation at load:
 
@@ -147,8 +160,9 @@ Validation at load:
   `unavailable` with reason `not_configured`.
 
 A test pins each served model's `engine_env` to the one in the benchmark spec that priced
-it (`bench/experiments/llama-3.3-70b-h100-tp2-runpod.yaml` for the 70B), so the served
-launch stays the benchmarked one.
+it (`bench/experiments/llama-3.3-70b-h100-tp2-runpod.yaml`, cell `vllm-tp2-fp8`, for the
+70B; `qwen3-8b-config-sweep-runpod.yaml`, cell `bf16`, for the 8B), so the served launch
+stays the benchmarked one.
 
 GPU type and count come from the registry (`hardware.gpu` through `RUNPOD_GPU_TYPE_IDS`,
 `gpus_per_replica`). The listed price comes from `bench/prices.yaml` through the row's
