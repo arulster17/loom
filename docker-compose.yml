@@ -190,6 +190,7 @@ services:
       dockerfile: services/gateway/Dockerfile
     environment:
       <<: *platform-env
+      LOOM_SERVING_YAML: /loom-config/serving.yaml
       LOOM_GATEWAY_CLIENT_CERT: /certs/gateway.crt
       LOOM_GATEWAY_CLIENT_KEY: /certs/gateway.key
       LOOM_POD_CA_CERT: /certs/ca.crt

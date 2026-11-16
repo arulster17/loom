@@ -1,8 +1,10 @@
 """Model pool state shared by the pool manager (writer) and the gateway (reader).
 
-`loom:pool:<model_id>` is a hash: state, retry_after_s, replicas (JSON), updated_at_ms.
-In M1 a pool simulator (or a seed command) writes it; from M2 the pool manager does.
-A model with no hash is treated as cold. See docs/phase1-contracts.md, "Model pools".
+`loom:pool:<model_id>` is a hash: state, retry_after_s, replicas (JSON), updated_at_ms,
+and from M2 an optional reason (why a pool is `unavailable`; only logged and counted by
+the gateway). In M1 a pool simulator (or a seed command) writes it; from M2 the pool
+manager does. A model with no hash is treated as cold; a hash without `reason` (written
+by M1 code) has none. See docs/phase1-contracts.md, "Model pools".
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Literal, cast
 
 from redis.asyncio import Redis
+from redis.typing import EncodableT, FieldT
 
 PoolStateName = Literal["ready", "warming", "cold", "unavailable"]
 WAKE_CHANNEL = "loom:pool:wake"
@@ -44,6 +47,9 @@ class PoolState:
     retry_after_s: int
     replicas: tuple[Replica, ...] = field(default_factory=tuple)
     updated_at_ms: int = 0
+    # Why the pool is `unavailable` (crash_loop, spend_cap, price_too_high,
+    # not_configured, no_capacity); None otherwise.
+    reason: str | None = None
 
     @property
     def routable(self) -> bool:
@@ -69,19 +75,26 @@ async def get_pool(redis: Redis, model_id: str, *, cold_retry_after_s: int = 300
         retry_after_s=int(h.get("retry_after_s") or cold_retry_after_s),
         replicas=replicas,
         updated_at_ms=int(h.get("updated_at_ms") or 0),
+        reason=h.get("reason") or None,
     )
 
 
 async def set_pool(redis: Redis, pool: PoolState) -> None:
-    await redis.hset(
-        pool_key(pool.model_id),
-        mapping={
-            "state": pool.state,
-            "retry_after_s": pool.retry_after_s,
-            "replicas": json.dumps([r.__dict__ for r in pool.replicas]),
-            "updated_at_ms": pool.updated_at_ms or int(time.time() * 1000),
-        },
-    )
+    """Write the whole hash in one transaction; a pool without a reason clears an old one."""
+    key = pool_key(pool.model_id)
+    mapping: dict[FieldT, EncodableT] = {
+        "state": pool.state,
+        "retry_after_s": pool.retry_after_s,
+        "replicas": json.dumps([r.__dict__ for r in pool.replicas]),
+        "updated_at_ms": pool.updated_at_ms or int(time.time() * 1000),
+    }
+    async with redis.pipeline(transaction=True) as pipe:
+        if pool.reason:
+            mapping["reason"] = pool.reason
+        else:
+            pipe.hdel(key, "reason")
+        pipe.hset(key, mapping=mapping)
+        await pipe.execute()
 
 
 async def request_wake(redis: Redis, model_id: str) -> bool:

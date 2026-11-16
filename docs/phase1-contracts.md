@@ -69,6 +69,7 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_DATABASE_URL` | `postgresql://loom:loom@localhost:5432/loom_platform` | all (web: as `DATABASE_URL`) |
 | `LOOM_REDIS_URL` | `redis://localhost:6379/0` | gateway, billing, poolsim, web (model status fallback; sign-in rate limit) |
 | `LOOM_MODELS_YAML` | repo `config/models.yaml` | gateway, billing |
+| `LOOM_SERVING_YAML` | repo `config/serving.yaml`; gateway image and compose: that file | gateway (cold-start estimates, §10; a missing file gives every model 300 s), pool manager (M2). Loaded by `loom_platform.serving.load_serving` |
 | `LOOM_USAGE_STREAM` | `loom:usage` | gateway, billing |
 | `LOOM_AUTH_CACHE_TTL_S` | 4 | gateway |
 | `LOOM_REQUEST_TIMEOUT_S` / `LOOM_RESERVATION_GRACE_S` | 600 / 60 | gateway (reservation TTL = their sum) |
@@ -119,6 +120,7 @@ Every table of the accepted PLAN.md draft exists as drafted, with these addition
 | `admin_audit_log.actor_user_id` has no foreign key | Deleting a user must not need an UPDATE of the log. |
 | `usage_posted_org`, `usage_posted_key` (migration 0008) | Per org / key, the cost of events linked to a ledger transaction, kept by trigger; the usage-total functions read them instead of summing all history |
 | `stripe_payments` (migration 0007): PaymentIntent -> session, org, purchase, amount, cumulative refunded and clawed-back micros | Refund and dispute events name the PaymentIntent; this maps them to the org and keeps clawbacks cumulative-safe and capped at the purchase. |
+| `serving_pods`, `serving_spend_alerts` (migration 0010) | The pool manager's pod records (one row per pod, written before RunPod is called; state, placement, `cost_per_hr_micros`, ports, lease, stages; never a token, key or certificate) and the monthly spend alerts sent, once per (month, fraction). See docs/phase1-m2-spec.md §5. |
 
 Invariants enforced in the database:
 
@@ -243,8 +245,8 @@ without also discarding the stream (both are one state).
 | `loom:usage` | stream | settle | Usage events (§7) |
 | `loom:notify` | stream | billing reconcile | Notifications outbox (§7) *(wave 2)* |
 | `loom:org:<org>:lowbal` | string | billing reconcile | Low-balance notice sent for the current crossing *(wave 2)* |
-| `loom:pool:<model>` | hash | pool manager / poolsim | Pool state (§10) |
-| `loom:pool:<model>:wake` | string, 600 s | gateway | Start request for a cold model; also `PUBLISH loom:pool:wake <model>` |
+| `loom:pool:<model>` | hash | pool manager / poolsim | Pool state (§10), with an optional `reason` (from M2) |
+| `loom:pool:<model>:wake` | string, 600 s | gateway | Start request for a `cold` or (from M2) `unavailable` model; also `PUBLISH loom:pool:wake <model>` |
 
 Use `loom_platform.limiter` (`Limiter`, `org_key`, `api_key_key`) rather than building
 names by hand.
@@ -618,11 +620,25 @@ available there is no fallback. A request to a model with no ready replica retur
 |---|---|---|
 | `ready` with replicas | Route (least in-flight) | |
 | `warming` | 503 "starting up" | `retry_after_s` (remaining cold-start estimate) |
-| `cold` or no hash | `request_wake(model)`, then 503 "starting up" | `retry_after_s`, else the model's cold-start estimate (8B 240 s, 70B 450 s from the measured cold starts; gateway constants in M1, `config/serving.yaml` from M2) |
-| `unavailable` | 503 "no GPU capacity" | `retry_after_s` (default 300) |
+| `cold` or no hash | `request_wake(model)`, then 503 "starting up" | `retry_after_s`, else the model's cold-start estimate: `cold_start_estimate_s` in `config/serving.yaml` (8B 240 s, 70B 450 s from the measured cold starts), 300 s for a model not there or with no file (`LOOM_SERVING_YAML`, §2) |
+| `unavailable` | `request_wake(model)`, then 503 "no GPU capacity" | `retry_after_s` (default 300) |
 
 `replicas` is a JSON list of `{id, url, server_name, token}`. The gateway reads the hash
 per request (or caches it for at most 1 s).
+
+`reason` (from M2; `PoolState.reason`) says why a pool is `unavailable`: `crash_loop`,
+`spend_cap`, `price_too_high`, `not_configured` or `no_capacity`. It is absent otherwise,
+and a hash written without it (M1 code, poolsim) has none. `set_pool` writes the whole
+hash, so a rewrite without a reason clears an old one. The gateway only logs it (the
+`pool_state` and `pool_reason` fields of the `rejected` line of a 503) and counts it:
+`loom_gateway_model_unavailable_total{model,state,reason}` (`reason="none"` when the pool
+gives none).
+
+**Wake on `unavailable`** (from M2): the gateway calls `request_wake` for an `unavailable`
+model too (one `SET NX`, after reserve like every 503, so rate-limited the same way). The
+pool manager treats a live wake key as demand and retries `no_capacity` on its backoff
+schedule while the key lives; it ignores the wake for the other reasons, which need an
+admin. The client's answer is unchanged.
 
 **M1 simulation** (`poolsim`): seeds every servable model as `ready` with the one mock
 pod replica. Simulated on-demand behaviour, for the tests and demos: setting a model

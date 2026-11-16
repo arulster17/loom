@@ -156,16 +156,17 @@ class OpenSshExec:
         )
 
 
-def generate_keypair(directory: Path) -> tuple[Path, str]:
-    """A fresh ed25519 key pair in `directory` (made 0700); returns (private key path,
-    public key line). The caller keeps the directory out of results and the repo."""
+def generate_keypair(directory: Path, comment: str = "loom-bench") -> tuple[Path, str]:
+    """A fresh ed25519 key pair in `directory` (made 0700), its public key labelled
+    `comment`; returns (private key path, public key line). The caller keeps the
+    directory out of results and the repo."""
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
     key = directory / "id_ed25519"
     if key.exists():
         raise FileExistsError(key)
     subprocess.run(
-        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "loom-bench", "-f", str(key)],
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", comment, "-f", str(key)],
         check=True,
         capture_output=True,
     )

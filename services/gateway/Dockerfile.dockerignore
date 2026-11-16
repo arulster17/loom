@@ -3,6 +3,7 @@
 !pyproject.toml
 !uv.lock
 !config/models.yaml
+!config/serving.yaml
 !bench/pyproject.toml
 !bench/src
 !services/platform_common/pyproject.toml
