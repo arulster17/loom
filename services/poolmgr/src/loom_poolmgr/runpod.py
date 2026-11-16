@@ -137,9 +137,22 @@ class RunpodServing:
             if e.no_capacity:
                 raise NoCapacity(f"RunPod has no {body['gpuTypeIds'][0]} free") from None
             if e.status is None or e.status >= 500:
-                for pod in self.api.find_pods_by_name(str(body["name"])):
-                    log.warning("terminating pod %s, made by an ambiguous create", pod.get("id"))
-                    self._terminate(str(pod["id"]))
+                cleaned: list[str] = []
+                try:
+                    for pod in self.api.find_pods_by_name(str(body["name"])):
+                        log.warning(
+                            "terminating pod %s, made by an ambiguous create", pod.get("id")
+                        )
+                        self._terminate(str(pod["id"]))
+                        cleaned.append(str(pod["id"]))
+                except (RunpodApiError, ValueError) as cleanup:
+                    log.error(
+                        "cleanup of the ambiguous create %s failed: %s", body["name"], cleanup
+                    )
+                    cleaned = []
+                raise CreateFailed(
+                    f"create {body['name']}: {e}", ambiguous=True, cleaned=tuple(cleaned)
+                ) from None
             raise CreateFailed(f"create {body['name']}: {e}") from None
 
     def _create_sync(self, model: Deployment, name: str, env: dict[str, str]) -> PodInfo:
@@ -161,13 +174,10 @@ class RunpodServing:
             network=self.network,
             start_command=self.start_command,
         )
-        try:
-            pod = self._create(body)
-        except RunpodApiError as e:  # the cleanup itself failed
-            raise CreateFailed(f"create {name}: cleanup failed: {e}") from None
+        pod = self._create(body)
         info = pod_info(pod)
         if not info.pod_id:
-            raise CreateFailed(f"create {name}: the answer has no pod id")
+            raise CreateFailed(f"create {name}: the answer has no pod id", ambiguous=True)
         if info.cost_per_hr_micros is None:
             try:
                 fetched = self.api.get_pod(info.pod_id)
@@ -186,6 +196,13 @@ class RunpodServing:
         except RunpodApiError as e:
             raise ProviderError(f"RunPod pod listing failed: {e}") from None
         return [pod_info(p) for p in pods if str(p.get("name") or "").startswith(POD_NAME_PREFIX)]
+
+    async def get(self, pod_id: str) -> PodInfo | None:
+        try:
+            pod = await asyncio.to_thread(self.api.get_pod, pod_id)
+        except (RunpodApiError, ValueError) as e:
+            raise ProviderError(f"GET pod {pod_id} failed: {e}") from None
+        return None if pod is None else pod_info(pod)
 
     def _terminate(self, pod_id: str) -> None:
         check_pod_id(pod_id)

@@ -156,6 +156,10 @@ class LocalServing:
     async def list(self) -> list[PodInfo]:
         return [self._info(p) for p in self.pods.values()]
 
+    async def get(self, pod_id: str) -> PodInfo | None:
+        pod = self.pods.get(pod_id)
+        return None if pod is None else self._info(pod)
+
     async def terminate(self, pod_id: str) -> None:
         pod = self.pods.pop(pod_id, None)
         if pod is None:

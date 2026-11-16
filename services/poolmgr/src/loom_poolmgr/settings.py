@@ -16,7 +16,8 @@
 - `LOOM_POOLMGR_LOCAL_HOST`: `provider: local`, the host the gateway reaches the local
   pods' proxies at (127.0.0.1; any other value makes them listen on all interfaces);
 - `LOOM_POOLMGR_STATE_DIR`: where the manager keeps its per-pod SSH known_hosts files
-  (and, in dev, a generated SSH key and CA); default a temporary directory;
+  (and, in dev, a generated SSH key and CA); required outside dev (known_hosts must
+  survive a restart), a temporary directory in dev when unset;
 - `RUNPOD_API_KEY`: the serving account's key (`provider: runpod` only).
 
 Outside `LOOM_ENV=dev` the manager refuses to start without the CA, the client
@@ -81,6 +82,8 @@ class PoolmgrSettings(PlatformSettings):
             "LOOM_POOLMGR_SSH_KEY": self.poolmgr_ssh_key,
             "LOOM_POOLMGR_LEASE_BUCKET": self.poolmgr_lease_bucket,
             "LOOM_POOLMGR_PROXY_BUNDLE": self.poolmgr_proxy_bundle,
+            # The pods' known_hosts files must survive a restart (spec §11).
+            "LOOM_POOLMGR_STATE_DIR": self.poolmgr_state_dir,
         }
         problems += [f"{name} is not set" for name, value in required.items() if not value]
         if config is not None:

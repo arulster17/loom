@@ -22,8 +22,18 @@ per model demand, creates and idle drains; spend alerts; the pool hashes. A crea
 the bootstrap after it) runs as a task the tick does not wait for, so bootstraps run in
 parallel across models. A drain is advanced by the ticks (it needs no task): the pod
 leaves the pool hash at once, and is terminated on the first tick at least
-`2 x POOL_CACHE_TTL_S` later that sees `vllm:num_requests_running` = 0, or
-`drain_max_s` after the drain started.
+`2 x POOL_CACHE_TTL_S` later that sees `vllm:num_requests_running` = 0 (a failed
+`/metrics` read is "try again next tick"), or `drain_max_s` after the drain started.
+
+**Failures** (§11 "Failure and restart rules"). A pod is lost only after two consecutive
+listings requested after its id was known leave it out, or a GET confirms it gone (or a
+listing shows it EXITED/TERMINATED); a lost pod is terminated before its row is marked.
+A terminate RunPod refuses leaves the row `failed`, counted against `max_replicas` and
+spend, and is retried every tick. A row whose pod id is unknown (an ambiguous create, a
+create task that crashed or was stopped mid-way) stays `failed` and counted until a later
+listing shows no pod with its name, or the pod found by name is terminated. Any
+unexpected exception in a create task fails the row; a `creating`/`bootstrapping` row
+with no live task is failed by the next tick.
 
 **Demand** (§5 step 1): a live wake key `loom:pool:<model>:wake`, or a ready model with a
 usage event (`loom:usage`, read with `XREAD` from where the last tick stopped, no consumer
@@ -34,8 +44,11 @@ the last demand a tick observed. Desired replicas: `max(min_replicas, 1 if deman
 **Holds.** `crash_loop` (more than `max_replacements_per_hour` pods failed or lost in the
 last hour), `spend_cap` and `price_too_high` keep a model `unavailable` and ignore its
 wakes until an admin `reset`; `not_configured` (a servable model missing from
-serving.yaml) is permanent. Holds live in memory: after a restart `crash_loop` is
-recomputed from the last hour's rows, and the spend guard trips again by itself.
+serving.yaml) is permanent. After a restart `crash_loop` and `price_too_high` are
+recomputed from the last hour's rows, counting only failures after the model's last
+`reset` (kept in Redis, `loom:poolmgr:reset:<model>`), by the same rule as live; the spend
+guard trips again by itself. Adopted pods count as demand at adoption, and adoption takes
+every pod out of the pool hashes before re-keying them.
 
 **No capacity.** A create refused for capacity (or failing without making a pod) is
 retried while demand lasts, `capacity.backoff_s[n]` after the n-th consecutive refusal
@@ -94,6 +107,7 @@ from loom_poolmgr.leases import LeaseRecord, LeaseRecords, renew_on_pod
 from loom_poolmgr.metrics import PoolmgrMetrics
 from loom_poolmgr.pki import Pki
 from loom_poolmgr.provider import (
+    CreateFailed,
     Deployment,
     Endpoints,
     NoCapacity,
@@ -129,7 +143,11 @@ NOT_REPLACEMENTS = (
     "create_failed",
     "spend_cap",
     "manager restarted",
+    "stopped",
 )
+# Where `reset` records its time, so it survives a restart (spec §11).
+RESET_KEY = "loom:poolmgr:reset:{model}"
+RESET_TTL_S = 2 * int(CRASH_WINDOW_S)
 
 log = logging.getLogger(__name__)
 
@@ -267,8 +285,22 @@ class _Pod:
     last_lease: float = -math.inf  # last renewal written on the pod and in its record
     lease_until: float | None = None
     cert_not_after: float | None = None
-    lost: bool = False  # the listing lost it while its bootstrap runs
+    lost: bool = False  # confirmed gone while its bootstrap runs
     drain_by: TerminatedBy = "manager"
+    # The pod id as soon as the create answers (the row may not have it yet).
+    known_id: str | None = None
+    # Lost-pod rule (spec §11): only listings requested after `watch_seq` count, and a
+    # pod is lost after two consecutive misses or a GET that confirms it gone.
+    watch_seq: int = 0
+    misses: int = 0
+    # No pod id, and a pod may exist under the row's name (ambiguous create, a create
+    # cancelled or crashed mid-way): the row stays `failed` and counted until a later
+    # listing shows no pod with that name, or the one found is terminated.
+    pending_name: bool = False
+    # Known that no pod was ever made (no capacity, a clear refusal).
+    no_pod: bool = False
+    terminate_by: TerminatedBy = "manager"
+    counted: bool = False  # its failure was counted toward the crash loop
     # The clock when the row was created and when its drain started, as floats: a
     # timestamptz round trip may move an instant by a microsecond, and every timing rule
     # compares at `>=`.
@@ -291,7 +323,7 @@ class _Pod:
 
     @property
     def pod_id(self) -> str | None:
-        return self.row.pod_id
+        return self.row.pod_id or self.known_id
 
     @property
     def busy(self) -> bool:
@@ -400,6 +432,8 @@ class PoolManager:
         self._last_demand: dict[str, float] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
         self._last_listing = -math.inf
+        self._listing_seq = 0
+        self._reset_at: dict[str, float] = {}
         self._usage_cursor: str | None = None
         self._db: AsyncConnectionPool | None = None
         self._lock_conn: psycopg.AsyncConnection[Any] | None = None
@@ -558,13 +592,15 @@ class PoolManager:
             now = self.clock()
             await self._admin_commands(now)
             if now - self._last_listing >= self.config.health.pod_state_every_s:
+                self._listing_seq += 1
+                seq = self._listing_seq
                 try:
                     listing = await self.provider.list()
                 except ProviderError as e:
                     log.warning("pod listing failed: %s", e)
                 else:
                     self._last_listing = now
-                    await self._observe(listing, now)
+                    await self._observe(listing, seq, now)
             await self._check_pods(now)
             await self._read_usage(now)
             budget = _Budget(self, now)
@@ -591,6 +627,11 @@ class PoolManager:
                 model = str(cmd.get("model"))
                 hold = self._holds.pop(model, None)
                 self._failures.pop(model, None)
+                self._reset_at[model] = now
+                try:
+                    await self.redis.set(RESET_KEY.format(model=model), repr(now), ex=RESET_TTL_S)
+                except Exception as e:
+                    log.error("recording the reset of %s failed: %s", model, _describe(e))
                 log.warning("admin reset of %s (hold was %s)", model, hold)
             elif op == "stop":
                 model = str(cmd.get("model"))
@@ -620,17 +661,39 @@ class PoolManager:
                 pod.task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await pod.task
-            await self._terminate(pod, by="admin")
+            # Without a pod id the create may still finish on RunPod's side: the row stays
+            # counted until a later listing settles it by name.
+            await self._terminate(pod, by="admin", failure="stopped by admin")
 
-    async def _observe(self, listing: list[PodInfo], now: float) -> None:
-        """The pod-state rule (§5 "Health rules", first row), and orphans."""
+    async def _observe(self, listing: list[PodInfo], seq: int, now: float) -> None:
+        """The pod-state rule (§5 "Health rules", first row; §11 "Failure and restart
+        rules"), rows waiting on a name, and orphans. Only a listing requested after a
+        pod's id was known (`seq > watch_seq`) says anything about it."""
         by_id = {p.pod_id: p for p in listing}
+        by_name = {p.name: p for p in listing}
         for pod in list(self._pods.values()):
-            if pod.pod_id is None:
+            if pod.state == "terminated" or seq <= pod.watch_seq:
                 continue
+            if pod.pod_id is None:
+                if pod.pending_name and not pod.busy:
+                    await self._settle_by_name(pod, by_name.get(pod.row.pod_name), now)
+                continue
+            if pod.state == "failed":
+                continue  # its termination is retried each tick
             info = by_id.get(pod.pod_id)
             if info is not None and not info.gone:
+                pod.misses = 0
                 continue
+            if info is None:
+                pod.misses += 1
+                if pod.misses < 2:
+                    try:
+                        info = await self.provider.get(pod.pod_id)
+                    except ProviderError as e:
+                        log.warning("GET of pod %s failed: %s", pod.pod_id, e)
+                        continue
+                    if info is not None and not info.gone:
+                        continue  # the listing lags: the pod is there
             if pod.busy:
                 pod.lost = True  # its bootstrap notices on its next check
                 continue
@@ -650,18 +713,30 @@ class PoolManager:
                     await self.provider.terminate(info.pod_id)
 
     async def _lost(self, pod: _Pod, info: PodInfo | None, now: float) -> None:
+        """A pod RunPod lost (gone, EXITED, TERMINATED): out of routing, terminated
+        (idempotent; an EXITED pod still bills for its disk), then its row is marked. A
+        failed terminate leaves the row `failed` and counted, retried each tick."""
         state = "gone" if info is None else info.status
         log.warning("pod %s (%s) is %s: out of routing", pod.pod_id, pod.model, state)
         pod.routable = False
-        if pod.state == "ready":
-            self._record_failure(pod.model, now, "pod_lost")
-        if info is not None and pod.pod_id is not None:
-            # EXITED still bills for its disk: terminate it (never stop).
-            with contextlib.suppress(ProviderError):
-                await self.provider.terminate(pod.pod_id)
-        await self._terminated(
-            pod, by="runpod", failure="pod_lost" if pod.state == "ready" else None
-        )
+        failure = "pod_lost" if pod.state == "ready" else None
+        if failure is not None:
+            self._count_failure(pod, failure, now)
+        await self._publish(pod.model, now)
+        await self._terminate(pod, by="runpod", failure=failure)
+        await self._publish(pod.model, now)
+
+    async def _settle_by_name(self, pod: _Pod, info: PodInfo | None, now: float) -> None:
+        """A row without a pod id, against a listing requested after it went `failed`:
+        no pod by its name means none exists; one found is terminated."""
+        if info is None:
+            log.info("no pod named %s exists: its row is closed", pod.row.pod_name)
+            pod.no_pod = True
+        else:
+            log.warning("terminating pod %s, found by the name %s", info.pod_id, pod.row.pod_name)
+            pod.known_id = info.pod_id
+        pod.pending_name = False
+        await self._terminate(pod, by=pod.terminate_by)
         await self._publish(pod.model, now)
 
     async def _terminate_orphan(self, info: PodInfo) -> None:
@@ -684,12 +759,18 @@ class PoolManager:
         for pod in list(self._pods.values()):
             if pod.busy:
                 continue
-            if pod.state == "ready":
+            if pod.state in ("creating", "bootstrapping"):
+                # Its task is gone (crashed, cancelled, or a failure it could not record).
+                jobs.append(self._fail(pod, "internal: the create task ended unfinished", now=now))
+            elif pod.state == "ready":
                 jobs.append(self._check_ready(pod, now))
             elif pod.state == "draining":
                 jobs.append(self._check_draining(pod, now))
-            elif pod.state == "failed":
+            elif pod.state == "failed" and pod.pod_id is not None:
                 jobs.append(self._retry_terminate(pod))
+            elif pod.state == "failed" and not pod.pending_name:
+                pod.pending_name = True  # settled by name on a later listing
+                pod.watch_seq = self._listing_seq
         if jobs:
             results = await asyncio.gather(*jobs, return_exceptions=True)
             for r in results:
@@ -700,7 +781,7 @@ class PoolManager:
         h = self.config.health
         replica = pod.replica()
         if replica is None:
-            await self._fail(pod, "ready pod without endpoints or token", why="internal", now=now)
+            await self._fail(pod, "internal: ready pod without endpoints or token", now=now)
             return
         if now - pod.last_health >= h.proxy_health_every_s:
             pod.last_health = now
@@ -727,7 +808,7 @@ class PoolManager:
                     pod.out_since = now
                     await self._publish(pod.model, now)
                 if pod.out_since is not None and now - pod.out_since >= h.unhealthy_grace_s:
-                    await self._fail(pod, "unhealthy", why="unhealthy", now=now)
+                    await self._fail(pod, "unhealthy", now=now)
                     return
             try:
                 m = await health.engine_metrics(self.http, replica, timeout_s=HEALTH_TIMEOUT_S)
@@ -745,7 +826,7 @@ class PoolManager:
                     pod.last_tokens = m.generation_tokens_total
                     pod.last_progress = now
                 elif now - pod.last_progress >= h.progress_stall_s:
-                    await self._fail(pod, "progress_stall", why="progress_stall", now=now)
+                    await self._fail(pod, "progress_stall", now=now)
                     return
         await self._maintain(pod, now)
 
@@ -768,7 +849,7 @@ class PoolManager:
             except Exception as e:
                 log.warning("certificate renewal of pod %s failed: %s", pod.pod_id, _describe(e))
                 if expires <= now:
-                    await self._fail(pod, "certificate_expired", why="certificate", now=now)
+                    await self._fail(pod, "certificate_expired", now=now)
 
     async def _check_draining(self, pod: _Pod, now: float) -> None:
         await self._maintain(pod, now)
@@ -783,16 +864,18 @@ class PoolManager:
                 assert self.http is not None
                 try:
                     m = await health.engine_metrics(self.http, replica, timeout_s=HEALTH_TIMEOUT_S)
-                except httpx.HTTPError:
-                    m = None  # nothing left to wait for
-                if m is not None and m.requests_running > 0:
+                except httpx.HTTPError as e:
+                    # Unknown, not zero: try again next tick, until drain_max_s.
+                    log.info("draining pod %s: /metrics failed (%s)", pod.pod_id, _describe(e))
+                    return
+                if m.requests_running > 0:
                     return
         log.info("pod %s (%s) drained after %.0f s: terminating", pod.pod_id, pod.model, elapsed)
-        await self._terminate(pod, by=pod.drain_by)
+        await self._terminate(pod, by=pod.drain_by, keep_state=True)
         await self._publish(pod.model, now)
 
     async def _retry_terminate(self, pod: _Pod) -> None:
-        if await self._terminate(pod, by="manager"):
+        if await self._terminate(pod, by=pod.terminate_by):
             await self._publish(pod.model, self.clock())
 
     async def _read_usage(self, now: float) -> None:
@@ -988,6 +1071,31 @@ class PoolManager:
         self._capacity[model] = _Capacity(failures, at, no_capacity)
 
     async def _create_and_bootstrap(self, pod: _Pod, dep: Deployment) -> None:
+        """The create task. Whatever goes wrong, the row ends `failed` and its pod is
+        terminated (by name when its id is unknown); a failure it cannot even record is
+        picked up by the next tick (a creating/bootstrapping row with no live task)."""
+        try:
+            await self._create_and_bootstrap_inner(pod, dep)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error(
+                "create task of %s failed unexpectedly: %s",
+                pod.row.pod_name,
+                _describe(e),
+                exc_info=e,
+            )
+            try:
+                await self._fail(pod, f"internal: {_describe(e)}", now=self.clock())
+            except Exception as again:
+                log.error(
+                    "failing %s failed too (the next tick retries): %s",
+                    pod.row.pod_name,
+                    _describe(again),
+                )
+            await self._publish(dep.model_id)
+
+    async def _create_and_bootstrap_inner(self, pod: _Pod, dep: Deployment) -> None:
         model = dep.model_id
         created = pod.created
         lc = self.config.lifecycle
@@ -1004,6 +1112,7 @@ class PoolManager:
             log.warning("no capacity for %s: %s", model, e)
             self.metrics.creates.labels(model, "no_capacity").inc()
             self._capacity_failure(model, created, no_capacity=True)
+            pod.no_pod = True
             await self._terminated(pod, by="manager", failure="no_capacity")
             await self._publish(model)
             return
@@ -1011,9 +1120,23 @@ class PoolManager:
             log.error("create of %s failed: %s", pod.row.pod_name, e)
             self.metrics.creates.labels(model, "error").inc()
             self._capacity_failure(model, created, no_capacity=False)
-            await self._terminated(pod, by="manager", failure=f"create_failed: {e}"[:500])
+            failure = f"create_failed: {e}"[:500]
+            if isinstance(e, CreateFailed) and e.ambiguous:
+                if e.cleaned:
+                    # The pod the create made anyway was found by name and terminated.
+                    pod.known_id = e.cleaned[0]
+                    await self._terminated(pod, by="manager", failure=failure)
+                else:
+                    # A pod may still appear under this name: keep the row counted until
+                    # a later listing settles it.
+                    await self._fail(pod, failure, now=self.clock())
+            else:
+                pod.no_pod = True
+                await self._terminated(pod, by="manager", failure=failure)
             await self._publish(model)
             return
+        pod.known_id = info.pod_id
+        pod.watch_seq = self._listing_seq
         self._capacity.pop(model, None)
         now = self.clock()
         api_cost = info.cost_per_hr_micros
@@ -1044,7 +1167,7 @@ class PoolManager:
             )
             self.metrics.creates.labels(model, "price_too_high").inc()
             self._holds[model] = "price_too_high"
-            await self._fail(pod, "price_too_high", why=None, now=now)
+            await self._fail(pod, "price_too_high", now=now)
             await self._publish(model)
             return
         self.metrics.creates.labels(model, "ok").inc()
@@ -1055,11 +1178,12 @@ class PoolManager:
         except PodLost as e:
             now = self.clock()
             log.warning("pod %s (%s) lost during bootstrap: %s", pod.pod_id, model, e)
-            self._record_failure(model, now, "pod_lost")
-            await self._terminated(pod, by="runpod", failure="pod_lost_during_bootstrap")
+            failure = "pod_lost_during_bootstrap"
+            self._count_failure(pod, failure, now)
+            await self._terminate(pod, by="runpod", failure=failure)
         except Exception as e:
             log.error("bootstrap of pod %s (%s) failed: %s", pod.pod_id, model, _describe(e))
-            await self._fail(pod, f"bootstrap: {_describe(e)}", why="bootstrap", now=self.clock())
+            await self._fail(pod, f"bootstrap: {_describe(e)}", now=self.clock())
         await self._publish(model)
 
     async def _bootstrap(self, pod: _Pod, dep: Deployment, info: PodInfo) -> None:
@@ -1085,13 +1209,12 @@ class PoolManager:
             await self.sleep(BOOT_POLL_S)
             await check()
             try:
-                listing = await self.provider.list()
+                found = await self.provider.get(pod_id)
             except ProviderError as e:
-                log.warning("pod listing failed: %s", e)
+                log.warning("GET of pod %s failed: %s", pod_id, e)
                 continue
-            found = next((p for p in listing if p.pod_id == pod_id), None)
             if found is None:
-                raise PodLost(f"{pod_id} is no longer listed")
+                raise PodLost(f"{pod_id} is gone (GET answers 404)")
             info = found
             endpoints = None if info.gone else self.provider.endpoints(info)
         pod.endpoints = endpoints
@@ -1208,7 +1331,7 @@ class PoolManager:
                 raise
             log.warning("lease renewal of pod %s failed: %s", pod.pod_id, _describe(e))
             if pod.lease_until is not None and pod.lease_until - now <= 2 * lc.lease_renew_every_s:
-                await self._fail(pod, "lease_renewal_failed", why="lease", now=now)
+                await self._fail(pod, "lease_renewal_failed", now=now)
             return False
         pod.lease_until = float(epoch)
         await self._update(pod, lease_until=_dt(epoch))
@@ -1232,8 +1355,14 @@ class PoolManager:
 
     # ------------------------------------------------------------------ failure and termination
 
-    def _record_failure(self, model: str, now: float, why: str) -> None:
-        self.metrics.replacements.labels(model, why).inc()
+    def _count_failure(self, pod: _Pod, failure: str, now: float) -> None:
+        """Count `failure` toward the crash loop, once per pod, when it is one (the same
+        rule as `_load_holds` applies to rows after a restart)."""
+        if pod.counted or not _counts(failure):
+            return
+        pod.counted = True
+        model = pod.model
+        self.metrics.replacements.labels(model, failure.split(":")[0]).inc()
         recent = [t for t in self._failures.get(model, []) if now - t < CRASH_WINDOW_S]
         recent.append(now)
         self._failures[model] = recent
@@ -1249,31 +1378,52 @@ class PoolManager:
                 model,
             )
 
-    async def _fail(self, pod: _Pod, failure: str, *, why: str | None, now: float) -> None:
+    async def _fail(self, pod: _Pod, failure: str, *, now: float) -> None:
         """Out of routing, `failed`, then terminate (retried each tick until it works)."""
         if pod.state in ("failed", "terminated"):
             return
-        log.error("pod %s (%s) failed: %s", pod.pod_id, pod.model, failure)
+        log.error("pod %s (%s) failed: %s", pod.pod_id or pod.row.pod_name, pod.model, failure)
         pod.routable = False
-        if why is not None:
-            self._record_failure(pod.model, now, why)
+        self._count_failure(pod, failure, now)
         await self._update(pod, state="failed", failure=failure[:500])
         await self._publish(pod.model, now)
         await self._terminate(pod, by="manager")
 
-    async def _terminate(self, pod: _Pod, *, by: TerminatedBy) -> bool:
-        """Terminate the pod (never stop) and mark its row; False (row kept) when RunPod
-        refused."""
+    async def _terminate(
+        self,
+        pod: _Pod,
+        *,
+        by: TerminatedBy,
+        failure: str | None = None,
+        keep_state: bool = False,
+    ) -> bool:
+        """Terminate the pod (never stop) and mark its row `terminated`. When RunPod
+        refuses, or the pod id is unknown and a pod may exist under the row's name, the
+        row stays live (and counted against `max_replicas` and spend) as `failed` (or as
+        it is, with `keep_state`) and False is returned; ticks retry."""
         if pod.state == "terminated":
             return True
         pod.routable = False
-        if pod.pod_id is not None:
+        pod.terminate_by = by
+        fields: dict[str, Any] = {}
+        if failure is not None and pod.row.failure is None:
+            fields["failure"] = failure[:500]
+        pod_id = pod.pod_id
+        if pod_id is None and not pod.no_pod:
+            pod.pending_name = True
+            pod.watch_seq = self._listing_seq
+            if pod.state != "failed":
+                await self._update(pod, state="failed", **fields)
+            return False
+        if pod_id is not None:
             try:
-                await self.provider.terminate(pod.pod_id)
+                await self.provider.terminate(pod_id)
             except ProviderError as e:
-                log.error("terminating pod %s failed (retried next tick): %s", pod.pod_id, e)
+                log.error("terminating pod %s failed (retried next tick): %s", pod_id, e)
+                if not keep_state and pod.state != "failed":
+                    await self._update(pod, state="failed", **fields)
                 return False
-        await self._terminated(pod, by=by)
+        await self._terminated(pod, by=by, failure=failure)
         return True
 
     async def _terminated(self, pod: _Pod, *, by: TerminatedBy, failure: str | None = None) -> None:
@@ -1283,7 +1433,9 @@ class PoolManager:
             "terminated_at": _dt(self.clock()),
         }
         if failure is not None and pod.row.failure is None:
-            fields["failure"] = failure
+            fields["failure"] = failure[:500]
+        if pod.row.pod_id is None and pod.known_id is not None:
+            fields["pod_id"] = pod.known_id
         pod.routable = False
         await self._update(pod, **fields)
         self._pods.pop(pod.row.id, None)
@@ -1297,34 +1449,37 @@ class PoolManager:
 
     async def _adopt_all(self) -> None:
         now = self.clock()
-        await self._load_failures(now)
+        await self._load_holds(now)
         rows = await self._db_call(store.live_rows)
+        self._listing_seq += 1
         listing = await self.provider.list()
         by_id = {p.pod_id: p for p in listing}
         by_name = {p.name: p for p in listing}
         matched: set[str] = set()
-        adoptions: list[Coroutine[Any, Any, None]] = []
+        adopt: list[tuple[_Pod, PodInfo]] = []
         for row in rows:
-            pod = _Pod(row)
+            pod = _Pod(row, watch_seq=self._listing_seq)
             self._pods[row.id] = pod
             info = by_id.get(row.pod_id) if row.pod_id else by_name.get(row.pod_name)
+            if info is None and row.pod_id is not None:
+                info = await self.provider.get(row.pod_id)  # the listing may lag
             if info is not None:
                 matched.add(info.pod_id)
+                pod.known_id = info.pod_id
             if info is None or info.gone:
                 log.warning(
                     "pod %s (%s) went away while no manager ran",
                     row.pod_id or row.pod_name,
                     row.model_id,
                 )
-                if info is not None:
-                    with contextlib.suppress(ProviderError):
-                        await self.provider.terminate(info.pod_id)
-                await self._terminated(pod, by="runpod")
+                if row.pod_id is None and info is None:
+                    pod.no_pod = True  # the listing shows no pod with its name
+                await self._terminate(pod, by="runpod")
                 continue
             if row.pod_id is None:
                 await self._update(pod, pod_id=info.pod_id)
             if row.state == "ready" and row.model_id in self.config.models:
-                adoptions.append(self._adopt(pod, info))
+                adopt.append((pod, info))
             elif row.state == "draining":
                 await self._terminate(pod, by="manager")
             else:
@@ -1333,15 +1488,18 @@ class PoolManager:
                     if row.state in ("creating", "bootstrapping")
                     else row.failure or "not configured"
                 )
-                await self._fail(pod, reason, why=None, now=now)
+                await self._fail(pod, reason, now=now)
                 if pod.state == "failed":
                     await self._terminate(pod, by="manager")
         for info in listing:
             if info.managed and info.pod_id not in matched:
                 await self._terminate_orphan(info)
-        if adoptions:
-            await asyncio.gather(*adoptions)
+        # Nothing is routable until re-keyed: the pool hashes lose every old replica (and
+        # token) before a re-key starts.
         await self._publish_all(now)
+        if adopt:
+            await asyncio.gather(*(self._adopt(pod, info) for pod, info in adopt))
+        await self._publish_all(self.clock())
 
     async def _adopt(self, pod: _Pod, info: PodInfo) -> None:
         try:
@@ -1362,7 +1520,7 @@ class PoolManager:
             raise
         except Exception as e:
             log.error("adopting pod %s (%s) failed: %s", pod.pod_id, pod.model, _describe(e))
-            await self._fail(pod, f"adoption: {_describe(e)}", why="adoption", now=self.clock())
+            await self._fail(pod, f"adoption: {_describe(e)}", now=self.clock())
             return
         now = self.clock()
         await self._update(
@@ -1374,24 +1532,40 @@ class PoolManager:
         pod.routable = True
         pod.last_health = now
         pod.last_progress = now
+        # §11: an adopted pod counts as demand now (no idle drain on the first tick).
+        self._last_demand[pod.model] = now
         log.info("adopted pod %s (%s)", pod.pod_id, pod.model)
 
-    async def _load_failures(self, now: float) -> None:
-        since = _dt(now - CRASH_WINDOW_S)
-        rows = await self._db_call(store.rows_since, since)
+    async def _load_holds(self, now: float) -> None:
+        """`crash_loop` and `price_too_high` from the last hour's rows, counting only
+        failures after the model's last `reset` (spec §11), by the rule `_count_failure`
+        applies live."""
+        for model in self.config.models:
+            raw: Any = await self.redis.get(RESET_KEY.format(model=model))
+            if raw is not None:
+                with contextlib.suppress(ValueError):
+                    self._reset_at[model] = float(_str(raw))
+        window = now - CRASH_WINDOW_S
+        rows = await self._db_call(store.rows_since, _dt(window))
+        price: set[str] = set()
         for row in rows:
-            if row.pod_id is None or row.terminated_at is None or row.terminated_at < since:
+            if row.failure is None or row.model_id not in self.config.models:
                 continue
-            counts = row.terminated_by == "runpod" or (
-                row.failure is not None and not row.failure.startswith(NOT_REPLACEMENTS)
-            )
-            if counts:
-                self._failures.setdefault(row.model_id, []).append(row.terminated_at.timestamp())
+            at = row.terminated_at.timestamp() if row.terminated_at is not None else now
+            if at < window or at <= self._reset_at.get(row.model_id, -math.inf):
+                continue
+            if row.failure == "price_too_high":
+                price.add(row.model_id)
+            elif _counts(row.failure):
+                self._failures.setdefault(row.model_id, []).append(at)
         limit = self.config.lifecycle.max_replacements_per_hour
         for model, times in self._failures.items():
             if len(times) > limit:
                 self._holds[model] = "crash_loop"
                 log.error("crash loop: %s had %d failed pods in the last hour", model, len(times))
+        for model in price:
+            self._holds.setdefault(model, "price_too_high")
+            log.error("%s: a pod was refused as priced too high in the last hour", model)
 
     # ------------------------------------------------------------------ database
 
@@ -1403,6 +1577,12 @@ class PoolManager:
 
     async def _update(self, pod: _Pod, **fields: Any) -> None:
         pod.row = await self._db_call(store.update, pod.row.id, **fields)
+
+
+def _counts(failure: str) -> bool:
+    """Whether a `serving_pods.failure` is a pod failing (counted toward the crash
+    loop), not a refusal or a restart."""
+    return not failure.startswith(NOT_REPLACEMENTS)
 
 
 def _str(v: bytes | str) -> str:

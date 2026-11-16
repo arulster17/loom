@@ -116,8 +116,18 @@ class NoCapacity(ProviderError):
 
 
 class CreateFailed(ProviderError):
-    """A create failed. Any pod an ambiguous create (timeout, 5xx) may have made was
-    found by name and terminated before this was raised."""
+    """A create failed. `ambiguous`: it failed without a clear answer (timeout, 5xx), so
+    a pod may exist under its name; `cleaned` lists the pods found by that name and
+    terminated before this was raised. An ambiguous create with nothing cleaned may still
+    surface a pod later: the caller keeps the name accounted for until a later listing
+    shows no pod with it (spec §11 "Failure and restart rules")."""
+
+    def __init__(
+        self, message: str, *, ambiguous: bool = False, cleaned: tuple[str, ...] = ()
+    ) -> None:
+        super().__init__(message)
+        self.ambiguous = ambiguous
+        self.cleaned = cleaned
 
 
 class ServingProvider(Protocol):
@@ -131,6 +141,10 @@ class ServingProvider(Protocol):
 
     async def list(self) -> list[PodInfo]:
         """Every `loom-serve-*` pod the provider can see (no other pod)."""
+        ...
+
+    async def get(self, pod_id: str) -> PodInfo | None:
+        """One pod by id (RunPod's GET /pods/{id}), or None once it is gone."""
         ...
 
     async def terminate(self, pod_id: str) -> None:
