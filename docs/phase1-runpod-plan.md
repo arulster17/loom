@@ -427,8 +427,11 @@ capacity, the spend cap and an idle stop. Deltas from this plan: the per-replica
 breaker of §5 (3 errors in 30 s) is not built, the manager's health rules plus the
 gateway's 10 s per-request penalty cover it; the tie-break on
 `vllm:num_requests_waiting` (§7) is deferred to Phase 3, moot at one replica per model.
-What M4 must check on a real pod is listed in `services/poolmgr/README.md`. Pending: the
-branch review and the user's go-ahead before M3.
+What M4 must check on a real pod is listed in `services/poolmgr/README.md`. CI's first run
+of the M2 acceptance found the manager blind to requests on a ready model (billing trims
+the usage stream before the manager reads it); the gateway now stamps
+`loom:pool:<model>:last_request` in `settle.lua` instead (spec §11 "Fixed after CI").
+Pending: the branch review and the user's go-ahead before M3.
 
 ### Follow-ups from the M1 pre-merge review (2026-11-15)
 
@@ -458,6 +461,18 @@ Policy questions from the same review, for the user before M3: whether
 `LOOM_ADMIN_EMAILS` should grant admin outside dev (today it grants in prod too and never
 revokes, and Google linking is on by default), and whether admins may approve or credit
 their own org outside dev.
+
+### M3 prerequisites from the M2 review (2026-11-16)
+
+The M2 spec fails closed or refuses in places where nothing tells a person. Each of these
+needs an alarm (and, for the CA, a runbook) in M3's Terraform before the serving reaper
+and the manager run against the real RunPod account.
+
+| # | From (M2 spec) | Gap | M3 work |
+|---|---|---|---|
+| P1 | §6 reaper serving rule, §11 (fail closed on S3) | Any S3 error other than a missing key (a missing bucket, a role without `s3:ListBucket`) makes every reaper run raise and delete nothing, so the second backstop is off with no other sign | CloudWatch alarm on the reaper Lambda's `Errors` (any in an hour) and on missing `Invocations` (no run in 2 schedule periods), to the ops address; give the role `s3:ListBucket` |
+| P2 | §5 spend guard, §11 (refusal signal) | A create refused at the monthly cap writes no `serving_spend_alerts` row: only an error log line and `loom_poolmgr_creates_total{result="spend_cap"}`. The model stays `unavailable` until an admin `reset` | Alert on any increase of that counter (and on the pool `reason` `spend_cap` lasting more than 5 minutes) through whatever M3 uses to scrape port 9102 |
+| P3 | §5 certificates, §11 (CA near expiry) | The manager refuses to start once the pod CA is within `server_cert_renew_before_s` (2 days) of expiry, and only logs an error while running; nothing warns earlier | Expose the CA's expiry (a gauge such as `loom_poolmgr_ca_expiry_seconds`, or a scheduled check of the certificate in Secrets Manager) and alarm 30 days ahead; write `docs/runbook-pod-ca.md`: issue the new CA, have the gateway trust old and new during the rollover, restart the manager, let it re-key every pod, then drop the old CA |
 
 ## 14. Risks
 
