@@ -159,6 +159,11 @@ Validation at load:
 - a servable model missing from `models` is never started. Its pool is written
   `unavailable` with reason `not_configured`.
 
+Also (decided after the wave 1 review; tests and code in wave 3): `lease_renew_every_s <
+lease_ttl_s`; `server_cert_renew_before_s < server_cert_days x 86400`;
+`bootstrap_stall_s <= bootstrap_timeout_s`; `alert_fractions` unique. `idle_stop_s: 0`
+means never idle-stopped (as poolsim's 0).
+
 A test pins each served model's `engine_env` to the one in the benchmark spec that priced
 it (`bench/experiments/llama-3.3-70b-h100-tp2-runpod.yaml`, cell `vllm-tp2-fp8`, for the
 70B; `qwen3-8b-config-sweep-runpod.yaml`, cell `bf16`, for the 8B), so the served launch
@@ -423,7 +428,7 @@ a certificate issued by the manager. The SSH steps are replaced by direct file w
 `LOOM_POOLMGR_LOCAL_COLD_START_S` (default 20, as poolsim) adds the delay. The create,
 health, drain, idle and pool-hash code is the same as for RunPod: only the
 `ServingProvider` and `PodExec` implementations differ. Compose swaps `poolsim` for
-`poolmgr` (local backend, `idle_stop_s` 0 by default as poolsim, the mock pod containers
+`poolmgr` (local backend, the committed `serving.yaml` with its `idle_stop_s`, the mock pod containers
 kept for M1's fixed-replica checks only if a test still needs them). poolsim stays in the
 repo for its own tests and is no longer started by compose. `loom-m1-acceptance` drives
 the manager's CLI wherever it called `loom-poolsim set` (§11) and must still pass all ten

@@ -119,7 +119,7 @@ class ServedModel(_Strict):
     min_replicas: NonNegativeInt
     # Hard cap on the model's pods not terminated.
     max_replicas: PositiveInt
-    # A ready pod with no demand this long is drained (0: at once).
+    # A ready pod with no demand this long is drained (0: never idle-stopped, as poolsim).
     idle_stop_s: NonNegativeInt
     # Retry-After of a request to the cold model.
     cold_start_estimate_s: PositiveInt
