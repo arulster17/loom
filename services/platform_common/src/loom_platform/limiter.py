@@ -23,6 +23,7 @@ from importlib import resources
 import psycopg
 from redis.asyncio import Redis
 
+from loom_platform.pool import last_request_key
 from loom_platform.usage import UsageEvent
 
 KEY_ROOT = "loom"
@@ -162,9 +163,10 @@ class Limiter:
         return ReserveResult(bool(res[0]), _str(res[1]), int(res[2]), int(res[3]))
 
     async def settle(self, event: UsageEvent) -> SettleResult:
-        """Release the reservation, charge `event.cost_micros`, append the event."""
+        """Release the reservation, charge `event.cost_micros`, append the event, and stamp
+        the model's `last_request` key (the pool manager's demand signal)."""
         res = await self._settle(
-            keys=[org_prefix(event.org_id), self.usage_stream],
+            keys=[org_prefix(event.org_id), self.usage_stream, last_request_key(event.model_id)],
             args=[
                 str(event.id),
                 str(event.api_key_id),

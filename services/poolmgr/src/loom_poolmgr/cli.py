@@ -194,7 +194,6 @@ async def _run(settings: PoolmgrSettings) -> int:
         ssh=ssh,
         bundle=bundle,
         servable=tuple(m.id for m in servable(registry)),
-        usage_stream=settings.usage_stream,
         metrics=metrics,
         extra_allow=settings.allow_cidrs,
     )

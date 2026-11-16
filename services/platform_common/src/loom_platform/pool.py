@@ -4,7 +4,13 @@
 and from M2 an optional reason (why a pool is `unavailable`; only logged and counted by
 the gateway). In M1 a pool simulator (or a seed command) writes it; from M2 the pool
 manager does. A model with no hash is treated as cold; a hash without `reason` (written
-by M1 code) has none. See docs/phase1-contracts.md, "Model pools".
+by M1 code) has none.
+
+`loom:pool:<model_id>:last_request` (from M2) is the Redis time in ms when the gateway last
+settled a request for the model, stamped inside `settle.lua` (`loom_platform.limiter`). The
+pool manager counts a change in it as demand: billing trims usage events from the stream as
+soon as it stores them, so the stream cannot carry that signal. See
+docs/phase1-contracts.md, "Model pools".
 """
 
 from __future__ import annotations
@@ -28,6 +34,10 @@ def pool_key(model_id: str) -> str:
 
 def wake_key(model_id: str) -> str:
     return f"loom:pool:{model_id}:wake"
+
+
+def last_request_key(model_id: str) -> str:
+    return f"loom:pool:{model_id}:last_request"
 
 
 @dataclass(frozen=True)

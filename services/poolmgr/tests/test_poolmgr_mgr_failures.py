@@ -7,7 +7,8 @@ rules", "Create", "Idle stop and drain"):
   the pod found by name is terminated;
 - an unexpected exception in a create or bootstrap fails the row and terminates the pod
   (by name if its id is unknown), so the model is not left `warming`;
-- a failed /metrics read while draining means "try again next tick", until drain_max_s.
+- a failed /metrics read while draining means "try again next tick", until drain_max_s;
+- a failed pool-hash write is repaired by the next tick.
 
 `max_replicas` (1 here) is checked after every tick both as live rows and as pods RunPod
 still has.
@@ -30,6 +31,7 @@ from poolmgr_fakes import (
     unique_model_id,
 )
 from poolmgr_faults import RunpodFaults, metrics_fail
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from loom_platform.pool import wake_key
 from loom_platform.testing import pg_url, redis_client  # noqa: F401
@@ -256,3 +258,40 @@ async def test_failed_metrics_read_while_draining_waits_until_drain_max(env: Fak
     while env.clock() < started + 65 and env.runpod.has(pod.pod_id):
         await step(manager, env.clock, advance=1)
     assert not env.runpod.has(pod.pod_id), "not terminated at drain_max_s"
+
+
+async def test_failed_pool_hash_writes_are_repaired_by_the_next_tick(
+    env: FakeServing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pool-hash write that fails (CI run 43949281009: a pooled Redis connection from
+    before a Redis restart, `ConnectionError` on first use) is only logged, and the state
+    is never lost: every tick rewrites every model's hash from the manager's own records."""
+    import loom_poolmgr.manager as manager_module
+
+    model = unique_model_id()
+    manager = env.manager(serving_config([model]))
+    await manager.start()
+    pod = await bring_up(env, manager, model)
+    assert (await env.pool(model)).routable
+
+    real_set_pool = manager_module.set_pool
+    failed: list[str] = []
+
+    async def broken(redis: Any, pool: Any) -> None:
+        failed.append(pool.state)
+        raise RedisConnectionError("Error UNKNOWN while writing to socket. Connection lost.")
+
+    monkeypatch.setattr(manager_module, "set_pool", broken)
+    await env.admin({"op": "stop", "model": model})
+    await env.redis.delete(wake_key(model))
+    for _ in range(3):
+        await tick(manager, env.clock, advance=5)
+    assert failed and "ready" not in failed
+    assert not env.runpod.has(pod.pod_id)
+    stale = await env.pool(model)
+    assert stale.routable, "the failed writes left the old hash in place"
+
+    monkeypatch.setattr(manager_module, "set_pool", real_set_pool)
+    await step(manager, env.clock, advance=5)
+    pool = await env.pool(model)
+    assert (pool.state, pool.replicas) == ("cold", ())

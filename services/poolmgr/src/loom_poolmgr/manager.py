@@ -36,10 +36,11 @@ unexpected exception in a create task fails the row; a `creating`/`bootstrapping
 with no live task is failed by the next tick.
 
 **Demand** (§5 step 1): a live wake key `loom:pool:<model>:wake`, or a ready model with a
-usage event (`loom:usage`, read with `XREAD` from where the last tick stopped, no consumer
-group) or an in-flight request within `idle_stop_s` (0: never idle). Idle time runs from
-the last demand a tick observed. Desired replicas: `max(min_replicas, 1 if demand else
-0)`, capped at `max_replicas`.
+request within `idle_stop_s` (0: never idle): one in flight on a pod's `/metrics`, or a
+settled one, seen as a change in `loom:pool:<model>:last_request` (the gateway stamps it in
+`settle.lua`; the usage stream cannot carry this, billing trims each event as soon as it
+stores it). Idle time runs from the last demand a tick observed. Desired replicas:
+`max(min_replicas, 1 if demand else 0)`, capped at `max_replicas`.
 
 **Holds.** `crash_loop` (more than `max_replacements_per_hour` pods failed or lost in the
 last hour), `spend_cap` and `price_too_high` keep a model `unavailable` and ignore its
@@ -93,6 +94,7 @@ import httpx
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from loom_bench.experiment import RUNPOD_GPU_TYPE_IDS
 from loom_bench.prices import PriceBook
@@ -101,7 +103,14 @@ from loom_bench.providers.runpod_ssh import RemoteCommandError, SshExec, SshTarg
 from loom_bench.records import Market
 from loom_bench.registry import Registry
 from loom_platform.db import libpq_url
-from loom_platform.pool import WAKE_CHANNEL, PoolState, Replica, set_pool, wake_key
+from loom_platform.pool import (
+    WAKE_CHANNEL,
+    PoolState,
+    Replica,
+    last_request_key,
+    set_pool,
+    wake_key,
+)
 from loom_platform.serving import ServingConfig
 from loom_poolmgr import bootstrap, health, spend, store
 from loom_poolmgr.bootstrap import LOOPBACK_ALLOW, PodSecrets, ProxyBundle
@@ -123,7 +132,6 @@ from loom_poolmgr.store import PodRow, TerminatedBy
 
 LOCK_NAME = "loom-poolmgr"
 ADMIN_QUEUE = "loom:poolmgr:admin"
-USAGE_STREAM = "loom:usage"
 # The gateway caches a pool hash for up to this long; a drain waits twice it after
 # removing the pod from the hash (§5 "Idle stop and drain").
 POOL_CACHE_TTL_S = 1.0
@@ -404,7 +412,6 @@ class PoolManager:
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         admin_queue: str = ADMIN_QUEUE,
-        usage_stream: str = USAGE_STREAM,
         metrics: PoolmgrMetrics | None = None,
         extra_allow: tuple[str, ...] = (),
     ) -> None:
@@ -414,7 +421,7 @@ class PoolManager:
         - `provider`: where pods come from (`RunpodServing`, `LocalServing`).
         - `pod_exec`: how scripts reach a pod (`OpenSshExec`; the local backend's own;
           tests: `FakeServingExec`; the protocol is in `loom_poolmgr.bootstrap`).
-        - `redis`: pool hashes, wake keys, the usage stream, the admin queue.
+        - `redis`: pool hashes, wake and last-request keys, the admin queue.
         - `database_url`: `serving_pods` and the lock; `start()` connects, `stop()` closes.
         - `leases`: lease records (`S3LeaseRecords`; tests: `MemoryLeaseRecords`).
         - `pki`: the CA for pod server certificates, and the manager's client certificate.
@@ -426,7 +433,6 @@ class PoolManager:
           `pki.client_ssl_context()`, closed by `stop()`).
         - `clock`, `sleep`: injected time.
         - `admin_queue`: the Redis list admin commands arrive on (`push_admin(queue=)`).
-        - `usage_stream`: the gateway's usage stream (`LOOM_USAGE_STREAM`).
         - `metrics`: Prometheus metrics (default: a registry of its own).
         - `extra_allow`: CIDRs added to every pod proxy's allowlist (dev only, the local
           backend's `LOOM_POOLMGR_ALLOW_CIDRS`).
@@ -446,7 +452,6 @@ class PoolManager:
         self.clock = clock
         self.sleep = sleep
         self.admin_queue = admin_queue
-        self.usage_stream = usage_stream
         self.metrics = metrics or PoolmgrMetrics()
         self.extra_allow = tuple(extra_allow)
         self._own_http = http is None
@@ -459,7 +464,8 @@ class PoolManager:
         self._last_listing = -math.inf
         self._listing_seq = 0
         self._reset_at: dict[str, float] = {}
-        self._usage_cursor: str | None = None
+        # Per model, the `last_request` stamp last seen (None: no key).
+        self._last_request: dict[str, Any] = {}
         self._db: AsyncConnectionPool | None = None
         self._lock_conn: psycopg.AsyncConnection[Any] | None = None
         self._in_tick = False
@@ -505,8 +511,8 @@ class PoolManager:
                 self.http = httpx.AsyncClient(
                     verify=self.pki.client_ssl_context(), timeout=HEALTH_TIMEOUT_S, trust_env=False
                 )
-            last: Any = await self.redis.xrevrange(self.usage_stream, count=1)
-            self._usage_cursor = _str(last[0][0]) if last else "0-0"
+            # Requests settled before this start are not demand (adoption counts its own).
+            self._last_request = await self._read_last_requests()
             self.metrics.spend_cap.set(spend.usd_micros(self.config.spend.monthly_cap_usd))
             await self._adopt_all()
         except BaseException:
@@ -634,7 +640,7 @@ class PoolManager:
                     self._last_listing = now
                     await self._observe(listing, seq, now)
             await self._check_pods(now)
-            await self._read_usage(now)
+            await self._observe_requests(now)
             budget = _Budget(self, now)
             for model in self.config.models:
                 await self._reconcile_model(model, now, budget)
@@ -947,24 +953,25 @@ class PoolManager:
         if await self._terminate(pod, by=pod.terminate_by):
             await self._publish(pod.model, self.clock())
 
-    async def _read_usage(self, now: float) -> None:
-        """Usage events since the last tick (no consumer group: billing loses nothing)."""
-        cursor = self._usage_cursor or "0-0"
+    async def _read_last_requests(self) -> dict[str, Any]:
+        models = list(self.config.models)
+        if not models:
+            return {}
+        values: list[Any] = await self.redis.mget([last_request_key(m) for m in models])
+        return dict(zip(models, values, strict=True))
+
+    async def _observe_requests(self, now: float) -> None:
+        """A model whose `last_request` stamp changed since the last tick settled a request
+        in between: demand now. A failed read only delays this; the stamp stays."""
         try:
-            while True:
-                batch: Any = await self.redis.xread({self.usage_stream: cursor}, count=1000)
-                if not batch:
-                    break
-                entries: list[tuple[Any, dict[Any, Any]]] = batch[0][1]
-                for entry_id, fields in entries:
-                    cursor = _str(entry_id)
-                    model = _str(fields.get(b"model_id") or fields.get("model_id") or "")
-                    if model in self.config.models:
-                        self._last_demand[model] = now
-                if len(entries) < 1000:
-                    break
-        finally:
-            self._usage_cursor = cursor
+            stamps = await self._read_last_requests()
+        except RedisError as e:
+            log.warning("reading the last-request stamps failed: %s", _describe(e))
+            return
+        for model, stamp in stamps.items():
+            if stamp is not None and stamp != self._last_request.get(model):
+                self._last_demand[model] = now
+            self._last_request[model] = stamp
 
     async def _reconcile_model(self, model: str, now: float, budget: _Budget) -> None:
         served = self.config.models[model]

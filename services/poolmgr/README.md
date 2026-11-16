@@ -26,7 +26,9 @@ Models start cold: the first request gets 503 `model_unavailable` with `Retry-Af
 wakes the model; the manager starts a pod and publishes `warming`, then `ready` (about 30
 to 40 s locally: `LOOM_POOLMGR_LOCAL_COLD_START_S`, 20 s, plus the bootstrap). A model
 without demand for its `idle_stop_s` (compose: `LOOM_POOLMGR_IDLE_STOP_S`, 600 s) is
-drained back to cold.
+drained back to cold. Demand is a wake key, a request in flight, or a change in
+`loom:pool:<model>:last_request`, which the gateway stamps whenever it settles a request
+for the model (not the usage stream: billing trims it too soon).
 
 Outside compose: `uv run loom-poolmgr run` with `LOOM_ENV=dev`, `LOOM_DATABASE_URL`
 (migrated with `uv run loom-migrate`) and `LOOM_REDIS_URL`. In dev without a CA, SSH key
@@ -69,7 +71,7 @@ and `local-capacity` are queued on `loom:poolmgr:admin` and applied on its next 
 ## Settings
 
 `LOOM_*` (the platform's `PlatformSettings`, `LOOM_ENV`, `LOOM_DATABASE_URL`,
-`LOOM_REDIS_URL`, `LOOM_MODELS_YAML`, `LOOM_USAGE_STREAM`) plus:
+`LOOM_REDIS_URL`, `LOOM_MODELS_YAML`) plus:
 
 | Variable | Default | What |
 |---|---|---|

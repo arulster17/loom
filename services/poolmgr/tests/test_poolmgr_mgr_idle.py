@@ -9,8 +9,7 @@ open on the draining pod.
 
 from __future__ import annotations
 
-import datetime as dt
-import uuid
+import time
 from typing import Any
 
 from poolmgr_fakes import (
@@ -26,12 +25,9 @@ from poolmgr_fakes import (
     wait_until,
 )
 
-from loom_platform.pool import Replica, wake_key
+from loom_platform.pool import Replica, last_request_key, wake_key
 from loom_platform.testing import pg_url, redis_client  # noqa: F401
-from loom_platform.usage import UsageEvent
 from loom_poolmgr.manager import PoolManager
-
-USAGE_STREAM = "loom:usage"
 
 
 def in_routing(replicas: tuple[Replica, ...], pod: FakePod) -> bool:
@@ -136,36 +132,35 @@ async def test_drain_terminates_at_drain_max_s(env: FakeServing) -> None:
     assert (await env.pool(model)).state == "cold"
 
 
-async def test_usage_event_keeps_pod_ready(env: FakeServing) -> None:
-    """Idle runs from the last demand observed: a usage event on `loom:usage` for the
-    model (read without a consumer group) restarts the idle_stop_s count."""
+async def test_settled_request_keeps_pod_ready(env: FakeServing) -> None:
+    """Idle runs from the last demand observed: a change in the model's `last_request`
+    stamp (the gateway's `settle.lua` writes it) restarts the idle_stop_s count."""
     model = unique_model_id()
     manager, pod, _, t_demand = await ready_idle_pod(env, model)
     while env.clock() < t_demand + 40:
         await step(manager, env.clock, advance=5)
-    event = UsageEvent(
-        id=uuid.uuid4(),
-        org_id=uuid.uuid4(),
-        api_key_id=uuid.uuid4(),
-        model_id=model,
-        price_version="0:0:0",
-        cloud="local",
-        prompt_tokens=5,
-        completion_tokens=5,
-        latency_ms=10,
-        status="ok",
-        cost_micros=0,
-        created_at=dt.datetime.fromtimestamp(env.clock(), dt.UTC),
-    )
-    fields = event.to_stream_fields()
-    await env.redis.xadd(USAGE_STREAM, dict(zip(fields[::2], fields[1::2], strict=True)))
+    await env.redis.set(last_request_key(model), int(time.time() * 1000))
     t_used = env.clock()
     while env.clock() < t_used + 55:
         await step(manager, env.clock, advance=5)
         assert in_routing((await env.pool(model)).replicas, pod), env.clock() - t_used
     drained_at = await drain_started(env, manager, model, pod)
-    # The event is seen at t_used or on the tick 5 s later; idle counts from there.
+    # The stamp is seen at t_used or on the tick 5 s later; idle counts from there.
     assert t_used + 60 <= drained_at <= t_used + 65, drained_at - t_used
+    await env.redis.delete(last_request_key(model))
+
+
+async def test_stamp_from_before_start_is_not_demand(env: FakeServing) -> None:
+    """Only a stamp that changes while the manager runs is demand: one left from before
+    `start()` does not hold a ready pod past idle_stop_s."""
+    model = unique_model_id()
+    await env.redis.set(last_request_key(model), 1)
+    try:
+        manager, pod, _, t_demand = await ready_idle_pod(env, model)
+        drained_at = await drain_started(env, manager, model, pod)
+        assert t_demand + 60 <= drained_at <= t_demand + 65, drained_at - t_demand
+    finally:
+        await env.redis.delete(last_request_key(model))
 
 
 async def test_min_replicas_one_starts_without_wake_and_never_idles(env: FakeServing) -> None:

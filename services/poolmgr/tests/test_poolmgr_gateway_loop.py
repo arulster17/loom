@@ -50,11 +50,13 @@ from poolmgr_fakes import (
 from redis.asyncio import Redis
 
 from loom_bench.registry import Registry, load_registry
+from loom_billing.consumer import UsageConsumer
 from loom_gateway.app import Gateway, create_app
 from loom_gateway.settings import GatewaySettings
+from loom_platform.db import open_pool
 from loom_platform.ledger import approve_org
 from loom_platform.limiter import org_key
-from loom_platform.pool import PoolState, Replica, pool_key, wake_key
+from loom_platform.pool import PoolState, Replica, last_request_key, pool_key, wake_key
 from loom_platform.serving import ServingConfig
 from loom_platform.testing import (  # noqa: F401
     DEFAULT_REDIS,
@@ -240,7 +242,7 @@ async def make_gateway(
             for gw in made:
                 keys = [gw.stream]
                 for m in gw.models:
-                    keys += [pool_key(m), wake_key(m)]
+                    keys += [pool_key(m), wake_key(m), last_request_key(m)]
                 await redis_client.delete(*keys)
                 for t in gw.tenants:
                     org_keys = [k async for k in redis_client.scan_iter(f"loom:org:{t.org_id}:*")]
@@ -249,8 +251,8 @@ async def make_gateway(
 
 
 def loop_manager(env: FakeServing, config: ServingConfig, gw: GatewayUnderTest) -> PoolManager:
-    """`env.manager(config)`, reading the gateway's usage stream (its demand signal, as
-    `LOOM_USAGE_STREAM` wires it in compose)."""
+    """`env.manager(config)` with the real deployments; the gateway reaches it only through
+    Redis (the pool hash, wake keys, and the `last_request` stamps settle writes)."""
     manager = PoolManager(
         config,
         deployments={m: deployment(config, m) for m in config.models},
@@ -265,7 +267,6 @@ def loop_manager(env: FakeServing, config: ServingConfig, gw: GatewayUnderTest) 
         clock=env.clock,
         sleep=env.clock.sleep,
         admin_queue=env.admin_queue,
-        usage_stream=gw.stream,
     )
     env.managers.append(manager)
     return manager
@@ -658,3 +659,63 @@ async def test_no_capacity_is_503_no_gpu_capacity_with_the_backoff_retry_after(
     assert r.headers["retry-after"] == "10"
     await nothing_billed(gw, t)
     assert env.runpod.creates() == [] and env.pods.of(model) == []
+
+
+async def test_served_request_counts_as_demand_after_billing_trims_its_usage_event(
+    env: FakeServing,
+    make_gateway: GatewayFactory,
+    pg_url: str,  # noqa: F811
+) -> None:
+    """Regression (CI run 43949281009, M2 acceptance `idle_stop`: drained 11 s early).
+    Billing's consumer stores each usage event and then XTRIMs it, usually long before the
+    manager's next tick, so a request a ready model served must reach the manager some
+    other way: the gateway stamps `loom:pool:<model>:last_request` when it settles the
+    request, and idle time runs from the tick that sees the stamp change (spec §5 "Idle
+    stop and drain"; contracts §10)."""
+    model = unique_model_id()
+    gw = await make_gateway([model])
+    manager = loop_manager(env, serving_config({model: {"idle_stop_s": 60}}), gw)
+    await manager.start()
+    pod = await bring_up(env, manager, model)
+    await env.wake(model)
+    await step(manager, env.clock, advance=0)  # the manager observes this demand now
+    t_wake = env.clock()
+    await env.redis.delete(wake_key(model))  # no demand from here on but the request
+    while env.clock() < t_wake + 40:
+        await step(manager, env.clock, advance=5)
+
+    t = await gw.tenant()
+    r = await gw.post(t, model, max_tokens=4)
+    assert r.status_code == 200, r.text
+    assert len(await gw.wait_events(1)) == 1
+    db = await open_pool(pg_url, min_size=1, max_size=2)
+    try:
+        consumer = UsageConsumer(
+            db,
+            gw.redis,
+            stream=gw.stream,
+            group=f"billing-{uuid.uuid4().hex[:8]}",
+            consumer="c1",
+            dead_stream=gw.stream + ":dead",
+            block_ms=10,
+        )
+        stored = await consumer.drain()
+    finally:
+        await db.close()
+    assert stored.inserted == 1
+    assert await gw.redis.xlen(gw.stream) == 0, "billing trims what it stored"
+    t_used = env.clock()
+
+    # The wake alone would drain at t_wake + 60 (= t_used + 20); the request keeps the pod.
+    while env.clock() < t_used + 55:
+        await step(manager, env.clock, advance=5)
+        pool = await env.pool(model)
+        assert any(rep.id == pod.pod_id for rep in pool.replicas), env.clock() - t_used
+    for _ in range(4):
+        await step(manager, env.clock, advance=5)
+        if not (await env.pool(model)).routable:
+            break
+    # Seen on the first tick after the request (t_used + 5 at the latest).
+    assert t_used + 60 <= env.clock() <= t_used + 65, env.clock() - t_used
+    assert (await env.pool(model)).state != "ready"
+    await gw.redis.delete(gw.stream + ":dead", last_request_key(model))

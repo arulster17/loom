@@ -2,12 +2,14 @@
 
 import asyncio
 import datetime as dt
+import time
 import uuid
 
 import pytest
 
 from loom_platform.ledger import approve_org, org_credit_state, org_usage_total
 from loom_platform.limiter import NO_LIMITS, Limiter, Limits, api_key_key, org_key
+from loom_platform.pool import last_request_key
 from loom_platform.pricing import Price, cost_micros
 from loom_platform.testing import create_api_key, create_org, create_user
 from loom_platform.usage import UsageEvent, insert_usage_events
@@ -134,6 +136,25 @@ async def test_settled_marker_lives_the_reservation_ttl_plus_the_replay_window(
     rid = uuid.uuid4()
     await short.settle(event(org_id, key_id, rid))
     assert 0 < await limiter.redis.ttl(org_key(org_id, f"done:{rid}")) <= 30
+
+
+async def test_settle_stamps_the_models_last_request(limiter, org, stream):
+    """The pool manager's demand signal (contracts §10): Redis time in ms, in the same call
+    as the charge; a refused repeat does not move it."""
+    org_id, key_id = org
+    model = f"test-model-{uuid.uuid4().hex[:8]}"
+    key = last_request_key(model)
+    e = event(org_id, key_id, uuid.uuid4()).model_copy(update={"model_id": model})
+    try:
+        before = int(time.time() * 1000)
+        assert (await limiter.settle(e)).settled
+        stamp = int(await limiter.redis.get(key))
+        assert before - 1000 <= stamp <= int(time.time() * 1000) + 1000
+        await limiter.redis.set(key, 1)
+        assert not (await limiter.settle(e)).settled
+        assert int(await limiter.redis.get(key)) == 1
+    finally:
+        await limiter.redis.delete(key)
 
 
 async def test_settle_without_reservation_still_charges(limiter, org, stream):
