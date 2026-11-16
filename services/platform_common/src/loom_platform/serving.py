@@ -55,6 +55,15 @@ class Spend(_Strict):
     # Refuse a pod priced above bench/prices.yaml x this.
     max_price_ratio: Annotated[float, Field(ge=1)]
 
+    @field_validator("alert_fractions")
+    @classmethod
+    def _unique_fractions(cls, v: list[float]) -> list[float]:
+        # Each fraction is a row key in serving_spend_alerts (month, fraction).
+        dupes = sorted({x for x in v if v.count(x) > 1})
+        if dupes:
+            raise ValueError(f"alert_fractions must be unique, repeated: {dupes}")
+        return v
+
 
 class Placement(_Strict):
     data_center_prefixes: Annotated[list[NonEmptyStr], Field(min_length=1)]
@@ -97,6 +106,23 @@ class Lifecycle(_Strict):
     server_cert_renew_before_s: PositiveInt
     max_replacements_per_hour: PositiveInt
 
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        # A renewal must land before the lease runs out, or the watchdog kills the pod.
+        if self.lease_renew_every_s >= self.lease_ttl_s:
+            raise ValueError(
+                f"lease_renew_every_s ({self.lease_renew_every_s}) must be < "
+                f"lease_ttl_s ({self.lease_ttl_s})"
+            )
+        # Otherwise every certificate is due for renewal the moment it is issued.
+        lifetime_s = self.server_cert_days * 86400
+        if self.server_cert_renew_before_s >= lifetime_s:
+            raise ValueError(
+                f"server_cert_renew_before_s ({self.server_cert_renew_before_s}) must be < "
+                f"server_cert_days x 86400 ({lifetime_s})"
+            )
+        return self
+
 
 class Health(_Strict):
     pod_state_every_s: PositiveInt
@@ -106,6 +132,16 @@ class Health(_Strict):
     progress_stall_s: PositiveInt
     bootstrap_stall_s: PositiveInt
     bootstrap_timeout_s: PositiveInt
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        # A stall limit above the timeout could never fire first.
+        if self.bootstrap_stall_s > self.bootstrap_timeout_s:
+            raise ValueError(
+                f"bootstrap_stall_s ({self.bootstrap_stall_s}) must be <= "
+                f"bootstrap_timeout_s ({self.bootstrap_timeout_s})"
+            )
+        return self
 
 
 class Capacity(_Strict):
