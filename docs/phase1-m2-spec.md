@@ -456,8 +456,8 @@ services/poolmgr/
 ```python
 class ServingProvider(Protocol):
     async def create(self, model: ServedModel, name: str, env: dict[str, str]) -> PodInfo: ...
-    async def list(self) -> list[PodInfo]: ...              # loom-serve-* only
-    async def terminate(self, pod_id: str) -> None: ...      # idempotent; 404 is success
+    async def list(self) -> list[PodInfo]: ...  # loom-serve-* only
+    async def terminate(self, pod_id: str) -> None: ...  # idempotent; 404 is success
     def endpoints(self, pod: PodInfo) -> Endpoints | None: ...  # ip, proxy port, ssh port
 ```
 
