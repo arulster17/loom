@@ -10,14 +10,28 @@ than `bench reap` (`runpod_reaper`) and acts on a resource only when all of thes
 - Network volume: its name is exactly `{prefix}-vol-{experiment[:8]}-{ttl_epoch}-{nonce}`
   (`volume_name`), its TTL has passed, and no listed pod references it. Loom creates no
   volumes today; any it creates later must be named by `volume_name` to be reaped.
+- Serving pod (the second backstop behind the pod's own lease watchdog, phase1-m2-spec.md
+  §6; only with `LOOM_RUNPOD_REAPER_SERVING=true` and `LOOM_RUNPOD_REAPER_LEASE_BUCKET`):
+  its name is exactly `loom-serve-{model}-{created_epoch}-{nonce}`, its env has
+  `LOOM_MANAGED=true` and `LOOM_ROLE=serving`, it is older than 2 hours (by its name's
+  epoch and, when the listing has one, RunPod's `createdAt`; only a missing `createdAt`
+  falls back to the name alone, and one that cannot be parsed keeps the pod), and its S3
+  lease record `serving/leases/{pod_id}` is missing or was written (`written_at`, never
+  `lease_until`) more than 2 hours ago. A record that cannot be parsed keeps the pod.
+
+The TTL rules (pods and volumes) never match a `loom-serve-` name, whatever the prefix,
+and the serving rule
+matches nothing but its own exact name.
 
 It fails closed: when a listing fails or returns anything but the expected shape, or a
-Loom-named resource lacks the fields the rules need, or more than `max_per_run` resources
-qualify, nothing is reaped and the run raises (visible as a Lambda error). Pod env values
-are never logged.
+Loom-named resource lacks the fields the rules need, or reading a lease record fails for
+any reason but a missing key (a missing bucket included), or more than `max_per_run`
+resources qualify over both rules, nothing is reaped and the run raises (visible as a
+Lambda error). Pod env values are never logged.
 
 The key is a RunPod API key read from Secrets Manager on each run. This file imports only
-the standard library (and boto3 in the handler) so Terraform can zip it alone.
+the standard library (and boto3 in the handler, and for S3 only when the serving rule is
+on) so Terraform can zip it alone.
 """
 
 from __future__ import annotations
@@ -30,7 +44,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 REST_URL = "https://rest.runpod.io/v1"
@@ -43,6 +57,19 @@ _PREFIX_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _ID_RE = re.compile(r"^[a-z0-9]{6,32}$")
 # The tail every Loom resource name ends with: `-{experiment[:8]}-{ttl_epoch}-{nonce}`.
 _TAIL = r"-(?P<experiment>[A-Za-z0-9][A-Za-z0-9._-]{0,7})-(?P<ttl>\d{10})-(?P<nonce>[0-9a-f]{6})$"
+
+# The serving rule (phase1-m2-spec.md §6). `\Z`, not `$`: `$` also matches before a
+# trailing newline.
+ROLE_ENV = "LOOM_ROLE"
+SERVING_PREFIX = "loom-serve-"
+SERVING_NAME_RE = re.compile(r"^loom-serve-[a-z0-9.-]+-(?P<created>\d{10})-[0-9a-f]{6}\Z")
+SERVING_MIN_AGE = timedelta(hours=2)
+LEASE_STALE_AFTER = timedelta(hours=2)
+LEASE_KEY = "serving/leases/{pod_id}"
+
+# pod id -> the lease record's bytes, or None when there is no record. Raises on any other
+# failure to read (which fails the run closed).
+LeaseReader = Callable[[str], bytes | None]
 
 log = logging.getLogger(__name__)
 
@@ -200,6 +227,8 @@ def _expired_pods(
     targets: list[Target] = []
     kept = 0
     for pod in pods:
+        if pod["name"].startswith(SERVING_PREFIX):
+            continue  # serving pods carry no TTL; only the serving rule may reap them
         m = name_re.match(pod["name"])
         if m is None or pod.get("desiredStatus") == "TERMINATED":
             continue
@@ -227,6 +256,95 @@ def _expired_pods(
     return targets, kept
 
 
+def _created_at(pod: Mapping[str, Any]) -> datetime | None:
+    """`createdAt` as RunPod writes it, e.g. `2026-10-06 07:03:35.426 +0000 UTC`."""
+    raw = str(pod.get("createdAt") or "").removesuffix(" UTC").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f %z", "%Y-%m-%d %H:%M:%S %z"):
+        try:
+            return datetime.strptime(raw, fmt).astimezone(UTC)
+        except ValueError:
+            continue
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed.astimezone(UTC) if parsed.tzinfo else None
+
+
+def _lease_written_at(raw: bytes, pod_id: str) -> datetime | None:
+    """The record's `written_at`, or None when the record cannot be trusted."""
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(record, Mapping):
+        return None
+    if record.get("pod_id", pod_id) != pod_id:
+        return None
+    written = record.get("written_at")
+    if not isinstance(written, str):
+        return None
+    try:
+        at = datetime.fromisoformat(written)
+    except ValueError:
+        return None
+    return at.astimezone(UTC) if at.tzinfo else None
+
+
+def _stale_serving_pods(
+    pods: list[Mapping[str, Any]], now: datetime, read_lease: LeaseReader
+) -> tuple[list[Target], int]:
+    """Serving pods past 2 hours with a missing or stale lease record (§6)."""
+    targets: list[Target] = []
+    kept = 0
+    for pod in pods:
+        m = SERVING_NAME_RE.match(pod["name"])
+        if m is None or pod.get("desiredStatus") == "TERMINATED":
+            continue
+        env = pod.get("env")
+        if not isinstance(env, Mapping):
+            raise UnsafeToReap(f"pod {pod['name']} has no env object")
+        if not _ID_RE.match(pod["id"]):
+            raise UnsafeToReap(f"pod {pod['name']} has an unexpected id")
+        if env.get(MANAGED_ENV) != "true" or env.get(ROLE_ENV) != "serving":
+            log.warning(
+                "kept %s (%s): serving name without %s=true and %s=serving",
+                pod["id"],
+                pod["name"],
+                MANAGED_ENV,
+                ROLE_ENV,
+            )
+            kept += 1
+            continue
+        # The younger of the two ages: the name's epoch and RunPod's own createdAt. Only a
+        # missing createdAt falls back to the name; one that cannot be parsed keeps the pod.
+        created = datetime.fromtimestamp(int(m.group("created")), UTC)
+        if pod.get("createdAt") is not None:
+            listed = _created_at(pod)
+            if listed is None:
+                log.warning("kept %s (%s): createdAt cannot be parsed", pod["id"], pod["name"])
+                kept += 1
+                continue
+            created = max(created, listed)
+        if now - created <= SERVING_MIN_AGE:
+            kept += 1
+            continue
+        raw = read_lease(pod["id"])
+        if raw is not None:
+            written = _lease_written_at(raw, pod["id"])
+            if written is None:
+                log.warning("kept %s (%s): lease record cannot be parsed", pod["id"], pod["name"])
+                kept += 1
+                continue
+            if now - written <= LEASE_STALE_AFTER:
+                kept += 1
+                continue
+        why = "no lease record" if raw is None else "stale lease record"
+        log.info("serving pod %s (%s) qualifies: %s", pod["id"], pod["name"], why)
+        targets.append(Target("pod", pod["id"], pod["name"], created + SERVING_MIN_AGE))
+    return targets, kept
+
+
 def _attached_volume_ids(pods: list[Mapping[str, Any]]) -> set[str]:
     ids: set[str] = set()
     for pod in pods:
@@ -249,6 +367,8 @@ def _expired_volumes(
     targets: list[Target] = []
     kept = 0
     for vol in volumes:
+        if vol["name"].startswith(SERVING_PREFIX):
+            continue  # whatever the prefix: the TTL rule never matches a serving name
         m = name_re.match(vol["name"])
         if m is None:
             continue
@@ -273,18 +393,24 @@ def select(
     *,
     prefix: str,
     max_per_run: int = DEFAULT_MAX_PER_RUN,
+    read_lease: LeaseReader | None = None,
 ) -> tuple[list[Target], int]:
-    """(resources to reap, Loom resources kept). Raises UnsafeToReap on any surprise."""
+    """(resources to reap, Loom resources kept). Raises UnsafeToReap on any surprise, and
+    whatever `read_lease` raises. The serving rule runs only with a `read_lease`."""
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
     pods = _records(pods_listing, "pods")
     volumes = _records(volumes_listing, "network volumes")
     pod_targets, pods_kept = _expired_pods(pods, now, prefix)
     vol_targets, vols_kept = _expired_volumes(volumes, pods, now, prefix)
-    targets = pod_targets + vol_targets
+    serving_targets: list[Target] = []
+    serving_kept = 0
+    if read_lease is not None:
+        serving_targets, serving_kept = _stale_serving_pods(pods, now, read_lease)
+    targets = pod_targets + serving_targets + vol_targets
     if len(targets) > max_per_run:
         raise UnsafeToReap(f"{len(targets)} resources qualify, above max_per_run={max_per_run}")
-    return targets, pods_kept + vols_kept
+    return targets, pods_kept + serving_kept + vols_kept
 
 
 def sweep(
@@ -294,12 +420,16 @@ def sweep(
     prefix: str = DEFAULT_PREFIX,
     dry_run: bool = False,
     max_per_run: int = DEFAULT_MAX_PER_RUN,
+    read_lease: LeaseReader | None = None,
 ) -> dict[str, Any]:
     """List, decide, then delete one resource per call so one failure cannot block the
-    rest. Both listings are read before anything is deleted."""
+    rest. Both listings, and every lease record the serving rule needs, are read before
+    anything is deleted."""
     pods = api.list_pods()
     volumes = api.list_network_volumes()
-    targets, kept = select(pods, volumes, now, prefix=prefix, max_per_run=max_per_run)
+    targets, kept = select(
+        pods, volumes, now, prefix=prefix, max_per_run=max_per_run, read_lease=read_lease
+    )
     reaped: list[dict[str, str]] = []
     failed: list[dict[str, str]] = []
     for t in targets:
@@ -331,6 +461,33 @@ def _read_key(secret_id: str) -> str:
     return key
 
 
+def s3_lease_reader(bucket: str) -> LeaseReader:
+    """Reads `serving/leases/{pod_id}` from `bucket`. Only a missing key means "no record";
+    every other error (a missing bucket, access denied, throttling) propagates. The role
+    needs `s3:ListBucket`, or S3 answers 403 for a missing key and every run fails closed."""
+    import boto3  # type: ignore[import-untyped]
+
+    client = boto3.client("s3")
+    no_such_key = client.exceptions.NoSuchKey
+
+    def read(pod_id: str) -> bytes | None:
+        try:
+            response = client.get_object(Bucket=bucket, Key=LEASE_KEY.format(pod_id=pod_id))
+        except no_such_key:
+            return None
+        body: bytes = response["Body"].read(MAX_RESPONSE_BYTES)
+        return body
+
+    return read
+
+
+def _serving_rule_on() -> bool:
+    value = os.environ.get("LOOM_RUNPOD_REAPER_SERVING", "")
+    if value not in ("", "true", "false"):
+        raise ValueError(f"LOOM_RUNPOD_REAPER_SERVING must be true or false, not {value!r}")
+    return value == "true"
+
+
 def lambda_handler(
     event: dict[str, Any] | None,
     context: Any,
@@ -346,8 +503,24 @@ def lambda_handler(
     ) in (True, "true")
     prefix = _check_prefix(os.environ.get("LOOM_RUNPOD_REAPER_PREFIX", DEFAULT_PREFIX))
     max_per_run = int(os.environ.get("LOOM_RUNPOD_REAPER_MAX_PER_RUN", DEFAULT_MAX_PER_RUN))
+    read_lease: LeaseReader | None = None
+    if _serving_rule_on():
+        bucket = os.environ.get("LOOM_RUNPOD_REAPER_LEASE_BUCKET", "").strip()
+        if not bucket:
+            raise RuntimeError(
+                "LOOM_RUNPOD_REAPER_SERVING=true needs LOOM_RUNPOD_REAPER_LEASE_BUCKET; "
+                "nothing was reaped"
+            )
+        read_lease = s3_lease_reader(bucket)
     api = RunpodRest(read_key(os.environ["LOOM_RUNPOD_KEY_SECRET_ID"]), transport=transport)
-    result = sweep(api, datetime.now(UTC), prefix=prefix, dry_run=dry_run, max_per_run=max_per_run)
+    result = sweep(
+        api,
+        datetime.now(UTC),
+        prefix=prefix,
+        dry_run=dry_run,
+        max_per_run=max_per_run,
+        read_lease=read_lease,
+    )
     if result["failed"]:
         raise RuntimeError(f"failed to reap {len(result['failed'])}: {result['failed']}")
     return result
