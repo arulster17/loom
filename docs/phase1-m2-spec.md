@@ -448,7 +448,11 @@ health, drain, idle and pool-hash code is the same as for RunPod: only the
 `ServingProvider` and `PodExec` implementations differ. Compose swaps `poolsim` for
 `poolmgr` (local backend, the committed `serving.yaml` with its `idle_stop_s`, the mock pod containers
 kept for M1's fixed-replica checks only if a test still needs them). poolsim stays in the
-repo for its own tests and is no longer started by compose: the locked
+repo for its own tests and is no longer started by compose. The committed
+`serving.yaml` keeps `gateway_egress_cidrs: []` (pinned by a test), so with `provider:
+local` the manager adds `LOOM_POOLMGR_ALLOW_CIDRS` (comma-separated; dev only, refused
+outside `LOOM_ENV=dev`) to the proxies' allowlist; compose sets it to the compose
+network's fixed subnet. The locked
 `test_devstack_compose.py` still reads the `poolsim`, `mock-pod-1` and `mock-pod-2`
 service definitions, so they stay in `docker-compose.yml` under `profiles: ["poolsim"]`
 (defined, not started by `docker compose up`), and the default stack runs `poolmgr`. `loom-m1-acceptance` drives
