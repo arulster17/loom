@@ -354,7 +354,10 @@ to be stored anywhere but the pool hash.
 ## 6. Reaper serving rule (second backstop)
 
 `runpod_reaper_lambda.py` gains a serving rule, enabled by `LOOM_RUNPOD_REAPER_SERVING=true`
-and `LOOM_RUNPOD_REAPER_LEASE_BUCKET`. It is deployed against the serving account in M3.
+and `LOOM_RUNPOD_REAPER_LEASE_BUCKET` (enabled without a bucket: the run fails closed,
+raising and deleting nothing). It is deployed against the serving account in M3, whose
+role needs `s3:ListBucket` (without it S3 answers 403 for a missing key, which fails
+closed every run). Staleness is judged on `written_at` only, never `lease_until`.
 A pod is reaped when **all** of these hold:
 
 - its name matches `^loom-serve-[a-z0-9.-]+-\d{10}-[0-9a-f]{6}$` exactly;
@@ -418,9 +421,12 @@ Caddy would have to re-implement and re-prove them. Changes:
   allowlist from a new `--allow-ip-file PATH`, one CIDR or address per line). New
   connections use the new ones and open connections are kept. A reload is all or
   nothing: if any file fails to parse, the whole old configuration stays and an error is
-  logged.
+  logged. An empty or blank allowlist file is a parse failure (at start: refuse to
+  start), never "any source": a truncated file must not open the proxy.
 - **Bundle.** `loom-podproxy-bundle --out DIR [--lock FILE]` (lock default
-  `config/serving-artifacts.lock`, committed) builds one tarball holding the `loom-podproxy` wheel
+  `config/serving-artifacts.lock`, committed) builds, from the committed git blobs
+  (`git archive HEAD`, so the hash is the same on a CRLF Windows checkout and on Linux),
+  one tarball holding the `loom-podproxy` wheel
   and its locked dependency wheels (h11, httpx and their dependencies; nothing from the
   vLLM image's site-packages). It records the tarball's sha256 in
   `config/serving-artifacts.lock`. Bootstrap ships it on SSH stdin, checks the sha256,
