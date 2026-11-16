@@ -320,8 +320,8 @@ race.
   starts sshd (key-only, root-only, no forwarding), authorizes only `LOOM_SSH_PUBKEY`, and
   ends in `sleep infinity`. A setup failure terminates the pod, as in the bench. The
   absolute TTL and the job user are removed.
-- Every `lease_renew_every_s` the manager runs `serve_lease.sh <epoch>` over SSH (an
-  atomic write of `/run/loom/lease`). It then writes the S3 lease record
+- Every `lease_renew_every_s` the manager runs `serve_lease` over SSH, rendered with
+  `LEASE_FILE` and `LEASE_EPOCH` (§11; an atomic write of `/run/loom/lease`). It then writes the S3 lease record
   `s3://<bucket>/serving/leases/<pod id>` (JSON `{pod_id, pod_name, model, lease_until,
   written_at}`, both times ISO 8601 with a UTC offset as `datetime.isoformat()` writes
   them; the bucket is `LOOM_POOLMGR_LEASE_BUCKET`). A failed SSH renewal is
