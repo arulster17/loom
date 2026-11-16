@@ -13,6 +13,10 @@
   `config/serving-artifacts.lock`);
 - `LOOM_POOLMGR_METRICS_PORT`: Prometheus (9102; 0 = none);
 - `LOOM_POOLMGR_LOCAL_COLD_START_S`: `provider: local`, seconds before a pod runs (20);
+- `LOOM_POOLMGR_LOCAL_HOST`: `provider: local`, the host the gateway reaches the local
+  pods' proxies at (127.0.0.1; any other value makes them listen on all interfaces);
+- `LOOM_POOLMGR_STATE_DIR`: where the manager keeps its per-pod SSH known_hosts files
+  (and, in dev, a generated SSH key and CA); default a temporary directory;
 - `RUNPOD_API_KEY`: the serving account's key (`provider: runpod` only).
 
 Outside `LOOM_ENV=dev` the manager refuses to start without the CA, the client
@@ -51,6 +55,8 @@ class PoolmgrSettings(PlatformSettings):
     poolmgr_proxy_bundle: Path | None = None
     poolmgr_metrics_port: Annotated[int, Field(ge=0, lt=65536)] = DEFAULT_METRICS_PORT
     poolmgr_local_cold_start_s: Annotated[float, Field(ge=0)] = DEFAULT_LOCAL_COLD_START_S
+    poolmgr_local_host: str = "127.0.0.1"
+    poolmgr_state_dir: Path | None = None
     runpod_api_key: SecretStr | None = Field(
         default=None, validation_alias=AliasChoices("RUNPOD_API_KEY", "runpod_api_key")
     )

@@ -10,12 +10,16 @@ say so; the manager runs each change in its own transaction.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import psycopg
+from psycopg import sql
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 PodState = Literal["creating", "bootstrapping", "ready", "draining", "failed", "terminated"]
 POD_STATES: tuple[PodState, ...] = (
@@ -65,6 +69,23 @@ class PodRow:
         return cls(**row)
 
 
+COLUMNS: tuple[str, ...] = tuple(f.name for f in dataclasses.fields(PodRow))
+_UPDATABLE = frozenset(COLUMNS) - {"id", "model_id", "pod_name", "created_at"}
+# The second key of the per-model transaction lock (two-key advisory locks live in their
+# own key space, apart from the manager's single-writer lock).
+_MODEL_LOCK = "loom-poolmgr-model"
+
+
+def _row(row: dict[str, Any] | None) -> PodRow | None:
+    return None if row is None else PodRow.from_db(row)
+
+
+def _value(name: str, value: Any) -> Any:
+    if name == "stages":
+        return Jsonb(dict(value or {}))
+    return value
+
+
 async def insert_creating(
     conn: psycopg.AsyncConnection,
     *,
@@ -76,28 +97,76 @@ async def insert_creating(
     """Insert a `creating` row, unless the model already has `max_replicas` live rows:
     then None. The count and the insert run in one transaction under a per-model lock
     (`pg_advisory_xact_lock`), so concurrent creates never exceed the cap. Commits."""
-    raise NotImplementedError("phase B")
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))", (_MODEL_LOCK, model_id)
+        )
+        await cur.execute(
+            "SELECT count(*) AS n FROM serving_pods WHERE model_id = %s AND state <> 'terminated'",
+            (model_id,),
+        )
+        counted = await cur.fetchone()
+        if counted is not None and int(counted["n"]) >= max_replicas:
+            return None
+        await cur.execute(
+            "INSERT INTO serving_pods (id, model_id, pod_name, state, created_at)"
+            " VALUES (%s, %s, %s, 'creating', %s) RETURNING *",
+            (uuid.uuid4(), model_id, pod_name, created_at),
+        )
+        inserted = _row(await cur.fetchone())
+    if not conn.autocommit:
+        await conn.commit()
+    return inserted
 
 
 async def update(conn: psycopg.AsyncConnection, row_id: uuid.UUID, **fields: Any) -> PodRow:
     """Set `fields` (column names of `serving_pods`) on one row; returns it."""
-    raise NotImplementedError("phase B")
+    bad = set(fields) - _UPDATABLE
+    if bad or not fields:
+        raise ValueError(f"cannot update serving_pods columns {sorted(bad) or '(none)'}")
+    assignments = sql.SQL(", ").join(
+        sql.SQL("{} = %s").format(sql.Identifier(name)) for name in fields
+    )
+    query = sql.SQL("UPDATE serving_pods SET {} WHERE id = %s RETURNING *").format(assignments)
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(query, (*(_value(k, v) for k, v in fields.items()), row_id))
+        row = _row(await cur.fetchone())
+    if row is None:
+        raise KeyError(f"no serving_pods row {row_id}")
+    return row
+
+
+async def _select(
+    conn: psycopg.AsyncConnection, where: str, params: tuple[Any, ...]
+) -> list[PodRow]:
+    query = "SELECT * FROM serving_pods WHERE " + where + " ORDER BY created_at, pod_name"
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(query, params)  # type: ignore[arg-type]  # constant SQL
+        return [PodRow.from_db(r) for r in await cur.fetchall()]
 
 
 async def get(conn: psycopg.AsyncConnection, row_id: uuid.UUID) -> PodRow | None:
-    raise NotImplementedError("phase B")
+    rows = await _select(conn, "id = %s", (row_id,))
+    return rows[0] if rows else None
 
 
 async def by_pod_id(conn: psycopg.AsyncConnection, pod_id: str) -> PodRow | None:
-    raise NotImplementedError("phase B")
+    rows = await _select(conn, "pod_id = %s", (pod_id,))
+    return rows[0] if rows else None
 
 
 async def live_rows(conn: psycopg.AsyncConnection, model_id: str | None = None) -> list[PodRow]:
     """Rows not `terminated` (of one model, or all), oldest first."""
-    raise NotImplementedError("phase B")
+    if model_id is None:
+        return await _select(conn, "state <> 'terminated'", ())
+    return await _select(conn, "state <> 'terminated' AND model_id = %s", (model_id,))
 
 
 async def rows_since(conn: psycopg.AsyncConnection, since: dt.datetime) -> list[PodRow]:
     """Rows created at or after `since` or still running then (month-to-date spend, the
     replacements of the last hour)."""
-    raise NotImplementedError("phase B")
+    return await _select(
+        conn,
+        "created_at >= %s OR terminated_at IS NULL OR terminated_at > %s",
+        (since, since),
+    )

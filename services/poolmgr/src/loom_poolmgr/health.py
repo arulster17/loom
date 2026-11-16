@@ -62,16 +62,44 @@ def parse_metrics(text: str) -> EngineMetrics:
     )
 
 
+def _headers(replica: Replica) -> dict[str, str]:
+    return {TOKEN_HEADER: replica.token}
+
+
+def _ext(replica: Replica) -> dict[str, str]:
+    return {"sni_hostname": replica.server_name}
+
+
 async def proxy_health(client: httpx.AsyncClient, replica: Replica, *, timeout_s: float) -> bool:
     """Whether the proxy answers `GET /health` with 200."""
-    raise NotImplementedError("phase B")
+    try:
+        r = await client.get(
+            replica.url + "/health",
+            headers=_headers(replica),
+            extensions=_ext(replica),
+            timeout=timeout_s,
+        )
+    except httpx.HTTPError:
+        return False
+    return r.status_code == 200
 
 
 async def engine_metrics(
     client: httpx.AsyncClient, replica: Replica, *, timeout_s: float
 ) -> EngineMetrics:
     """The engine's metrics through the proxy. Raises `httpx.HTTPError` on failure."""
-    raise NotImplementedError("phase B")
+    r = await client.get(
+        replica.url + "/metrics",
+        headers=_headers(replica),
+        extensions=_ext(replica),
+        timeout=timeout_s,
+    )
+    r.raise_for_status()
+    return parse_metrics(r.text)
+
+
+class ProbeFailed(RuntimeError):
+    """The one-token probe did not answer a 200 with a choice."""
 
 
 async def probe(
@@ -79,4 +107,18 @@ async def probe(
 ) -> None:
     """A one-token completion through the proxy. Raises on anything but a 200 with a
     choice."""
-    raise NotImplementedError("phase B")
+    r = await client.post(
+        replica.url + "/v1/completions",
+        json={"model": served_model, "prompt": "ping", "max_tokens": 1},
+        headers=_headers(replica),
+        extensions=_ext(replica),
+        timeout=timeout_s,
+    )
+    if r.status_code != 200:
+        raise ProbeFailed(f"probe answered {r.status_code}")
+    try:
+        choices = r.json().get("choices")
+    except ValueError:
+        choices = None
+    if not choices:
+        raise ProbeFailed("probe answered no choice")

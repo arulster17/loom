@@ -1689,6 +1689,8 @@ dependencies = [
     { name = "httpx" },
     { name = "loom-bench" },
     { name = "loom-platform" },
+    { name = "loom-podproxy" },
+    { name = "prometheus-client" },
 ]
 
 [package.metadata]
@@ -1698,6 +1700,8 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "loom-bench", editable = "bench" },
     { name = "loom-platform", editable = "services/platform_common" },
+    { name = "loom-podproxy", editable = "services/podproxy" },
+    { name = "prometheus-client", specifier = ">=0.20" },
 ]
 
 [[package]]

@@ -2,9 +2,10 @@
 protocol and its types.
 
 Implementations: `loom_poolmgr.runpod.RunpodServing` (RunPod's API; with `FakeRunpod`'s
-transport in tests) and `LocalServing` (compose: each "pod" is a mock engine plus a
-`loom-podproxy` subprocess pair, §9). The create, health, drain, idle and pool-hash code
-in the manager is the same for both; only the provider and the pod exec differ.
+transport in tests) and `loom_poolmgr.local.LocalServing` (compose: each "pod" is a mock
+engine plus a `loom-podproxy` subprocess pair, §9). The create, health, drain, idle and
+pool-hash code in the manager is the same for both; only the provider and the pod exec
+differ.
 
 A provider knows nothing about the manager's rows or states. It creates a pod under a
 name the manager chose, lists the `loom-serve-*` pods it can see, terminates by id, and
@@ -15,8 +16,7 @@ from __future__ import annotations
 
 import re
 import secrets
-import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -63,6 +63,9 @@ class Deployment:
     # bench/prices.yaml's price of spec.hardware.instance_types.runpod; None for local/fake
     # providers (no price check).
     listed_price_per_hr_micros: int | None
+    # The container disk's price per hour (bench/prices.yaml storage), added to RunPod's
+    # costPerHr for spend; 0 when unknown.
+    disk_per_hr_micros: int = 0
 
 
 @dataclass(frozen=True)
@@ -137,28 +140,3 @@ class ServingProvider(Protocol):
     def endpoints(self, pod: PodInfo) -> Endpoints | None:
         """The pod's public IP and mapped proxy and SSH ports, or None until assigned."""
         ...
-
-
-class LocalServing:
-    """`provider: local` (compose, §9): each pod is a mock engine on a loopback port plus
-    a `loom-podproxy` with a certificate the manager issued, as subprocesses of the
-    manager. `cold_start_s` (LOOM_POOLMGR_LOCAL_COLD_START_S) delays the pod's RUNNING
-    status. `no_capacity` makes every create raise `NoCapacity` (the acceptance's switch).
-    Its pod exec (phase B) writes the delivered files directly instead of using SSH."""
-
-    def __init__(self, *, cold_start_s: float, clock: Callable[[], float] = time.time) -> None:
-        self.cold_start_s = cold_start_s
-        self.clock = clock
-        self.no_capacity = False
-
-    async def create(self, model: Deployment, name: str, env: dict[str, str]) -> PodInfo:
-        raise NotImplementedError("phase B")
-
-    async def list(self) -> list[PodInfo]:
-        raise NotImplementedError("phase B")
-
-    async def terminate(self, pod_id: str) -> None:
-        raise NotImplementedError("phase B")
-
-    def endpoints(self, pod: PodInfo) -> Endpoints | None:
-        raise NotImplementedError("phase B")

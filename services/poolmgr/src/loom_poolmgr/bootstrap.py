@@ -45,9 +45,11 @@ The kinds of call (a fake must answer each; the order is at the end):
    and `loom-lease <epoch>` on stdout. Also run every `lease_renew_every_s` after
    bootstrap.
 
-**Re-key** (adoption after a restart; certificate renewal) runs serve_bootstrap again
-with a new payload (new token and server certificate, same bundle), then serve_lease. A
-fake must replace the files and reload its proxy, keeping open connections.
+**Re-key** runs serve_bootstrap again with a new payload (same bundle). Adoption after a
+restart sends a new token and server certificate, then runs serve_lease; certificate
+renewal sends a new certificate with the pod's current token, so the gateway's cached
+pool hash stays valid across the reload. A fake must replace the files and reload its
+proxy, keeping open connections.
 
 `loom_poolmgr.scripts.script_name(script)` says which template a rendered script is;
 `script_var(script, NAME)` reads one of its variables. Secrets appear only in the
@@ -62,15 +64,33 @@ serve_engine; then, from the manager, proxy `GET /health` and a one-token
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import hashlib
 import io
+import re
 import tarfile
 import textwrap
-from collections.abc import Mapping
+import time
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from loom_bench.providers.runpod_ssh import DEFAULT_CTL_ROOT, SshExec, SshTarget
+from loom_bench.engines import engine_process_argv, launch_weights, render_launch
+from loom_bench.providers import runpod_layout
+from loom_bench.providers.aws_ssm import parse_markers
+from loom_bench.providers.base import EngineLaunch
+from loom_bench.providers.runpod_api import GRAPHQL_URL
+from loom_bench.providers.runpod_ssh import (
+    DEFAULT_CTL_ROOT,
+    SSH_UNREACHABLE,
+    RemoteCommandError,
+    SshExec,
+    SshTarget,
+    run_detached,
+)
+from loom_poolmgr import scripts
+from loom_poolmgr.provider import Deployment
 
 SSH_PROBE = "echo loom-online\n"
 PAYLOAD_MARKER = "loom-payload-v1"
@@ -78,6 +98,8 @@ PAYLOAD_FILES = ("server.crt", "server.key", "ca.crt", "token", "allow", "proxy-
 CTL_ROOT = DEFAULT_CTL_ROOT
 BOOTSTRAP_CALL_TIMEOUT_S = 600.0
 LEASE_CALL_TIMEOUT_S = 60.0
+PROBE_CALL_TIMEOUT_S = 30.0
+PROMPT_TOKENS_DETAILS = "--enable-prompt-tokens-details"
 
 # Fixed pod paths and ids (the values rendered into the scripts).
 LEASE_FILE = "/run/loom/lease"
@@ -107,7 +129,14 @@ class ProxyBundle:
     @classmethod
     def load(cls, path: Path, sha256: str) -> ProxyBundle:
         """Read `path` and check it against `sha256`."""
-        raise NotImplementedError("phase B")
+        data = path.read_bytes()
+        actual = hashlib.sha256(data).hexdigest()
+        if actual != sha256.strip().lower():
+            raise ValueError(f"{path}: sha256 {actual} does not match the lock's {sha256}")
+        return cls(data, actual)
+
+    def __repr__(self) -> str:
+        return f"ProxyBundle({len(self.data)} bytes, sha256={self.sha256})"
 
 
 @dataclass(frozen=True)
@@ -191,11 +220,105 @@ def ssh_target(endpoints_ip: str, ssh_port: int, key_path: Path, known_hosts: Pa
     return SshTarget(host=endpoints_ip, port=ssh_port, key_path=key_path, known_hosts=known_hosts)
 
 
+class BootstrapError(RuntimeError):
+    """A bootstrap step failed (the message never holds a secret)."""
+
+
+def bootstrap_script(bundle: ProxyBundle, *, proxy_port: int) -> str:
+    """The rendered serve_bootstrap (no secrets: they follow it on stdin)."""
+    return scripts.render(
+        "serve_bootstrap",
+        PROXY_DIR=PROXY_DIR,
+        PROXY_VENV=PROXY_VENV,
+        PROXY_PORT=proxy_port,
+        UPSTREAM=UPSTREAM,
+        BUNDLE_SHA256=bundle.sha256,
+        PROXY_UID=PROXY_UID,
+        ENGINE_UID=ENGINE_UID,
+    )
+
+
+def lease_script(lease_epoch: int) -> str:
+    """The rendered serve_lease moving the pod's lease to `lease_epoch`."""
+    return scripts.render("serve_lease", LEASE_FILE=LEASE_FILE, LEASE_EPOCH=int(lease_epoch))
+
+
+def start_command(graphql_url: str = GRAPHQL_URL) -> str:
+    """The rendered serve_start (the pod's start command, `dockerStartCmd`)."""
+    return scripts.render(
+        "serve_start",
+        LEASE_FILE=LEASE_FILE,
+        LEASE_POLL_S=LEASE_POLL_S,
+        STAGE_FILE=STAGE_FILE,
+        LOOM_ROOT=LOOM_ROOT,
+        SSH_DIR=SSH_DIR,
+        SSHD_CONFIG=SSHD_CONFIG,
+        GRAPHQL_URL=graphql_url,
+    )
+
+
+def engine_launch(model: Deployment) -> EngineLaunch:
+    """The registry row's launch with the serving config's `engine_env`."""
+    launch = render_launch(model.spec)
+    return launch.model_copy(update={"env": {**launch.env, **model.served.engine_env}})
+
+
+def engine_script(model: Deployment, *, stall_s: int, ready_timeout_s: int) -> str:
+    """The rendered serve_engine for `model` (no secrets): the bench's launch, bound to
+    loopback, plus `--enable-prompt-tokens-details` for vLLM (plan §9)."""
+    launch = engine_launch(model)
+    argv = engine_process_argv(launch, host="127.0.0.1", weights_dir=runpod_layout.WEIGHTS_DIR)
+    if launch.engine == "vllm" and PROMPT_TOKENS_DETAILS not in argv:
+        argv.append(PROMPT_TOKENS_DETAILS)
+    return scripts.render(
+        "serve_engine",
+        WARM=0,
+        FETCH_WEIGHTS=[x for pair in launch_weights(launch) for x in pair],
+        CACHED_WEIGHTS=[],
+        WEIGHTS_DIR=runpod_layout.WEIGHTS_DIR,
+        PORT=ENGINE_PORT,
+        SERVED_MODEL=launch.served_model,
+        READY_TIMEOUT_S=int(ready_timeout_s),
+        ENGINE_STALL_S=int(stall_s),
+        LOG_DIR=runpod_layout.LOG_DIR,
+        STAGE_FILE=STAGE_FILE,
+        ENGINE_ENV=[f"{k}={v}" for k, v in sorted(launch.env.items())],
+        ENGINE_CMD=argv,
+        ENGINE_PIDFILE=runpod_layout.ENGINE_PIDFILE,
+        PROC1_ENVIRON=runpod_layout.PROC1_ENVIRON,
+        SCAN_DIRS=list(runpod_layout.SECRET_SCAN_DIRS),
+        ENGINE_UID=ENGINE_UID,
+        PROXY_DIR=PROXY_DIR,
+    )
+
+
 async def wait_for_ssh(
-    pod_exec: SshExec, target: SshTarget, *, timeout_s: float, poll_s: float
+    pod_exec: SshExec,
+    target: SshTarget,
+    *,
+    timeout_s: float,
+    poll_s: float,
+    clock: Callable[[], float] = time.time,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    check: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
-    """Probe with `SSH_PROBE` until sshd answers; `TimeoutError` after `timeout_s`."""
-    raise NotImplementedError("phase B")
+    """Probe with `SSH_PROBE` until sshd answers; `TimeoutError` after `timeout_s` (on
+    `clock`). `check` runs between probes and raises when the pod is lost."""
+    deadline = clock() + timeout_s
+    while True:
+        res = await pod_exec.run(target, SSH_PROBE, timeout_s=PROBE_CALL_TIMEOUT_S)
+        if res.returncode == 0 and "loom-online" in res.stdout:
+            return
+        if res.returncode != SSH_UNREACHABLE:
+            raise BootstrapError(f"SSH probe exited {res.returncode}")
+        if check is not None:
+            await check()
+        if clock() >= deadline:
+            raise TimeoutError(f"SSH not reachable after {timeout_s:.0f} s")
+        await sleep(poll_s)
+
+
+_PROXY_RE = re.compile(r"^loom-proxy (started|reloaded) (\d+)$", re.MULTILINE)
 
 
 async def deliver(
@@ -209,7 +332,16 @@ async def deliver(
     """Run serve_bootstrap with the payload; returns `started` or `reloaded`. Raises
     `RemoteCommandError` on a non-zero exit (stderr is the script's own, never the
     payload)."""
-    raise NotImplementedError("phase B")
+    stdin = bootstrap_stdin(
+        bootstrap_script(bundle, proxy_port=proxy_port), payload_files(secrets, bundle)
+    )
+    res = await pod_exec.run(target, stdin, timeout_s=BOOTSTRAP_CALL_TIMEOUT_S)
+    if res.returncode != 0:
+        raise RemoteCommandError("serve_bootstrap", res.returncode, res.stdout, res.stderr)
+    m = _PROXY_RE.search(res.stdout)
+    if m is None:
+        raise RemoteCommandError("serve_bootstrap: no proxy line", 0, res.stdout, res.stderr)
+    return m.group(1)
 
 
 async def start_engine(
@@ -219,6 +351,25 @@ async def start_engine(
     *,
     timeout_s: float,
     poll_s: float,
+    check_host: Callable[[], Awaitable[None]],
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> dict[str, float]:
-    """Run the rendered serve_engine detached; returns the stage epochs it reported."""
-    raise NotImplementedError("phase B")
+    """Run the rendered serve_engine detached; returns the stage epochs it reported.
+
+    `run_detached`'s own deadline is real time (`timeout_s`); callers on an injected clock
+    enforce theirs in `check_host`, which runs every poll."""
+    stdout = await run_detached(
+        pod_exec,
+        target,
+        script,
+        what="serve_engine",
+        timeout_s=timeout_s,
+        poll_s=poll_s,
+        check_host=check_host,
+        ctl_root=CTL_ROOT,
+        sleep=sleep,
+    )
+    stages, system = parse_markers(stdout)
+    if system.get("engine_isolation") != "ok":
+        raise BootstrapError("serve_engine did not prove the engine's isolation")
+    return stages

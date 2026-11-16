@@ -19,15 +19,45 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import datetime as dt
+import hashlib
+import logging
+import signal
 import sys
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
+import psycopg
 from redis.asyncio import Redis
 
-from loom_platform.pool import request_wake
-from loom_poolmgr.manager import push_admin
-from loom_poolmgr.pki import write_dev_ca
+from loom_bench.prices import load_prices
+from loom_bench.providers.runpod_api import RunpodApi
+from loom_bench.providers.runpod_ssh import OpenSshExec, SshExec
+from loom_bench.registry import REPO_ROOT, load_registry
+from loom_platform.db import libpq_url
+from loom_platform.pool import get_pool, request_wake
+from loom_platform.pricing import servable
+from loom_platform.serving import load_serving
+from loom_platform.settings import enforce_environment
+from loom_podproxy.bundle import LOCK_DEFAULT, read_lock  # type: ignore[import-untyped]
+from loom_poolmgr import spend, store
+from loom_poolmgr.bootstrap import ProxyBundle, start_command
+from loom_poolmgr.leases import LeaseRecords, MemoryLeaseRecords, S3LeaseRecords
+from loom_poolmgr.local import LocalServing
+from loom_poolmgr.manager import (
+    ManagerLocked,
+    PoolManager,
+    SshIdentity,
+    build_deployments,
+    push_admin,
+)
+from loom_poolmgr.metrics import PoolmgrMetrics
+from loom_poolmgr.metrics import serve as serve_metrics
+from loom_poolmgr.pki import Pki, write_dev_ca
+from loom_poolmgr.provider import ServingProvider
+from loom_poolmgr.runpod import USER_AGENT, RunpodServing
 from loom_poolmgr.settings import PoolmgrSettings
 
 
@@ -52,12 +82,165 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _bundle(settings: PoolmgrSettings) -> ProxyBundle:
+    """The pinned proxy bundle, checked against config/serving-artifacts.lock. In dev
+    without one (the local backend installs nothing), a placeholder."""
+    if settings.poolmgr_proxy_bundle is None:
+        data = b"loom-poolmgr dev: no proxy bundle"
+        return ProxyBundle(data, hashlib.sha256(data).hexdigest())
+    lock = read_lock(REPO_ROOT / LOCK_DEFAULT)
+    return ProxyBundle.load(settings.poolmgr_proxy_bundle, str(lock["sha256"]))
+
+
 async def _run(settings: PoolmgrSettings) -> int:
-    raise NotImplementedError("phase B")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    config = load_serving(
+        settings.poolmgr_serving_yaml, registry=load_registry(settings.models_yaml)
+    )
+    if config.provider == "fake":
+        print("loom-poolmgr: provider fake is for tests only", file=sys.stderr)
+        return 2
+    enforce_environment(settings, "loom-poolmgr", settings.production_problems(config))
+    registry = load_registry(settings.models_yaml)
+    deployments = build_deployments(config, registry, load_prices())
+    state = settings.poolmgr_state_dir or Path(tempfile.mkdtemp(prefix="loom-poolmgr-"))
+    state.mkdir(parents=True, exist_ok=True)
+    if settings.poolmgr_ca_cert and settings.poolmgr_ca_key:
+        if not (settings.poolmgr_client_cert and settings.poolmgr_client_key):
+            print("loom-poolmgr: the CA needs LOOM_POOLMGR_CLIENT_CERT/KEY", file=sys.stderr)
+            return 2
+        pki = Pki.load(
+            settings.poolmgr_ca_cert,
+            settings.poolmgr_ca_key,
+            settings.poolmgr_client_cert,
+            settings.poolmgr_client_key,
+        )
+    else:
+        pki = Pki.generate(state / "pki")  # dev only (production_problems requires the CA)
+    if settings.poolmgr_ssh_key is not None:
+        ssh = SshIdentity.load(settings.poolmgr_ssh_key, state / "known_hosts")
+        ssh.known_hosts_dir.mkdir(mode=0o700, exist_ok=True)
+    else:
+        ssh = SshIdentity.generate(state / "ssh")
+    leases: LeaseRecords = (
+        S3LeaseRecords(settings.poolmgr_lease_bucket)
+        if settings.poolmgr_lease_bucket
+        else MemoryLeaseRecords()
+    )
+    local: LocalServing | None = None
+    provider: ServingProvider
+    pod_exec: SshExec
+    if config.provider == "runpod":
+        if settings.runpod_api_key is None:
+            print("loom-poolmgr: RUNPOD_API_KEY is not set", file=sys.stderr)
+            return 2
+        provider = RunpodServing(
+            RunpodApi(settings.runpod_api_key, user_agent=USER_AGENT),
+            placement=config.placement,
+            network=config.network,
+            start_command=start_command(),
+        )
+        pod_exec = OpenSshExec()
+    else:
+        host = settings.poolmgr_local_host
+        local = LocalServing(
+            cold_start_s=settings.poolmgr_local_cold_start_s,
+            root=state / "pods",
+            host=host,
+            bind="127.0.0.1" if host in ("127.0.0.1", "localhost") else "0.0.0.0",
+        )
+        provider, pod_exec = local, local.exec
+    metrics = PoolmgrMetrics()
+    if settings.poolmgr_metrics_port:
+        serve_metrics(metrics, settings.poolmgr_metrics_port)
+    redis = Redis.from_url(settings.redis_url)
+    manager = PoolManager(
+        config,
+        deployments=deployments,
+        provider=provider,
+        pod_exec=pod_exec,
+        redis=redis,
+        database_url=settings.database_url,
+        leases=leases,
+        pki=pki,
+        ssh=ssh,
+        bundle=_bundle(settings),
+        servable=tuple(m.id for m in servable(registry)),
+        usage_stream=settings.usage_stream,
+        metrics=metrics,
+    )
+    try:
+        try:
+            await manager.start()
+        except ManagerLocked as e:
+            print(f"loom-poolmgr: {e}", file=sys.stderr)
+            return 1
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with contextlib.suppress(NotImplementedError):
+                loop.add_signal_handler(sig, stop.set)
+        logging.getLogger("loom_poolmgr").info(
+            "loom-poolmgr running: provider %s, models %s",
+            config.provider,
+            ", ".join(config.models),
+        )
+        try:
+            await manager.run(stop)
+        except ManagerLocked as e:
+            print(f"loom-poolmgr: {e}", file=sys.stderr)
+            return 1
+    finally:
+        await manager.stop()
+        if local is not None:
+            await local.aclose()
+        await redis.aclose()
+    return 0
+
+
+def _age(now: dt.datetime, then: dt.datetime | None) -> str:
+    if then is None:
+        return "-"
+    s = int((now - then).total_seconds())
+    return f"{s // 3600}h{s % 3600 // 60:02d}m" if s >= 3600 else f"{s // 60}m{s % 60:02d}s"
 
 
 async def _status(settings: PoolmgrSettings) -> int:
-    raise NotImplementedError("phase B")
+    config = load_serving(settings.poolmgr_serving_yaml, check_registry=False)
+    now = dt.datetime.now(dt.UTC)
+    redis = Redis.from_url(settings.redis_url)
+    try:
+        async with await psycopg.AsyncConnection.connect(
+            libpq_url(settings.database_url), autocommit=True
+        ) as conn:
+            rows = await store.live_rows(conn)
+            month = await spend.month_to_date_micros(conn, now)
+        for model in config.models:
+            pool = await get_pool(redis, model)
+            reason = f" ({pool.reason})" if pool.reason else ""
+            print(
+                f"{model}: {pool.state}{reason}, retry after {pool.retry_after_s} s, "
+                f"{len(pool.replicas)} replica(s)"
+            )
+            for row in (r for r in rows if r.model_id == model):
+                price = (
+                    "-"
+                    if row.cost_per_hr_micros is None
+                    else f"${row.cost_per_hr_micros / 1e6:.2f}/h"
+                )
+                lease = "-" if row.lease_until is None else row.lease_until.isoformat()
+                print(
+                    f"  {row.pod_id or row.pod_name}  {row.state}  age {_age(now, row.created_at)}"
+                    f"  {price}  lease until {lease}"
+                )
+        cap = spend.usd_micros(config.spend.monthly_cap_usd)
+        print(
+            f"spend this month: ${month / 1e6:.2f} of the ${cap / 1e6:.2f} cap "
+            f"({100 * month / cap:.0f}%)"
+        )
+    finally:
+        await redis.aclose()
+    return 0
 
 
 async def _admin(settings: PoolmgrSettings, args: argparse.Namespace) -> int:

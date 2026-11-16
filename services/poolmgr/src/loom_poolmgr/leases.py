@@ -21,7 +21,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from loom_bench.providers.runpod_ssh import SshExec, SshTarget
+from loom_bench.providers.runpod_ssh import RemoteCommandError, SshExec, SshTarget
+from loom_poolmgr.bootstrap import lease_script
 
 LEASE_PREFIX = "serving/leases/"
 
@@ -163,4 +164,8 @@ async def renew_on_pod(
 ) -> None:
     """Run serve_lease (LEASE_FILE, LEASE_EPOCH = `lease_epoch`) over SSH. Raises
     `RemoteCommandError` on a non-zero exit or an unreachable pod."""
-    raise NotImplementedError("phase B")
+    res = await pod_exec.run(target, lease_script(lease_epoch), timeout_s=timeout_s)
+    if res.returncode != 0:
+        raise RemoteCommandError("serve_lease", res.returncode, res.stdout, res.stderr)
+    if f"loom-lease {int(lease_epoch)}" not in res.stdout.split("\n"):
+        raise RemoteCommandError("serve_lease: no loom-lease line", 0, res.stdout, res.stderr)

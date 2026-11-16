@@ -20,6 +20,7 @@ from decimal import ROUND_CEILING, Decimal
 
 import psycopg
 
+from loom_poolmgr import store
 from loom_poolmgr.store import PodRow
 
 MICROS_PER_USD = 1_000_000
@@ -70,7 +71,9 @@ def crossed_fractions(
 
 async def month_to_date_micros(conn: psycopg.AsyncConnection, now: dt.datetime) -> int:
     """`month_to_date` over this month's `serving_pods` rows."""
-    raise NotImplementedError("phase B")
+    since = month_start(now)
+    rows = await store.rows_since(conn, since)
+    return month_to_date(rows, now)
 
 
 async def record_alerts(
@@ -78,4 +81,17 @@ async def record_alerts(
 ) -> list[float]:
     """Insert (month, fraction) into `serving_spend_alerts` for each of `fractions`; return
     the ones not sent before (the alerts to send now). Commits."""
-    raise NotImplementedError("phase B")
+    month = month_start(now).date()
+    sent: list[float] = []
+    async with conn.transaction():
+        for fraction in sorted(fractions):
+            cur = await conn.execute(
+                "INSERT INTO serving_spend_alerts (month, fraction, sent_at) VALUES (%s, %s, %s)"
+                " ON CONFLICT (month, fraction) DO NOTHING RETURNING fraction",
+                (month, Decimal(str(fraction)), now),
+            )
+            if await cur.fetchone() is not None:
+                sent.append(fraction)
+    if not conn.autocommit:
+        await conn.commit()
+    return sent
