@@ -466,6 +466,8 @@ class PoolManager:
         self._reset_at: dict[str, float] = {}
         # Per model, the `last_request` stamp last seen (None: no key).
         self._last_request: dict[str, Any] = {}
+        # False on a tick whose stamp read failed: demand is unknown, so nothing idles.
+        self._requests_known = True
         self._db: AsyncConnectionPool | None = None
         self._lock_conn: psycopg.AsyncConnection[Any] | None = None
         self._in_tick = False
@@ -962,12 +964,15 @@ class PoolManager:
 
     async def _observe_requests(self, now: float) -> None:
         """A model whose `last_request` stamp changed since the last tick settled a request
-        in between: demand now. A failed read only delays this; the stamp stays."""
+        in between: demand now. A failed read only delays this (the stamp stays), and
+        that tick drains nothing for idleness."""
         try:
             stamps = await self._read_last_requests()
         except RedisError as e:
             log.warning("reading the last-request stamps failed: %s", _describe(e))
+            self._requests_known = False
             return
+        self._requests_known = True
         for model, stamp in stamps.items():
             if stamp is not None and stamp != self._last_request.get(model):
                 self._last_demand[model] = now
@@ -997,7 +1002,9 @@ class PoolManager:
             for _ in range(desired - active):
                 if not await self._try_create(dep, now, budget):
                     break
-        elif not demand and served.idle_stop_s > 0 and len(ready) > desired:
+        elif (
+            not demand and served.idle_stop_s > 0 and len(ready) > desired and self._requests_known
+        ):
             for pod in ready[desired:]:
                 log.info("pod %s (%s) idle for %.0f s: draining", pod.pod_id, model, idle_for)
                 await self._start_drain(pod, now, by="manager")

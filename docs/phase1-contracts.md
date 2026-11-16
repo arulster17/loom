@@ -401,6 +401,11 @@ at the next start when a process stops with entries left. **M3**: put it on a vo
 that outlives the task, or accept that a task stopped during a Redis outage longer than
 its shutdown loses the spooled settles (logged at error with the count).
 
+A replayed settle stamps `loom:pool:<model>:last_request` with the replay time, not the
+request's: after an outage every ready model in the backlog counts as freshly used and
+stays up one more `idle_stop_s` (at most ~30 GPU-minutes per model at the committed 1800 s).
+Accepted: it can only keep a pod up longer, never drain one early.
+
 While Redis is unavailable new requests are refused fast: any Redis error during auth,
 reserve or the pool check is a 503 `service_unavailable` with `Retry-After: 1` (§11).
 

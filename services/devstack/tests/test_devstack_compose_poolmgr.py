@@ -12,7 +12,8 @@ address the pods' allowlist admits: the network the gateway and poolmgr share ha
 `ipam` subnet, and `LOOM_POOLMGR_ALLOW_CIDRS` (dev only) holds CIDRs inside it, never
 wider (§9). `LOOM_POOLMGR_IDLE_STOP_S` (dev only) shortens every model's idle stop for
 the acceptance run, but stays longer than the ~4-minute M1 acceptance (§9: compose sets
-600). poolmgr shares the gateway's Redis, Postgres database and usage stream.
+600). poolmgr shares the gateway's Redis and Postgres database (it does not read the usage
+stream: a settled request reaches it as `loom:pool:<model>:last_request`, spec §11).
 
 Values written `${VAR:-default}` are read as their default.
 """
@@ -226,14 +227,13 @@ def test_poolmgr_starts_after_the_migration_and_redis() -> None:
     assert deps.get("redis", {}).get("condition") == "service_healthy"
 
 
-@pytest.mark.parametrize("var", ["LOOM_REDIS_URL", "LOOM_DATABASE_URL", "LOOM_USAGE_STREAM"])
-def test_poolmgr_shares_the_gateways_redis_database_and_usage_stream(var: str) -> None:
-    """§9: the pool hashes, wake keys and usage events the manager reads are the
-    gateway's. (Both unset is equal: the same default.)"""
+@pytest.mark.parametrize("var", ["LOOM_REDIS_URL", "LOOM_DATABASE_URL"])
+def test_poolmgr_shares_the_gateways_redis_and_database(var: str) -> None:
+    """§9: the pool hashes, wake keys and last-request stamps the manager reads are the
+    gateway's."""
     gateway = env_of(services()["gateway"])
     assert env_of(poolmgr()).get(var) == gateway.get(var), var
-    if var != "LOOM_USAGE_STREAM":
-        assert gateway.get(var), f"the gateway sets no {var}"
+    assert gateway.get(var), f"the gateway sets no {var}"
 
 
 def test_poolmgr_uses_the_committed_serving_yaml_with_the_local_provider() -> None:

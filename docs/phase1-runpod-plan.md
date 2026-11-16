@@ -464,15 +464,17 @@ their own org outside dev.
 
 ### M3 prerequisites from the M2 review (2026-11-16)
 
-The M2 spec fails closed or refuses in places where nothing tells a person. Each of these
-needs an alarm (and, for the CA, a runbook) in M3's Terraform before the serving reaper
-and the manager run against the real RunPod account.
+The M2 spec fails closed or refuses in places where nothing tells a person, and the
+manager now depends on the gateway's `settle.lua`. P1-P3 need an alarm (and, for the CA, a
+runbook) in M3's Terraform, and P4 a deploy-order rule, before the serving reaper and the
+manager run against the real RunPod account.
 
 | # | From (M2 spec) | Gap | M3 work |
 |---|---|---|---|
 | P1 | §6 reaper serving rule, §11 (fail closed on S3) | Any S3 error other than a missing key (a missing bucket, a role without `s3:ListBucket`) makes every reaper run raise and delete nothing, so the second backstop is off with no other sign | CloudWatch alarm on the reaper Lambda's `Errors` (any in an hour) and on missing `Invocations` (no run in 2 schedule periods), to the ops address; give the role `s3:ListBucket` |
 | P2 | §5 spend guard, §11 (refusal signal) | A create refused at the monthly cap writes no `serving_spend_alerts` row: only an error log line and `loom_poolmgr_creates_total{result="spend_cap"}`. The model stays `unavailable` until an admin `reset` | Alert on any increase of that counter (and on the pool `reason` `spend_cap` lasting more than 5 minutes) through whatever M3 uses to scrape port 9102 |
 | P3 | §5 certificates, §11 (CA near expiry) | The manager refuses to start once the pod CA is within `server_cert_renew_before_s` (2 days) of expiry, and only logs an error while running; nothing warns earlier | Expose the CA's expiry (a gauge such as `loom_poolmgr_ca_expiry_seconds`, or a scheduled check of the certificate in Secrets Manager) and alarm 30 days ahead; write `docs/runbook-pod-ca.md`: issue the new CA, have the gateway trust old and new during the rollover, restart the manager, let it re-key every pod, then drop the old CA |
+| P4 | §11 "Fixed after CI" (`last_request` stamps) | The manager's only signal that a ready model is in use, besides requests in flight at a tick, is the stamp the new `settle.lua` writes. A gateway still on the old script writes none, so a manager deployed first would drain models in use | Deploy the gateways before or together with the manager, never the manager alone first; say so in the M3 deploy runbook |
 
 ## 14. Risks
 

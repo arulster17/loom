@@ -589,8 +589,9 @@ routing 11 s before `idle_stop_s`):
   a ready model in light use was drained `idle_stop_s` after its last wake.
   `test_poolmgr_gateway_loop.py` runs the gateway, billing's consumer and the manager
   together to hold this.
-- A failed read of the stamps is logged and retried on the next tick; the stamp stays in
-  Redis, so the demand is only delayed, never lost.
+- A failed read of the stamps is logged and retried on the next tick (the stamp stays in
+  Redis, so the demand is only delayed), and that tick idle-drains nothing: demand is
+  unknown, so it never drains a pod a request just used.
 
 **Serve scripts** (the seam the script tests use). `loom_poolmgr.scripts.render(name,
 **values) -> str` has the bench's `render_script` contract: exactly the variables on the

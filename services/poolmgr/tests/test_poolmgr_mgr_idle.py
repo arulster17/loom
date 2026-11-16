@@ -12,6 +12,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import pytest
 from poolmgr_fakes import (
     FakePod,
     FakeServing,
@@ -24,6 +25,7 @@ from poolmgr_fakes import (
     unique_model_id,
     wait_until,
 )
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from loom_platform.pool import Replica, last_request_key, wake_key
 from loom_platform.testing import pg_url, redis_client  # noqa: F401
@@ -161,6 +163,29 @@ async def test_stamp_from_before_start_is_not_demand(env: FakeServing) -> None:
         assert t_demand + 60 <= drained_at <= t_demand + 65, drained_at - t_demand
     finally:
         await env.redis.delete(last_request_key(model))
+
+
+async def test_no_idle_drain_on_a_tick_whose_stamp_read_failed(
+    env: FakeServing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tick that could not read the `last_request` stamps does not know whether the
+    model was used, so it drains nothing for idleness; the next good read does."""
+    model = unique_model_id()
+    manager, pod, _, t_demand = await ready_idle_pod(env, model)
+    while env.clock() < t_demand + 55:
+        await step(manager, env.clock, advance=5)
+    real_mget = manager.redis.mget
+
+    async def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RedisConnectionError("Connection lost.")
+
+    monkeypatch.setattr(manager.redis, "mget", broken)
+    for _ in range(3):  # t_demand + 60 .. + 70: idle by the clock, but demand is unknown
+        await step(manager, env.clock, advance=5)
+        assert in_routing((await env.pool(model)).replicas, pod), env.clock() - t_demand
+    monkeypatch.setattr(manager.redis, "mget", real_mget)
+    await step(manager, env.clock, advance=5)
+    assert not in_routing((await env.pool(model)).replicas, pod)
 
 
 async def test_min_replicas_one_starts_without_wake_and_never_idles(env: FakeServing) -> None:
