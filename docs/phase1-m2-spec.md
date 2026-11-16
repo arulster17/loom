@@ -224,9 +224,11 @@ For each configured model:
 
 1. **Desired count.** `max(min_replicas, 1 if there is demand else 0)`, capped at
    `max_replicas`. Demand means a wake key exists (`loom:pool:<model>:wake`), or the model
-   is ready and had a usage event or an in-flight request within `idle_stop_s`. Usage is
-   read from `loom:usage` with `XREAD` and no consumer group, as poolsim does, so billing
-   loses no events.
+   is ready and had a request within `idle_stop_s`: one in flight (`/metrics` on a tick),
+   or one settled, seen as a change in `loom:pool:<model>:last_request`, which the gateway
+   stamps in `settle.lua` (contracts §6, §10). Not the usage stream: billing `XTRIM`s each
+   event as soon as it stores it, so a reader without a consumer group misses most of
+   them (CI found this; see §11 "Fixed after CI").
 2. **Observe.** One `list_pods()` per tick, matched to rows by `pod_id`, applying the
    health rules below.
 3. **Act.** Create, drain or terminate to close the gap; replace failed pods.
@@ -462,7 +464,7 @@ no capacity, a dev-only `loom-poolmgr local-capacity off|on` (admin queue; refus
 unless `provider: local`); spend cap, a synthetic terminated `serving_pods` row whose
 cost puts month-to-date over the cap, deleted afterwards together with any
 `serving_spend_alerts` rows it caused, then `reset`. The poolmgr service shares the
-gateway's Redis, Postgres database and usage stream. CI runs `loom-podproxy-bundle
+gateway's Redis and Postgres database. CI runs `loom-podproxy-bundle
 --check` as its own job with network access (not in the main test job). The locked
 `test_devstack_compose.py` still reads the `poolsim`, `mock-pod-1` and `mock-pod-2`
 service definitions, so they stay in `docker-compose.yml` under `profiles: ["poolsim"]`
@@ -525,6 +527,15 @@ tested without sleeping. Timing rules, fixed after the wave 2a test review:
   (`loop.time()`), so the manager enforces `bootstrap_timeout_s` itself (e.g. a
   `check_host` that raises). `bootstrap_stall_s` is enforced on the pod by
   `serve_engine` (rendered as `ENGINE_STALL_S`, the bench's stall check, real time).
+- `bootstrap_timeout_s` runs from the create (the row's `created_at`).
+- Idle time runs from the last demand the manager observed (a wake key, a change in
+  `last_request`, or an in-flight request seen on some tick), not from `ready_at`.
+- Capacity retries follow the configured `capacity.backoff_s` (the bench's
+  `CAPACITY_BACKOFF_S` is only its default value).
+- `PoolManager(..., admin_queue=ADMIN_QUEUE)` and `push_admin(redis, op, *,
+  queue=ADMIN_QUEUE)` take the admin queue key, so parallel tests don't share one.
+- `reconcile_once()` is not re-entrant; `run()` calls it serially. Tests never run two
+  ticks of one manager concurrently.
 
 Failure and restart rules, fixed after the wave 2a implementation review:
 
@@ -566,15 +577,20 @@ Fixed after the final whole-branch review:
   config error); only a missing file falls back to `DEFAULT_COLD_START_S`.
 - `devcerts` keeps its own issuing code (it gained `--client` and `--owner`); reusing
   `loom_poolmgr.pki` there is left for later.
-- `bootstrap_timeout_s` runs from the create (the row's `created_at`).
-- Idle time runs from the last demand the manager observed (a wake key, usage event or
-  in-flight request seen on some tick), not from `ready_at`.
-- Capacity retries follow the configured `capacity.backoff_s` (the bench's
-  `CAPACITY_BACKOFF_S` is only its default value).
-- `PoolManager(..., admin_queue=ADMIN_QUEUE)` and `push_admin(redis, op, *,
-  queue=ADMIN_QUEUE)` take the admin queue key, so parallel tests don't share one.
-- `reconcile_once()` is not re-entrant; `run()` calls it serially. Tests never run two
-  ticks of one manager concurrently.
+
+Fixed after CI (run 43949281009: the M2 acceptance's `idle_stop` saw the pod leave
+routing 11 s before `idle_stop_s`):
+
+- A ready model's settled requests reach the manager as `loom:pool:<model>:last_request`,
+  stamped by the gateway inside `settle.lua` (no extra round trip). The manager reads the
+  stamps with one `MGET` per tick and counts a change since the last tick as demand; a
+  stamp present at `start()` is not demand. The usage stream is no longer read: billing
+  `XTRIM`s each event right after storing it, so the manager saw almost none of them, and
+  a ready model in light use was drained `idle_stop_s` after its last wake.
+  `test_poolmgr_gateway_loop.py` runs the gateway, billing's consumer and the manager
+  together to hold this.
+- A failed read of the stamps is logged and retried on the next tick; the stamp stays in
+  Redis, so the demand is only delayed, never lost.
 
 **Serve scripts** (the seam the script tests use). `loom_poolmgr.scripts.render(name,
 **values) -> str` has the bench's `render_script` contract: exactly the variables on the

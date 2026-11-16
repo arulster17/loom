@@ -55,7 +55,7 @@ compose servers are down, and fail when the variable is set. Factories:
 | web | 3000 | Next.js |
 | stripe-stub | 12111 | Local Stripe stand-in (`loom-billing stripe-stub`) |
 | mailpit | 8025 (UI), 1025 (SMTP) | Catches the web app's magic-link email |
-| poolmgr | 9102 (Prometheus) | The pool manager (§10) on its `local` backend: each serving "pod" is the bench mock engine behind `loom-podproxy`, both subprocesses in this container, reached by the gateway at `https://poolmgr:<port>` on the compose network only. Shares the gateway's Redis, Postgres database and usage stream. Healthy once it holds the single-writer lock and has adopted its pods |
+| poolmgr | 9102 (Prometheus) | The pool manager (§10) on its `local` backend: each serving "pod" is the bench mock engine behind `loom-podproxy`, both subprocesses in this container, reached by the gateway at `https://poolmgr:<port>` on the compose network only. Shares the gateway's Redis and Postgres database. Healthy once it holds the single-writer lock and has adopted its pods |
 | mock-pod-1, mock-pod-2 | 8443, not published | Profile `poolsim` only (not started by `docker compose up`): M1's fixed mock pods, one per servable model, mTLS pod proxy in front of the mock engine on `127.0.0.1:8000` |
 | poolsim | none | Profile `poolsim` only: M1's pool simulator (§10), kept for its own tests and demos. Never together with poolmgr (both write the pool hashes) |
 | migrate, devcerts | none | One-shot jobs |
@@ -75,7 +75,7 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_REDIS_URL` | `redis://localhost:6379/0` | gateway, billing, pool manager, poolsim, web (model status fallback; sign-in rate limit) |
 | `LOOM_MODELS_YAML` | repo `config/models.yaml` | gateway, billing |
 | `LOOM_SERVING_YAML` | repo `config/serving.yaml`; gateway image and compose: that file | gateway (cold-start estimates, §10; a missing file gives every model 300 s, a present but invalid one stops it at start), pool manager (M2). Loaded by `loom_platform.serving.load_serving` |
-| `LOOM_USAGE_STREAM` | `loom:usage` | gateway, billing, pool manager (its demand signal, read with `XREAD`, no consumer group) |
+| `LOOM_USAGE_STREAM` | `loom:usage` | gateway, billing (the pool manager no longer reads it: billing trims each event as soon as it stores it, §10) |
 | `LOOM_AUTH_CACHE_TTL_S` | 4 | gateway |
 | `LOOM_REQUEST_TIMEOUT_S` / `LOOM_RESERVATION_GRACE_S` | 600 / 60 | gateway (reservation TTL = their sum) |
 | `LOOM_SETTLE_REPLAY_WINDOW_S` | 3600 | gateway: the `done:` marker lives the reservation TTL plus this; a spooled settle replayed within it is refused as a repeat by the marker (§6 "Settle spool") |
@@ -265,6 +265,7 @@ without also discarding the stream (both are one state).
 | `loom:notify` | stream | billing reconcile | Notifications outbox (§7) *(wave 2)* |
 | `loom:org:<org>:lowbal` | string | billing reconcile | Low-balance notice sent for the current crossing *(wave 2)* |
 | `loom:pool:<model>` | hash | pool manager / poolsim | Pool state (§10), with an optional `reason` (from M2) |
+| `loom:pool:<model>:last_request` | string (Redis time, ms), no TTL | settle | When a request for the model was last settled (from M2). The pool manager's demand signal for a ready model: a change between two ticks is demand (§10) |
 | `loom:pool:<model>:wake` | string, 600 s | gateway, `loom-poolmgr warm` | Start request for a `cold` or (from M2) `unavailable` model; also `PUBLISH loom:pool:wake <model>` (the manager ticks at once) |
 | `loom:poolmgr:admin` | list of JSON | `loom-poolmgr drain\|stop\|reset\|local-capacity` | The manager's admin queue: `{"op": "drain", "pod_id"}`, `{"op": "stop"\|"reset", "model"}`, dev only `{"op": "local_capacity", "capacity": "on"\|"off"}`; popped at the start of each tick |
 | `loom:poolmgr:reset:<model>` | string (epoch seconds), 2 h | pool manager | When the model's holds were last `reset`: after a restart, `crash_loop` and `price_too_high` are recomputed from the last hour's `serving_pods` rows counting only failures after it |
@@ -328,7 +329,8 @@ Per request, after auth and model lookup, before the pool check (§8):
    abort, upstream loss, engine error, or no replica answered): refuse a repeat; release the
    reservation; charge tpm buckets `actual tokens - estimate` (refunds an over-estimate,
    debt floored at one minute of tokens); `usage += cost`; key usage += cost; `XADD` the
-   usage event with `org_usage_total_micros`. Settling without a live reservation still
+   usage event with `org_usage_total_micros`; `SET loom:pool:<model>:last_request` to the
+   Redis time (ms), the pool manager's demand signal (§10). Settling without a live reservation still
    charges. If the org's state is gone from Redis (lost mid-request), settle appends the
    event but creates no counters, so the next reserve loads them from Postgres. Cost is
    `pricing.cost_micros` on the engine's token counts.
@@ -691,9 +693,14 @@ model's hash from its pod records, evaluating in this order:
 | otherwise | `cold` | `cold_start_estimate_s` | |
 
 A servable model missing from `serving.yaml` is written `unavailable` / `not_configured`.
-Demand is a live wake key, or a ready model with a usage event (`loom:usage`) or an
-in-flight request within its `idle_stop_s`; a ready pod idle that long is removed from
-the hash first, then drained and terminated. Admin: `loom-poolmgr status|warm|drain|stop|
+Demand is a live wake key, or a ready model with a request within its `idle_stop_s`:
+one in flight on a pod (`vllm:num_requests_running` > 0 on a tick), or one settled, seen
+as a change in `loom:pool:<model>:last_request` between two ticks (`settle.lua` stamps it,
+§6). Idle time runs from the tick that saw the demand. A stamp present when the manager
+starts is not demand (adopted pods count as demand by themselves). The usage stream is not
+a demand signal: billing trims each event right after storing it, usually before the
+manager's next tick (found by the M2 acceptance's idle check in CI). A ready pod idle that
+long is removed from the hash first, then drained and terminated. Admin: `loom-poolmgr status|warm|drain|stop|
 reset` (services/poolmgr/README.md).
 
 **M1 simulation** (`poolsim`, now a test tool under the compose profile `poolsim`; never
