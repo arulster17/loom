@@ -504,8 +504,31 @@ tested without sleeping. Timing rules, fixed after the wave 2a test review:
 - A periodic check is due when `clock() - last >= period` (`>=`, not `>`).
 - Every wait goes through the injected `sleep`, and every deadline is measured on the
   injected clock. The bench's `run_detached` has its own real-time deadline
-  (`loop.time()`), so the manager enforces `bootstrap_timeout_s` and
-  `bootstrap_stall_s` itself (e.g. a `check_host` that raises).
+  (`loop.time()`), so the manager enforces `bootstrap_timeout_s` itself (e.g. a
+  `check_host` that raises). `bootstrap_stall_s` is enforced on the pod by
+  `serve_engine` (rendered as `ENGINE_STALL_S`, the bench's stall check, real time).
+
+Failure and restart rules, fixed after the wave 2a implementation review:
+
+- A pod is "lost" only after it was missing from two consecutive listings taken after
+  its `pod_id` was known (or a `get_pod` confirms it gone); a lost pod is terminated
+  (idempotent) before its row is marked.
+- An ambiguous create (timeout/5xx) keeps its row counted against `max_replicas` until
+  a listing shows no pod with its name, or the pod found by name is terminated.
+- Any unexpected exception in a create or bootstrap task fails the row and terminates
+  the pod (by name if its id is unknown); a tick treats a `creating`/`bootstrapping` row
+  with no live task as `failed`.
+- A failed `/metrics` read while draining means "try again next tick", until
+  `drain_max_s`.
+- An adopted pod counts as demand at adoption time (it is not idle-drained on the first
+  tick after a restart).
+- Holds survive a restart: `crash_loop` and `price_too_high` are recomputed from the
+  last hour's rows, counting only failures after the model's last `reset` (the reset
+  time is kept in the manager's own Redis key `loom:poolmgr:reset:<model>`, no schema
+  change), with the same counting rule live and on restart.
+- Adoption takes the model out of the pool hash before re-keying its pods.
+- Outside `LOOM_ENV=dev`, `LOOM_POOLMGR_STATE_DIR` is required (pods' known_hosts must
+  survive a restart).
 - `bootstrap_timeout_s` runs from the create (the row's `created_at`).
 - Idle time runs from the last demand the manager observed (a wake key, usage event or
   in-flight request seen on some tick), not from `ready_at`.
