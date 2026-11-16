@@ -1,0 +1,35 @@
+{
+  "protect": {
+    "locked": false,
+    "paths": [
+      "**/tests/**",
+      "**/test/**",
+      "**/test_*.py",
+      "**/*_test.py",
+      "**/conftest.py",
+      "pytest.ini",
+      "services/platform_common/src/loom_platform/testing.py",
+      "bench/src/loom_bench/providers/runpod_fake.py",
+      "bench/src/loom_bench/providers/runpod_fake_pod.json",
+      "bench/tests/**",
+      "services/platform_common/tests/**",
+      "services/gateway/tests/**",
+      "services/billing/tests/**",
+      "services/podproxy/tests/**",
+      "services/devstack/tests/**"
+    ],
+    "testWriters": [
+      "agent-setup:test-writer"
+    ]
+  },
+  "verify": {
+    "command": "LOOM_TEST_DATABASE_URL=postgresql+psycopg://loom:loom@localhost:5432/loom LOOM_TEST_REDIS_URL=redis://localhost:6379/15 uv run pytest -q -n auto -p no:cacheprovider services bench/tests/runpod --ignore=bench/tests/runpod/test_runpod_e2e.py --ignore=bench/tests/runpod/test_runpod_search_fail.py --ignore=bench/tests/runpod/test_runpod_sweep_8b.py --ignore=bench/tests/runpod/test_runpod_trtllm.py --ignore=bench/tests/runpod/test_runpod_two_checkpoints.py --ignore=bench/tests/runpod/test_runpod_specdec.py --ignore=bench/tests/runpod/test_runpod_reproduce.py",
+    "timeoutMs": 600000,
+    "maxBlocks": 3,
+    "requireTests": true
+  },
+  "retro": {
+    "path": ".claude/agent-retros.md",
+    "minAgents": 2
+  }
+}
