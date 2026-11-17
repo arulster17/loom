@@ -21,9 +21,14 @@ x-devstack: &devstack
     context: .
     dockerfile: services/devstack/Dockerfile
 
+# Postgres roles (contracts §3): `loom` (the server's superuser here) owns the schema and
+# runs the migrations; every service connects as the runtime login `loom_app`, which
+# `migrate` creates with the dev password below (a production problem outside dev).
+x-app-database-url: &app-database-url postgresql://loom_app:loom-app-dev@postgres:5432/loom_platform
+
 x-platform-env: &platform-env
   LOOM_ENV: dev
-  LOOM_DATABASE_URL: postgresql://loom:loom@postgres:5432/loom_platform
+  LOOM_DATABASE_URL: *app-database-url
   LOOM_REDIS_URL: redis://redis:6379/0
   LOOM_MODELS_YAML: /loom-config/models.yaml
 
@@ -81,12 +86,14 @@ services:
       timeout: 5s
       retries: 10
 
-  # One-shot: create loom_platform and apply every migration; the services start after it.
+  # One-shot: create loom_platform and apply every migration as the owner, then create
+  # or update the runtime login loom_app; the services start after it.
   migrate:
     <<: *devstack
     command: ["loom-migrate", "--create-database"]
     environment:
       LOOM_DATABASE_URL: postgresql://loom:loom@postgres:5432/loom_platform
+      LOOM_APP_DATABASE_PASSWORD: loom-app-dev
     depends_on:
       postgres:
         condition: service_healthy
@@ -372,8 +379,8 @@ services:
       dockerfile: apps/web/Dockerfile
     environment:
       LOOM_ENV: dev
-      DATABASE_URL: postgresql://loom:loom@postgres:5432/loom_platform
-      LOOM_DATABASE_URL: postgresql://loom:loom@postgres:5432/loom_platform
+      DATABASE_URL: *app-database-url
+      LOOM_DATABASE_URL: *app-database-url
       LOOM_REDIS_URL: redis://redis:6379/0
       LOOM_MODELS_YAML: /loom-config/models.yaml
       AUTH_SECRET: ${AUTH_SECRET:-loom-dev-auth-secret-not-for-production}

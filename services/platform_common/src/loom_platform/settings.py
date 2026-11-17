@@ -5,7 +5,9 @@ Unset fields take the defaults below, which are the local docker-compose values.
 
 `LOOM_ENV` is `dev` or `prod`; unset means `prod`. docker-compose sets `dev`. Outside dev
 a service refuses to start (`enforce_environment`) while any setting is still a dev
-default or a secret it needs is missing (`production_problems`, extended per service).
+default or a secret it needs is missing (`production_problems`, extended per service),
+or while its database role could switch off the ledger's guards
+(`database_role_problems`: a superuser, or the owner of tables in the schema).
 """
 
 from __future__ import annotations
@@ -20,7 +22,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PositiveInt = Annotated[int, Field(gt=0)]
 LoomEnv = Literal["dev", "prod"]
-DEV_DATABASE_PASSWORD = "loom"  # docker-compose's postgres password
+DEV_DATABASE_PASSWORD = "loom"  # docker-compose's postgres (owner) password
+# docker-compose's password for the runtime login (loom_app, LOOM_APP_DATABASE_PASSWORD).
+DEV_APP_DATABASE_PASSWORD = "loom-app-dev"
+DEV_DATABASE_PASSWORDS = (DEV_DATABASE_PASSWORD, DEV_APP_DATABASE_PASSWORD)
 
 
 class PlatformSettings(BaseSettings):
@@ -84,7 +89,7 @@ class PlatformSettings(BaseSettings):
             return []
         problems = []
         url = urllib.parse.urlsplit(self.database_url)
-        if url.password is None or url.password == DEV_DATABASE_PASSWORD:
+        if url.password is None or urllib.parse.unquote(url.password) in DEV_DATABASE_PASSWORDS:
             problems.append("LOOM_DATABASE_URL has no password or the docker-compose one")
         rurl = urllib.parse.urlsplit(self.redis_url)
         if not rurl.password:
@@ -94,12 +99,63 @@ class PlatformSettings(BaseSettings):
         return problems
 
 
+def database_role_problems(database_url: str, *, timeout_s: int = 5) -> list[str]:
+    """Outside dev, at start, over the service's own connection: its role must not be a
+    superuser and must own no table in the schema (directly or through a role it is a
+    member of). Either could disable, drop or replace the ledger's append-only and
+    zero-sum triggers (contracts §3); services run as the runtime role (`loom_app`).
+    A database that cannot be reached is a problem too: the role is unchecked."""
+    import psycopg
+
+    from loom_platform.db import libpq_url
+
+    try:
+        with psycopg.connect(libpq_url(database_url), connect_timeout=timeout_s) as conn:
+            row = conn.execute(
+                "SELECT current_user, r.rolsuper, ARRAY(SELECT c.relname::text "
+                "  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "  WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') "
+                "  AND pg_has_role(c.relowner, 'MEMBER') ORDER BY 1) "
+                "FROM pg_roles r WHERE r.rolname = current_user"
+            ).fetchone()
+    except (psycopg.Error, ValueError) as e:
+        first = str(e).strip().splitlines()[0] if str(e).strip() else ""
+        return [f"cannot check LOOM_DATABASE_URL's database role: {type(e).__name__}: {first}"]
+    if row is None:  # current_user always has a pg_roles row
+        return ["cannot check LOOM_DATABASE_URL's database role: not in pg_roles"]
+    user, superuser, owned = row
+    problems = []
+    if superuser:
+        problems.append(
+            f"LOOM_DATABASE_URL's database role {user} is a superuser: services run as the "
+            "runtime role (loom_app), which cannot switch off the ledger's guards"
+        )
+    if owned:
+        names = ", ".join(owned[:5]) + (", ..." if len(owned) > 5 else "")
+        tables = f"{len(owned)} table{'' if len(owned) == 1 else 's'}"
+        problems.append(
+            f"LOOM_DATABASE_URL's database role {user} owns {tables} in schema public "
+            f"({names}): services run as the runtime role, not the migration owner"
+        )
+    return problems
+
+
 def enforce_environment(
-    settings: PlatformSettings, service: str, problems: list[str] | None = None
+    settings: PlatformSettings,
+    service: str,
+    problems: list[str] | None = None,
+    *,
+    check_database_role: bool = True,
 ) -> None:
     """Exit (status 2) listing every problem when `settings` may not run in this LOOM_ENV
-    (`problems` defaults to `settings.production_problems()`)."""
-    problems = settings.production_problems() if problems is None else problems
+    (`problems` defaults to `settings.production_problems()`). Outside dev the
+    database role is checked too (`database_role_problems`, connecting with
+    `settings.database_url`), even when other problems already refuse the start, so the
+    message lists them all; `check_database_role=False` for a process that never
+    connects to Postgres."""
+    problems = list(settings.production_problems() if problems is None else problems)
+    if settings.env != "dev" and check_database_role:
+        problems += database_role_problems(settings.database_url)
     if problems:
         lines = "\n".join(f"  - {p}" for p in problems)
         print(

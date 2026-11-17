@@ -9,20 +9,26 @@ Postgres:
    never touched here.
 2. **Drift check** on `usage`, race-free:
    a. in one MULTI: read every org's Redis `usage` (U1) and the stream's last id (L);
-   b. check the consumer group has delivered and acked everything up to L (else the
-      check is skipped this minute: billing is behind, not wrong);
+   b. check the consumer group has delivered and acked everything up to L, polling for
+      up to `drain_wait_s` (`LOOM_RECONCILE_DRAIN_WAIT_S`, 2 s) while it has not;
    c. read `loom_org_usage_total` (P) from Postgres, after (b);
    d. read Redis `usage` again (U2).
    Settle bumps `usage` and appends the event in one atomic call, and the consumer acks
-   only after its commit, so a healthy system has U1 <= P <= U2. P < U1 means events
-   counted in Redis never reached Postgres (lost or dead-lettered); P > U2 means Redis
+   only after its commit, so a healthy system has U1 <= P <= U2. P > U2 means Redis
    lost usage (e.g. AOF loss, or an org loaded while its events were still in the
-   stream). Either is logged with the org id and counted in metrics. `redis_behind`
-   is also healed: the missing amount is added back with INCRBY (an under-counted
-   `usage` would let the org spend past its balance); `missing_in_postgres` is left
-   alone (it only makes the balance look lower). When the check is skipped because the
-   stream's consumer group is gone (Redis lost its data), that is logged at error and
-   counted (`usage_group_missing_total`); the consumer recreates the group.
+   stream): `redis_behind`. P <= U2 holds whether or not the stream is drained, so this
+   direction is checked, and healed, every run. P < U1 means events counted in Redis
+   never reached Postgres (lost or dead-lettered): `missing_in_postgres`, checked only
+   when (b) found the group consumed through L (else billing is behind, not wrong, and
+   the direction is skipped this minute). Either is logged with the org id and counted
+   in metrics. The `redis_behind` heal is one atomic Lua call: add the missing amount
+   (P - U2) only while the org is loaded and its `usage` is still below P. A correct
+   heal leaves `usage >= P`, so a second reconciler that saw the same drift (another
+   worker, or an overlapping run) finds nothing to do, and settles made since U2 stay
+   counted. `missing_in_postgres` is left alone (it only makes the balance look
+   lower). When the check is skipped because the stream's consumer group is gone
+   (Redis lost its data), that is logged at error and counted
+   (`usage_group_missing_total`); the consumer recreates the group.
 3. **Notifications**: balance = credit - U2 feeds the low-balance check and the
    auto-recharge hook (`loom_billing.notify`).
 
@@ -58,12 +64,21 @@ log = logging.getLogger("loom_billing.reconcile")
 
 CHUNK = 500
 
+# KEYS[1] the org's usage; ARGV[1] P (the Postgres total the run read), ARGV[2] the
+# missing amount (P - U2). Returns false when the org is not loaded, else
+# {1 if healed now else 0, usage after}.
 _HEAL_LUA = """
-if redis.call('EXISTS', KEYS[1]) == 1 then
-  return redis.call('INCRBY', KEYS[1], ARGV[1])
+local usage = redis.call('GET', KEYS[1])
+if not usage then
+  return false
 end
-return false
+if tonumber(usage) < tonumber(ARGV[1]) then
+  return {1, redis.call('INCRBY', KEYS[1], ARGV[2])}
+end
+return {0, tonumber(usage)}
 """
+# How often (b) asks again whether the group has caught up, while it waits.
+DRAIN_POLL_S = 0.05
 
 
 @dataclass(frozen=True)
@@ -108,6 +123,7 @@ class Reconciler:
         group: str,
         notifier: Notifier | None = None,
         recharge: AutoRecharge | None = None,
+        drain_wait_s: float = 2.0,
     ) -> None:
         self.pool = pool
         self.redis = redis
@@ -116,6 +132,7 @@ class Reconciler:
         self.group = group
         self.notifier = notifier
         self.recharge = recharge
+        self.drain_wait_s = drain_wait_s
 
     async def run(self, org_ids: Sequence[uuid.UUID] | None = None) -> ReconcileRun:
         """Reconcile `org_ids` (default: every org loaded in Redis)."""
@@ -129,11 +146,28 @@ class Reconciler:
             for d in run.drifts:
                 micros[d.direction] += d.micros
                 missing += 1
+            if run.orgs:  # redis_behind is checked every run
+                metrics.DRIFT_MICROS.labels("redis_behind").set(micros["redis_behind"])
             if run.drift_checked or run.drifts:
                 metrics.DRIFT_ORGS.set(missing)
-                for direction, v in micros.items():
-                    metrics.DRIFT_MICROS.labels(direction).set(v)
+            if run.drift_checked:
+                metrics.DRIFT_MICROS.labels("missing_in_postgres").set(
+                    micros["missing_in_postgres"]
+                )
         return run
+
+    async def _wait_consumed(self, last: StreamId | None) -> bool:
+        """(b): whether the group consumed everything up to `last`, asking again every
+        DRAIN_POLL_S for up to `drain_wait_s` while it has not."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.drain_wait_s
+        while True:
+            if await consumed_through(self.redis, self.stream, self.group, last):
+                return True
+            left = deadline - loop.time()
+            if left <= 0:
+                return False
+            await asyncio.sleep(min(DRAIN_POLL_S, left))
 
     async def _chunk(self, ids: list[uuid.UUID], run: ReconcileRun) -> None:
         async with self.pool.connection() as conn:
@@ -157,8 +191,8 @@ class Reconciler:
             res = await pipe.execute()
             u1 = [None if v is None else int(v) for v in res[:-1]]
             last: StreamId | None = parse_id(res[-1][0][0]) if res[-1] else None
-            # (b) everything up to `last` consumed and committed?
-            drained = await consumed_through(self.redis, self.stream, self.group, last)
+            # (b) everything up to `last` consumed and committed (waiting a little)?
+            drained = await self._wait_consumed(last)
             # (c) Postgres, one snapshot.
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -193,9 +227,10 @@ class Reconciler:
                     metrics.RECONCILE_ORGS.inc()
                 if drained and before is not None and pg_usage < before:
                     self._drift(run, o, "missing_in_postgres", before - pg_usage, before, pg_usage)
-                if drained and after is not None and pg_usage > after:
+                # P <= U2 holds whether or not the stream is drained: checked every run.
+                if after is not None and pg_usage > after:
                     self._drift(run, o, "redis_behind", pg_usage - after, after, pg_usage)
-                    after = await self._heal(o, pg_usage - after)
+                    after = await self._heal(o, pg_usage, pg_usage - after)
                 if after is None:
                     continue
                 balance = credit - after
@@ -206,18 +241,32 @@ class Reconciler:
                         run.notifications += 1
                     await conn.commit()
 
-    async def _heal(self, org: uuid.UUID, missing: int) -> int | None:
+    async def _heal(self, org: uuid.UUID, pg_usage: int, missing: int) -> int | None:
         """Add usage Redis lost back to its counter (an org reloaded from Postgres
         before billing stored events settled while it was not loaded, or Redis lost
         writes): an under-counted `usage` would let the org spend past its balance.
-        INCRBY, not SET, so settles since U2 stay counted; only while the org is
-        loaded (a lone usage key would block init_org). Returns the new usage."""
-        res = await self.redis.eval(_HEAL_LUA, 1, org_key(org, "usage"), missing)  # type: ignore[misc]
+
+        One atomic call: INCRBY `missing` only while `usage` is still below `pg_usage`
+        (P), so settles since U2 stay counted and a reconciler racing this one (which
+        saw the same drift) heals it once in total. Only while the org is loaded (a
+        lone usage key would block init_org). Returns the usage after."""
+        res = await self.redis.eval(  # type: ignore[misc]
+            _HEAL_LUA, 1, org_key(org, "usage"), pg_usage, missing
+        )
         if res is None:
             return None
-        metrics.DRIFT_HEALED_MICROS.inc(missing)
-        log.warning("reconcile.usage_healed", extra=fields(org_id=str(org), added_micros=missing))
-        return int(res)
+        healed, usage = int(res[0]), int(res[1])
+        if healed:
+            metrics.DRIFT_HEALED_MICROS.inc(missing)
+            log.warning(
+                "reconcile.usage_healed", extra=fields(org_id=str(org), added_micros=missing)
+            )
+        else:
+            log.info(
+                "reconcile.usage_heal_not_needed",
+                extra=fields(org_id=str(org), usage_micros=usage, postgres_usage_micros=pg_usage),
+            )
+        return usage
 
     def _drift(
         self, run: ReconcileRun, org: uuid.UUID, direction: str, micros: int, r: int, p: int

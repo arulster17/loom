@@ -49,7 +49,7 @@ compose servers are down, and fail when the variable is set. Factories:
 |---|---|---|
 | postgres | 5432 | Platform database `loom_platform` (the bench keeps `loom`) |
 | redis | 6379 | AOF `everysec`, `maxmemory-policy noeviction` (already in `docker-compose.yml`) |
-| migrate | none | One-shot: `loom-migrate --create-database`; others start after it succeeds |
+| migrate | none | One-shot: `loom-migrate --create-database` as the owner `loom`, which also creates or updates the runtime login `loom_app` (§3 "Roles"); others start after it succeeds |
 | gateway | 8080 | Public API at `http://localhost:8080/v1`; Prometheus `/metrics` on 9100 |
 | billing | 8090 | `POST /stripe/webhook`, `POST /internal/checkout-sessions` (§7), `GET /health`; Prometheus `/metrics` on 9101 |
 | web | 3000 | Next.js |
@@ -70,12 +70,15 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 
 | Variable | Default | Used by |
 |---|---|---|
-| `LOOM_ENV` | unset = `prod`; compose: `dev` | all services: `dev` or `prod` (anything else refuses to start). Outside dev a service refuses to start on a missing secret or a compose dev default: gateway and billing (a `LOOM_REDIS_URL` without a password or not `rediss://`; Redis `maxmemory-policy` other than `noeviction` when `CONFIG GET` is permitted, a warning when it is not), gateway (DB password, `LOOM_SETTLE_SPOOL_PATH`, `LOOM_POD_CA_CERT`, client certificate, `LOOM_CORS_ORIGINS`; and it never uses an `http://` replica), billing (DB password, `LOOM_STRIPE_MODE=stub`, internal token missing or the compose value), web (`AUTH_SECRET` missing or the compose value, `AUTH_URL` missing, internal token missing or the compose value) |
-| `LOOM_DATABASE_URL` | `postgresql://loom:loom@localhost:5432/loom_platform` | all (web: as `DATABASE_URL`) |
+| `LOOM_ENV` | unset = `prod`; compose: `dev` | all services: `dev` or `prod` (anything else refuses to start). Outside dev a service refuses to start on a missing secret or a compose dev default: gateway and billing (a `LOOM_REDIS_URL` without a password or not `rediss://`; Redis `maxmemory-policy` other than `noeviction` when `CONFIG GET` is permitted, a warning when it is not), gateway (DB password, `LOOM_SETTLE_SPOOL_PATH`, `LOOM_POD_CA_CERT`, client certificate, `LOOM_CORS_ORIGINS`; and it never uses an `http://` replica), billing (DB password, `LOOM_STRIPE_MODE=stub`, internal token missing or the compose value), web (`AUTH_SECRET` missing or the compose value, `AUTH_URL` missing, internal token missing or the compose value). "DB password" means none, or either compose one (the owner's `loom` or the runtime login's `loom-app-dev`). Every Python service (gateway, billing, pool manager) also checks at start, over its own connection with `LOOM_DATABASE_URL`, that its role is not a superuser and owns no table in schema `public` (directly or through a role it is a member of), and refuses otherwise (§3 "Roles"); an unreachable database is refused too (the role is unchecked). All problems are listed together in one exit-2 message |
+| `LOOM_DATABASE_URL` | `postgresql://loom:loom@localhost:5432/loom_platform`; compose: `postgresql://loom_app:loom-app-dev@postgres:5432/loom_platform` for every service, the owner `loom` for `migrate` | all (web: as `DATABASE_URL`). Services connect as the runtime login, `loom-migrate` as the owner (§3 "Roles") |
+| `LOOM_APP_DATABASE_PASSWORD` | unset; compose (`migrate` only): `loom-app-dev` | `loom-migrate`: when set, creates or updates the runtime login with this password (`LOGIN`, member of the group role). Unset: the login is left as it is. `loom-migrate` accepts the compose value; a service whose `LOOM_DATABASE_URL` uses it refuses to start outside dev |
+| `LOOM_APP_DATABASE_USER` / `LOOM_APP_DATABASE_GROUP` | `loom_app` / `loom_runtime` | `loom-migrate`: the runtime login's name and its `NOLOGIN` group role's (roles are server-wide: two stacks sharing one Postgres server can use different names) |
 | `LOOM_REDIS_URL` | `redis://localhost:6379/0` | gateway, billing, pool manager, poolsim, web (model status fallback; sign-in rate limit) |
 | `LOOM_MODELS_YAML` | repo `config/models.yaml` | gateway, billing |
 | `LOOM_SERVING_YAML` | repo `config/serving.yaml`; gateway image and compose: that file | gateway (cold-start estimates, §10; a missing file gives every model 300 s, a present but invalid one stops it at start), pool manager (M2). Loaded by `loom_platform.serving.load_serving` |
 | `LOOM_USAGE_STREAM` | `loom:usage` | gateway, billing (the pool manager no longer reads it: billing trims each event as soon as it stores it, §10) |
+| `LOOM_RECONCILE_DRAIN_WAIT_S` | 2 | billing: how long reconcile waits for the consumer group to consume through the snapshot's last stream id before skipping the `missing_in_postgres` check for that minute (§7 "Reconcile"; `redis_behind` is checked every run) |
 | `LOOM_AUTH_CACHE_TTL_S` | 4 | gateway |
 | `LOOM_REQUEST_TIMEOUT_S` / `LOOM_RESERVATION_GRACE_S` | 600 / 60 | gateway (reservation TTL = their sum) |
 | `LOOM_SETTLE_REPLAY_WINDOW_S` | 3600 | gateway: the `done:` marker lives the reservation TTL plus this; a spooled settle replayed within it is refused as a repeat by the marker (§6 "Settle spool") |
@@ -143,11 +146,16 @@ Every table of the accepted PLAN.md draft exists as drafted, with these addition
 
 Invariants enforced in the database:
 
+These hold for the runtime role (§3 "Roles"). The owner, and any superuser, can still
+disable, drop or replace the triggers that enforce them, so only migrations run as the
+owner and no service does (each checks its role at start outside dev).
+
 - **Zero-sum**: a deferred constraint trigger checks at commit that each transaction's
   entries sum to 0 and that it has at least 2; entries are non-zero.
 - **Append-only**: `UPDATE`, `DELETE` and `TRUNCATE` on `ledger_entries`,
-  `ledger_transactions` and `admin_audit_log` raise `insufficient_privilege` for every
-  role (only a superuser can disable the triggers).
+  `ledger_transactions` and `admin_audit_log` raise `insufficient_privilege`: the
+  runtime role is not granted them, and triggers refuse them for any other role while
+  the triggers are enabled.
 - **Idempotency**: `ledger_transactions.idempotency_key` is unique.
 - **Tenant scope**: `loom_post_transaction` refuses an org account that is not the
   transaction's org.
@@ -179,8 +187,9 @@ indexes; results are identical. Dashboard balance = `credit_total - usage_total`
 
 `usage_events` is partitioned by month (UTC). Migration 0004 creates last month through
 12 months ahead; the billing worker calls `loom_ensure_usage_partitions(current_date, 3)`
-at start and daily. There is no default partition: an insert outside every partition
-fails and the event stays pending in the stream.
+at start and daily (as the runtime role; the function runs with the owner's rights, and
+the partitions it creates belong to the owner). There is no default partition: an
+insert outside every partition fails and the event stays pending in the stream.
 
 NOTIFY channels (delivered on commit):
 
@@ -191,6 +200,50 @@ NOTIFY channels (delivered on commit):
 
 Row-level security is not enabled yet: isolation is org-scoped queries plus the
 cross-tenant tests M1 requires.
+
+### Roles
+
+Two Postgres roles (migration 0011, plan R8):
+
+- the **owner** runs `loom-migrate` and owns every object (compose: `loom`, the server's
+  superuser). Only migrations run as the owner;
+- the **runtime** login `loom_app` (`LOOM_APP_DATABASE_USER`), which every service uses
+  (gateway, billing, pool manager, web). It is not a superuser, owns nothing, cannot
+  create objects in the schema, and holds its privileges only through membership of the
+  `NOLOGIN` group role `loom_runtime` (`LOOM_APP_DATABASE_GROUP`).
+
+`loom-migrate` creates the group role if missing before applying any migration (the
+Python seam: `loom_platform.migrate.upgrade(url, group_role=...)`) and passes its name to
+the migrations in the session setting `loom.runtime_role`; with
+`LOOM_APP_DATABASE_PASSWORD` set it then creates or updates the login
+(`ensure_app_login(url, login=, group_role=, password=)`). Roles belong to the whole
+server: both are safe to run at the same time against many databases (a concurrent
+`CREATE ROLE` or membership grant failing with `duplicate_object` or `unique_violation`
+means "already exists").
+
+The group role's privileges:
+
+| Objects | Granted |
+|---|---|
+| `ledger_entries`, `ledger_transactions`, `admin_audit_log` | `SELECT`, `INSERT` only |
+| `ledger_accounts`, `org_members`, `serving_spend_alerts` | `SELECT`, `INSERT` |
+| `users`, `accounts`, `sessions`, `verification_token` (Auth.js) | `SELECT`, `INSERT`, `UPDATE`, `DELETE` |
+| `orgs`, `api_keys`, `auto_recharge`, `usage_events`, `usage_posted_org`, `usage_posted_key`, `stripe_events`, `stripe_payments`, `serving_pods` | `SELECT`, `INSERT`, `UPDATE` |
+| every function | `EXECUTE` |
+| every sequence | `USAGE` |
+| schema `public` | `USAGE` (`CREATE` is revoked from `PUBLIC`) |
+
+`schema_migrations` gets no grant; `usage_events` partitions are reached through their
+parent. **A migration that adds a table must grant on it to the group role** (through
+`format('... TO %I', current_setting('loom.runtime_role'))`, see 0011); a test checks
+that every table has an explicit grant. The one object services create at run time,
+the monthly `usage_events` partition, is made by `loom_ensure_usage_partitions`, which
+runs with the owner's rights (`SECURITY DEFINER`, `search_path = public, pg_temp`; no
+`EXECUTE` for `PUBLIC`).
+
+Outside `LOOM_ENV=dev` a service refuses to start (exit 2) when its own connection's
+role is a superuser or owns a table in `public`, or when `LOOM_DATABASE_URL` uses a
+compose dev password (§2).
 
 ## 4. Signups, approval, admins
 
@@ -500,7 +553,12 @@ Stream `loom:usage`, consumer group `billing`, one consumer per billing process
 The billing worker reads with `XREADGROUP`, validates (`UsageEvent.from_stream_fields`),
 inserts with `insert_usage_events` and commits, then `XACK`s; it trims with `XTRIM MINID`
 below the oldest pending entry. A malformed entry goes to a dead-letter stream
-`loom:usage:dead` and alerts; it is never silently dropped.
+`loom:usage:dead` and alerts; it is never silently dropped. Entries are decoded one by
+one in the consumer's `process`, so an entry with a field name or value that is not
+valid UTF-8 is malformed like any other: copied to the dead-letter stream with its
+fields as read (the bad bytes kept) and `dead_reason`, then acked, and the entries after
+it are consumed as usual (it never fails a whole read, whether read new, recovered
+from this consumer's own pending list or claimed from a crashed peer).
 
 Because settle appends in the same atomic call that bumps `usage`, the stream is in
 settle order and, for each org, `org_usage_total_micros` of the last event inserted equals
@@ -515,9 +573,19 @@ back both; a racing second worker hits the idempotency key.
 
 **Reconcile** (billing, every minute): for each org loaded in Redis
 (`SCAN loom:org:*:credit`), `set_credit(org, credit total, version)`; also on every
-`loom_credit_changed` notification. Its drift check (`services/billing/README.md`) adds
-usage Redis is missing (`redis_behind`) back to `usage` with INCRBY (§6 "Redis data
-loss").
+`loom_credit_changed` notification. Its drift check (`services/billing/README.md`)
+compares Redis `usage` with the Postgres total P read after the stream snapshot:
+
+- `redis_behind` (P above Redis `usage` read after P) is checked every run, whether or
+  not the stream is drained (P <= that usage holds regardless), and healed in one
+  atomic Lua call: add the missing amount only while the org is loaded and its Redis
+  `usage` is still below P. A correct heal leaves `usage >= P`, so reconcilers racing
+  each other (several workers, or overlapping runs) heal a drift once in total, and
+  settles made meanwhile stay counted (§6 "Redis data loss");
+- `missing_in_postgres` (P below Redis `usage` read at the snapshot) needs the consumer
+  group to have consumed through the snapshot's last id: reconcile polls for up to
+  `LOOM_RECONCILE_DRAIN_WAIT_S` (2 s), and skips this direction for the minute when it
+  has not caught up (billing is behind, not wrong). It is reported, never rewritten.
 
 **Notifications outbox** *(wave 2, billing)*: stream `loom:notify`
 (`LOOM_NOTIFY_STREAM`), flat string entries `type`, `org_id`, `balance_micros`,

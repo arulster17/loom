@@ -82,7 +82,13 @@ def main(argv: list[str] | None = None) -> int:
     problems = settings.production_problems(serves_api=args.command in ("all", "api"))
     if settings.env != "dev" and args.command != "stripe-stub":
         problems += redis_policy_problems(settings.redis_url)
-    enforce_environment(settings, f"loom-billing {args.command}", problems)
+    # The stub never connects to Postgres: no database role to check.
+    enforce_environment(
+        settings,
+        f"loom-billing {args.command}",
+        problems,
+        check_database_role=args.command != "stripe-stub",
+    )
 
     if args.command == "stripe-stub":
         if settings.stripe_mode != "stub":
