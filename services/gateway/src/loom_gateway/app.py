@@ -19,6 +19,7 @@ import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import psycopg
@@ -26,6 +27,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg_pool import AsyncConnectionPool
 from redis.asyncio import BlockingConnectionPool, Redis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import RedisError
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -74,7 +77,8 @@ def _unsent(error: BaseException) -> bool:
     have been reserved: waiting for a pool connection timed out, or connecting failed
     (refused, or the connect timeout). Read from the exception's type and message, which
     are redis-py's own; anything else, including a failure while writing, is possibly
-    sent."""
+    sent. This is sound only because the gateway's pool connections retry 0 times (see
+    `Gateway.start`); a retried send could be reported as a connecting failure."""
     if not isinstance(error, RedisConnectionError | RedisTimeoutError):
         return False
     msg = str(error)
@@ -122,6 +126,11 @@ class Gateway:
 
     async def start(self) -> None:
         s = self.settings
+        # `_unsent` needs 0 retries: pass `retry` explicitly (not a URL option, so the URL
+        # cannot override it; a `retry_on_timeout` URL option only adds error types to a
+        # copy of it, and the retry count stays 0).
+        if "retry_on_timeout" in parse_qs(urlsplit(s.redis_url).query):
+            log.warning("LOOM_REDIS_URL sets retry_on_timeout; the gateway ignores it (0 retries)")
         # Blocking: the default pool raises MaxConnectionsError under bursts.
         self.redis = Redis(
             connection_pool=BlockingConnectionPool.from_url(
@@ -130,6 +139,7 @@ class Gateway:
                 timeout=5,
                 socket_timeout=s.redis_socket_timeout_s,
                 socket_connect_timeout=s.redis_connect_timeout_s,
+                retry=Retry(NoBackoff(), 0),
             )
         )
         self.pg: AsyncConnectionPool = await open_pool(
