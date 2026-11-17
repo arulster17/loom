@@ -14,8 +14,8 @@ Postgres:
       wait happens at most once per run (the run's chunks of orgs share it), and not at
       all when the group is missing (it cannot catch up within the wait);
    c. read `loom_org_usage_total` (P) from Postgres, after (b);
-   d. in one MGET: read Redis `usage` again (U2) and each org's heal generation (G,
-      `loom:org:<org>:heal_gen`, absent = 0).
+   d. in one MGET: read Redis `usage` again (U2) and each org's heal token (T,
+      `loom:org:<org>:heal_token`; absent is a value like any other).
    Settle bumps `usage` and appends the event in one atomic call, and the consumer acks
    only after its commit, so a healthy system has U1 <= P <= U2. P > U2 means Redis
    lost usage (e.g. AOF loss, or an org loaded while its events were still in the
@@ -24,17 +24,18 @@ Postgres:
    never reached Postgres (lost or dead-lettered): `missing_in_postgres`, checked only
    when (b) found the group consumed through L (else billing is behind, not wrong, and
    the direction is skipped this minute). Either is logged with the org id and counted
-   in metrics. The `redis_behind` heal is one atomic Lua call: if the org is loaded,
-   its heal generation is still G and its `usage` is still below P, add the missing
-   amount (P - U2) and bump the generation; otherwise do nothing. Reconcilers that saw
-   the same drift (several workers, or overlapping runs) read the same G, so only the
+   in metrics. The `redis_behind` heal is one atomic Lua call: if the org is loaded
+   and its heal token is still T, add the missing amount (P - U2) and set a fresh token
+   (a UUID made here, passed to the script); otherwise do nothing. Reconcilers that saw
+   the same drift (several workers, or overlapping runs) read the same T, so only the
    first heal applies, even when they read different P; the others leave it to the
-   next run, which reads afresh. `usage < P` covers a reload from Postgres since the
-   snapshot (it resets an absent generation to 0, and already counts the missing
-   amount). Settles made since U2 stay counted (INCRBY). `missing_in_postgres` is left
-   alone (it only makes the balance look lower). When the check is skipped because the
-   stream's consumer group is gone (Redis lost its data), that is logged at error and
-   counted (`usage_group_missing_total`); the consumer recreates the group.
+   next run, which reads afresh. Every load of the org from Postgres (`init_org.lua`)
+   writes a fresh token too, so a heal read before a reload does nothing. Settles made
+   since U2 stay counted (INCRBY), and a busy org (more settled between U2 and the
+   heal than was missing) still heals. `missing_in_postgres` is left alone (it only
+   makes the balance look lower). When the check is skipped because the stream's
+   consumer group is gone (Redis lost its data), that is logged at error and counted
+   (`usage_group_missing_total`); the consumer recreates the group.
 3. **Notifications**: balance = credit - U2 feeds the low-balance check and the
    auto-recharge hook (`loom_billing.notify`).
 
@@ -64,32 +65,28 @@ from loom_billing.notify import AutoRecharge, Notifier
 from loom_billing.streams import StreamId, consumed_through, group_state, parse_id, s
 from loom_platform.db import libpq_url
 from loom_platform.ledger import org_credit_state
-from loom_platform.limiter import KEY_ROOT, Limiter, org_key
+from loom_platform.limiter import HEAL_TOKEN, KEY_ROOT, Limiter, new_heal_token, org_key
 
 log = logging.getLogger("loom_billing.reconcile")
 
 CHUNK = 500
 
-# KEYS[1] the org's usage, KEYS[2] its heal generation; ARGV[1] the generation read
-# with U2, ARGV[2] the missing amount (P - U2), ARGV[3] P. Returns false when the org is
-# not loaded, else {1 if healed now else 0, usage after}. Both guards are needed: the
-# generation alone lets a heal run after a reload from Postgres reset it (absent = 0),
-# and `usage < P` alone lets reconcilers that read different P both heal.
+# KEYS[1] the org's usage, KEYS[2] its heal token; ARGV[1] the token read with U2 (''
+# when absent: a token is never empty), ARGV[2] the missing amount (P - U2), ARGV[3] a
+# fresh token. Returns false when the org is not loaded, else {1 if healed now else 0,
+# usage after}. The token alone decides: it changes with every heal and every load of
+# the org, so of the heals that read it only the first applies, and none after a reload.
 _HEAL_LUA = """
 local usage = redis.call('GET', KEYS[1])
 if not usage then
   return false
 end
-if tonumber(redis.call('GET', KEYS[2]) or '0') ~= tonumber(ARGV[1]) then
+if (redis.call('GET', KEYS[2]) or '') ~= ARGV[1] then
   return {0, tonumber(usage)}
 end
-if tonumber(usage) >= tonumber(ARGV[3]) then
-  return {0, tonumber(usage)}
-end
-redis.call('INCR', KEYS[2])
+redis.call('SET', KEYS[2], ARGV[3])
 return {1, redis.call('INCRBY', KEYS[1], ARGV[2])}
 """
-HEAL_GENERATION = "heal_gen"  # org_key(org, HEAL_GENERATION): bumped by each heal
 # How often (b) asks again whether the group has caught up, while it waits.
 DRAIN_POLL_S = 0.05
 
@@ -235,12 +232,12 @@ class Reconciler:
                 )
                 pg = {r[0]: (int(r[1]), int(r[2]), int(r[3])) for r in await cur.fetchall()}
             await conn.commit()
-            # (d) U2 and the heal generations, atomically (one MGET).
+            # (d) U2 and the heal tokens, atomically (one MGET).
             raw = await self.redis.mget(
-                [org_key(o, "usage") for o in orgs] + [org_key(o, HEAL_GENERATION) for o in orgs]
+                [org_key(o, "usage") for o in orgs] + [org_key(o, HEAL_TOKEN) for o in orgs]
             )
             u2 = [None if v is None else int(v) for v in raw[: len(orgs)]]
-            gens = [0 if v is None else int(v) for v in raw[len(orgs) :]]
+            tokens: list[bytes | str] = [b"" if v is None else v for v in raw[len(orgs) :]]
 
             if drained:
                 run.drift_checked = True
@@ -255,7 +252,7 @@ class Reconciler:
                         extra=fields(stream=self.stream, group=self.group),
                     )
 
-            for o, before, after, gen in zip(orgs, u1, u2, gens, strict=True):
+            for o, before, after, token in zip(orgs, u1, u2, tokens, strict=True):
                 credit, pg_usage, version = pg[o]
                 if await self.limiter.set_credit(o, credit, version):
                     run.credits_set += 1
@@ -265,7 +262,7 @@ class Reconciler:
                 # P <= U2 holds whether or not the stream is drained: checked every run.
                 if after is not None and pg_usage > after:
                     self._drift(run, o, "redis_behind", pg_usage - after, after, pg_usage)
-                    after = await self._heal(o, gen, pg_usage - after, pg_usage)
+                    after = await self._heal(o, token, pg_usage - after)
                 if after is None:
                     continue
                 balance = credit - after
@@ -276,28 +273,26 @@ class Reconciler:
                         run.notifications += 1
                     await conn.commit()
 
-    async def _heal(
-        self, org: uuid.UUID, generation: int, missing: int, postgres_usage: int
-    ) -> int | None:
+    async def _heal(self, org: uuid.UUID, token: bytes | str, missing: int) -> int | None:
         """Add usage Redis lost back to its counter (an org reloaded from Postgres
         before billing stored events settled while it was not loaded, or Redis lost
         writes): an under-counted `usage` would let the org spend past its balance.
 
-        One atomic call: INCRBY `missing` (P - U2) and bump the heal generation, only
-        while the generation is still `generation` (read with U2) and `usage` is still
-        below `postgres_usage` (P). Settles since U2 stay counted, and of the
-        reconcilers that saw the same drift only the first heals (the others find the
-        generation moved on); an org reloaded from Postgres since the snapshot is not
-        healed again (its usage is already P or more). Only while the org is loaded (a
-        lone usage key would block init_org). Returns the usage after."""
+        One atomic call: INCRBY `missing` (P - U2) and set a fresh heal token, only
+        while the token is still `token` (read with U2; empty when absent). Settles
+        since U2 stay counted, however much settled meanwhile; of the reconcilers that
+        saw the same drift only the first heals (the others find the token changed);
+        an org reloaded from Postgres since the snapshot is not healed (the load wrote
+        a fresh token). Only while the org is loaded (a lone usage key would block
+        init_org). Returns the usage after."""
         res = await self.redis.eval(  # type: ignore[misc]
             _HEAL_LUA,
             2,
             org_key(org, "usage"),
-            org_key(org, HEAL_GENERATION),
-            generation,
+            org_key(org, HEAL_TOKEN),
+            token,
             missing,
-            postgres_usage,
+            new_heal_token(),
         )
         if res is None:
             return None
@@ -310,7 +305,7 @@ class Reconciler:
         else:
             log.info(
                 "reconcile.usage_heal_not_needed",
-                extra=fields(org_id=str(org), usage_micros=usage, heal_generation=generation),
+                extra=fields(org_id=str(org), usage_micros=usage),
             )
         return usage
 

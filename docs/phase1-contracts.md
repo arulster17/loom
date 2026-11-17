@@ -325,7 +325,7 @@ without also discarding the stream (both are one state).
 | `loom:org:<org>:credit` | int | init, billing | `loom_org_credit_total` |
 | `loom:org:<org>:credit_v` | int | init, billing | Its version, `loom_org_credit_version` (migration 0006): the org's count of non-usage ledger transactions, read in the same snapshot |
 | `loom:org:<org>:usage` | int | init, settle | Cumulative settled cost (all time) |
-| `loom:org:<org>:heal_gen` | int (absent = 0) | billing reconcile | Heal generation: bumped by each `redis_behind` heal, so reconcilers that saw the same drift heal it once (§7 "Reconcile") |
+| `loom:org:<org>:heal_token` | string (a UUID) | init, billing reconcile | Heal token: a random value made by the caller (never by a script), written fresh by every load of the org (`init_org.lua`) and by each `redis_behind` heal, so reconcilers that saw the same drift heal it once and none heals across a reload (§7 "Reconcile"). An org loaded before it existed has none; absent is a value like any other |
 | `loom:org:<org>:rsum` | int | reserve, settle | Sum of live reservations |
 | `loom:org:<org>:rsv` | hash | reserve, settle | request id -> `<max cost>|<key id>|<tpm estimate>` |
 | `loom:org:<org>:rsv:exp` | zset | reserve, settle | request id -> expiry (ms); its size is the org's in-flight count |
@@ -366,7 +366,8 @@ unposted `usage_events` to posted ledger entries, both of which are already insi
 Loading: `reserve` answers `noinit` when the org's `credit`/`usage` or the key's `usage`
 is missing. The gateway then calls `Limiter.load_from_postgres(conn, org_id, key_id)`
 (reads `loom_org_credit_total`, `loom_org_usage_total`, `loom_key_usage_total` in one
-snapshot; `init_org.lua` sets them only if absent) and retries once.
+snapshot; `init_org.lua` sets them only if absent, and when it initialises the org also
+writes a fresh heal token, a UUID the caller passes in) and retries once.
 
 ### Reserve and settle (one Lua call each)
 
@@ -494,7 +495,7 @@ What happens and how it heals (tested in `services/billing/tests/test_billing_re
 |---|---|---|
 | `loom:usage` and its group | The next settle's `XADD` recreates the stream without the group; `XREADGROUP` answers NOGROUP | The billing consumer recreates the group at id 0 and continues (`loom_billing_usage_group_recreated_total`, alert); reconcile logs `reconcile.usage_group_missing` until then |
 | Unconsumed stream entries | Those requests are never billed (under-charge) | Not recoverable; the bound in "Worst-case overshoot" (d) |
-| Org `credit`, `credit_v`, `usage`, key `usage` | Next `reserve` answers `noinit` | `load_from_postgres` (§6 "Loading") |
+| Org `credit`, `credit_v`, `usage`, `heal_token`, key `usage` | Next `reserve` answers `noinit` | `load_from_postgres` (§6 "Loading") |
 | Usage settled while the org was unloaded, then the org reloaded before billing stored it | Redis `usage` below Postgres (`redis_behind`) | Reconcile adds the difference back (INCRBY) within a minute |
 | Reservations, in-flight counts, token buckets | Limits briefly looser; settles without a reservation still charge | Nothing to do |
 | `done:` markers | A spooled settle replays normally (its original never landed) | Nothing to do |
@@ -601,17 +602,19 @@ compares Redis `usage` with the Postgres total P read after the stream snapshot:
 
 - `redis_behind` (P above Redis `usage` U2 read after P) is checked every run, whether
   or not the stream is drained (P <= U2 holds regardless). U2 is read together with the
-  org's heal generation (`loom:org:<org>:heal_gen`, §6) in one `MGET`. The heal is one
-  atomic Lua call: if the org is loaded, its generation is unchanged since that read,
-  **and** Redis `usage` is still below P, add the missing amount (P - U2) and bump the
-  generation; otherwise do nothing (another reconciler healed first, or Redis was
-  reloaded from Postgres meanwhile; the next run reads afresh). Reconcilers that saw
-  the same drift (several workers, or overlapping runs) therefore add the missing
-  amount at most once, even when they read different P, and settles made meanwhile stay
-  counted (§6 "Redis data loss"). Both guards are needed: `usage` < P alone lets two
-  reconcilers that read different P both heal, and the generation alone lets a heal run
-  after a reload from Postgres reset it (absent = 0: 900, reloaded to 1000, healed to
-  1100);
+  org's heal token (`loom:org:<org>:heal_token`, §6; absent is a value like any other)
+  in one `MGET`. The heal is one atomic Lua call: if the org is loaded and its token is
+  unchanged since that read, add the missing amount (P - U2) and set a fresh token;
+  otherwise do nothing (another reconciler healed first, or the org was reloaded from
+  Postgres meanwhile; the next run reads afresh). The token is a random UUID made by the
+  caller and passed to the script (no script depends on a clock or on Redis-side
+  randomness), and every load of the org (`init_org.lua`, so the gateway's `noinit` load
+  too) writes a fresh one. Reconcilers that saw the same drift (several workers, or
+  overlapping runs) therefore add the missing amount at most once, even when they read
+  different P or the org was reloaded in between, and settles made meanwhile stay
+  counted (§6 "Redis data loss"). There is no `usage` < P guard: a busy org heals at its
+  first run even when more than the missing amount settled between the read and the
+  heal (U2 = 900, P = 1000, 150 settled meanwhile: 1150, the true total);
 - `missing_in_postgres` (P below Redis `usage` read at the snapshot) needs the consumer
   group to have consumed through the snapshot's last id: reconcile polls for up to
   `LOOM_RECONCILE_DRAIN_WAIT_S` (2 s), at most once per run (its chunks of orgs share

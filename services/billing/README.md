@@ -35,22 +35,25 @@ and reconcile are safe to race.
 id; check the group has acked everything up to that id, asking again for up to
 `LOOM_RECONCILE_DRAIN_WAIT_S` (2 s) while it has not (at most one wait per run, shared by
 its chunks of orgs, and none when the group is missing); read Postgres usage (P); in one
-MGET read Redis `usage` again (U2) and each org's heal generation
-(`loom:org:<org>:heal_gen`, absent = 0). A healthy system has U1 <= P <= U2. `P > U2`
+MGET read Redis `usage` again (U2) and each org's heal token
+(`loom:org:<org>:heal_token`; absent is a value like any other). A healthy system has
+U1 <= P <= U2. `P > U2`
 (`redis_behind`) means Redis lost usage; it is checked every run, drained stream or not.
 `P < U1` (`missing_in_postgres`) means events were lost or dead-lettered; it is checked
 only when the group caught up within the wait (else skipped that minute: billing is
 behind, not wrong). Both are logged at error with the org id and counted
 (`loom_billing_usage_drift_detected_total{direction}`). `redis_behind` is healed, since
-an under-count would let the org overspend, by one Lua call that, if the org is loaded,
-its heal generation is unchanged since the MGET **and** Redis `usage` is still below P,
-adds P - U2 to Redis `usage` and bumps the generation, and otherwise does nothing
-(`loom_billing_usage_drift_healed_micros_total`). Reconcilers racing each other read the
-same generation, so only the first heal applies, even when they read different P (the
-`usage` < P guard alone let two of them both heal); an org reloaded from Postgres since
-the MGET already counts the missing amount, and its reset generation (absent = 0) would
-match again, so `usage` < P stops that heal. The next run reads afresh.
-`missing_in_postgres` is not rewritten.
+an under-count would let the org overspend, by one Lua call that, if the org is loaded
+and its heal token is unchanged since the MGET, adds P - U2 to Redis `usage` and sets a
+fresh token, and otherwise does nothing (`loom_billing_usage_drift_healed_micros_total`).
+The token is a random UUID made by the caller (the reconciler, or `Limiter.init_org`) and
+passed to the script, never made by a script. Reconcilers racing each other read the
+same token, so only the first heal applies, even when they read different P; every load
+of the org from Postgres (`init_org.lua`: the gateway's `noinit` load or any other)
+writes a fresh token, so a heal read before a reload does nothing. Settles made since
+the MGET stay counted, and a busy org heals at its first run however much settled
+between the MGET and the heal (U2 = 900, P = 1000, 150 settled meanwhile: 1150, the true
+total). The next run reads afresh. `missing_in_postgres` is not rewritten.
 
 **Redis data loss.** After a FLUSHALL or a failover without AOF the gateway's next
 settle recreates `loom:usage` without the consumer group. The consumer answers NOGROUP

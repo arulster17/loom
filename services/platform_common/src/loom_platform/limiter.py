@@ -36,6 +36,16 @@ UNLIMITED = -1
 # derives the deployed value from the settings; this is the default settings' value.
 SETTLE_REPLAY_WINDOW_S = 3600
 SETTLED_TTL_S = 600 + 60 + SETTLE_REPLAY_WINDOW_S
+# org_key(org, HEAL_TOKEN): a random value (a UUID made by the caller, never by a script)
+# written fresh by every load of the org (`init_org.lua`) and by each `redis_behind` heal
+# (billing reconcile). The only question asked of it is "did it change": a heal applies
+# only while the token is the one read with the usage it heals (contracts §6, §7).
+HEAL_TOKEN = "heal_token"
+
+
+def new_heal_token() -> str:
+    """A fresh heal token (`HEAL_TOKEN`)."""
+    return str(uuid.uuid4())
 
 
 def org_prefix(org_id: uuid.UUID | str) -> str:
@@ -196,9 +206,19 @@ class Limiter:
         key_usage_total: int,
         credit_version: int = 0,
     ) -> tuple[bool, bool]:
+        """Load the org's (and the key's) balance state unless present. Initialising
+        the org also writes a fresh heal token (`HEAL_TOKEN`), so a heal read before
+        this load does nothing."""
         res = await self._init(
             keys=[org_prefix(org_id)],
-            args=[credit_total, usage_total, str(key_id), key_usage_total, credit_version],
+            args=[
+                credit_total,
+                usage_total,
+                str(key_id),
+                key_usage_total,
+                credit_version,
+                new_heal_token(),
+            ],
         )
         return bool(res[0]), bool(res[1])
 
