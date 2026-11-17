@@ -134,6 +134,10 @@ wrapped `sendVerificationRequest`), so a direct `POST /api/auth/signin/nodemaile
 limited the same as the form. Each send is counted once (the server action no longer
 counts separately). Over the limit no mail is sent, and the sign-in form still shows
 "Too many sign-in emails. Try again in a few minutes." It still fails open if Redis is down.
+The client IP on that path is the right-most `X-Forwarded-For` entry, as today. The W1
+tests need a real Redis, so CI's `web` job gets a Redis service and
+`LOOM_TEST_REDIS_URL`; with the variable set, an unreachable Redis fails those tests
+instead of skipping them.
 
 **W2 (R12). An admin credit adjustment posts once per form.**
 The adjust-credits form carries a per-render token (a random UUID in a hidden field named `form_token`); the
@@ -161,7 +165,8 @@ wrong".
   a warning at startup if it is set. Admins already granted keep their role (granting the
   first production admin is a manual SQL step, written down in the contracts).
 - Outside dev, an admin cannot approve, or adjust the credit of, an org they are a member
-  of: refused with a message, with no state change, audit row or ledger entry. In dev it
+  of: refused with a message, with no state change, audit row or ledger entry, by the
+  action and again by the data layer (as every admin check is). In dev it
   stays allowed, because the local flow has the bootstrap admin approve their own org
   (user decision: outside dev only).
 - Contracts §4 says both.
