@@ -18,6 +18,11 @@ login. `loom-migrate` runs both, the second only when `LOOM_APP_DATABASE_PASSWOR
 set. Roles belong to the whole server, not one database, and many databases may be set
 up at once (parallel test workers): creating a role or a membership that a concurrent
 run just created is not an error.
+
+Before changing anything, `loom-migrate` (and each seam) refuses role names it would
+otherwise alter wrongly (`check_role_names`): a login or group name that is the
+connecting role itself (`current_user` or `session_user`), or a group name that exists
+as a `LOGIN` role.
 """
 
 from __future__ import annotations
@@ -95,26 +100,50 @@ def _create_role(conn: psycopg.Connection, name: str, options: sql.Composable) -
     return True
 
 
-def ensure_group_role(conn: psycopg.Connection, group_role: str) -> None:
-    """The runtime group role exists and cannot log in. `conn`: autocommit."""
-    if _create_role(conn, group_role, sql.SQL("NOLOGIN")):
-        return
+def check_role_names(
+    conn: psycopg.Connection, *, group_role: str, login: str | None = None
+) -> None:
+    """Raise `MigrationError`, before anything is changed, when a configured name would
+    make loom-migrate alter the wrong role: the login (`login`, when given) or the group
+    is the connecting role itself (`current_user` or `session_user`), or the group
+    exists as a LOGIN role."""
+    if login is not None and login == group_role:
+        raise MigrationError("the runtime login and its group role need different names")
+    row = conn.execute("SELECT current_user::text, session_user::text").fetchone()
+    assert row is not None
+    connecting = {"current_user": row[0], "session_user": row[1]}
+    named = [("LOOM_APP_DATABASE_GROUP", group_role)]
+    if login is not None:
+        named.insert(0, ("LOOM_APP_DATABASE_USER", login))
+    for setting, name in named:
+        for which, role in connecting.items():
+            if name == role:
+                raise MigrationError(
+                    f"{setting}={name} is the role loom-migrate connects as ({which}); "
+                    "the runtime roles must be separate from the owner"
+                )
     state = _role(conn, group_role)
     if state is not None and state[0]:
-        _concurrently(
-            lambda: conn.execute(
-                sql.SQL("ALTER ROLE {} NOLOGIN").format(sql.Identifier(group_role))
-            )
+        raise MigrationError(
+            f"LOOM_APP_DATABASE_GROUP={group_role} exists as a LOGIN role; the group role "
+            "must be NOLOGIN (choose another name, or drop or alter that role yourself)"
         )
+
+
+def ensure_group_role(conn: psycopg.Connection, group_role: str) -> None:
+    """The runtime group role exists (created NOLOGIN if missing). `conn`: autocommit.
+    An existing LOGIN role of that name is refused, not altered (`check_role_names`)."""
+    if _create_role(conn, group_role, sql.SQL("NOLOGIN")):
+        return
+    check_role_names(conn, group_role=group_role)
 
 
 def ensure_app_login(url: str, *, login: str, group_role: str, password: str) -> None:
     """Create or update the runtime login: its password, LOGIN, and membership of
     `group_role` (created too if missing). Safe to run at the same time against many
-    databases of one server."""
-    if login == group_role:
-        raise MigrationError("the runtime login and its group role need different names")
+    databases of one server. Refuses names `check_role_names` refuses."""
     with connect_sync(url, autocommit=True) as conn:
+        check_role_names(conn, group_role=group_role, login=login)
         ensure_group_role(conn, group_role)
         ident = sql.Identifier(login)
         # Sent as a SCRAM verifier made client-side (as psql's \password does), so the
@@ -204,6 +233,7 @@ def upgrade(url: str, *, group_role: str | None = None) -> list[Migration]:
     migrations = load_migrations()
     done: list[Migration] = []
     with connect_sync(url, autocommit=True) as conn:
+        check_role_names(conn, group_role=group)
         ensure_group_role(conn, group)
         conn.execute("SELECT set_config(%s, %s, false)", (RUNTIME_ROLE_SETTING, group))
         conn.execute("SELECT pg_advisory_lock(%s)", (_LOCK_KEY,))
@@ -261,14 +291,20 @@ def main(argv: list[str] | None = None) -> None:
     if args.create_database and create_database(url):
         print("created database")
     group = app_group_role()
-    done = upgrade(url, group_role=group)
-    for mig in done:
-        print(f"applied {mig.version:04d}_{mig.name}")
     password = os.environ.get("LOOM_APP_DATABASE_PASSWORD")
-    if password:
-        login = app_login_role()
-        ensure_app_login(url, login=login, group_role=group, password=password)
-        print(f"runtime login {login} ready (member of {group})")
+    login = app_login_role()
+    try:
+        # Every name checked before anything (roles or schema) is changed.
+        with connect_sync(url, autocommit=True) as conn:
+            check_role_names(conn, group_role=group, login=login)
+        done = upgrade(url, group_role=group)
+        for mig in done:
+            print(f"applied {mig.version:04d}_{mig.name}")
+        if password:
+            ensure_app_login(url, login=login, group_role=group, password=password)
+            print(f"runtime login {login} ready (member of {group})")
+    except MigrationError as e:
+        raise SystemExit(f"loom-migrate: {e}") from None
     if not done:
         print("up to date")
 

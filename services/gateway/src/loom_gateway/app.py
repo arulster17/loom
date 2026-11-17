@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import psycopg
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg_pool import AsyncConnectionPool
@@ -109,8 +110,10 @@ class Gateway:
                 socket_connect_timeout=s.redis_connect_timeout_s,
             )
         )
+        # Not waited for while the role check is deferred (Postgres unreachable at
+        # start): requests that need Postgres answer 503 until it has passed.
         self.pg: AsyncConnectionPool = await open_pool(
-            s.database_url, min_size=1, max_size=s.pg_pool_max
+            s.database_url, min_size=1, max_size=s.pg_pool_max, background=True
         )
         self.limiter = Limiter(
             self.redis, usage_stream=s.usage_stream, settled_ttl_s=s.settled_ttl_s
@@ -328,6 +331,11 @@ class Gateway:
             # Redis down or frozen past its socket timeout: refuse fast, nothing reserved
             # (a reservation made before the failure is released or expires).
             log.warning("redis unavailable", extra={"fields": {"error": type(e).__name__}})
+            return self.rejected(errors.service_unavailable(), headers, endpoint, model_label, t0)
+        except psycopg.OperationalError as e:
+            # Postgres down (or its pool not open yet: the role check waits for it), for
+            # a key or balance not cached in Redis. Nothing reserved.
+            log.warning("postgres unavailable", extra={"fields": {"error": type(e).__name__}})
             return self.rejected(errors.service_unavailable(), headers, endpoint, model_label, t0)
 
         ctx = RequestCtx(

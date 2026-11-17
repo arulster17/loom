@@ -37,7 +37,7 @@ from loom_bench.prices import load_prices
 from loom_bench.providers.runpod_api import RunpodApi
 from loom_bench.providers.runpod_ssh import OpenSshExec, SshExec
 from loom_bench.registry import REPO_ROOT, load_registry
-from loom_platform.db import libpq_url
+from loom_platform.db import libpq_url, role_gate
 from loom_platform.pool import get_pool, request_wake
 from loom_platform.pricing import servable
 from loom_platform.serving import LOCAL_PROVIDERS, load_serving
@@ -198,6 +198,9 @@ async def _run(settings: PoolmgrSettings) -> int:
         extra_allow=settings.allow_cidrs,
     )
     try:
+        # Postgres unreachable at start (outside dev): nothing touches it until the
+        # role check has passed on the first connection.
+        await role_gate.wait()
         try:
             await manager.start()
         except ManagerLocked as e:
