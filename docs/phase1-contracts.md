@@ -78,6 +78,7 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_USAGE_STREAM` | `loom:usage` | gateway, billing (the pool manager no longer reads it: billing trims each event as soon as it stores it, §10) |
 | `LOOM_AUTH_CACHE_TTL_S` | 4 | gateway |
 | `LOOM_REQUEST_TIMEOUT_S` / `LOOM_RESERVATION_GRACE_S` | 600 / 60 | gateway (reservation TTL = their sum) |
+| `LOOM_TIMEOUT_BILL_TOKENS_PER_S` | 10 | gateway: tokens per second per sequence billed for a non-streaming request cut at the timeout (§6 "Shutdown"); 0 bills nothing |
 | `LOOM_SETTLE_REPLAY_WINDOW_S` | 3600 | gateway: the `done:` marker lives the reservation TTL plus this; a spooled settle replayed within it is refused as a repeat by the marker (§6 "Settle spool") |
 | `LOOM_MAX_BODY_BYTES` | 1048576 | gateway (413 above) |
 | `LOOM_MAX_TOKENS_CAP` | 16384 | gateway |
@@ -409,6 +410,14 @@ Accepted: it can only keep a pod up longer, never drain one early.
 While Redis is unavailable new requests are refused fast: any Redis error during auth,
 reserve or the pool check is a 503 `service_unavailable` with `Retry-After: 1` (§11).
 
+A reserve call that fails this way may still have run in Redis (its reply was lost), so the
+gateway starts a background `release` of that request id (`Limiter.release(org_id,
+request_id)`), retried with backoff (0.1 s, doubling, at most 2 s apart) until it succeeds
+or `LOOM_RESERVATION_GRACE_S` has passed. `release.lua` also writes the `:done:<rid>` marker
+(TTL: the settled-id TTL, at least the reservation TTL), whether or not it found a
+reservation, so a reserve script that runs after the release (queued behind a Redis stall)
+answers `duplicate_request` and holds nothing.
+
 ### Redis data loss
 
 FLUSHALL, or a failover to a replica without the last writes, loses everything at once.
@@ -438,7 +447,7 @@ On SIGTERM the gateway (`python -m loom_gateway`, `GatewayServer`):
    released at once;
 4. waits up to 2 s more for connections to close, then cancels what is left (a
    non-streaming request still waiting on the engine settles `error`, releasing its
-   reservation; its tokens are unbilled, as at the timeout above);
+   reservation; its tokens are unbilled);
 5. waits up to 5 s for the settles it started, then closes Redis and Postgres.
 
 The process exits within about `LOOM_SHUTDOWN_GRACE_S` + 8 s (exit status: uvicorn
@@ -451,10 +460,29 @@ and are cut and billed at SIGTERM anyway, and an ALB that closes a connection at
 of the delay is a client abort, also billed. Keep `LOOM_SHUTDOWN_GRACE_S` +
 deregistration delay well under the deploy's health-check grace.
 
-A **non-streaming** request cut at `LOOM_REQUEST_TIMEOUT_S` is also unbilled: the engine
-reports usage only in its final body, so the tokens it generated before the cut are
-unknown. It settles `aborted` at cost 0 and counts in
-`loom_gateway_usage_missing_total` (alert on it). The bound is that request's reservation.
+A **non-streaming** request cut at `LOOM_REQUEST_TIMEOUT_S` is billed an estimate: the
+engine reports usage only in its final body, so the tokens it generated before the cut are
+unknown. It settles `aborted` with completion tokens = `sequences x min(max_tokens,
+floor(t x R))` (`t` seconds from the first dispatch to the cut, `R` =
+`LOOM_TIMEOUT_BILL_TOKENS_PER_S`, default 10: below any model's decode rate at its SLO,
+so it errs toward the client) and prompt tokens = `prompts x min(prompt bound, ceil(body
+bytes / 4))`, nothing cached. The cost is clamped to the reservation (fewer prompt tokens,
+then fewer completion tokens, so the event's cost still matches its tokens). The 502
+`upstream_lost` carries `X-Loom-Cost-Micros` / `X-Loom-Cost-USD` with the amount billed;
+the event counts in `loom_gateway_usage_estimated_total{model}` (not `usage_missing`) and
+its request log line has `estimated: true`. `R` = 0 turns estimating off: `aborted` at
+cost 0, counted in `loom_gateway_usage_missing_total`, no cost headers. A request whose
+deadline passed before any dispatch, or that shutdown cut, settles `error` and bills
+nothing. Streams are unchanged (they bill the engine's own counts).
+
+Once the engine's 200 body of a non-streaming request has been read, the deadline no
+longer applies: the client gets that body and its cost however long settle takes, never a
+502 for a request that is billed `ok`.
+
+A **stream** that ends at the deadline (or loses its pod) settles `aborted` for the tokens
+forwarded and releases its reservation before the trailing writes (the `upstream_lost`
+error chunk, `[DONE]`, the final empty body), which together are bounded at 1 s: a client
+that stopped reading cannot hold up the settle.
 Not fixed by streaming from the engine internally: vLLM's streaming tool-call and
 reasoning parsers are a different code path from the non-streaming ones the quality gate
 measured, so that switch waits for a user decision and a gate run on the streaming path.
@@ -575,7 +603,8 @@ by the signed `checkout.session.completed` webhook, as a `purchase` keyed
    naming it, before reserve.
 3. Reserve (402/429). If the org's balance cannot be loaded from Postgres into Redis
    (`noinit` again after the load), 503 `balance_unavailable` with `Retry-After: 1`
-   *(wave 2)*.
+   *(wave 2)*, and likewise on any Postgres error (including a pool timeout) during the
+   load; nothing is reserved.
 4. Pool state (§10): not routable -> release the reservation, 503 `model_unavailable`.
    Reserving first means a cold model is only woken (a GPU start, §10) by a request that
    has the balance for it and passes the rate limits; every 503 spends an rpm token, so
@@ -735,9 +764,9 @@ Clients branch on the status; `code` gives the reason.
 | 404 | `invalid_request_error` | `model_not_found` (`param: "model"`) | Unknown, unpriced or disabled model |
 | 413 | `invalid_request_error` | `request_too_large` | Body over `LOOM_MAX_BODY_BYTES` |
 | 429 | `rate_limit_error` | `rate_limit_exceeded`, `concurrency_limit_exceeded` | Limits; `Retry-After` in seconds |
-| 502 | `server_error` | `upstream_lost` | Pod lost before any byte reached the client, retry used up; *(wave 2)* also no answer within `LOOM_REQUEST_TIMEOUT_S` of receipt. Billed nothing (usage event `error`) |
+| 502 | `server_error` | `upstream_lost` | Pod lost before any byte reached the client, retry used up; *(wave 2)* also no answer within `LOOM_REQUEST_TIMEOUT_S` of receipt. Billed nothing (usage event `error`). A non-streaming request cut at the timeout is billed an estimate (§6 "Shutdown"): usage event `aborted`, cost in `X-Loom-Cost-Micros` / `X-Loom-Cost-USD` |
 | 503 | `server_error` | `model_unavailable` | §10; `Retry-After` in seconds |
-| 503 | `server_error` | `balance_unavailable` | *(wave 2)* the org's balance could not be loaded into Redis (§8 step 3); `Retry-After: 1`; no reservation, no usage event |
+| 503 | `server_error` | `balance_unavailable` | *(wave 2)* the org's balance could not be loaded into Redis, or Postgres failed while loading it (§8 step 3); `Retry-After: 1`; no reservation, no usage event |
 | 503 | `server_error` | `service_unavailable` | Redis unreachable or frozen past `LOOM_REDIS_SOCKET_TIMEOUT_S` during auth, reserve or the pool check (§6 "Settle spool"); `Retry-After: 1`; nothing reserved |
 | 503 | `server_error` | `server_shutdown` | Only as a stream's last error chunk: the gateway is shutting down (§6 "Shutdown"); the tokens streamed are billed; retry |
 
@@ -803,9 +832,10 @@ strings. An unknown id is 404 `model_not_found`.
 - **Gateway image size**: `loom-platform` depends on `loom-bench` for the registry,
   which pulls numpy, scipy and pyarrow. Splitting the registry into its own small
   package is a later refactor.
-- **Non-streaming requests cut at the timeout** are unbilled (§6). Billing them means
-  streaming from the engine internally, which first needs a quality-gate run on vLLM's
-  streaming tool-call and reasoning parsers (user decision).
+- **Non-streaming requests cut at the timeout** are billed an estimate, not the engine's
+  count (§6 "Shutdown"). An exact bill means streaming from the engine internally, which
+  first needs a quality-gate run on vLLM's streaming tool-call and reasoning parsers (user
+  decision).
 - **Google email linking**: kept on (`LOOM_GOOGLE_EMAIL_LINKING`, verified emails only);
   whether to keep it at all is a user decision.
 - **Disputes won** (`charge.dispute.closed`, status `won`) do not reinstate the credit

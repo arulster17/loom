@@ -181,10 +181,17 @@ class Limiter:
         total = int(res[1])
         return SettleResult(True, total if total >= 0 else None, _str(res[2]))
 
-    async def release(self, org_id: uuid.UUID, request_id: uuid.UUID) -> bool:
-        """Drop a reservation that was never dispatched (503 after reserve): refund its tpm
-        estimate, keep its rpm token spent, charge nothing, append no usage event."""
-        return bool(await self._release(keys=[org_prefix(org_id)], args=[str(request_id)]))
+    async def release(
+        self, org_id: uuid.UUID, request_id: uuid.UUID, done_ttl_s: int | None = None
+    ) -> bool:
+        """Drop a reservation that was never dispatched (503 after reserve, or a reserve
+        whose reply was lost): refund its tpm estimate, keep its rpm token spent, charge
+        nothing, append no usage event. The request id is marked done for `done_ttl_s`
+        (default: the settled-id TTL, which covers the reservation TTL), whether or not a
+        reservation was found, so a reserve that runs later is refused as a duplicate.
+        True when a reservation was released."""
+        ttl = self.settled_ttl_s if done_ttl_s is None else done_ttl_s
+        return bool(await self._release(keys=[org_prefix(org_id)], args=[str(request_id), ttl]))
 
     async def init_org(
         self,
