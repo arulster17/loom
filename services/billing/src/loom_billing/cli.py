@@ -25,7 +25,7 @@ from loom_billing.logs import configure_logging
 from loom_billing.settings import BillingSettings
 from loom_billing.stripe_stub import create_stub_app
 from loom_billing.worker import Worker, redis_from_settings, run_worker
-from loom_platform.db import open_pool
+from loom_platform.db import RoleCheckFailed, open_pool, role_gate
 from loom_platform.settings import enforce_environment, redis_policy_problems
 
 COMMANDS = (
@@ -112,17 +112,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command in ("all", "worker", "api") and settings.billing_metrics_port:
         start_http_server(settings.billing_metrics_port)
-    with contextlib.suppress(KeyboardInterrupt):
-        if args.command == "all":
-            asyncio.run(_all(settings))
-        elif args.command == "worker":
-            asyncio.run(run_worker(settings))
-        elif args.command == "api":
-            app = create_app(settings)
-            asyncio.run(_server(app, settings.billing_host, settings.billing_port).serve())
-        else:
-            asyncio.run(_once(settings, args.command))
-    return 0
+    try:
+        with contextlib.suppress(KeyboardInterrupt):
+            if args.command == "all":
+                asyncio.run(_all(settings))
+            elif args.command == "worker":
+                asyncio.run(run_worker(settings))
+            elif args.command == "api":
+                app = create_app(settings)
+                asyncio.run(_server(app, settings.billing_host, settings.billing_port).serve())
+            else:
+                asyncio.run(_once(settings, args.command))
+    except RoleCheckFailed:
+        # The deferred role check failed (printed) in `open_pool`, before any work; the
+        # unwinding closed what was open.
+        return 2
+    return 2 if role_gate.failed else 0  # `api`: uvicorn ends on the failed lifespan
 
 
 if __name__ == "__main__":

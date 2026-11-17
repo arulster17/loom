@@ -125,7 +125,9 @@ def upstream_lost() -> ApiError:
 
 
 def service_unavailable() -> ApiError:
-    """Redis (balances, limits, auth cache) unreachable or frozen past its timeout."""
+    """Redis (balances, limits, auth cache) unreachable or frozen past its timeout, or
+    Postgres unreachable (or its pool held back by the deferred role check) for a key or
+    org not cached in Redis (contracts §11)."""
     return ApiError(
         503,
         "server_error",

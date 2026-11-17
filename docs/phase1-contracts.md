@@ -70,7 +70,7 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 
 | Variable | Default | Used by |
 |---|---|---|
-| `LOOM_ENV` | unset = `prod`; compose: `dev` | all services: `dev` or `prod` (anything else refuses to start). Outside dev a service refuses to start on a missing secret or a compose dev default: gateway and billing (a `LOOM_REDIS_URL` without a password or not `rediss://`; Redis `maxmemory-policy` other than `noeviction` when `CONFIG GET` is permitted, a warning when it is not), gateway (DB password, `LOOM_SETTLE_SPOOL_PATH`, `LOOM_POD_CA_CERT`, client certificate, `LOOM_CORS_ORIGINS`; and it never uses an `http://` replica), billing (DB password, `LOOM_STRIPE_MODE=stub`, internal token missing or the compose value), web (`AUTH_SECRET` missing or the compose value, `AUTH_URL` missing, internal token missing or the compose value). "DB password" means none, or either compose one (the owner's `loom` or the runtime login's `loom-app-dev`). Every Python service (gateway, billing, pool manager) also checks at start, over its own connection with `LOOM_DATABASE_URL`, that its role (the login, `session_user`, and `current_user`) is not a superuser and owns no table in schema `public` (directly or through a role it is a member of), and refuses otherwise (§3 "Roles"). All problems are listed together in one exit-2 message. Postgres unreachable at start is not a refusal: the service logs one warning line naming Postgres and starts (the gateway answers 503 to requests that need Postgres), and runs the role check on its first successful connection. Until that check has passed it does no Postgres work (no pool connection, no `LISTEN`); if it fails, the service prints the problem and exits 2 |
+| `LOOM_ENV` | unset = `prod`; compose: `dev` | all services: `dev` or `prod` (anything else refuses to start). Outside dev a service refuses to start on a missing secret or a compose dev default: gateway and billing (a `LOOM_REDIS_URL` without a password or not `rediss://`; Redis `maxmemory-policy` other than `noeviction` when `CONFIG GET` is permitted, a warning when it is not), gateway (DB password, `LOOM_SETTLE_SPOOL_PATH`, `LOOM_POD_CA_CERT`, client certificate, `LOOM_CORS_ORIGINS`; and it never uses an `http://` replica), billing (DB password, `LOOM_STRIPE_MODE=stub`, internal token missing or the compose value), web (`AUTH_SECRET` missing or the compose value, `AUTH_URL` missing, internal token missing or the compose value). "DB password" means none, or either compose one (the owner's `loom` or the runtime login's `loom-app-dev`). Every Python service (gateway, billing, pool manager) also checks at start, over its own connection with `LOOM_DATABASE_URL`, that its role (the login, `session_user`, and `current_user`) is not a superuser and owns no table in schema `public` (directly or through a role it is a member of), and refuses otherwise (§3 "Roles"). All problems are listed together in one exit-2 message. Postgres unreachable at start is not a refusal: the service logs one warning line naming Postgres and starts (the gateway answers 503 `service_unavailable` to requests that need Postgres), and runs the role check on its first successful connection. Until that check has passed it does no Postgres work (no pool connection, no `LISTEN`); if it fails, the service prints the problem, stops through its normal shutdown (the gateway drains and settles its open streams as at SIGTERM) and exits 2. Only an outage counts as unreachable (§3 "Roles"): a wrong password, a missing role or database, or no `pg_hba.conf` entry exits 2, at start and in the deferred check |
 | `LOOM_DATABASE_URL` | `postgresql://loom:loom@localhost:5432/loom_platform`; compose: `postgresql://loom_app:loom-app-dev@postgres:5432/loom_platform` for every service, the owner `loom` for `migrate` | all (web: as `DATABASE_URL`). Services connect as the runtime login, `loom-migrate` as the owner (§3 "Roles"). Outside dev a Python service starts while this database is unreachable and checks its role once it connects (`LOOM_ENV` above) |
 | `LOOM_APP_DATABASE_PASSWORD` | unset; compose (`migrate` only): `loom-app-dev` | `loom-migrate`: when set, creates or updates the runtime login with this password (`LOGIN`, member of the group role). Unset: the login is left as it is. `loom-migrate` accepts the compose value; a service whose `LOOM_DATABASE_URL` uses it refuses to start outside dev |
 | `LOOM_APP_DATABASE_USER` / `LOOM_APP_DATABASE_GROUP` | `loom_app` / `loom_runtime` | `loom-migrate`: the runtime login's name and its `NOLOGIN` group role's (roles are server-wide: two stacks sharing one Postgres server can use different names). It refuses, before changing anything, a name that is the role it connects as (`current_user` or `session_user`), and a group name that exists as a `LOGIN` role |
@@ -245,13 +245,24 @@ Outside `LOOM_ENV=dev` a service refuses to start (exit 2) when its own connecti
 role is a superuser or owns a table in `public`, or when `LOOM_DATABASE_URL` uses a
 compose dev password (§2). When Postgres is unreachable at start, the service starts with
 a warning and runs the same check on its first successful connection; it does no work
-on any connection before the check has passed, and exits 2 if it fails. The check reads
-only the system catalogs (`pg_roles`, `pg_class`, `session_user`, `current_user`,
-`pg_has_role`), never the schema's own tables or functions.
+on any connection before the check has passed, and exits 2 if it fails, through its
+normal shutdown (the gateway drains and settles its open streams as at SIGTERM). The
+check reads only the system catalogs (`pg_roles`, `pg_class`, `session_user`,
+`current_user`, `pg_has_role`), never the schema's own tables or functions.
+
+Only an outage counts as unreachable, not a misconfiguration
+(`loom_platform.settings.connection_outage`). A connection error whose message says
+`password authentication failed`, `does not exist` (role or database) or `no pg_hba.conf
+entry` exits 2, at start and in the deferred check, as does any error not listed next.
+Retried: refused or timed-out connections and transient server states (`the database
+system is starting up` / `shutting down`, `too many clients`, `remaining connection
+slots`). While the deferred check keeps retrying it logs a warning naming Postgres at
+most once a minute.
 
 `loom-migrate` refuses, and changes nothing, when `LOOM_APP_DATABASE_USER` or
 `LOOM_APP_DATABASE_GROUP` is the role it connects as (`current_user` or `session_user`),
-or when the group name exists as a `LOGIN` role (it is not altered to `NOLOGIN`).
+or when the group name exists as a `LOGIN` role (it is not altered to `NOLOGIN`). With
+`--create-database` it checks the names before creating the database.
 
 ## 4. Signups, approval, admins
 
@@ -470,6 +481,9 @@ Accepted: it can only keep a pod up longer, never drain one early.
 
 While Redis is unavailable new requests are refused fast: any Redis error during auth,
 reserve or the pool check is a 503 `service_unavailable` with `Retry-After: 1` (§11).
+So is a Postgres error during auth or reserve, for a key or org not cached in Redis:
+Postgres down, or its pool not opened yet because the deferred role check is still
+waiting for Postgres (§3 "Roles"); nothing is reserved.
 
 ### Redis data loss
 
@@ -824,7 +838,7 @@ Clients branch on the status; `code` gives the reason.
 | 502 | `server_error` | `upstream_lost` | Pod lost before any byte reached the client, retry used up; *(wave 2)* also no answer within `LOOM_REQUEST_TIMEOUT_S` of receipt. Billed nothing (usage event `error`) |
 | 503 | `server_error` | `model_unavailable` | §10; `Retry-After` in seconds |
 | 503 | `server_error` | `balance_unavailable` | *(wave 2)* the org's balance could not be loaded into Redis (§8 step 3); `Retry-After: 1`; no reservation, no usage event |
-| 503 | `server_error` | `service_unavailable` | Redis unreachable or frozen past `LOOM_REDIS_SOCKET_TIMEOUT_S` during auth, reserve or the pool check (§6 "Settle spool"); `Retry-After: 1`; nothing reserved |
+| 503 | `server_error` | `service_unavailable` | Redis unreachable or frozen past `LOOM_REDIS_SOCKET_TIMEOUT_S` during auth, reserve or the pool check (§6 "Settle spool"); Postgres unreachable during auth or reserve for a key or org not cached in Redis, including the pool held back by the deferred role check (§3 "Roles"); `Retry-After: 1`; nothing reserved |
 | 503 | `server_error` | `server_shutdown` | Only as a stream's last error chunk: the gateway is shutting down (§6 "Shutdown"); the tokens streamed are billed; retry |
 
 Mid-stream failures end the stream with `data: {"error": {... "code": "upstream_lost"}}`

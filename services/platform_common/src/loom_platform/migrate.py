@@ -22,7 +22,8 @@ run just created is not an error.
 Before changing anything, `loom-migrate` (and each seam) refuses role names it would
 otherwise alter wrongly (`check_role_names`): a login or group name that is the
 connecting role itself (`current_user` or `session_user`), or a group name that exists
-as a `LOGIN` role.
+as a `LOGIN` role. With `--create-database` the names are checked before the database
+is created.
 """
 
 from __future__ import annotations
@@ -265,18 +266,32 @@ def upgrade(url: str, *, group_role: str | None = None) -> list[Migration]:
     return done
 
 
-def create_database(url: str) -> bool:
-    """Create the URL's database if it does not exist (connecting to 'postgres')."""
+def _server_conninfo(url: str) -> tuple[str, str]:
+    """The URL's database name, and the same connection to the 'postgres' database."""
     info = psycopg.conninfo.conninfo_to_dict(libpq_url(url))
     dbname = info.get("dbname")
     if not dbname:
         raise MigrationError("database URL names no database")
     admin = {**info, "dbname": "postgres"}
-    with psycopg.connect(psycopg.conninfo.make_conninfo("", **admin), autocommit=True) as conn:
+    return str(dbname), psycopg.conninfo.make_conninfo("", **admin)
+
+
+def check_role_names_on_server(url: str, *, group_role: str, login: str | None = None) -> None:
+    """`check_role_names` over a connection to the 'postgres' database as the URL's role
+    (roles belong to the server), for before the URL's database exists."""
+    _, admin = _server_conninfo(url)
+    with psycopg.connect(admin, autocommit=True) as conn:
+        check_role_names(conn, group_role=group_role, login=login)
+
+
+def create_database(url: str) -> bool:
+    """Create the URL's database if it does not exist (connecting to 'postgres')."""
+    dbname, admin = _server_conninfo(url)
+    with psycopg.connect(admin, autocommit=True) as conn:
         exists = conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (dbname,)).fetchone()
         if exists:
             return False
-        conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(str(dbname))))
+        conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(dbname)))
         return True
 
 
@@ -288,13 +303,15 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
     url = args.database_url or PlatformSettings().database_url
-    if args.create_database and create_database(url):
-        print("created database")
     group = app_group_role()
     password = os.environ.get("LOOM_APP_DATABASE_PASSWORD")
     login = app_login_role()
     try:
-        # Every name checked before anything (roles or schema) is changed.
+        # Every name checked before anything (database, roles or schema) is changed.
+        if args.create_database:
+            check_role_names_on_server(url, group_role=group, login=login)
+            if create_database(url):
+                print("created database")
         with connect_sync(url, autocommit=True) as conn:
             check_role_names(conn, group_role=group, login=login)
         done = upgrade(url, group_role=group)

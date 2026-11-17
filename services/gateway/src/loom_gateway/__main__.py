@@ -11,6 +11,7 @@ from prometheus_client import start_http_server
 from loom_gateway.app import Gateway, create_app
 from loom_gateway.logs import configure_logging
 from loom_gateway.settings import GatewaySettings
+from loom_platform.db import role_gate
 from loom_platform.settings import enforce_environment, redis_policy_problems
 
 # After the drain, how long the server still waits for connections to close before it
@@ -24,12 +25,20 @@ class GatewayServer(uvicorn.Server):
     connections (contracts §6 "Shutdown"). Plain uvicorn waits for every open stream to
     end (up to LOOM_REQUEST_TIMEOUT_S, 600 s), so the orchestrator's SIGKILL would lose
     their settles: tokens unbilled, reservations and in-flight counts held until the
-    reservation TTL (429s for the key meanwhile)."""
+    reservation TTL (429s for the key meanwhile).
+
+    A failed deferred role check (`loom_platform.db.role_gate`: Postgres was unreachable
+    at start) stops the server the same way, and `main` then exits 2."""
 
     def __init__(self, config: uvicorn.Config, gateway: Gateway, grace_s: float) -> None:
         super().__init__(config)
         self.gateway = gateway
         self.grace_s = grace_s
+
+    async def on_tick(self, counter: int) -> bool:
+        if role_gate.failed:
+            return True  # as at SIGTERM: drain, settle, close
+        return await super().on_tick(counter)
 
     async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
         for server in self.servers:
@@ -63,6 +72,8 @@ def main() -> None:
         timeout_graceful_shutdown=FINAL_CLOSE_S,
     )
     GatewayServer(config, app.state.gateway, settings.shutdown_grace_s).run()
+    if role_gate.failed:  # the problem is printed; the open streams are settled
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
