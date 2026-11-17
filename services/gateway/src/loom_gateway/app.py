@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import psycopg
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg_pool import AsyncConnectionPool
@@ -56,7 +57,7 @@ from loom_platform import errors
 from loom_platform.auth import AuthRecord
 from loom_platform.db import open_pool
 from loom_platform.errors import ApiError
-from loom_platform.limiter import Limiter
+from loom_platform.limiter import Limiter, ReserveResult
 from loom_platform.pool import PoolState
 from loom_platform.pricing import Price, servable
 from loom_platform.usage import UsageEvent
@@ -73,8 +74,22 @@ EXPOSED_HEADERS = [
 ]
 
 
+RELEASE_FIRST_RETRY_S = 0.1
+RELEASE_MAX_RETRY_S = 2.0
+
+
 def _usd(micros: int) -> str:
     return f"{micros // 1_000_000}.{micros % 1_000_000:06d}"
+
+
+def _balance_unavailable() -> ApiError:
+    return ApiError(
+        503,
+        "server_error",
+        "balance_unavailable",
+        "The balance could not be loaded. Retry shortly.",
+        headers={"Retry-After": "1"},
+    )
 
 
 class Gateway:
@@ -96,6 +111,8 @@ class Gateway:
         }
         self._listener: asyncio.Task[None] | None = None
         self._calls = 0  # generate() calls in progress (a stream's ends at its first byte)
+        # Background releases of reserves whose reply was lost (_release_lost).
+        self._releases: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
         s = self.settings
@@ -161,6 +178,11 @@ class Gateway:
         left = await wait_background(SHUTDOWN_SETTLE_S)
         if left:
             log.error("shutdown: settles still running at close", extra={"fields": {"n": left}})
+        # Releases of lost reserves still retrying: those reservations expire with their
+        # TTL instead.
+        for task in list(self._releases):
+            task.cancel()
+        await asyncio.gather(*self._releases, return_exceptions=True)
         await self.spool.stop()
         if self._listener is not None:
             self._listener.cancel()
@@ -219,24 +241,69 @@ class Gateway:
             "limits": record.limits(s),
             "ttl_ms": s.reservation_ttl_ms,
         }
-        result = await self.limiter.reserve(**kwargs)
+        result = await self._reserve_once(record.org_id, request_id, kwargs)
         if result.reason == "noinit":
-            async with self.pg.connection() as conn:
-                await self.limiter.load_from_postgres(
-                    conn, org_id=record.org_id, key_id=record.key_id
-                )
-            result = await self.limiter.reserve(**kwargs)
+            try:
+                async with self.pg.connection() as conn:
+                    await self.limiter.load_from_postgres(
+                        conn, org_id=record.org_id, key_id=record.key_id
+                    )
+            except psycopg.Error as e:
+                # Postgres down, slow or the pool exhausted (PoolTimeout): a 503 to retry,
+                # never a 500. The noinit reserve wrote nothing.
+                log.warning("balance load failed", extra={"fields": {"error": type(e).__name__}})
+                raise _balance_unavailable() from None
+            result = await self._reserve_once(record.org_id, request_id, kwargs)
         if result.admitted:
             return
         if result.reason == "noinit":
-            raise ApiError(
-                503,
-                "server_error",
-                "balance_unavailable",
-                "The balance could not be loaded. Retry shortly.",
-                headers={"Retry-After": "1"},
-            )
+            raise _balance_unavailable()
         raise errors.from_reserve(result, prep.max_cost_micros)
+
+    async def _reserve_once(
+        self, org_id: uuid.UUID, request_id: uuid.UUID, kwargs: dict[str, Any]
+    ) -> ReserveResult:
+        """One reserve call. When it raises a Redis error the script may still have run
+        (only its reply was lost), so a background release of the request id is started
+        before the error goes on to answer 503 (contracts §6)."""
+        try:
+            return await self.limiter.reserve(**kwargs)
+        except (RedisError, OSError):
+            self._release_later(org_id, request_id)
+            raise
+
+    def _release_later(self, org_id: uuid.UUID, request_id: uuid.UUID) -> None:
+        task = asyncio.create_task(self._release_lost(org_id, request_id))
+        self._releases.add(task)
+        task.add_done_callback(self._releases.discard)
+
+    async def _release_lost(self, org_id: uuid.UUID, request_id: uuid.UUID) -> None:
+        """Release a reservation whose reserve reply was lost, retrying with backoff
+        (RELEASE_FIRST_RETRY_S, doubling, at most RELEASE_MAX_RETRY_S apart) until Redis
+        answers or LOOM_RESERVATION_GRACE_S has passed. The release also marks the id
+        done, so a reserve script still queued behind the stall refuses it."""
+        loop = asyncio.get_running_loop()
+        give_up_at = loop.time() + self.settings.reservation_grace_s
+        delay = RELEASE_FIRST_RETRY_S
+        fields: dict[str, object] = {"request_id": str(request_id)}
+        while True:
+            try:
+                await self.limiter.release(org_id, request_id)
+                return
+            except (RedisError, OSError) as e:
+                fields["error"] = type(e).__name__
+            except Exception:
+                log.exception("release of a lost reserve failed", extra={"fields": fields})
+                return
+            left = give_up_at - loop.time()
+            if left <= 0:
+                log.error(
+                    "release of a lost reserve given up; it expires with its TTL",
+                    extra={"fields": fields},
+                )
+                return
+            await asyncio.sleep(min(delay, left))
+            delay = min(delay * 2, RELEASE_MAX_RETRY_S)
 
     def rejected(
         self,

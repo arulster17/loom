@@ -93,6 +93,12 @@ class GatewayMetrics:
             ["model"],
             registry=r,
         )
+        self.usage_estimated = Counter(
+            "loom_gateway_usage_estimated",
+            "Non-streaming requests cut at the timeout and billed an estimate (contracts §6)",
+            ["model"],
+            registry=r,
+        )
         self.settle_failures = Counter(
             "loom_gateway_settle_failures",
             "Settles neither accepted by Redis nor written to the spool (usage lost: alert)",

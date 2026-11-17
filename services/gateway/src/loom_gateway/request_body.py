@@ -128,6 +128,8 @@ class Prepared:
     max_cost_micros: int
     upstream_body: bytes
     max_context: int = 0
+    prompts: int = 1  # prompts in the request (completions takes a list)
+    body_bytes: int = 0  # the client's body, for the timeout estimate (contracts §6)
     # Chat without max_tokens / max_completion_tokens: the cap was filled in by the
     # gateway, so it may be lowered to fit a long prompt into the context.
     default_max_tokens: bool = False
@@ -283,5 +285,7 @@ def prepare(
         max_cost_micros=max_cost,
         upstream_body=json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode(),
         max_context=max_context,
+        prompts=prompts,
+        body_bytes=body_bytes,
         default_max_tokens=endpoint == "chat" and not requested,
     )

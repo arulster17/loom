@@ -49,6 +49,11 @@ class GatewaySettings(PlatformSettings):
     pool_cache_ttl_s: Annotated[float, Field(ge=0, le=1)] = 1.0
 
     upstream_connect_timeout_s: Annotated[float, Field(gt=0)] = 5.0
+    # A non-streaming request cut at LOOM_REQUEST_TIMEOUT_S after dispatch is billed an
+    # estimate (contracts §6): this many completion tokens per second per sequence since
+    # the first dispatch, capped at max_tokens. Below any model's measured decode rate at
+    # its SLO, so the estimate errs toward the client. 0: no estimate (billed nothing).
+    timeout_bill_tokens_per_s: Annotated[float, Field(ge=0)] = 10.0
     # A replica that failed is tried last for this long.
     replica_penalty_s: Annotated[float, Field(ge=0)] = 10.0
 
