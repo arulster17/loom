@@ -26,7 +26,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg_pool import AsyncConnectionPool
 from redis.asyncio import BlockingConnectionPool, Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import RedisError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, Response
 
@@ -63,6 +65,25 @@ from loom_platform.pricing import Price, servable
 from loom_platform.usage import UsageEvent
 
 log = logging.getLogger("loom_gateway")
+
+RELEASE_CAP = 1000  # background releases of lost reserves running at once
+
+
+def _unsent(error: BaseException) -> bool:
+    """True when redis-py raised `error` before it wrote the command, so nothing can
+    have been reserved: waiting for a pool connection timed out, or connecting failed
+    (refused, or the connect timeout). Read from the exception's type and message, which
+    are redis-py's own; anything else, including a failure while writing, is possibly
+    sent."""
+    if not isinstance(error, RedisConnectionError | RedisTimeoutError):
+        return False
+    msg = str(error)
+    return (
+        msg.startswith("No connection available")
+        or msg.startswith("Timeout connecting to server")
+        or (msg.startswith("Error") and " connecting to " in msg)
+    )
+
 
 EXPOSED_HEADERS = [
     "X-Loom-Request-Id",
@@ -213,12 +234,23 @@ class Gateway:
                 raise errors.request_too_large(limit)
         return bytes(body)
 
-    def _release_in_background(self, org_id: uuid.UUID, request_id: uuid.UUID) -> None:
+    def _release_in_background(
+        self, org_id: uuid.UUID, request_id: uuid.UUID, error: BaseException
+    ) -> None:
         """Release a request id whose reserve call failed (the script may have run, its
         reply lost), retried with backoff (0.1 s doubling, at most 2 s apart) until it
-        succeeds or LOOM_RESERVATION_GRACE_S has passed: a reservation that old has
-        expired by its TTL anyway. The release also marks the id done, so a reserve
-        still queued in Redis is refused when it runs."""
+        succeeds or LOOM_RESERVATION_GRACE_S has passed; after that the reservation is
+        left to its TTL (request_timeout_s + reservation_grace_s). The release also marks
+        the id done, so a reserve still queued in Redis is refused when it runs.
+
+        Skipped (counted in `reserve_release_skipped`) when `error` shows the command was
+        never written ("unsent"), and when RELEASE_CAP releases already run ("cap")."""
+        if _unsent(error):
+            self.metrics.reserve_release_skipped.labels("unsent").inc()
+            return
+        if len(self._releases) >= RELEASE_CAP:
+            self.metrics.reserve_release_skipped.labels("cap").inc()
+            return
         task = asyncio.create_task(self._release_until(org_id, request_id))
         self._releases.add(task)
         task.add_done_callback(self._releases.discard)
@@ -272,9 +304,9 @@ class Gateway:
                         headers={"Retry-After": "1"},
                     ) from None
                 result = await self.limiter.reserve(**kwargs)
-        except (RedisError, OSError):
+        except (RedisError, OSError) as e:
             # The script may have run although its reply was lost: release the request id.
-            self._release_in_background(record.org_id, request_id)
+            self._release_in_background(record.org_id, request_id, e)
             raise
         if result.admitted:
             return

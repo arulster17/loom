@@ -191,6 +191,8 @@ class Limiter:
         reservation was found, so a reserve that runs later is refused as a duplicate.
         True when a reservation was released."""
         ttl = self.settled_ttl_s if done_ttl_s is None else done_ttl_s
+        if ttl < 1:
+            raise ValueError(f"done marker TTL must be at least 1 s, got {ttl}")
         return bool(await self._release(keys=[org_prefix(org_id)], args=[str(request_id), ttl]))
 
     async def init_org(

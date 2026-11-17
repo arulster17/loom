@@ -99,6 +99,13 @@ class GatewayMetrics:
             ["model"],
             registry=r,
         )
+        self.reserve_release_skipped = Counter(
+            "loom_gateway_reserve_release_skipped",
+            "Background releases of a failed reserve not started: the command was never "
+            "sent (unsent) or 1,000 releases already run (cap)",
+            ["reason"],
+            registry=r,
+        )
         self.settle_failures = Counter(
             "loom_gateway_settle_failures",
             "Settles neither accepted by Redis nor written to the spool (usage lost: alert)",
