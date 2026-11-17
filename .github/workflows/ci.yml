@@ -39,6 +39,84 @@ jobs:
       - run: uv run mypy services/platform_common/src services/poolmgr/src
       - run: uv run pytest -q -n auto
 
+  # Flake check (plan R15): the test files a PR adds or changes, each test repeated 20
+  # times (pytest-repeat) under deliberate CPU load; fails if any test both passed and
+  # failed. `flake-files` finds them; `flake-check` is skipped when there are none.
+  flake-files:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      files: ${{ steps.diff.outputs.files }}
+    steps:
+      # The PR's merge commit: parent 1 is the base it merges into.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: diff
+        run: |
+          pattern='^(bench|services/[^/]+)/tests/(.+/)?(test_[^/]*|[^/]*_test)\.py$'
+          changed=$(git diff --name-only --diff-filter=d HEAD^1 HEAD)
+          files=$(echo "$changed" | grep -E "$pattern" | tr '\n' ' ' || true)
+          echo "changed test files: ${files:-none}"
+          echo "files=${files}" >> "$GITHUB_OUTPUT"
+
+  flake-check:
+    needs: flake-files
+    if: needs.flake-files.outputs.files != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: loom
+          POSTGRES_PASSWORD: loom
+          POSTGRES_DB: loom_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U loom" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      LOOM_TEST_DATABASE_URL: postgresql+psycopg://loom:loom@localhost:5432/loom_test
+      LOOM_TEST_REDIS_URL: redis://localhost:6379/15
+      FLAKE_FILES: ${{ needs.flake-files.outputs.files }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      # One busy loop per CPU next to `-n auto`'s workers: about half the CPU each test
+      # would get alone. `--repeat-scope session` runs every test once, then again, so
+      # when the 7-minute limit stops a slow file each test still got a fair share (the
+      # report warns). pytest is called directly so the limit's SIGINT reaches it and it
+      # still writes the JUnit file. Exit 5: every changed test is network/acceptance.
+      - name: Changed tests x20 under CPU load
+        run: |
+          for _ in $(seq "$(nproc)"); do sh -c 'while :; do :; done' & done
+          set +e
+          repeat="--count 20 --repeat-scope session"
+          timeout -s INT 420 .venv/bin/python -m pytest -q -n auto $repeat --junitxml=flake.xml $FLAKE_FILES
+          status=$?
+          kill $(jobs -p)
+          case $status in
+            0|1|5) ;;
+            124) echo "::warning::stopped at the 7-minute limit; see the report" ;;
+            *) echo "pytest exited $status"; exit $status ;;
+          esac
+      - name: Report tests that both passed and failed
+        run: |
+          [ -s flake.xml ] || { echo "no tests ran (all deselected)"; exit 0; }
+          args="--repeat-count 20 --expect-runs 20"
+          title="Flake check: changed tests x20"
+          python3 scripts/flaky_report.py $args --title "$title" flake.xml | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+
   # The pinned pod proxy bundle (docs/phase1-m2-spec.md §9): rebuilt from `git archive
   # HEAD` and the locked wheels (downloaded), it must match config/serving-artifacts.lock.
   # Its own job: it needs the network, the main test job does not.
@@ -118,6 +196,13 @@ jobs:
       LOOM_MAILPIT_UI_PORT: "18025"
       LOOM_MAILPIT_SMTP_PORT: "11025"
       LOOM_POOLMGR_METRICS_PORT: "19102"
+      # Every model idles out after 300 s instead of compose's 600, so M2's idle_stop
+      # check waits 5 minutes less. M1 acceptance must not see a ready model go cold: its
+      # longest stretch without a request to a model is the wait for a killed pod's
+      # replacement (~35 s to fail 3 health checks + 120 s unhealthy grace + up to a 15 s
+      # tick + a 26 s cold start; 183-196 s in CI). 300 s leaves ~100 s for a slow runner.
+      # M2's idle_stop check accepts up to 900 s and waits idle_stop_s + 120 s.
+      LOOM_POOLMGR_IDLE_STOP_S: "300"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6

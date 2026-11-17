@@ -49,6 +49,7 @@ dev = [
     "openai>=1.50",
     "scipy-stubs>=1.18.1.1",
     "pyarrow-stubs>=20.0.0.20260819",
+    "pytest-repeat>=0.9",
 ]
 
 [tool.ruff]
