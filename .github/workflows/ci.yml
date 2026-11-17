@@ -122,6 +122,7 @@ jobs:
           if [ -n "$stopped" ]; then echo "::warning::7-minute limit hit $stopped; see the report"; fi
       - name: Report tests that both passed and failed
         run: |
+          if ! ls flake-*.xml > /dev/null 2>&1; then echo "::error::no JUnit file: pytest was killed in session 1"; exit 1; fi
           args="--repeat-count 2 --expect-runs 20"
           title="Flake check: changed tests x20"
           python3 scripts/flaky_report.py $args --title "$title" flake-*.xml | tee -a "$GITHUB_STEP_SUMMARY"
