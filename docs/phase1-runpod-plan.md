@@ -414,7 +414,7 @@ Each milestone ends with a stop for the user's go-ahead before the next paid one
 | M4 | Serving smoke on RunPod: one 8B pod, then one 70B FP8 pod, through the real gateway | Cap $20 | mTLS path works and refuses a request without our client certificate and from another IP; usage equals the engine's tokens exactly, including a client abort and a pod terminated mid-stream [acceptance]; cold start, gateway-to-pod RTT and GPU metrics recorded; load test through the gateway at the Lab's goodput reports TTFT and tokens/s within the Lab's intervals plus the RTT [deliverable 4]; engine log holds no prompt text; teardown verified |
 | M5 | Go-live in the chosen mode (invite-only preview unless decided otherwise) | Cap $35 for the window, then the mode's cost | Both models live, Stripe test mode [deliverable 3]; dashboards show cost per 1M served next to the Lab prediction; the M4 checks pass again on both models; a written acceptance note like `phase0-acceptance.md` |
 
-**M2 status (2026-11-16):** built on branch `phase1-m2-pool` to
+**M2 status (2026-11-16; merged into `main` the same day, PR #8):** built on branch `phase1-m2-pool` to
 [phase1-m2-spec.md](phase1-m2-spec.md): `services/poolmgr` (lifecycle, health rules,
 leases and the pod watchdog, spend guard and alerts, restart and adoption), the reaper's
 serving rule, the pod proxy's SIGHUP reload and pinned bundle (it, not Caddy, runs on
@@ -431,7 +431,8 @@ What M4 must check on a real pod is listed in `services/poolmgr/README.md`. CI's
 of the M2 acceptance found the manager blind to requests on a ready model (billing trims
 the usage stream before the manager reads it); the gateway now stamps
 `loom:pool:<model>:last_request` in `settle.lua` instead (spec §11 "Fixed after CI").
-Pending: the branch review and the user's go-ahead before M3.
+The branch review found no M2 blockers; its M3 prerequisites are P1-P4 below. Before M3
+starts, the review follow-ups below are being fixed ([m3-review-fixes-spec.md](m3-review-fixes-spec.md)).
 
 ### Follow-ups from the M1 pre-merge review (2026-11-15)
 

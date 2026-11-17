@@ -44,6 +44,24 @@ runs before the delayed reserve makes that reserve refuse with `duplicate_reques
 write nothing; (c) the existing release after a 503 `model_unavailable` still refunds the
 tpm estimate and leaves no usage event.
 
+**G2a (added after review, user decision 2026-11-17). Skip unsent reserves; cap the releases.**
+- A reserve error raised **before the command was written** to Redis starts no background
+  release, because nothing can have been reserved. Only two cases count as unsent:
+  waiting for a pool connection timed out (redis-py's `BlockingConnectionPool` "No
+  connection available."), or connecting failed (connection refused, or the connect
+  timeout). Any error after the write (a socket timeout or reset while reading the
+  reply, or anything not known to be unsent) is treated as possibly sent and released as
+  in G2. The client gets the same 503 in every case.
+- At most **1,000** background releases run at once per gateway process. A possibly-sent
+  reserve that fails while 1,000 are running starts none: its reservation is left to its
+  TTL. Both skips count in `loom_gateway_reserve_release_skipped_total{reason}`, with
+  `reason` `unsent` or `cap`.
+- `Limiter.release` refuses a marker TTL below 1 s (`ValueError`) rather than sending
+  Redis a `SET ... EX 0` that fails the script.
+- The release marker gets a test in `loom_platform`'s own tests (`services/platform_common/tests`),
+  as CLAUDE.md asks for a contract change: it is written whether or not a reservation
+  existed, with `NX`, for at least the reservation TTL.
+
 **G3 (R2b). A Postgres failure while loading the balance is a 503.**
 Any Postgres error (`psycopg.Error`, a pool timeout) in `load_from_postgres` after a
 `noinit` reserve answers 503 `balance_unavailable` with `Retry-After: 1`, never a 500.
