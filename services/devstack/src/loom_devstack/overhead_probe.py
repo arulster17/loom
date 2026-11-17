@@ -1,11 +1,13 @@
 """Gateway overhead on the compose network (M1 acceptance item d).
 
 Runs inside a container on the compose network (the acceptance script pipes this file to
-`python -` in the poolsim container, which has httpx and the dev certificates), so both
+`python -` in the poolmgr container, which has httpx and the dev certificates), so both
 paths start from the same place:
 
-- direct: `https://<pod>:8443/v1/chat/completions` with the gateway's client certificate
-  and the pod token, i.e. exactly the gateway's own upstream request (mTLS, TLS 1.3);
+- direct: the pod's proxy at its pool URL (`--pod-url`, server name `--server-name`, the
+  pod's token in the file `--token-file`) with the gateway's client certificate, i.e.
+  exactly the gateway's own upstream request (mTLS, TLS 1.3). Without `--pod-url`, M1's
+  mock pod: `https://<pod>:8443` and the token file `<certs>/<pod>.token`;
 - gateway: `http://gateway:8080/v1/chat/completions` with an API key.
 
 Requests alternate, over kept-alive connections; the added overhead is the difference of
@@ -31,6 +33,9 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="overhead_probe")
     p.add_argument("--gateway", default="http://gateway:8080")
     p.add_argument("--pod", default="mock-pod-1")
+    p.add_argument("--pod-url", help="the replica's URL from the pool hash")
+    p.add_argument("--server-name", help="the replica's TLS server name (its pod id)")
+    p.add_argument("--token-file", type=Path, help="a file holding the replica's pod token")
     p.add_argument("--model", default="qwen3-8b")
     p.add_argument("--certs", type=Path, default=Path("/certs"))
     p.add_argument("--api-key", required=True)
@@ -42,13 +47,16 @@ def main(argv: list[str] | None = None) -> None:
     certs: Path = args.certs
     ctx = ssl.create_default_context(cafile=str(certs / "ca.crt"))
     ctx.load_cert_chain(str(certs / "gateway.crt"), str(certs / "gateway.key"))
-    token = (certs / f"{args.pod}.token").read_text().strip()
+    token_file: Path = args.token_file or certs / f"{args.pod}.token"
+    token = token_file.read_text().strip()
+    server_name = args.server_name or args.pod
     body = {
         "model": args.model,
         "messages": [{"role": "user", "content": "Hello there."}],
         "max_tokens": args.max_tokens,
     }
-    direct_url = f"https://{args.pod}:8443/v1/chat/completions"
+    pod_url = (args.pod_url or f"https://{args.pod}:8443").rstrip("/")
+    direct_url = f"{pod_url}/v1/chat/completions"
     gw_url = f"{args.gateway.rstrip('/')}/v1/chat/completions"
 
     with (
@@ -58,7 +66,12 @@ def main(argv: list[str] | None = None) -> None:
 
         def via_pod() -> float:
             t0 = time.perf_counter()
-            r = direct.post(direct_url, json=body, headers={"X-Loom-Pod-Token": token})
+            r = direct.post(
+                direct_url,
+                json=body,
+                headers={"X-Loom-Pod-Token": token},
+                extensions={"sni_hostname": server_name},
+            )
             dt = time.perf_counter() - t0
             if r.status_code != 200:
                 raise SystemExit(f"direct: {r.status_code} {r.text[:200]}")

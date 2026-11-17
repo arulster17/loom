@@ -24,7 +24,8 @@ handling, §13 milestones).
 | `services/billing` | Usage consumer, ledger batches, balance reconcile, Stripe webhooks | `loom-billing` / `loom_billing` |
 | `apps/web` | Next.js dashboard, playground, admin (Auth.js, Postgres adapter) | npm |
 | `services/podproxy` | The pod proxy: mTLS front of each pod's engine (§9) | `loom-podproxy` / `loom_podproxy` |
-| `services/devstack` | Local stack: mock pod launcher, poolsim, dev certificates, load test | `loom-devstack` / `loom_devstack` |
+| `services/devstack` | Local stack: mock pod launcher, poolsim, dev certificates, load test, M1 and M2 acceptance drivers | `loom-devstack` / `loom_devstack` |
+| `services/poolmgr` | The pool manager (M2): creates, bootstraps, health-checks, drains and terminates serving pods, writes the pool hashes (§10); its admin CLI and Prometheus metrics | `loom-poolmgr` / `loom_poolmgr` |
 | `bench/` | Benchmark Lab; its mock backend is M1's engine | `loom-bench` |
 
 All Python packages are uv workspace members with their dependencies already locked;
@@ -54,11 +55,15 @@ compose servers are down, and fail when the variable is set. Factories:
 | web | 3000 | Next.js |
 | stripe-stub | 12111 | Local Stripe stand-in (`loom-billing stripe-stub`) |
 | mailpit | 8025 (UI), 1025 (SMTP) | Catches the web app's magic-link email |
-| mock-pod-1, mock-pod-2 | 8443, not published | One per servable model (`qwen3-8b`, `llama-3.3-70b-instruct-fp8`): mTLS pod proxy; the mock engine listens on `127.0.0.1:8000` inside the container |
-| poolsim | none | M1 pool simulator (§10) |
+| poolmgr | 9102 (Prometheus) | The pool manager (§10) on its `local` backend: each serving "pod" is the bench mock engine behind `loom-podproxy`, both subprocesses in this container, reached by the gateway at `https://poolmgr:<port>` on the compose network only. Shares the gateway's Redis and Postgres database. Healthy once it holds the single-writer lock and has adopted its pods |
+| mock-pod-1, mock-pod-2 | 8443, not published | Profile `poolsim` only (not started by `docker compose up`): M1's fixed mock pods, one per servable model, mTLS pod proxy in front of the mock engine on `127.0.0.1:8000` |
+| poolsim | none | Profile `poolsim` only: M1's pool simulator (§10), kept for its own tests and demos. Never together with poolmgr (both write the pool hashes) |
 | migrate, devcerts | none | One-shot jobs |
 
 Every published port can be moved with a `LOOM_*_PORT` variable (`docker-compose.yml`).
+The compose network has a fixed subnet (`10.213.0.0/24`): the local pods' proxies admit
+sources inside it only (`LOOM_POOLMGR_ALLOW_CIDRS`), so a second stack next to the first
+needs a compose override with another subnet and that variable changed with it.
 
 Settings are `LOOM_*` environment variables, read by `loom_platform.settings.PlatformSettings`
 (services subclass it). Defaults are the compose values.
@@ -67,9 +72,10 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 |---|---|---|
 | `LOOM_ENV` | unset = `prod`; compose: `dev` | all services: `dev` or `prod` (anything else refuses to start). Outside dev a service refuses to start on a missing secret or a compose dev default: gateway and billing (a `LOOM_REDIS_URL` without a password or not `rediss://`; Redis `maxmemory-policy` other than `noeviction` when `CONFIG GET` is permitted, a warning when it is not), gateway (DB password, `LOOM_SETTLE_SPOOL_PATH`, `LOOM_POD_CA_CERT`, client certificate, `LOOM_CORS_ORIGINS`; and it never uses an `http://` replica), billing (DB password, `LOOM_STRIPE_MODE=stub`, internal token missing or the compose value), web (`AUTH_SECRET` missing or the compose value, `AUTH_URL` missing, internal token missing or the compose value) |
 | `LOOM_DATABASE_URL` | `postgresql://loom:loom@localhost:5432/loom_platform` | all (web: as `DATABASE_URL`) |
-| `LOOM_REDIS_URL` | `redis://localhost:6379/0` | gateway, billing, poolsim, web (model status fallback; sign-in rate limit) |
+| `LOOM_REDIS_URL` | `redis://localhost:6379/0` | gateway, billing, pool manager, poolsim, web (model status fallback; sign-in rate limit) |
 | `LOOM_MODELS_YAML` | repo `config/models.yaml` | gateway, billing |
-| `LOOM_USAGE_STREAM` | `loom:usage` | gateway, billing |
+| `LOOM_SERVING_YAML` | repo `config/serving.yaml`; gateway image and compose: that file | gateway (cold-start estimates, §10; a missing file gives every model 300 s, a present but invalid one stops it at start), pool manager (M2). Loaded by `loom_platform.serving.load_serving` |
+| `LOOM_USAGE_STREAM` | `loom:usage` | gateway, billing (the pool manager no longer reads it: billing trims each event as soon as it stores it, §10) |
 | `LOOM_AUTH_CACHE_TTL_S` | 4 | gateway |
 | `LOOM_REQUEST_TIMEOUT_S` / `LOOM_RESERVATION_GRACE_S` | 600 / 60 | gateway (reservation TTL = their sum) |
 | `LOOM_SETTLE_REPLAY_WINDOW_S` | 3600 | gateway: the `done:` marker lives the reservation TTL plus this; a spooled settle replayed within it is refused as a repeat by the marker (§6 "Settle spool") |
@@ -94,10 +100,24 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_GATEWAY_URL`, `LOOM_PUBLIC_API_URL`, `LOOM_BILLING_URL` | `http://localhost:8080`, `http://localhost:8080/v1`, `http://localhost:8090` | web: the gateway and billing as the server reaches them; the API base shown to users |
 | `LOOM_PLAYGROUND_KEY_SECRET` / `LOOM_PLAYGROUND_KEY_TTL_S` | derived from `AUTH_SECRET` / 3600 | web: playground keys (§5) *(wave 2)* |
 | `LOOM_NOTIFY_STREAM` | `loom:notify` | billing: notifications outbox (§7) *(wave 2)* |
+| `LOOM_POOLMGR_SERVING_YAML` | unset: `LOOM_SERVING_YAML`, else the repo's `config/serving.yaml`; compose: `/loom-config/serving.yaml` (the committed file, `provider: local`) | pool manager |
+| `LOOM_POOLMGR_CA_CERT` / `LOOM_POOLMGR_CA_KEY` | none; compose: the dev CA in `.dev/certs` (`ca.crt`, `ca.key`), the one the gateway trusts as `LOOM_POD_CA_CERT` | pool manager: the Loom pod CA it issues pod server certificates from (SAN = pod id, `serving.yaml` `server_cert_days`). Required outside dev; dev without them: a CA generated in the state directory |
+| `LOOM_POOLMGR_CLIENT_CERT` / `LOOM_POOLMGR_CLIENT_KEY` | none; compose: `.dev/certs/loom-poolmgr.{crt,key}` (`loom-devcerts --client loom-poolmgr`) | pool manager: its own client certificate (clientAuth, signed by that CA) for health checks and probes through each pod's proxy. Required with the CA |
+| `LOOM_POOLMGR_SSH_KEY` | none (dev: a key generated in the state directory) | pool manager: the private key serving pods authorize (`<key>.pub` next to it). Required outside dev |
+| `LOOM_POOLMGR_LEASE_BUCKET` | none (dev: lease records kept in memory) | pool manager: S3 bucket of the pod lease records `serving/leases/<pod id>`. Required outside dev |
+| `LOOM_POOLMGR_PROXY_BUNDLE` | none (dev: a placeholder; the local backend installs nothing) | pool manager: the `loom-podproxy` bundle tarball (`loom-podproxy-bundle`), its sha256 checked against `config/serving-artifacts.lock`. Required outside dev |
+| `LOOM_POOLMGR_METRICS_PORT` | 9102 (0 = none) | pool manager: Prometheus, served once it holds the lock and has adopted its pods (the image's healthcheck) |
+| `LOOM_POOLMGR_STATE_DIR` | dev: a temporary directory; compose: `/var/lib/loom-poolmgr` | pool manager: per-pod known_hosts files (and in dev a generated SSH key and CA; the local backend's pod directories). Required outside dev |
+| `LOOM_POOLMGR_LOCAL_COLD_START_S` | 20 | pool manager, `provider: local`: seconds before a local pod reports `RUNNING` (a simulated image pull) |
+| `LOOM_POOLMGR_LOCAL_HOST` | `127.0.0.1`; compose: `poolmgr` | pool manager, `provider: local`: the host the local pods' proxies are advertised at in the pool hash (anything but loopback makes them listen on all interfaces) |
+| `LOOM_POOLMGR_ALLOW_CIDRS` | empty; compose: the compose subnet | pool manager, dev and `provider: local` only (refused otherwise): comma-separated CIDRs added to the local pods' proxy allowlist, which is otherwise `gateway_egress_cidrs` or loopback. Compose keeps it inside the network's fixed `ipam` subnet, never wider |
+| `LOOM_POOLMGR_IDLE_STOP_S` | unset (each model's `idle_stop_s` from `serving.yaml`); compose: 600 | pool manager, dev only (refused otherwise): replaces every model's `idle_stop_s`; the committed file's 1800 s is too long for an acceptance run |
+| `RUNPOD_API_KEY` | none | pool manager, `provider: runpod`: the **serving** account's key (not the bench's) |
 | `LOOM_POOLSIM_REPLICAS` | compose: `<model>=<pod>@https://<pod>:8443,...` | poolsim (§10) |
-| `LOOM_POOLSIM_TOKEN_DIR`, `_COLD_START_S`, `_IDLE_STOP_S` | `.dev/certs`, 20, 0 (off) | poolsim |
-| `LOOM_MOCKPOD_ID`, `LOOM_MOCKPOD_MODELS`, `LOOM_DEV_CERTS` | `mock-pod-1`, `qwen3-8b`, `.dev/certs` | mock pods |
-| `LOOM_PODPROXY_ALLOW_IPS` | empty (any source) | pod proxy: allowed source CIDRs |
+| `LOOM_POOLSIM_TOKEN_DIR`, `_COLD_START_S`, `_IDLE_STOP_S` | `.dev/certs`, 20, 0 (off) | poolsim (compose profile `poolsim`) |
+| `LOOM_DEV_OWNER` | compose: `1000:1000` | `devcerts` (`loom-devcerts --owner`): the host user `.dev/certs` is given to, so the checkout stays readable from the host (the container writes as root, and `ca.key` is 0600). Set it to `$(id -u):$(id -g)` for another first user |
+| `LOOM_MOCKPOD_ID`, `LOOM_MOCKPOD_MODELS`, `LOOM_DEV_CERTS` | `mock-pod-1`, `qwen3-8b`, `.dev/certs` | mock pods (compose profile `poolsim`) |
+| `LOOM_PODPROXY_ALLOW_IPS` | empty (any source) | pod proxy: allowed source CIDRs (on serving pods the manager uses `--allow-ip-file` instead, §9) |
 
 ## 3. Postgres
 
@@ -119,6 +139,7 @@ Every table of the accepted PLAN.md draft exists as drafted, with these addition
 | `admin_audit_log.actor_user_id` has no foreign key | Deleting a user must not need an UPDATE of the log. |
 | `usage_posted_org`, `usage_posted_key` (migration 0008) | Per org / key, the cost of events linked to a ledger transaction, kept by trigger; the usage-total functions read them instead of summing all history |
 | `stripe_payments` (migration 0007): PaymentIntent -> session, org, purchase, amount, cumulative refunded and clawed-back micros | Refund and dispute events name the PaymentIntent; this maps them to the org and keeps clawbacks cumulative-safe and capped at the purchase. |
+| `serving_pods`, `serving_spend_alerts` (migration 0010) | The pool manager's pod records (one row per pod, written before RunPod is called; state, placement, `cost_per_hr_micros`, ports, lease, stages; never a token, key or certificate) and the monthly spend alerts sent, once per (month, fraction). See docs/phase1-m2-spec.md §5. |
 
 Invariants enforced in the database:
 
@@ -243,8 +264,11 @@ without also discarding the stream (both are one state).
 | `loom:usage` | stream | settle | Usage events (§7) |
 | `loom:notify` | stream | billing reconcile | Notifications outbox (§7) *(wave 2)* |
 | `loom:org:<org>:lowbal` | string | billing reconcile | Low-balance notice sent for the current crossing *(wave 2)* |
-| `loom:pool:<model>` | hash | pool manager / poolsim | Pool state (§10) |
-| `loom:pool:<model>:wake` | string, 600 s | gateway | Start request for a cold model; also `PUBLISH loom:pool:wake <model>` |
+| `loom:pool:<model>` | hash | pool manager / poolsim | Pool state (§10), with an optional `reason` (from M2) |
+| `loom:pool:<model>:last_request` | string (Redis time, ms), no TTL | settle | When a request for the model was last settled (from M2). The pool manager's demand signal for a ready model: a change between two ticks is demand (§10) |
+| `loom:pool:<model>:wake` | string, 600 s | gateway, `loom-poolmgr warm` | Start request for a `cold` or (from M2) `unavailable` model; also `PUBLISH loom:pool:wake <model>` (the manager ticks at once) |
+| `loom:poolmgr:admin` | list of JSON | `loom-poolmgr drain\|stop\|reset\|local-capacity` | The manager's admin queue: `{"op": "drain", "pod_id"}`, `{"op": "stop"\|"reset", "model"}`, dev only `{"op": "local_capacity", "capacity": "on"\|"off"}`; popped at the start of each tick |
+| `loom:poolmgr:reset:<model>` | string (epoch seconds), 2 h | pool manager | When the model's holds were last `reset`: after a restart, `crash_loop` and `price_too_high` are recomputed from the last hour's `serving_pods` rows counting only failures after it |
 
 Use `loom_platform.limiter` (`Limiter`, `org_key`, `api_key_key`) rather than building
 names by hand.
@@ -305,7 +329,8 @@ Per request, after auth and model lookup, before the pool check (§8):
    abort, upstream loss, engine error, or no replica answered): refuse a repeat; release the
    reservation; charge tpm buckets `actual tokens - estimate` (refunds an over-estimate,
    debt floored at one minute of tokens); `usage += cost`; key usage += cost; `XADD` the
-   usage event with `org_usage_total_micros`. Settling without a live reservation still
+   usage event with `org_usage_total_micros`; `SET loom:pool:<model>:last_request` to the
+   Redis time (ms), the pool manager's demand signal (§10). Settling without a live reservation still
    charges. If the org's state is gone from Redis (lost mid-request), settle appends the
    event but creates no counters, so the next reserve loads them from Postgres. Cost is
    `pricing.cost_micros` on the engine's token counts.
@@ -376,6 +401,11 @@ at the next start when a process stops with entries left. **M3**: put it on a vo
 that outlives the task, or accept that a task stopped during a Redis outage longer than
 its shutdown loses the spooled settles (logged at error with the count).
 
+A replayed settle stamps `loom:pool:<model>:last_request` with the replay time, not the
+request's: after an outage every ready model in the backlog counts as freshly used and
+stays up one more `idle_stop_s` (at most ~30 GPU-minutes per model at the committed 1800 s).
+Accepted: it can only keep a pod up longer, never drain one early.
+
 While Redis is unavailable new requests are refused fast: any Redis error during auth,
 reserve or the pool check is a 503 `service_unavailable` with `Retry-After: 1` (§11).
 
@@ -393,7 +423,7 @@ What happens and how it heals (tested in `services/billing/tests/test_billing_re
 | Reservations, in-flight counts, token buckets | Limits briefly looser; settles without a reservation still charge | Nothing to do |
 | `done:` markers | A spooled settle replays normally (its original never landed) | Nothing to do |
 | `loom:apikey:*`, `lowbal` markers | Reloaded from Postgres; a low-balance notice may repeat | Nothing to do |
-| `loom:pool:*` | Model looks cold: 503 and a wake | Pool manager (M1: poolsim) brings it back |
+| `loom:pool:*` | Model looks cold: 503 and a wake | Pool manager (M1: poolsim) brings it back: it rewrites every pool hash on its next tick |
 
 ### Shutdown
 
@@ -601,10 +631,27 @@ a replica's URL host and `server_name` are the same (`https://mock-pod-1:8443`).
   never a clean end.
 - **Implementation**: Python (`h11` + `httpx`, already locked) instead of the Caddy binary
   in phase1-runpod-plan.md §4 step 2: it runs in the test suite and in compose unchanged,
-  and the proxy tests are the behaviour any replacement must pass. Whether RunPod pods run
-  it or Caddy is an M2 decision.
+  and the proxy tests are the behaviour any replacement must pass. **Decided in M2: RunPod
+  pods run this proxy too, not Caddy** (docs/phase1-m2-spec.md §9), as a pinned bundle:
+  `loom-podproxy-bundle --out DIR` builds one tarball (the `loom-podproxy` wheel from
+  `git archive HEAD` plus its locked dependency wheels) whose sha256 is committed in
+  `config/serving-artifacts.lock` (CI checks it with `--check`); the manager's bootstrap
+  ships it on SSH stdin, checks the sha256 and installs it into `/opt/loom/proxy-venv`
+  with `pip install --no-index`.
+- **On a serving pod** the manager writes `/etc/loom/proxy/{server.crt,server.key,ca.crt,
+  token,allow}` (0600, owned by `loomproxy`, over SSH stdin only) and runs the proxy as
+  `loomproxy` on `:8443` with `--token-file` and `--allow-ip-file` (one CIDR or address
+  per line: `serving.yaml` `gateway_egress_cidrs`). **SIGHUP** reloads certificate, key,
+  CA, token and allowlist from those files for new connections; open connections are
+  kept. A reload is all or nothing: if any file fails to parse, the old configuration
+  stays and an error is logged; an empty or blank allowlist file is a parse failure (at
+  start: refuse to start), never "any source". The manager uses it to re-key a pod
+  (adoption) and to renew its server certificate before expiry.
 - Dev certificates (`loom-devcerts`: a local CA, a gateway client certificate, a server
-  certificate and a token per pod) go into `.dev/certs`, gitignored; never committed.
+  certificate and a token per pod, and `--client loom-poolmgr`, the manager's client
+  certificate) go into `.dev/certs`, gitignored; never committed. In compose (M2) the
+  manager signs its local pods' server certificates with that CA's key and makes up each
+  pod's token; the replica URL is `https://poolmgr:<port>`, its `server_name` the pod id.
 
 ## 10. Model pools and "model temporarily unavailable"
 
@@ -618,13 +665,51 @@ available there is no fallback. A request to a model with no ready replica retur
 |---|---|---|
 | `ready` with replicas | Route (least in-flight) | |
 | `warming` | 503 "starting up" | `retry_after_s` (remaining cold-start estimate) |
-| `cold` or no hash | `request_wake(model)`, then 503 "starting up" | `retry_after_s`, else the model's cold-start estimate (8B 240 s, 70B 450 s from the measured cold starts; gateway constants in M1, `config/serving.yaml` from M2) |
-| `unavailable` | 503 "no GPU capacity" | `retry_after_s` (default 300) |
+| `cold` or no hash | `request_wake(model)`, then 503 "starting up" | `retry_after_s`, else the model's cold-start estimate: `cold_start_estimate_s` in `config/serving.yaml` (8B 240 s, 70B 450 s from the measured cold starts), 300 s for a model not there or with no file (`LOOM_SERVING_YAML`, §2). A file that exists but fails validation is a config error: the gateway refuses to start (fail fast), it never falls back |
+| `unavailable` | `request_wake(model)`, then 503 "no GPU capacity" | `retry_after_s` (default 300) |
 
 `replicas` is a JSON list of `{id, url, server_name, token}`. The gateway reads the hash
 per request (or caches it for at most 1 s).
 
-**M1 simulation** (`poolsim`): seeds every servable model as `ready` with the one mock
+`reason` (from M2; `PoolState.reason`) says why a pool is `unavailable`: `crash_loop`,
+`spend_cap`, `price_too_high`, `not_configured` or `no_capacity`. It is absent otherwise,
+and a hash written without it (M1 code, poolsim) has none. `set_pool` writes the whole
+hash, so a rewrite without a reason clears an old one. The gateway only logs it (the
+`pool_state` and `pool_reason` fields of the `rejected` line of a 503) and counts it:
+`loom_gateway_model_unavailable_total{model,state,reason}` (`reason="none"` when the pool
+gives none).
+
+**Wake on `unavailable`** (from M2): the gateway calls `request_wake` for an `unavailable`
+model too (one `SET NX`, after reserve like every 503, so rate-limited the same way). The
+pool manager treats a live wake key as demand and retries `no_capacity` on its backoff
+schedule while the key lives; it ignores the wake for the other reasons, which need an
+admin. The client's answer is unchanged.
+
+**Writer: the pool manager** (M2, `loom-poolmgr run`, single writer by a Postgres
+advisory lock; docs/phase1-m2-spec.md §5, §7). Every tick it rewrites each configured
+model's hash from its pod records, evaluating in this order:
+
+| Condition | `state` | `retry_after_s` | `reason` |
+|---|---|---|---|
+| >= 1 `ready` pod | `ready`, replicas = the ready pods | 0 | |
+| crash loop, spend cap, price too high, not configured | `unavailable` | `capacity.unavailable_retry_after_s` (300) | `crash_loop` / `spend_cap` / `price_too_high` / `not_configured` |
+| last create answered no capacity, nothing in flight | `unavailable` | the next `capacity.backoff_s` step | `no_capacity` |
+| a pod is `creating` or `bootstrapping` | `warming` | `max(15, cold_start_estimate_s - elapsed)` | |
+| otherwise | `cold` | `cold_start_estimate_s` | |
+
+A servable model missing from `serving.yaml` is written `unavailable` / `not_configured`.
+Demand is a live wake key, or a ready model with a request within its `idle_stop_s`:
+one in flight on a pod (`vllm:num_requests_running` > 0 on a tick), or one settled, seen
+as a change in `loom:pool:<model>:last_request` between two ticks (`settle.lua` stamps it,
+§6). Idle time runs from the tick that saw the demand. A stamp present when the manager
+starts is not demand (adopted pods count as demand by themselves). The usage stream is not
+a demand signal: billing trims each event right after storing it, usually before the
+manager's next tick (found by the M2 acceptance's idle check in CI). A ready pod idle that
+long is removed from the hash first, then drained and terminated. Admin: `loom-poolmgr status|warm|drain|stop|
+reset` (services/poolmgr/README.md).
+
+**M1 simulation** (`poolsim`, now a test tool under the compose profile `poolsim`; never
+run it against the manager's Redis): seeds every servable model as `ready` with the one mock
 pod replica. Simulated on-demand behaviour, for the tests and demos: setting a model
 `cold` makes the next request return 503 and publish a wake; poolsim moves it to `warming`
 (`retry_after_s` counting down) and to `ready` after `LOOM_POOLSIM_COLD_START_S` (default
@@ -711,7 +796,9 @@ strings. An unknown id is 404 `model_not_found`.
 - **Auth.js with uuid ids**: verify on the installed `@auth/pg-adapter` (web agent).
 - **Mock `continuous_usage_stats`**: done (§9). Cached tokens of an aborted stream are
   unknown (as in vLLM); exact while cached input is priced as input.
-- **Pod proxy on RunPod**: Python `loom-podproxy` or a pinned Caddy (plan §4); decide in M2.
+- **Pod proxy on RunPod**: closed in M2: the Python `loom-podproxy`, shipped as a pinned
+  bundle and reloaded with SIGHUP (§9; docs/phase1-m2-spec.md §9, decision 1). Whether
+  the pinned vLLM image's Python can install it is checked in M4's smoke.
 - **Row-level security**: deferred; org-scoped queries and cross-tenant tests for now.
 - **Gateway image size**: `loom-platform` depends on `loom-bench` for the registry,
   which pulls numpy, scipy and pyarrow. Splitting the registry into its own small

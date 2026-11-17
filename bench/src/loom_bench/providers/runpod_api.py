@@ -122,14 +122,20 @@ def check_pod_id(pod_id: str) -> str:
     return pod_id
 
 
-def public_ssh(pod: Mapping[str, Any]) -> tuple[str, int] | None:
-    """(public IP, port) mapped to the pod's 22/tcp, or None until RunPod assigns them."""
+def public_port(pod: Mapping[str, Any], port: int) -> tuple[str, int] | None:
+    """(public IP, port) mapped to the pod's `port`/tcp, or None until RunPod assigns
+    them."""
     ip = pod.get("publicIp") or ""
     mappings = pod.get("portMappings") or {}
-    port = mappings.get("22") if isinstance(mappings, Mapping) else None
-    if not ip or port is None:
+    mapped = mappings.get(str(port)) if isinstance(mappings, Mapping) else None
+    if not ip or mapped is None:
         return None
-    return str(ip), int(port)
+    return str(ip), int(mapped)
+
+
+def public_ssh(pod: Mapping[str, Any]) -> tuple[str, int] | None:
+    """(public IP, port) mapped to the pod's 22/tcp, or None until RunPod assigns them."""
+    return public_port(pod, 22)
 
 
 class RunpodApi:
@@ -144,6 +150,7 @@ class RunpodApi:
         transport: httpx.BaseTransport | None = None,
         timeout_s: float = 30.0,
         sleep: Callable[[float], None] = time.sleep,
+        user_agent: str = "loom-bench",
     ) -> None:
         if not api_key.get_secret_value():
             raise ValueError("empty RunPod API key")
@@ -154,7 +161,7 @@ class RunpodApi:
         self._client = httpx.Client(
             headers={
                 "Authorization": f"Bearer {api_key.get_secret_value()}",
-                "User-Agent": "loom-bench",
+                "User-Agent": user_agent,
             },
             transport=transport,
             timeout=timeout_s,

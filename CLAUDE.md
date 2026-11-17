@@ -18,8 +18,15 @@ uv run ruff format --check . && uv run ruff check .
 uv run mypy bench/src
 uv run mypy services/platform_common/src services/gateway/src services/billing/src
 uv run mypy services/platform_common/src services/podproxy/src services/devstack/src
-uv run pytest -q -n auto
+uv run mypy services/platform_common/src services/poolmgr/src
+uv run pytest -q -n auto   # includes the pool manager's tests (services/poolmgr/tests)
 ```
+Job `podproxy-bundle` (needs the network) rebuilds the pinned pod proxy bundle and checks it against `config/serving-artifacts.lock`:
+```
+uv run loom-podproxy-bundle --check --out "$RUNNER_TEMP/podproxy-bundle"
+uv run pytest -q -m network services/podproxy/tests/test_podproxy_bundle.py services/podproxy/tests/test_podproxy_bundle_dirty.py
+```
+Job `acceptance` runs `docker compose up -d --build --wait`, then `uv run loom-m1-acceptance` and `uv run loom-m2-acceptance` (M2's takes ~20 min, mostly the idle-stop wait).
 Web app, from `apps/web`: `npm ci`, `npm run lint`, `npm run typecheck`, `npm test`, `npm run test:integration` (real Postgres, migrated with `uv run loom-migrate`), `npm run build`.
 
 ## Native Windows

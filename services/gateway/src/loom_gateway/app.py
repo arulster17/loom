@@ -57,6 +57,7 @@ from loom_platform.auth import AuthRecord
 from loom_platform.db import open_pool
 from loom_platform.errors import ApiError
 from loom_platform.limiter import Limiter
+from loom_platform.pool import PoolState
 from loom_platform.pricing import Price, servable
 from loom_platform.usage import UsageEvent
 
@@ -238,23 +239,28 @@ class Gateway:
         raise errors.from_reserve(result, prep.max_cost_micros)
 
     def rejected(
-        self, e: ApiError, headers: dict[str, str], endpoint: str, model: str, t0: float
+        self,
+        e: ApiError,
+        headers: dict[str, str],
+        endpoint: str,
+        model: str,
+        t0: float,
+        pool: PoolState | None = None,
     ) -> Response:
         self.metrics.requests.labels(endpoint, model, str(e.status)).inc()
         self.metrics.errors.labels(e.code).inc()
-        log.info(
-            "rejected",
-            extra={
-                "fields": {
-                    "request_id": headers.get("X-Loom-Request-Id"),
-                    "endpoint": endpoint,
-                    "model": model,
-                    "http_status": e.status,
-                    "code": e.code,
-                    "latency_ms": int((time.perf_counter() - t0) * 1000),
-                }
-            },
-        )
+        fields: dict[str, object] = {
+            "request_id": headers.get("X-Loom-Request-Id"),
+            "endpoint": endpoint,
+            "model": model,
+            "http_status": e.status,
+            "code": e.code,
+            "latency_ms": int((time.perf_counter() - t0) * 1000),
+        }
+        if pool is not None:
+            # A 503 model_unavailable: the pool behind it (contracts §10).
+            fields |= {"pool_state": pool.state, "pool_reason": pool.reason}
+        log.info("rejected", extra={"fields": fields})
         return error_response(e, headers)
 
     # ------------------------------------------------------------ endpoints
@@ -279,6 +285,7 @@ class Gateway:
     ) -> Response:
         headers = {"X-Loom-Request-Id": str(request_id)}
         model_label = "-"
+        unroutable: PoolState | None = None
         try:
             # The key before the body: an unknown or malformed key is refused without
             # reading (and buffering) up to LOOM_MAX_BODY_BYTES first.
@@ -305,7 +312,9 @@ class Gateway:
             await self.reserve(record, request_id, prep)
             try:
                 pool = await self.router.pool(model_id)
+                unroutable = pool
                 await self.router.check_routable(pool)
+                unroutable = None
             except BaseException:
                 # Never dispatched: drop the reservation, no usage event (if this fails
                 # too, the reservation expires with its TTL).
@@ -314,7 +323,7 @@ class Gateway:
                 raise
             headers["X-Loom-Max-Cost-Micros"] = str(prep.max_cost_micros)
         except ApiError as e:
-            return self.rejected(e, headers, endpoint, model_label, t0)
+            return self.rejected(e, headers, endpoint, model_label, t0, unroutable)
         except (RedisError, OSError) as e:
             # Redis down or frozen past its socket timeout: refuse fast, nothing reserved
             # (a reservation made before the failure is released or expires).

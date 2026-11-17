@@ -1,7 +1,7 @@
 [project]
 name = "loom-devstack"
 version = "0.1.0"
-description = "Loom local stack: mock pod launcher, pool simulator, dev certificates, gateway load test"
+description = "Loom local stack: mock pod launcher, pool simulator, dev certificates, gateway load test, acceptance drivers"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
@@ -23,6 +23,7 @@ loom-poolsim = "loom_devstack.poolsim:main"
 loom-mockpod = "loom_devstack.mockpod:main"
 loom-loadtest = "loom_devstack.loadtest:main"
 loom-m1-acceptance = "loom_devstack.acceptance:main"
+loom-m2-acceptance = "loom_devstack.m2_acceptance:main"
 
 [build-system]
 requires = ["hatchling>=1.25"]

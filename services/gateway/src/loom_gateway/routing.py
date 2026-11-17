@@ -18,9 +18,10 @@ import httpx
 from redis.asyncio import Redis
 
 from loom_gateway.metrics import GatewayMetrics
-from loom_gateway.settings import COLD_START_ESTIMATE_S, DEFAULT_COLD_START_S, GatewaySettings
+from loom_gateway.settings import DEFAULT_COLD_START_S, GatewaySettings
 from loom_platform import errors
 from loom_platform.pool import PoolState, Replica, get_pool, request_wake
+from loom_platform.serving import load_serving, serving_path
 
 log = logging.getLogger("loom_gateway.routing")
 
@@ -50,6 +51,22 @@ def upstream_client(s: GatewaySettings) -> httpx.AsyncClient:
     )
 
 
+def serving_cold_starts() -> dict[str, int]:
+    """`cold_start_estimate_s` per model from config/serving.yaml (`LOOM_SERVING_YAML`
+    honoured). No file there: nothing, so every model gets DEFAULT_COLD_START_S. A file
+    that exists but does not validate raises (the gateway fails fast at start; spec §11)."""
+    path = serving_path()
+    try:
+        cfg = load_serving(path, check_registry=False)
+    except FileNotFoundError:
+        log.warning(
+            "no serving config; cold-start estimates default",
+            extra={"fields": {"path": str(path), "cold_start_s": DEFAULT_COLD_START_S}},
+        )
+        return {}
+    return {model_id: m.cold_start_estimate_s for model_id, m in cfg.models.items()}
+
+
 @dataclass
 class _ReplicaStats:
     inflight: int = 0
@@ -67,7 +84,7 @@ class Router:
         self.redis = redis
         self.settings = settings
         self.metrics = metrics
-        self.cold_start_s = {**COLD_START_ESTIMATE_S, **(cold_start_s or {})}
+        self.cold_start_s = {**serving_cold_starts(), **(cold_start_s or {})}
         self._pools: dict[str, tuple[float, PoolState]] = {}
         self._stats: dict[str, _ReplicaStats] = {}
 
@@ -87,20 +104,25 @@ class Router:
         return pool
 
     async def check_routable(self, pool: PoolState) -> None:
-        """Raise 503 model_unavailable (with Retry-After) unless the pool can serve."""
+        """Raise 503 model_unavailable (with Retry-After) unless the pool can serve.
+        Every 503 is counted by pool state and reason."""
         if pool.routable:
             return
-        if pool.state == "unavailable":
-            raise errors.model_unavailable(pool.model_id, pool.retry_after_s or 300, False)
+        state = "cold" if pool.state == "ready" else pool.state
+        self.metrics.model_unavailable.labels(pool.model_id, state, pool.reason or "none").inc()
         if pool.state == "warming":
             raise errors.model_unavailable(
                 pool.model_id,
                 pool.retry_after_s or self.cold_start_estimate(pool.model_id),
                 True,
             )
-        # cold, missing, or 'ready' with no replica: ask for a start.
+        # cold, missing, 'ready' with no replica, or unavailable: ask for a start. For
+        # `unavailable` the manager decides whether a wake can clear the reason (it retries
+        # no_capacity while the wake lives; the other reasons need an admin).
         if await request_wake(self.redis, pool.model_id):
             self.metrics.wakes.labels(pool.model_id).inc()
+        if pool.state == "unavailable":
+            raise errors.model_unavailable(pool.model_id, pool.retry_after_s or 300, False)
         raise errors.model_unavailable(
             pool.model_id, pool.retry_after_s or self.cold_start_estimate(pool.model_id), True
         )

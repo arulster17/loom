@@ -1,0 +1,54 @@
+# How the pool manager (loom-poolmgr) deploys the models config/models.yaml serves
+# (docs/phase1-m2-spec.md §4). Loaded and validated by loom_platform.serving.load_serving;
+# LOOM_SERVING_YAML overrides the path. Every section rejects unknown keys.
+#
+# This committed file is the docker-compose default: provider `local` runs each "pod" as
+# a mock engine behind loom-podproxy inside the poolmgr container, so the egress
+# allowlist may stay empty. The production file (provider `runpod`, the control plane's
+# egress IP) is deployed in M3; the manager refuses `local`/`fake` outside LOOM_ENV=dev.
+# The gateway reads only `models.<id>.cold_start_estimate_s` (its 503 Retry-After).
+version: 1
+provider: local                    # runpod | local (compose) | fake (tests)
+spend:
+  monthly_cap_usd: 100             # plan §15 q1 suggestion for on-demand; confirm before M4
+  alert_fractions: [0.5, 0.8, 1.0]
+  max_price_ratio: 1.25            # refuse a pod priced above bench/prices.yaml x this
+placement:
+  data_center_prefixes: ["US-"]    # decision 7: US only; resolved against RunPod's stock list
+  allowed_cuda_versions: ["13.0"]
+  container_disk_gb: {qwen3-8b: 80, llama-3.3-70b-instruct-fp8: 120}
+network:
+  gateway_egress_cidrs: []         # pod proxy allowlist; empty only with provider local/fake
+  proxy_port: 8443
+lifecycle:
+  reconcile_every_s: 15
+  lease_ttl_s: 3600                # a pod lives at most this long past the last renewal
+  lease_renew_every_s: 300
+  drain_max_s: 600
+  server_cert_days: 7
+  server_cert_renew_before_s: 172800   # re-issue over SSH when < 2 days left
+  max_replacements_per_hour: 3     # per model; past it: unavailable, alert, admin reset
+health:
+  pod_state_every_s: 30
+  proxy_health_every_s: 10
+  proxy_health_failures: 3
+  unhealthy_grace_s: 120
+  progress_stall_s: 60
+  bootstrap_stall_s: 600           # the bench's engine_stall_s
+  bootstrap_timeout_s: 1800
+capacity:
+  backoff_s: [30, 60, 120, 240]    # the bench's capacity_backoff
+  unavailable_retry_after_s: 300
+models:
+  qwen3-8b:
+    min_replicas: 0                # 0 = on demand (decision 2026-10-31); >= 1 = always on
+    max_replicas: 1                # hard cap on non-terminated pods
+    idle_stop_s: 1800
+    cold_start_estimate_s: 240
+    engine_env: {}                 # 7a8237d0's bf16 cell (pinned by a test)
+  llama-3.3-70b-instruct-fp8:
+    min_replicas: 0
+    max_replicas: 1
+    idle_stop_s: 1800
+    cold_start_estimate_s: 450
+    engine_env: {NCCL_P2P_LEVEL: NVL}   # the env 9f0853d7's FP8 cell ran with (pinned by a test)

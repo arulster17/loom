@@ -36,7 +36,8 @@ other than compose's, and it never dispatches to an `http://` replica.
 3. One `reserve.lua` call (402/429), loading the org from Postgres and retrying once on
    `noinit`.
 4. 503 `model_unavailable` with `Retry-After` unless the model's pool is `ready` (a cold
-   model also gets a wake request). No fallback to another model or GPU type. The 503
+   or unavailable model also gets a wake request; a cold model's Retry-After defaults to
+   its `cold_start_estimate_s` in `config/serving.yaml`). No fallback to another model or GPU type. The 503
    releases the reservation (`release.lua`: tpm refunded, the rpm token stays spent, no
    usage event), so only a request with the balance and rate limit to run can wake a GPU.
 5. Dispatch over mTLS (client certificate, pod CA, server name = pod id, TLS 1.3,

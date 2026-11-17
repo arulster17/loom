@@ -6,8 +6,14 @@ same server actions run), the magic link read from Mailpit's API, the gateway wi
 unmodified OpenAI Python SDK, the Stripe stub's pay page. Checks every number against
 Postgres, Redis and the mock engines' own counters, and records it.
 
-    docker compose up -d --build                     # with LOOM_ADMIN_EMAILS set, below
-    uv run loom-m1-acceptance --json /tmp/m1.json    # ~4 minutes; exit 0 = every item passed
+    docker compose up -d --build --wait              # with LOOM_ADMIN_EMAILS set, below
+    uv run loom-m1-acceptance --json /tmp/m1.json    # ~8 minutes; exit 0 = every item passed
+
+The pods are the pool manager's (M2, `poolmgr` on its local backend: the bench mock
+engine behind loom-podproxy, inside the poolmgr container). Models start cold, so the
+flow first warms both with `loom-poolmgr warm`; where M1 drove poolsim, this drives the
+manager's CLI (`stop` for the cold model of item f, `warm` to bring a model back) and
+reads the engines' own counters on the pod (`pod_tool.py`, piped into that container).
 
 The admin is bootstrapped through `LOOM_ADMIN_EMAILS`, which must contain `--admin-email`
 (default `admin@m1.test`). Ports default to the compose defaults; a second stack on moved
@@ -20,6 +26,7 @@ Items (the M1 row of docs/phase1-runpod-plan.md §13 and the brief §8.4):
 0  sign up -> pending -> admin approves -> $5 -> key -> SDK (both models, stream and not,
    chat and completions) and the playground -> usage rows and balance drop match
 a  usage in Postgres = engine-reported tokens, incl. a client abort and a killed pod
+   (its engine killed; the manager fails the pod and starts a replacement)
 b  a revoked key (and a suspended org) is refused within 5 s
 c  concurrent load against a small balance cannot overshoot it
 d  gateway p50 added overhead < 10 ms (gateway vs direct to the pod, same mTLS path)
@@ -51,6 +58,7 @@ import csv
 import html
 import io
 import json
+import math
 import os
 import re
 import secrets
@@ -75,7 +83,7 @@ from loom_platform.limiter import org_key
 
 ITEMS = "0abcdefghijklm"
 MODELS = ("qwen3-8b", "llama-3.3-70b-instruct-fp8")
-POD_OF = {"qwen3-8b": "mock-pod-1", "llama-3.3-70b-instruct-fp8": "mock-pod-2"}
+POOLMGR = "poolmgr"  # the compose service: the manager and its local pods
 RAISED_LIMITS = {"rpm_limit": 100_000, "tpm_limit": 1_000_000_000, "concurrency_limit": 256}
 
 
@@ -450,14 +458,109 @@ def wait_healthy(cid: str, timeout_s: float = 90) -> float:
     raise AcceptanceError(f"container {cid} not healthy within {timeout_s} s")
 
 
-def engine_counters(stack: Stack, model: str) -> tuple[int, int]:
-    """(prompt_tokens_total, generation_tokens_total) of the mock engine of `model`, read
-    on the pod itself from the engine's own Prometheus endpoint."""
-    code = (
-        "import urllib.request;"
-        "print(urllib.request.urlopen('http://127.0.0.1:8000/metrics',timeout=5).read().decode())"
+# ---------------------------------------------------------------------------- the pool manager
+
+
+def poolmgr(stack: Stack, *args: str) -> str:
+    """`loom-poolmgr <args>` in the manager's container (its admin CLI)."""
+    return docker("exec", container(stack, POOLMGR), "loom-poolmgr", *args)
+
+
+def pod_tool(stack: Stack, *args: str) -> str:
+    """`pod_tool.py <args>` in the manager's container, where the local pods run."""
+    source = (Path(__file__).parent / "pod_tool.py").read_text()
+    return docker("exec", "-i", container(stack, POOLMGR), "python", "-", *args, input_text=source)
+
+
+def pool_of(r: redis.Redis, model: str) -> dict[str, Any]:
+    """`loom:pool:<model>` as the gateway reads it (contracts §10); `{}` when absent."""
+    raw: dict[Any, Any] = r.hgetall(f"loom:pool:{model}")  # type: ignore[assignment]
+    h = {
+        (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
+        for k, v in raw.items()
+    }
+    if h:
+        h["replicas"] = json.loads(h.get("replicas") or "[]")
+    return h
+
+
+def ready_replica(r: redis.Redis, model: str) -> dict[str, Any] | None:
+    pool = pool_of(r, model)
+    if pool.get("state") == "ready" and pool["replicas"]:
+        replica: dict[str, Any] = pool["replicas"][0]
+        return replica
+    return None
+
+
+def ensure_ready(stack: Stack, r: redis.Redis, model: str, timeout_s: float = 240) -> float:
+    """Wake `model` through the manager (`loom-poolmgr warm`) until its pool is ready;
+    returns the seconds it took (0 when it already was)."""
+    t0 = time.monotonic()
+    if ready_replica(r, model):
+        return 0.0
+    last_warm = -math.inf
+    while time.monotonic() - t0 < timeout_s:
+        if ready_replica(r, model):
+            return time.monotonic() - t0
+        if time.monotonic() - last_warm > 15:  # a wake lives 600 s; this is cheap anyway
+            poolmgr(stack, "warm", model)
+            last_warm = time.monotonic()
+        time.sleep(1)
+    raise AcceptanceError(f"{model}: not ready within {timeout_s} s: {pool_of(r, model)}")
+
+
+def live_pods(db: Db, model: str) -> int:
+    """The model's `serving_pods` rows not terminated (they count against max_replicas)."""
+    return int(
+        db.one(
+            "SELECT count(*) FROM serving_pods WHERE model_id = %s AND state <> 'terminated'",
+            model,
+        )
     )
-    text = docker("exec", container(stack, POD_OF[model]), "python", "-c", code)
+
+
+def stop_model(stack: Stack, r: redis.Redis, db: Db, model: str, timeout_s: float = 120) -> float:
+    """`loom-poolmgr stop <model>`, then wait until its pods are terminated and its pool
+    is cold (the manager acts on its next tick); returns the seconds it took."""
+    t0 = time.monotonic()
+    poolmgr(stack, "stop", model)
+    while time.monotonic() - t0 < timeout_s:
+        if live_pods(db, model) == 0 and pool_of(r, model).get("state") == "cold":
+            return time.monotonic() - t0
+        time.sleep(1)
+    raise AcceptanceError(f"{model}: not stopped within {timeout_s} s: {pool_of(r, model)}")
+
+
+def wait_replaced(
+    stack: Stack, r: redis.Redis, model: str, old_pod: str, timeout_s: float = 420
+) -> float:
+    """After `old_pod` was killed: wait until the manager has failed it and published a
+    new ready replica (the replacement starts on demand, so keep a wake alive, as the
+    gateway's 503s would); returns the seconds it took."""
+    t0 = time.monotonic()
+    last_warm = -math.inf
+    while time.monotonic() - t0 < timeout_s:
+        rep = ready_replica(r, model)
+        if rep is not None and rep["id"] != old_pod:
+            return time.monotonic() - t0
+        if rep is None and time.monotonic() - last_warm > 15:
+            poolmgr(stack, "warm", model)
+            last_warm = time.monotonic()
+        time.sleep(2)
+    raise AcceptanceError(f"{model}: {old_pod} not replaced within {timeout_s} s")
+
+
+def engine_counters(stack: Stack, model: str) -> tuple[int, int]:
+    """(prompt_tokens_total, generation_tokens_total) of the mock engine of `model`'s
+    ready replica, read on the pod itself from the engine's own Prometheus endpoint."""
+    r = redis.Redis.from_url(stack.redis_url)
+    try:
+        rep = ready_replica(r, model)
+    finally:
+        r.close()
+    check(rep is not None, f"{model} has no ready replica")
+    assert rep is not None
+    text = pod_tool(stack, "metrics", rep["id"])
     vals = {}
     for name in ("vllm:prompt_tokens_total", "vllm:generation_tokens_total"):
         total = 0.0
@@ -466,10 +569,6 @@ def engine_counters(stack: Stack, model: str) -> tuple[int, int]:
                 total += float(line.rsplit(" ", 1)[1])
         vals[name] = int(total)
     return vals["vllm:prompt_tokens_total"], vals["vllm:generation_tokens_total"]
-
-
-def poolsim(stack: Stack, *args: str) -> str:
-    return docker("exec", container(stack, "poolsim"), "loom-poolsim", *args)
 
 
 # ---------------------------------------------------------------------------- API helpers
@@ -689,6 +788,10 @@ class Acceptance:
     # -- item 0: the flow
 
     def flow(self, res: ItemResult) -> None:
+        # The manager starts models on demand: warm both before the first call.
+        res.numbers["warm_up_s"] = {
+            m: round(ensure_ready(self.stack, self.redis, m), 1) for m in MODELS
+        }
         b, org = self.signup_and_approve("alice")
         self.alice, self.alice_org = b, org
         credit, usage, posted = self.db.balance(org)
@@ -875,9 +978,13 @@ class Acceptance:
                 "gateway forwarded; they are not billed (contracts §9: bill what was sent)"
             )
 
-        # 2. Pod killed mid-stream: the client reads to the end and sees upstream_lost.
+        # 2. Pod killed mid-stream (its engine, as a GPU process dying): the client reads
+        # to the end and sees upstream_lost.
         model = MODELS[1]
-        pod = container(self.stack, POD_OF[model])
+        rep = ready_replica(self.redis, model)
+        check(rep is not None, f"{model} has no ready replica")
+        assert rep is not None
+        pod = str(rep["id"])
         body2 = {**body, "model": model, "messages": [{"role": "user", "content": self.prompt()}]}
         events: list[dict[str, Any] | str] = []
         killed_at: float | None = None
@@ -897,7 +1004,7 @@ class Acceptance:
                         content += 1
                     if content == 10 and killed_at is None:
                         killed_at = time.monotonic()
-                        docker("kill", pod)
+                        pod_tool(self.stack, "kill", pod)
         check(events and events[-1] == "[DONE]", "kill: stream did not end with [DONE]")
         errs = [e for e in events if isinstance(e, dict) and "error" in e]
         check(
@@ -911,9 +1018,11 @@ class Acceptance:
         got = (row2["prompt_tokens"], row2["completion_tokens"])
         want = (last["prompt_tokens"], last["completion_tokens"])
         check(got == want, f"pod kill: billed {got} != last engine usage the client saw {want}")
-        docker("start", pod)
-        back = wait_healthy(pod)
-        # The replica serves again (poolsim keeps it ready; the gateway retries it).
+        # The manager fails the pod on its health checks and starts a replacement.
+        back = wait_replaced(self.stack, self.redis, model, pod)
+        # The kill is deliberate: clear it from the crash-loop count, so repeated runs on
+        # one stack within the hour never trip `crash_loop`.
+        poolmgr(self.stack, "reset", model)
         call = sdk_chat(openai_client(self.stack, key), model, self.prompt(), stream=False)
         self.remember(call)
         res.numbers["pod_kill"] = {
@@ -921,7 +1030,8 @@ class Acceptance:
             "billed_completion_tokens": row2["completion_tokens"],
             "billed_prompt_tokens": row2["prompt_tokens"],
             "client_saw_error": errs[-1]["error"]["code"],
-            "pod_healthy_again_after_s": round(back, 1),
+            "killed_pod": pod,
+            "replaced_after_s": round(back, 1),
         }
         rows = self.db.usage([call.request_id])
         check_rows([call], rows, org)
@@ -1108,18 +1218,45 @@ class Acceptance:
     def item_d(self, res: ItemResult) -> None:
         key = self.load_keys()[0]
         probe = (Path(__file__).parent / "overhead_probe.py").read_text()
-        out = docker(
+        rep = ready_replica(self.redis, MODELS[0])
+        check(rep is not None, f"{MODELS[0]} has no ready replica")
+        assert rep is not None
+        # From the manager's container, on the compose network like the gateway: the
+        # pod's proxy at its pool URL, with the gateway's client certificate. The pod
+        # token goes into a 0600 file in the container over stdin, never on a command
+        # line (`docker exec -e` would show it in the exec's inspect and process list).
+        cid = container(self.stack, POOLMGR)
+        token_file = f"/tmp/loom-probe-token-{secrets.token_hex(4)}"
+        docker(
             "exec",
             "-i",
-            container(self.stack, "poolsim"),
-            "python",
-            "-",
-            "--api-key",
-            key,
-            "--pairs",
-            "400",
-            input_text=probe,
+            cid,
+            "sh",
+            "-c",
+            f'umask 077 && cat > "{token_file}"',
+            input_text=str(rep["token"]),
         )
+        try:
+            out = docker(
+                "exec",
+                "-i",
+                cid,
+                "python",
+                "-",
+                "--api-key",
+                key,
+                "--pairs",
+                "400",
+                "--pod-url",
+                str(rep["url"]),
+                "--server-name",
+                str(rep["server_name"]),
+                "--token-file",
+                token_file,
+                input_text=probe,
+            )
+        finally:
+            docker("exec", cid, "rm", "-f", token_file)
         result = json.loads(out.strip().splitlines()[-1])
         # The gateway's own view: time from receipt to dispatch and the settle call.
         metrics = httpx.get(self.stack.gateway_metrics, timeout=10).text
@@ -1190,7 +1327,7 @@ class Acceptance:
         hdr = {"Authorization": f"Bearer {client_key}"}
         url = f"{self.stack.gateway}/chat/completions"
         body = {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4}
-        poolsim(self.stack, "set", model, "cold")
+        stopped_in = stop_model(self.stack, self.redis, self.db, model)
         try:
             t0 = time.monotonic()
             with httpx.Client(timeout=30, trust_env=False) as http:
@@ -1224,8 +1361,9 @@ class Acceptance:
                 "a 503 model_unavailable must not emit a usage event",
             )
         finally:
-            poolsim(self.stack, "set", model, "ready")
+            ensure_ready(self.stack, self.redis, model)
         res.numbers.update(
+            stopped_after_s=round(stopped_in, 1),
             first_status=503,
             message=err["message"],
             retry_after_s=retry_after,
@@ -1661,6 +1799,9 @@ class Acceptance:
         finally:
             docker("start", rds)
             wait_healthy(rds)
+            # This driver's own Redis connections died with the server: drop them (on
+            # Windows the first use of a dead pooled socket raises instead of retrying).
+            self.redis.connection_pool.disconnect()
         check(outage.get("new_request_status") == 503, f"outage: {outage}")
         check(outage.get("new_request_code") == "service_unavailable", f"outage: {outage}")
         check(outage.get("spool_depth_while_down") == 1, f"settle not spooled: {outage}")
@@ -1730,7 +1871,7 @@ class Acceptance:
             check(b"billing" in groups or "billing" in groups, f"group not recreated: {groups}")
         finally:
             for m in MODELS:
-                poolsim(self.stack, "set", m, "ready")
+                ensure_ready(self.stack, self.redis, m)
         res.numbers.update(
             served_again_after_s=round(served_after, 1),
             statuses_until_served=sorted(set(statuses)),

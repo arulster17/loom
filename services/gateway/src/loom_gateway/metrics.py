@@ -122,8 +122,15 @@ class GatewayMetrics:
         )
         self.wakes = Counter(
             "loom_gateway_pool_wakes",
-            "Wake requests published for cold models",
+            "Wake requests published for cold or unavailable models",
             ["model"],
+            registry=r,
+        )
+        self.model_unavailable = Counter(
+            "loom_gateway_model_unavailable",
+            "503 model_unavailable answers, by pool state and the pool's reason (none when "
+            "the pool gives none)",
+            ["model", "state", "reason"],
             registry=r,
         )
 

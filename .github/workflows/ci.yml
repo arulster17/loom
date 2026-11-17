@@ -36,7 +36,23 @@ jobs:
       - run: uv run mypy bench/src
       - run: uv run mypy services/platform_common/src services/gateway/src services/billing/src
       - run: uv run mypy services/platform_common/src services/podproxy/src services/devstack/src
+      - run: uv run mypy services/platform_common/src services/poolmgr/src
       - run: uv run pytest -q -n auto
+
+  # The pinned pod proxy bundle (docs/phase1-m2-spec.md §9): rebuilt from `git archive
+  # HEAD` and the locked wheels (downloaded), it must match config/serving-artifacts.lock.
+  # Its own job: it needs the network, the main test job does not.
+  podproxy-bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run loom-podproxy-bundle --check --out "$RUNNER_TEMP/podproxy-bundle"
+      - run: >-
+          uv run pytest -q -m network services/podproxy/tests/test_podproxy_bundle.py
+          services/podproxy/tests/test_podproxy_bundle_dirty.py
 
   # The Next.js web app (apps/web): lint, types, unit tests, and the integration tests
   # against a real Postgres, migrated by the platform's own runner (uv run loom-migrate).
@@ -78,14 +94,16 @@ jobs:
       - run: npm run test:integration
       - run: npm run build
 
-  # M1 acceptance end to end: the whole compose stack (mock pods, gateway, billing, web,
-  # Stripe stub, Mailpit) built from this commit, driven from outside by
-  # `loom-m1-acceptance` (docs/phase1-m1-acceptance.md). The pytest twin of this run is
-  # marker-deselected in the `bench` job; this job is where it runs. Free: no cloud, no
-  # accounts. Ports are moved off the defaults so nothing else on the runner collides.
+  # M1 and M2 acceptance end to end: the whole compose stack (the pool manager on its local
+  # backend, gateway, billing, web, Stripe stub, Mailpit) built from this commit, driven
+  # from outside by `loom-m1-acceptance` (docs/phase1-m1-acceptance.md), then
+  # `loom-m2-acceptance` (the manager: cold start, pod kill, no capacity, spend cap, idle
+  # stop). The pytest twins of these runs are marker-deselected in the `bench` job; this
+  # job is where they run. Free: no cloud, no accounts. Ports are moved off the defaults
+  # so nothing else on the runner collides.
   acceptance:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     env:
       COMPOSE_PROJECT_NAME: loom-ci
       LOOM_ADMIN_EMAILS: admin@m1.test
@@ -99,6 +117,7 @@ jobs:
       LOOM_WEB_PORT: "13000"
       LOOM_MAILPIT_UI_PORT: "18025"
       LOOM_MAILPIT_SMTP_PORT: "11025"
+      LOOM_POOLMGR_METRICS_PORT: "19102"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -109,6 +128,11 @@ jobs:
         run: |
           set -o pipefail
           uv run loom-m1-acceptance --json m1-acceptance.json 2>&1 | tee m1-acceptance.log
+      - name: M2 acceptance
+        if: always()
+        run: |
+          set -o pipefail
+          uv run loom-m2-acceptance --json m2-acceptance.json 2>&1 | tee m2-acceptance.log
       - name: Stack state and logs
         if: always()
         run: |
@@ -117,10 +141,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: m1-acceptance
+          name: acceptance
           path: |
             m1-acceptance.json
             m1-acceptance.log
+            m2-acceptance.json
+            m2-acceptance.log
             compose.log
           if-no-files-found: ignore
       - name: Tear down

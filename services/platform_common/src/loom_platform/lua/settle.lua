@@ -1,9 +1,12 @@
 -- Settle one request: release its reservation, charge its actual cost, and append its
 -- usage event to the stream, all atomically, so the stream holds exactly the settled
 -- requests and the org's usage counter always equals what the stream says was charged.
+-- It also stamps the model's last-request time, the pool manager's demand signal for a
+-- ready model (billing trims the stream too soon for the manager to read it).
 --
 -- KEYS[1]  org prefix, 'loom:org:<org_id>'
 -- KEYS[2]  usage stream, 'loom:usage'
+-- KEYS[3]  the model's last request, 'loom:pool:<model_id>:last_request' (Redis time, ms)
 -- ARGV[1]  request id      ARGV[2]  api key id
 -- ARGV[3]  cost, micros    ARGV[4]  actual tokens, prompt + completion (for tpm)
 -- ARGV[5]  seconds to remember the request as settled
@@ -56,4 +59,5 @@ end
 fields[#fields + 1] = 'org_usage_total_micros'
 fields[#fields + 1] = total >= 0 and tostring(total) or ''
 local id = redis.call('XADD', stream, '*', unpack(fields))
+redis.call('SET', KEYS[3], now)
 return {1, total, id}

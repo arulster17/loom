@@ -3,6 +3,11 @@
 #   docker compose up -d postgres redis   # just the databases, for the test suite
 #   docker compose up -d --build          # the whole platform on the mock backend
 #
+# The pool manager (poolmgr) runs on its local backend: each serving "pod" is the bench
+# mock engine behind loom-podproxy, started on demand inside the poolmgr container. The M1
+# pool simulator and its two fixed mock pods are kept under a profile:
+#   docker compose --profile poolsim up -d poolsim   # never together with poolmgr
+#
 # Published host ports can be moved with the *_PORT variables below (e.g. to run a second
 # stack next to the first: LOOM_PG_PORT=15432 ... docker compose -p loom2 up -d).
 # Nothing here is a production secret: the dev values are fixed or generated locally.
@@ -28,6 +33,13 @@ x-certs-volume: &certs-volume ./.dev/certs:/certs:ro
 # Shared by billing (LOOM_BILLING_INTERNAL_TOKEN) and the web app (LOOM_INTERNAL_TOKEN):
 # the web app's bearer token for billing's internal checkout API.
 x-internal-token: &internal-token ${LOOM_INTERNAL_TOKEN:-loom-dev-internal-token}
+
+# The default network's fixed subnet (`networks:` at the end). The local pods' proxies
+# admit only sources inside it (LOOM_POOLMGR_ALLOW_CIDRS), i.e. the gateway, the manager
+# and the acceptance's probes. Outside Docker's own address pools (172.16/12,
+# 192.168/16), so no network Docker creates by itself collides with it. A second stack
+# next to this one needs another subnet (a compose override file setting both).
+x-compose-subnet: &compose-subnet 10.213.0.0/24
 
 services:
   postgres:
@@ -95,8 +107,17 @@ services:
       # The Stripe stub's webhook signing secret, random per stack, shared with billing.
       - --secret
       - stripe-stub-webhook
+      # The pool manager's client certificate (it signs its pods' server certificates
+      # with this CA, which the gateway trusts).
+      - --client
+      - loom-poolmgr
       # Keys readable by the other containers' users; dev only.
       - --readable-keys
+      # Files owned by the host user (default 1000, WSL's and most Linux desktops'
+      # first user; set LOOM_DEV_OWNER=$(id -u):$(id -g) otherwise), so the checkout's
+      # .dev/certs stays readable from the host (loom-verify's rsync reads ca.key).
+      - --owner
+      - ${LOOM_DEV_OWNER:-1000:1000}
     volumes:
       - ./.dev/certs:/certs
     restart: "no"
@@ -108,11 +129,61 @@ services:
       - "${LOOM_MAILPIT_UI_PORT:-8025}:8025"
       - "${LOOM_MAILPIT_SMTP_PORT:-1025}:1025"
 
+  # The pool manager (services/poolmgr/README.md) on its local backend (provider local in
+  # the committed config/serving.yaml): it starts a model's "pod" on demand (a wake from
+  # the gateway's 503, or `loom-poolmgr warm <model>`), the bench mock engine behind
+  # loom-podproxy inside this container, advertised to the gateway as
+  # https://poolmgr:<port> with a server certificate it signs with the dev CA, and drains
+  # it after LOOM_POOLMGR_IDLE_STOP_S without demand. Prometheus on 9102.
+  #   docker compose exec poolmgr loom-poolmgr status
+  poolmgr:
+    image: loom-poolmgr:dev
+    build:
+      context: .
+      dockerfile: services/poolmgr/Dockerfile
+    command: ["loom-poolmgr", "run"]
+    environment:
+      <<: *platform-env
+      LOOM_POOLMGR_SERVING_YAML: /loom-config/serving.yaml
+      LOOM_POOLMGR_CA_CERT: /certs/ca.crt
+      LOOM_POOLMGR_CA_KEY: /certs/ca.key
+      LOOM_POOLMGR_CLIENT_CERT: /certs/loom-poolmgr.crt
+      LOOM_POOLMGR_CLIENT_KEY: /certs/loom-poolmgr.key
+      LOOM_POOLMGR_STATE_DIR: /var/lib/loom-poolmgr
+      LOOM_POOLMGR_METRICS_PORT: "9102"
+      # Where the gateway reaches the local pods' proxies (this service's name).
+      LOOM_POOLMGR_LOCAL_HOST: poolmgr
+      LOOM_POOLMGR_LOCAL_COLD_START_S: ${LOOM_POOLMGR_LOCAL_COLD_START_S:-20}
+      # Dev only: the pods' allowlist gets the compose subnet (the gateway is not
+      # loopback), and every model idles out after 10 minutes instead of serving.yaml's
+      # 30, longer than an M1 acceptance run, short enough for loom-m2-acceptance.
+      LOOM_POOLMGR_ALLOW_CIDRS: *compose-subnet
+      LOOM_POOLMGR_IDLE_STOP_S: "600"
+    volumes:
+      - *certs-volume
+      - *config-volume
+    ports:
+      - "${LOOM_POOLMGR_METRICS_PORT:-9102}:9102"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      devcerts:
+        condition: service_completed_successfully
+    # Healthy = the metrics port answers, which the manager opens only once it holds the
+    # single-writer lock and has adopted its pods (services/poolmgr/Dockerfile).
+    restart: unless-stopped
+
+  # M1's fixed mock pods and pool simulator, kept under the `poolsim` profile: defined,
+  # not started by `docker compose up` (poolsim's tests and demos). Never run poolsim and
+  # poolmgr against the same Redis: both write the pool hashes.
   # Mock serving pods, one per servable model in config/models.yaml (contracts §9): the
   # bench mock engine on 127.0.0.1:8000 inside, the mTLS pod proxy on 8443, reachable only
   # on the compose network. The service name is the pod id and its certificate name.
   mock-pod-1:
     <<: *devstack
+    profiles: ["poolsim"]
     command: ["loom-mockpod"]
     environment:
       LOOM_MOCKPOD_ID: mock-pod-1  # also read by the healthcheck
@@ -134,6 +205,7 @@ services:
 
   mock-pod-2:
     <<: *devstack
+    profiles: ["poolsim"]
     command: ["loom-mockpod"]
     environment:
       LOOM_MOCKPOD_ID: mock-pod-2  # also read by the healthcheck
@@ -157,6 +229,7 @@ services:
   # simulated cold starts. `docker compose exec poolsim loom-poolsim set qwen3-8b cold`.
   poolsim:
     <<: *devstack
+    profiles: ["poolsim"]
     command: ["loom-poolsim", "run"]
     environment:
       <<: *platform-env
@@ -190,6 +263,7 @@ services:
       dockerfile: services/gateway/Dockerfile
     environment:
       <<: *platform-env
+      LOOM_SERVING_YAML: /loom-config/serving.yaml
       LOOM_GATEWAY_CLIENT_CERT: /certs/gateway.crt
       LOOM_GATEWAY_CLIENT_KEY: /certs/gateway.key
       LOOM_POD_CA_CERT: /certs/ca.crt
@@ -208,7 +282,7 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
-      poolsim:
+      poolmgr:
         condition: service_started
     restart: unless-stopped
 
@@ -337,3 +411,11 @@ volumes:
   pgdata:
   redisdata:
   gatewayspool:
+
+# One network for the whole stack, on the fixed subnet above: the local pods' proxies
+# (inside poolmgr) admit the gateway by its address in it.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: *compose-subnet

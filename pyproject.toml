@@ -17,6 +17,7 @@ members = [
     "services/billing",
     "services/podproxy",
     "services/devstack",
+    "services/poolmgr",
 ]
 
 [tool.uv.sources]
@@ -26,6 +27,7 @@ loom-gateway = { workspace = true }
 loom-billing = { workspace = true }
 loom-podproxy = { workspace = true }
 loom-devstack = { workspace = true }
+loom-poolmgr = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -35,6 +37,7 @@ dev = [
     "loom-billing",
     "loom-podproxy",
     "loom-devstack",
+    "loom-poolmgr",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-timeout>=2.3",
@@ -67,4 +70,5 @@ known-first-party = [
     "loom_billing",
     "loom_podproxy",
     "loom_devstack",
+    "loom_poolmgr",
 ]

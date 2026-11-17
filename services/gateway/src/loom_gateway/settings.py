@@ -9,15 +9,8 @@ from pydantic import Field
 
 from loom_platform.settings import PlatformSettings
 
-# Measured RunPod cold starts (docs/phase1-runpod-plan.md §5), the Retry-After of a
-# request to a cold model whose pool hash says nothing better. Gateway constants in M1;
-# config/serving.yaml from M2.
-COLD_START_ESTIMATE_S: dict[str, int] = {
-    "qwen3-8b": 240,
-    "qwen3-8b-fp8": 240,
-    "llama-3.3-70b-instruct": 450,
-    "llama-3.3-70b-instruct-fp8": 450,
-}
+# The Retry-After of a request to a cold model whose pool hash says nothing better, for
+# a model without `cold_start_estimate_s` in config/serving.yaml (or with no such file).
 DEFAULT_COLD_START_S = 300
 
 # /v1/completions without max_tokens: OpenAI's and vLLM's default, sent explicitly.
