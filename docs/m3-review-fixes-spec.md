@@ -126,7 +126,7 @@ when the consumer group is missing (it cannot catch up within the wait).
   service: gateway, billing worker and pool manager.
   - The role check reads only the system catalogs (`pg_roles`, `pg_class`/`pg_tables`,
     `current_user`/`session_user`); it calls no function and names no table of the
-    schema.
+    schema (built-in catalog functions such as `pg_has_role` are fine).
   - The unreachable-at-start warning is one log line that names Postgres (or "database")
     and does not repeat the role problems' wording ("superuser", "owns").
 - `loom-migrate` refuses a configured login or group name that is the connecting role
