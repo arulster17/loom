@@ -76,20 +76,34 @@ after the deadline yields 200 with the body and one `ok` usage event, and no 502
 (2026-11-17, user decision): two reconcilers that read *different* `P` can both pass that
 guard (Redis 900, true 1000: A reads P=980 and heals to 980, B reads P=1000 and adds 100,
 ending at 1080). The heal now uses a **per-org heal generation**:
-- each loaded org has a heal-generation counter in Redis (absent means 0);
-- the reconciler reads it in the same atomic snapshot as U2 (step d), with `MGET` or a
-  `MULTI` (not a Lua script: only the heal itself is a script);
-- the heal is one atomic Lua call: if the org is loaded, the generation is unchanged
-  since that snapshot, **and** Redis `usage` is still below `P`, add the missing amount
-  (`P - U2`) and bump the generation; otherwise do nothing (another reconciler healed
-  first, or Redis was reloaded from Postgres meanwhile; the next run reads afresh). Both
-  guards are needed: the generation alone lets a heal run after a Redis reload resets it
-  (absent = 0: 900 → reload to 1000 → heal to 1100, found in the second review), and
-  `usage < P` alone lets reconcilers with different `P` both heal.
+- each loaded org has a heal **token** in Redis: a random value (a UUID made by the
+  caller and passed to the script, so no script depends on a clock or Redis-side
+  randomness; a clock that steps back after a failover could repeat a value). The only
+  question asked of it is "did it change";
+- **every load of an org sets a fresh token**: `init_org.lua` writes one whenever it
+  initialises the org (the gateway's `noinit` load and any other `init_org` caller), so
+  a reload after Redis lost data can never match a token read before the loss. An org
+  loaded before this change has no token; "absent" is a value like any other;
+- the reconciler reads the token in the same atomic snapshot as U2 (step d), with `MGET`
+  or a `MULTI` (not a Lua script: only the heal itself is a script);
+- the heal is one atomic Lua call: if the org is loaded and the token is unchanged since
+  that snapshot, add the missing amount (`P - U2`) and set a fresh token; otherwise do
+  nothing (another reconciler healed first, or the org was reloaded meanwhile; the next
+  run reads afresh).
+- History: the first guard ("only while `usage < P`") let reconcilers with different `P`
+  both heal (900 → 980 → 1080 against a true 1000); a counter that read absent as 0 let a
+  heal run again after a reload (900 → reload 1000 → 1100); and requiring `usage < P` as
+  well blocked heals for good on a busy org, when more than the missing amount settled
+  between the snapshot and the heal (900 + 150 settled, P = 1000: nothing healed, Redis
+  stays 100 under). The fresh token on every load replaces both earlier guards (user
+  decision 2026-11-17).
 Done when: reconcilers that observed the same `redis_behind` drift, whether they read the
-same or different `P`, healing in any order or concurrently, add the missing amount at most
-once: Redis `usage` never ends above the true total (settles since stay counted).
-Contracts §7 and the billing README say so.
+same or different `P`, healing in any order or concurrently, with or without a reload in
+between, add the missing amount at most once: Redis `usage` never ends above the true
+total; settles since stay counted; and a busy org still heals at its first run (U2 = 900,
+150 settled between snapshot and heal, P = 1000 ends at 1150, the true total).
+Contracts §6 (the token key, written by `init_org` and the heal), §7 and the billing
+README say so.
 
 **B2 (R6). `redis_behind` heals under steady traffic.**
 The `redis_behind` check and heal run every reconcile, whether or not the stream is
@@ -136,11 +150,14 @@ when the consumer group is missing (it cannot catch up within the wait).
   - **Only an outage counts as unreachable**, not a misconfiguration. A connection error
     whose message says `password authentication failed`, `does not exist` (role or
     database) or `no pg_hba.conf entry` exits 2 as before, at start and in the gate.
-    Refused or timed-out connections, a host name that does not resolve (`could not
-    translate host name`, `failed to resolve host`: in compose a stopped Postgres
-    container looks like this), and transient server states (`the database system is
-    starting up` / `shutting down`, `too many clients`, `remaining connection slots`) are
-    retried. While the gate keeps retrying it logs at warning, at most once a minute.
+    **Every other connection error is retried** (user decision 2026-11-17, after a review
+    found DNS failures, network unreachable and "in recovery mode" made fatal by a short
+    retry list): refused or timed-out connections, a host name that does not resolve (in
+    compose a stopped Postgres container looks like this), network unreachable, a missing
+    socket, any `the database system is ...` state, `too many clients`, a connection
+    closed unexpectedly, and anything not on the misconfiguration list. While the gate
+    keeps retrying it logs at warning, at most once a minute, naming the error, so an
+    unexpected case is visible rather than fatal.
   - When the deferred check fails, the service exits 2 through its normal shutdown path
     (the gateway drains and settles its open streams as at SIGTERM), not `os._exit`.
   - Contracts §6 and §11 list Postgres (including the pool held back by the gate) under
