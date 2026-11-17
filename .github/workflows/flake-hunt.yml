@@ -1,0 +1,134 @@
+# Weekly flake hunt (plan R15): the full suite 3 times in parallel, each in a different
+# shuffled order (pytest-randomly), then one report of the tests with mixed results,
+# kept in a single open GitHub issue labelled `flaky-tests` (opened or updated).
+#
+# pytest-randomly is added with `uv run --with` here only: it is not a dev dependency,
+# since once installed it shuffles every pytest run. Reproduce a run's order with its
+# seed (printed in the report): `uv run --with pytest-randomly==3.16.0 pytest
+# --randomly-seed=<seed>`.
+name: flake-hunt
+on:
+  schedule:
+    - cron: "23 6 * * 1"  # Mondays 06:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: loom
+          POSTGRES_PASSWORD: loom
+          POSTGRES_DB: loom_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U loom" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      LOOM_TEST_DATABASE_URL: postgresql+psycopg://loom:loom@localhost:5432/loom_test
+      LOOM_TEST_REDIS_URL: redis://localhost:6379/15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      # A failing test does not fail this job: the report job judges the three runs.
+      - name: Full suite, shuffled
+        run: |
+          seed=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+          echo "run ${{ matrix.run }}: --randomly-seed=$seed" | tee seed.txt
+          set +e
+          uv run --frozen --with pytest-randomly==3.16.0 pytest -q -n auto -p randomly \
+            --randomly-seed="$seed" --junitxml=junit.xml
+          status=$?
+          case $status in
+            0|1) ;;
+            *) echo "pytest exited $status"; exit $status ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: flake-hunt-${{ matrix.run }}
+          path: |
+            junit.xml
+            seed.txt
+          if-no-files-found: ignore
+
+  report:
+    needs: suite
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: flake-hunt-*
+          path: runs
+      - name: Report and file the issue
+        run: |
+          shopt -s nullglob
+          files=(runs/*/junit.xml)
+          status=0
+          if [ ${#files[@]} -gt 0 ]; then
+            python3 scripts/flaky_report.py --title "Tests with mixed results" \
+              "${files[@]}" > mixed.md || status=$?
+          else
+            echo "No run produced results." > mixed.md
+          fi
+          # A missing run is an error unless the runs that did report found flakes.
+          if [ "$status" -eq 0 ] && [ ${#files[@]} -ne 3 ]; then status=2; fi
+          {
+            echo "Weekly flake hunt [run]($RUN_URL) on \`${GITHUB_SHA::12}\`:" \
+              "${#files[@]} of 3 shuffled full-suite runs reported."
+            echo
+            cat runs/*/seed.txt | sed 's/^/    /'
+            echo
+            cat mixed.md
+          } > report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          # GitHub refuses issue bodies over 65,536 characters (a broken run can list
+          # hundreds of tests); the run's summary keeps the whole report.
+          head -c 60000 report.md > issue.md
+          if [ "$(wc -c < report.md)" -gt 60000 ]; then
+            printf '\n\n… truncated; the full report is in the [run summary](%s).\n' "$RUN_URL" >> issue.md
+          fi
+
+          gh label create flaky-tests --color B60205 \
+            --description "Tests with mixed results (flake-hunt workflow)" --force
+          issue=$(gh issue list --label flaky-tests --state open --limit 1 \
+            --json number --jq '.[0].number // empty')
+          if [ "$status" -eq 1 ]; then
+            if [ -n "$issue" ]; then
+              gh issue edit "$issue" --body-file issue.md
+              gh issue comment "$issue" --body "Updated by $RUN_URL."
+            else
+              gh issue create --title "Flaky tests (weekly flake hunt)" \
+                --label flaky-tests --body-file issue.md
+            fi
+          elif [ -n "$issue" ]; then
+            gh issue comment "$issue" --body-file issue.md
+          fi
+          exit "$status"

@@ -26,7 +26,11 @@ Job `podproxy-bundle` (needs the network) rebuilds the pinned pod proxy bundle a
 uv run loom-podproxy-bundle --check --out "$RUNNER_TEMP/podproxy-bundle"
 uv run pytest -q -m network services/podproxy/tests/test_podproxy_bundle.py services/podproxy/tests/test_podproxy_bundle_dirty.py
 ```
-Job `acceptance` runs `docker compose up -d --build --wait`, then `uv run loom-m1-acceptance` and `uv run loom-m2-acceptance` (M2's takes ~20 min, mostly the idle-stop wait).
+Job `acceptance` runs `docker compose up -d --build --wait`, then `uv run loom-m1-acceptance` and `uv run loom-m2-acceptance` (M2's takes ~13 min, mostly the idle-stop wait). The job sets `LOOM_POOLMGR_IDLE_STOP_S=300`; compose's default stays 600.
+
+Flaky tests (plan R15). Don't re-run CI to look for flakes:
+- On PRs, job `flake-check` runs the test files the PR adds or changes 20 times under CPU load, with a 7-minute limit. That is 10 pytest sessions, each with `-n auto --count 2` (pytest-repeat). Separate sessions are needed because pytest-repeat's copies share module-scoped fixtures. The job fails if a test both passed and failed (`scripts/flaky_report.py`), and is skipped when no test file changed.
+- Workflow `flake-hunt` (`.github/workflows/flake-hunt.yml`, Mondays, or run it by hand) runs the full suite 3 times in shuffled order and opens or updates the issue labelled `flaky-tests`. It adds pytest-randomly with `uv run --with`. Never make pytest-randomly a dependency: once installed, it shuffles every run.
 Web app, from `apps/web`: `npm ci`, `npm run lint`, `npm run typecheck`, `npm test`, `npm run test:integration` (real Postgres, migrated with `uv run loom-migrate`), `npm run build`.
 
 ## Native Windows

@@ -115,7 +115,8 @@ services:
       - --readable-keys
       # Files owned by the host user (default 1000, WSL's and most Linux desktops'
       # first user; set LOOM_DEV_OWNER=$(id -u):$(id -g) otherwise), so the checkout's
-      # .dev/certs stays readable from the host (loom-verify's rsync reads ca.key).
+      # .dev/certs stays readable from the host (copying the checkout, e.g. into WSL for
+      # the agent-setup plugin's runs, reads ca.key).
       - --owner
       - ${LOOM_DEV_OWNER:-1000:1000}
     volumes:
@@ -156,9 +157,10 @@ services:
       LOOM_POOLMGR_LOCAL_COLD_START_S: ${LOOM_POOLMGR_LOCAL_COLD_START_S:-20}
       # Dev only: the pods' allowlist gets the compose subnet (the gateway is not
       # loopback), and every model idles out after 10 minutes instead of serving.yaml's
-      # 30, longer than an M1 acceptance run, short enough for loom-m2-acceptance.
+      # 30, longer than an M1 acceptance run, short enough for loom-m2-acceptance (CI
+      # sets 300 in its acceptance job; .github/workflows/ci.yml says why that is safe).
       LOOM_POOLMGR_ALLOW_CIDRS: *compose-subnet
-      LOOM_POOLMGR_IDLE_STOP_S: "600"
+      LOOM_POOLMGR_IDLE_STOP_S: ${LOOM_POOLMGR_IDLE_STOP_S:-600}
     volumes:
       - *certs-volume
       - *config-volume

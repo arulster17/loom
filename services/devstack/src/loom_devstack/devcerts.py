@@ -292,7 +292,7 @@ def main(argv: list[str] | None = None) -> None:
         "--owner",
         metavar="UID[:GID]",
         help="chown every file in --out to this user (dev: the container writes as root, "
-        "and the host user, e.g. WSL's rsync in loom-verify, must still read the CA key)",
+        "and the host user, e.g. a copy of the checkout into WSL, must still read the CA key)",
     )
     p.add_argument("--force", action="store_true", help="discard everything, new CA")
     p.add_argument(
