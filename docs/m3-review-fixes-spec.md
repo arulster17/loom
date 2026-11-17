@@ -136,7 +136,7 @@ counts separately). Over the limit no mail is sent, and the sign-in form still s
 "Too many sign-in emails. Try again in a few minutes." It still fails open if Redis is down.
 
 **W2 (R12). An admin credit adjustment posts once per form.**
-The adjust-credits form carries a per-render token (a random UUID in a hidden field); the
+The adjust-credits form carries a per-render token (a random UUID in a hidden field named `form_token`); the
 ledger idempotency key is derived from it (`admin:adjust:<token>`). A resubmit, or the same
 form posted from two tabs, posts one ledger transaction and one audit row; the repeat
 answers with the same success message and changes nothing. A missing or malformed token
