@@ -136,9 +136,11 @@ when the consumer group is missing (it cannot catch up within the wait).
   - **Only an outage counts as unreachable**, not a misconfiguration. A connection error
     whose message says `password authentication failed`, `does not exist` (role or
     database) or `no pg_hba.conf entry` exits 2 as before, at start and in the gate.
-    Refused or timed-out connections and transient server states (`the database system
-    is starting up` / `shutting down`, `too many clients`, `remaining connection slots`)
-    are retried. While the gate keeps retrying it logs at warning, at most once a minute.
+    Refused or timed-out connections, a host name that does not resolve (`could not
+    translate host name`, `failed to resolve host`: in compose a stopped Postgres
+    container looks like this), and transient server states (`the database system is
+    starting up` / `shutting down`, `too many clients`, `remaining connection slots`) are
+    retried. While the gate keeps retrying it logs at warning, at most once a minute.
   - When the deferred check fails, the service exits 2 through its normal shutdown path
     (the gateway drains and settles its open streams as at SIGTERM), not `os._exit`.
   - Contracts §6 and §11 list Postgres (including the pool held back by the gate) under
