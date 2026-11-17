@@ -58,10 +58,11 @@ class RoleGate:
     listener waits in `wait()` before it connects. The check runs on the first
     successful connection and reads only the system catalogs.
 
-    Only an outage is retried (refused or timed-out connections, the server starting up
-    or shutting down, out of connection slots: `connection_outage`), with a warning
-    naming Postgres at most once a minute. A misconfiguration (wrong password, missing
-    role or database, no pg_hba entry) or a role problem is printed and fails the gate:
+    Every connection error but an explicit misconfiguration is an outage and is retried
+    (`connection_outage`), with a warning naming Postgres and the error at most once a
+    minute, so an unexpected case is visible rather than fatal. A misconfiguration
+    (wrong password, missing role or database, no pg_hba entry) or a role problem is
+    printed and fails the gate:
     `wait()` raises `RoleCheckFailed` (now and on every later call, so no pool or
     listener ever starts) and `failed` is set. The service then stops through its normal
     shutdown (the gateway drains and settles its open streams as at SIGTERM) and exits

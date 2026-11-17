@@ -8,9 +8,10 @@ a service refuses to start (`enforce_environment`) while any setting is still a 
 default or a secret it needs is missing (`production_problems`, extended per service),
 or while its database role could switch off the ledger's guards
 (`database_role_problems`: a superuser, or the owner of tables in the schema). When
-Postgres cannot be reached at start (an outage, not a misconfiguration:
-`connection_outage`), the service starts with a warning and the role is checked on its
-first successful connection, before any work (`loom_platform.db.role_gate`).
+Postgres cannot be reached at start (any connection error but an explicit
+misconfiguration: `connection_outage`), the service starts with a warning and the role
+is checked on its first successful connection, before any work
+(`loom_platform.db.role_gate`).
 """
 
 from __future__ import annotations
@@ -109,33 +110,24 @@ class DatabaseUnreachable(Exception):
 
 # Only an outage counts as unreachable, not a misconfiguration (contracts §3 "Roles").
 # A connection error naming one of these exits 2, at start and in the deferred check
-# (`loom_platform.db.role_gate`): retrying cannot fix it.
+# (`loom_platform.db.role_gate`): retrying cannot fix it. Every other connection error
+# is an outage and is retried (refused or timed out, a host name that does not resolve,
+# network unreachable, a missing socket, any "the database system is ..." state, too
+# many clients, a connection closed unexpectedly, and anything unforeseen).
 MISCONFIGURATION_MARKERS = (
     "password authentication failed",
     "does not exist",  # a role or a database
     "no pg_hba.conf entry",
 )
-# Retried: refused or timed-out connections and transient server states. Any other
-# connection error exits 2 too.
-OUTAGE_MARKERS = (
-    "connection refused",
-    "timeout expired",  # libpq's connect_timeout (psycopg's ConnectionTimeout)
-    "timed out",
-    "the database system is starting up",
-    "the database system is shutting down",
-    "too many clients",
-    "remaining connection slots",
-)
 
 
 def connection_outage(e: BaseException) -> bool:
-    """Whether a failed Postgres connection is an outage, to be retried, rather than a
-    misconfiguration (or an unknown error), which exits 2. A message that names a
-    misconfiguration wins (libpq lists every address it tried)."""
+    """Whether a failed Postgres connection is an outage, to be retried: every
+    connection error except an explicit misconfiguration (`MISCONFIGURATION_MARKERS`,
+    found anywhere in the message: libpq lists every address it tried), which exits
+    2."""
     text = str(e).lower()
-    if any(m in text for m in MISCONFIGURATION_MARKERS):
-        return False
-    return any(m in text for m in OUTAGE_MARKERS)
+    return not any(m in text for m in MISCONFIGURATION_MARKERS)
 
 
 def connection_error_summary(e: BaseException) -> str:
@@ -203,8 +195,9 @@ def database_role_problems(database_url: str, *, timeout_s: int = 5) -> list[str
     member of). Either could disable, drop or replace the ledger's append-only and
     zero-sum triggers (contracts §3); services run as the runtime role (`loom_app`).
     Raises `DatabaseUnreachable` when Postgres cannot be connected to because of an
-    outage; a misconfiguration (wrong password, missing role or database, no pg_hba
-    entry) is a problem like the others (`connection_outage`)."""
+    outage (any connection error but a misconfiguration); a misconfiguration (wrong
+    password, missing role or database, no pg_hba entry) is a problem like the others
+    (`connection_outage`)."""
     import psycopg
 
     from loom_platform.db import libpq_url
@@ -261,12 +254,13 @@ def enforce_environment(
     message lists them all; `check_database_role=False` for a process that never
     connects to Postgres.
 
-    When Postgres cannot be reached (an outage: `connection_outage`), that alone does
-    not refuse the start: one warning line, and the check is left to
-    `loom_platform.db.role_gate`, which runs it on the first successful connection and
-    holds back all of the process's Postgres work (its pools, its listeners) until it
-    has passed. A misconfiguration (wrong password, missing role or database, no
-    pg_hba entry) refuses the start like any other problem."""
+    When Postgres cannot be reached (an outage, which is any connection error but a
+    misconfiguration: `connection_outage`), that alone does not refuse the start: one
+    warning line, and the check is left to `loom_platform.db.role_gate`, which runs it
+    on the first successful connection and holds back all of the process's Postgres
+    work (its pools, its listeners) until it has passed. A misconfiguration (wrong
+    password, missing role or database, no pg_hba entry) refuses the start like any
+    other problem."""
     problems = list(settings.production_problems() if problems is None else problems)
     if settings.env != "dev" and check_database_role:
         try:
