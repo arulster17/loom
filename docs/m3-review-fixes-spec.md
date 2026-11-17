@@ -105,7 +105,13 @@ being consumed continuously (the stream never empty at the snapshot), an org who
   (exit 2, like `production_problems`) otherwise. The dev password for `loom_app` is also
   a production problem.
 - A test checks that every table has an explicit grant to the group role, so a later
-  migration cannot forget one.
+  migration cannot forget one (the migrations bookkeeping table and individual
+  partitions excepted: services reach partitions through their parent).
+- The one thing services create at run time, the monthly `usage_events` partitions, is
+  done through `loom_ensure_usage_partitions` running with the owner's rights (`SECURITY
+  DEFINER`, fixed `search_path`), so `loom_app` itself still cannot create objects.
+- The dev password is a production problem when a service's `LOOM_DATABASE_URL` uses
+  the compose dev password for `loom_app`.
 - Roles belong to the whole Postgres server, not one database. The migration, and
   `loom-migrate`'s role setup, must succeed when run at the same time against many
   databases on one server (parallel test workers each migrating a fresh database): no
