@@ -72,12 +72,19 @@ after the deadline yields 200 with the body and one `ok` usage event, and no 502
 ## Billing (`fix-m3-billing`)
 
 **B1 (R5). Concurrent reconcilers heal `redis_behind` once.**
-The heal is one atomic Lua call: add the missing amount only if the org's Redis `usage`
-is still below the Postgres total `P` that run read (and the org is loaded). Since a
-correct heal leaves `usage >= P`, a second reconciler (another worker, or an overlapping
-run) finds nothing to do. Done when: two reconcilers that both observed the same
-`redis_behind` drift, healing in either order or concurrently, leave Redis `usage` equal
-to `P` plus the settles made since, never more.
+~~The heal adds the missing amount only while `usage < P`.~~ Replaced after review
+(2026-11-17, user decision): two reconcilers that read *different* `P` can both pass that
+guard (Redis 900, true 1000: A reads P=980 and heals to 980, B reads P=1000 and adds 100,
+ending at 1080). The heal now uses a **per-org heal generation**:
+- each loaded org has a heal-generation counter in Redis (absent means 0);
+- the reconciler reads it in the same atomic snapshot as U2 (step d);
+- the heal is one atomic Lua call: if the org is loaded and the generation is unchanged
+  since that snapshot, add the missing amount (`P - U2`) and bump the generation;
+  otherwise do nothing (another reconciler healed first; the next run reads afresh).
+Done when: reconcilers that observed the same `redis_behind` drift, whether they read the
+same or different `P`, healing in any order or concurrently, add the missing amount at most
+once: Redis `usage` never ends above the true total (settles since stay counted).
+Contracts §7 and the billing README say so.
 
 **B2 (R6). `redis_behind` heals under steady traffic.**
 The `redis_behind` check and heal run every reconcile, whether or not the stream is
@@ -88,6 +95,8 @@ reconciler polls `consumed_through` for up to `LOOM_RECONCILE_DRAIN_WAIT_S` (new
 being consumed continuously (the stream never empty at the snapshot), an org whose Redis
 `usage` lost an amount is healed at the first reconcile run, and a real
 `missing_in_postgres` is still reported once the consumer catches up within the wait.
+The wait happens at most once per reconcile run (not per chunk of orgs), and not at all
+when the consumer group is missing (it cannot catch up within the wait).
 
 **B3 (R8). Services run as a role that cannot switch off the ledger's guards.**
 - Two Postgres roles: the **owner** (runs `loom-migrate`, owns every object) and a
@@ -107,6 +116,15 @@ being consumed continuously (the stream never empty at the snapshot), an org who
   problems in the one exit-2 message, so the service connects and checks the role even
   when static problems already refuse the start. `loom-migrate` itself does not refuse
   the dev password.
+- **Postgres unreachable at start** (user decision 2026-11-17): outside dev the service
+  starts with a warning instead of refusing, so a gateway restarted during a Postgres
+  outage still comes up and answers 503s. The role check then runs on the first
+  successful connection, and **gates the pool**: no work query runs on any pool
+  connection until the check has passed; if it fails, the service logs the problem and
+  exits 2 without having done any work as the wrong role.
+- `loom-migrate` refuses a configured login or group name that is the connecting role
+  itself (`current_user` / `session_user`), and a group name that exists as a `LOGIN`
+  role, rather than altering it.
 - A test checks that every table has an explicit grant to the group role, so a later
   migration cannot forget one (the migrations bookkeeping table and individual
   partitions excepted: services reach partitions through their parent).
