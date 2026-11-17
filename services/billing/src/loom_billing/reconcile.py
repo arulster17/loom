@@ -24,12 +24,14 @@ Postgres:
    never reached Postgres (lost or dead-lettered): `missing_in_postgres`, checked only
    when (b) found the group consumed through L (else billing is behind, not wrong, and
    the direction is skipped this minute). Either is logged with the org id and counted
-   in metrics. The `redis_behind` heal is one atomic Lua call: if the org is loaded
-   and its heal generation is still G, add the missing amount (P - U2) and bump the
-   generation; otherwise do nothing. Reconcilers that saw the same drift (several
-   workers, or overlapping runs) read the same G, so only the first heal applies, even
-   when they read different P; the others leave it to the next run, which reads
-   afresh. Settles made since U2 stay counted (INCRBY). `missing_in_postgres` is left
+   in metrics. The `redis_behind` heal is one atomic Lua call: if the org is loaded,
+   its heal generation is still G and its `usage` is still below P, add the missing
+   amount (P - U2) and bump the generation; otherwise do nothing. Reconcilers that saw
+   the same drift (several workers, or overlapping runs) read the same G, so only the
+   first heal applies, even when they read different P; the others leave it to the
+   next run, which reads afresh. `usage < P` covers a reload from Postgres since the
+   snapshot (it resets an absent generation to 0, and already counts the missing
+   amount). Settles made since U2 stay counted (INCRBY). `missing_in_postgres` is left
    alone (it only makes the balance look lower). When the check is skipped because the
    stream's consumer group is gone (Redis lost its data), that is logged at error and
    counted (`usage_group_missing_total`); the consumer recreates the group.
@@ -69,14 +71,19 @@ log = logging.getLogger("loom_billing.reconcile")
 CHUNK = 500
 
 # KEYS[1] the org's usage, KEYS[2] its heal generation; ARGV[1] the generation read
-# with U2, ARGV[2] the missing amount (P - U2). Returns false when the org is not
-# loaded, else {1 if healed now else 0, usage after}.
+# with U2, ARGV[2] the missing amount (P - U2), ARGV[3] P. Returns false when the org is
+# not loaded, else {1 if healed now else 0, usage after}. Both guards are needed: the
+# generation alone lets a heal run after a reload from Postgres reset it (absent = 0),
+# and `usage < P` alone lets reconcilers that read different P both heal.
 _HEAL_LUA = """
 local usage = redis.call('GET', KEYS[1])
 if not usage then
   return false
 end
 if tonumber(redis.call('GET', KEYS[2]) or '0') ~= tonumber(ARGV[1]) then
+  return {0, tonumber(usage)}
+end
+if tonumber(usage) >= tonumber(ARGV[3]) then
   return {0, tonumber(usage)}
 end
 redis.call('INCR', KEYS[2])
@@ -258,7 +265,7 @@ class Reconciler:
                 # P <= U2 holds whether or not the stream is drained: checked every run.
                 if after is not None and pg_usage > after:
                     self._drift(run, o, "redis_behind", pg_usage - after, after, pg_usage)
-                    after = await self._heal(o, gen, pg_usage - after)
+                    after = await self._heal(o, gen, pg_usage - after, pg_usage)
                 if after is None:
                     continue
                 balance = credit - after
@@ -269,16 +276,20 @@ class Reconciler:
                         run.notifications += 1
                     await conn.commit()
 
-    async def _heal(self, org: uuid.UUID, generation: int, missing: int) -> int | None:
+    async def _heal(
+        self, org: uuid.UUID, generation: int, missing: int, postgres_usage: int
+    ) -> int | None:
         """Add usage Redis lost back to its counter (an org reloaded from Postgres
         before billing stored events settled while it was not loaded, or Redis lost
         writes): an under-counted `usage` would let the org spend past its balance.
 
         One atomic call: INCRBY `missing` (P - U2) and bump the heal generation, only
-        while the generation is still `generation` (read with U2). Settles since U2
-        stay counted, and of the reconcilers that saw the same drift only the first
-        heals (the others find the generation moved on). Only while the org is loaded
-        (a lone usage key would block init_org). Returns the usage after."""
+        while the generation is still `generation` (read with U2) and `usage` is still
+        below `postgres_usage` (P). Settles since U2 stay counted, and of the
+        reconcilers that saw the same drift only the first heals (the others find the
+        generation moved on); an org reloaded from Postgres since the snapshot is not
+        healed again (its usage is already P or more). Only while the org is loaded (a
+        lone usage key would block init_org). Returns the usage after."""
         res = await self.redis.eval(  # type: ignore[misc]
             _HEAL_LUA,
             2,
@@ -286,6 +297,7 @@ class Reconciler:
             org_key(org, HEAL_GENERATION),
             generation,
             missing,
+            postgres_usage,
         )
         if res is None:
             return None

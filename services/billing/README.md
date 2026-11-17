@@ -42,12 +42,14 @@ MGET read Redis `usage` again (U2) and each org's heal generation
 only when the group caught up within the wait (else skipped that minute: billing is
 behind, not wrong). Both are logged at error with the org id and counted
 (`loom_billing_usage_drift_detected_total{direction}`). `redis_behind` is healed, since
-an under-count would let the org overspend, by one Lua call that, if the org is loaded
-and its heal generation is unchanged since the MGET, adds P - U2 to Redis `usage` and
-bumps the generation, and otherwise does nothing
+an under-count would let the org overspend, by one Lua call that, if the org is loaded,
+its heal generation is unchanged since the MGET **and** Redis `usage` is still below P,
+adds P - U2 to Redis `usage` and bumps the generation, and otherwise does nothing
 (`loom_billing_usage_drift_healed_micros_total`). Reconcilers racing each other read the
 same generation, so only the first heal applies, even when they read different P (the
-old "add while `usage` < P" guard let two of them both heal); the next run reads afresh.
+`usage` < P guard alone let two of them both heal); an org reloaded from Postgres since
+the MGET already counts the missing amount, and its reset generation (absent = 0) would
+match again, so `usage` < P stops that heal. The next run reads afresh.
 `missing_in_postgres` is not rewritten.
 
 **Redis data loss.** After a FLUSHALL or a failover without AOF the gateway's next

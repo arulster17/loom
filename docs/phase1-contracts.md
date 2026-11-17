@@ -588,13 +588,16 @@ compares Redis `usage` with the Postgres total P read after the stream snapshot:
 - `redis_behind` (P above Redis `usage` U2 read after P) is checked every run, whether
   or not the stream is drained (P <= U2 holds regardless). U2 is read together with the
   org's heal generation (`loom:org:<org>:heal_gen`, §6) in one `MGET`. The heal is one
-  atomic Lua call: if the org is loaded and its generation is unchanged since that
-  read, add the missing amount (P - U2) and bump the generation; otherwise do nothing
-  (another reconciler healed first; the next run reads afresh). Reconcilers that saw
+  atomic Lua call: if the org is loaded, its generation is unchanged since that read,
+  **and** Redis `usage` is still below P, add the missing amount (P - U2) and bump the
+  generation; otherwise do nothing (another reconciler healed first, or Redis was
+  reloaded from Postgres meanwhile; the next run reads afresh). Reconcilers that saw
   the same drift (several workers, or overlapping runs) therefore add the missing
   amount at most once, even when they read different P, and settles made meanwhile stay
-  counted (§6 "Redis data loss"). The old guard ("add while `usage` < P") did not:
-  two reconcilers that read different P could both pass it;
+  counted (§6 "Redis data loss"). Both guards are needed: `usage` < P alone lets two
+  reconcilers that read different P both heal, and the generation alone lets a heal run
+  after a reload from Postgres reset it (absent = 0: 900, reloaded to 1000, healed to
+  1100);
 - `missing_in_postgres` (P below Redis `usage` read at the snapshot) needs the consumer
   group to have consumed through the snapshot's last id: reconcile polls for up to
   `LOOM_RECONCILE_DRAIN_WAIT_S` (2 s), at most once per run (its chunks of orgs share
