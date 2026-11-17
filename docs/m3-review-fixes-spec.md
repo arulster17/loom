@@ -140,11 +140,14 @@ The adjust-credits form carries a per-render token (a random UUID in a hidden fi
 ledger idempotency key is derived from it (`admin:adjust:<token>`). A resubmit, or the same
 form posted from two tabs, posts one ledger transaction and one audit row; the repeat
 answers with the same success message and changes nothing. A missing or malformed token
-is refused. A newly rendered form gets a new token.
+is refused. A newly rendered form gets a new token. A token already used for a different
+org or amount is refused, not answered as a success.
 
 **W3 (R13). Every sign-out revokes the playground keys.**
-Auth.js's `events.signOut` revokes the user's playground keys, so signing out through
-`POST /api/auth/signout` revokes them as the app's sign-out button does.
+Signing out through Auth.js's own `POST /api/auth/signout` revokes the user's playground
+keys, as the app's sign-out button does. (With `@auth/pg-adapter`, `deleteSession` returns
+nothing, so `events.signOut` gets no session; the fix must find the user another way, such
+as a wrapped `deleteSession`.)
 
 **W4 (R14). A key's spend limit has an upper bound.**
 A spend limit above **$1,000,000** (10^12 micros, well inside both Postgres `bigint` and
@@ -153,6 +156,7 @@ naming the bound, in the action and in the data layer. No input gives "Something
 wrong".
 
 **W5 (admin policy). `LOOM_ADMIN_EMAILS` only in dev; no self-service admin.**
+"Outside dev" means any `LOOM_ENV` other than `dev`, unset included.
 - Outside `LOOM_ENV=dev`, `LOOM_ADMIN_EMAILS` grants nothing at sign-in, and the app logs
   a warning at startup if it is set. Admins already granted keep their role (granting the
   first production admin is a manual SQL step, written down in the contracts).
