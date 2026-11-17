@@ -103,7 +103,10 @@ being consumed continuously (the stream never empty at the snapshot), an org who
 - Outside `LOOM_ENV=dev`, each Python service checks at startup, over its own connection,
   that its role is not a superuser and owns no table in the schema, and refuses to start
   (exit 2, like `production_problems`) otherwise. The dev password for `loom_app` is also
-  a production problem.
+  a production problem. The role problems are listed together with the other production
+  problems in the one exit-2 message, so the service connects and checks the role even
+  when static problems already refuse the start. `loom-migrate` itself does not refuse
+  the dev password.
 - A test checks that every table has an explicit grant to the group role, so a later
   migration cannot forget one (the migrations bookkeeping table and individual
   partitions excepted: services reach partitions through their parent).
@@ -116,6 +119,24 @@ being consumed continuously (the stream never empty at the snapshot), an org who
   `loom-migrate`'s role setup, must succeed when run at the same time against many
   databases on one server (parallel test workers each migrating a fresh database): no
   "role already exists" or duplicate-key error, and the grants come out the same.
+  Concurrent `CREATE ROLE` (and adding the same membership) can fail with either
+  `duplicate_object` or `unique_violation`; both mean "already exists" and are not
+  errors. Advisory locks are per database, so they do not serialise this.
+- **Role names are configurable** (user decision 2026-11-17), so two stacks can share one
+  Postgres server and the race can be tested on fresh names: the login comes from
+  `LOOM_APP_DATABASE_USER` (default `loom_app`) and the group from
+  `LOOM_APP_DATABASE_GROUP` (default `loom_runtime`). The seams:
+  - `loom_platform.migrate.upgrade(url, *, group_role=None)` creates the group role
+    (if missing) **before** applying any migration, then migrates and grants to it;
+    `None` means the env value or the default;
+  - `loom_platform.migrate.ensure_app_login(url, *, login, group_role, password)`
+    creates or updates the login (password, `LOGIN`, member of the group);
+  - `loom-migrate` runs `upgrade`, then `ensure_app_login` when
+    `LOOM_APP_DATABASE_PASSWORD` is set.
+  The race test runs several rounds; each round makes fresh random login and group
+  names and 6 fresh databases, releases 6 threads at once through a barrier into
+  `upgrade` + `ensure_app_login`, requires every call to succeed and the grant
+  snapshots to match, then drops the databases and roles.
 - Contracts §3 is corrected: append-only and zero-sum hold for the runtime role; the
   owner can still disable the triggers, so only migrations run as the owner.
 Done when: connected as `loom_app`, `UPDATE`/`DELETE`/`TRUNCATE` on the three append-only
