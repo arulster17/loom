@@ -54,7 +54,11 @@ It settles `aborted` with estimated tokens instead of zero:
   any model's measured decode rate at its SLO, so the estimate errs toward the client;
   0 turns estimating off and restores today's zero bill);
 - prompt tokens = `prompts × min(prompt_upper, ceil(body bytes / 4))`; cached = 0;
-- so the cost never exceeds the reservation (`max_cost_micros`).
+- the cost is clamped to the reservation (`max_cost_micros`): a body above about
+  4 × context could otherwise push it over.
+A request whose deadline passed before it was dispatched bills nothing (`error`), even if
+the code gives the attempt a last millisecond. With the rate at 0, behaviour is exactly
+today's (`aborted`, zero cost, counted in `usage_missing`, no cost headers).
 The client still gets 502 `upstream_lost`, now with `X-Loom-Cost-Micros` /
 `X-Loom-Cost-USD` naming the amount billed. The event counts in a new counter
 `loom_gateway_usage_estimated_total{model}` and no longer in `usage_missing`; the request
