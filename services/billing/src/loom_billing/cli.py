@@ -127,7 +127,13 @@ def main(argv: list[str] | None = None) -> int:
         # The deferred role check failed (printed) in `open_pool`, before any work; the
         # unwinding closed what was open.
         return 2
-    return 2 if role_gate.failed else 0  # `api`: uvicorn ends on the failed lifespan
+    except SystemExit:
+        # `api`: the deferred role check failed in the lifespan's `open_pool`, and
+        # uvicorn ends a failed lifespan with exit 3. A failed role check exits 2.
+        if role_gate.failed:
+            return 2
+        raise
+    return 2 if role_gate.failed else 0
 
 
 if __name__ == "__main__":
