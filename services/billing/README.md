@@ -33,17 +33,22 @@ and reconcile are safe to race.
 
 **Drift check.** In one MULTI read each org's Redis `usage` (U1) and the stream's last
 id; check the group has acked everything up to that id, asking again for up to
-`LOOM_RECONCILE_DRAIN_WAIT_S` (2 s) while it has not; read Postgres usage (P); read
-Redis `usage` again (U2). A healthy system has U1 <= P <= U2. `P > U2`
+`LOOM_RECONCILE_DRAIN_WAIT_S` (2 s) while it has not (at most one wait per run, shared by
+its chunks of orgs, and none when the group is missing); read Postgres usage (P); in one
+MGET read Redis `usage` again (U2) and each org's heal generation
+(`loom:org:<org>:heal_gen`, absent = 0). A healthy system has U1 <= P <= U2. `P > U2`
 (`redis_behind`) means Redis lost usage; it is checked every run, drained stream or not.
 `P < U1` (`missing_in_postgres`) means events were lost or dead-lettered; it is checked
 only when the group caught up within the wait (else skipped that minute: billing is
 behind, not wrong). Both are logged at error with the org id and counted
 (`loom_billing_usage_drift_detected_total{direction}`). `redis_behind` is healed, since
-an under-count would let the org overspend, by one Lua call that adds the difference
-back to Redis `usage` only while the org is loaded and its `usage` is still below P
-(`loom_billing_usage_drift_healed_micros_total`): reconcilers racing each other heal a
-drift once in total. `missing_in_postgres` is not rewritten.
+an under-count would let the org overspend, by one Lua call that, if the org is loaded
+and its heal generation is unchanged since the MGET, adds P - U2 to Redis `usage` and
+bumps the generation, and otherwise does nothing
+(`loom_billing_usage_drift_healed_micros_total`). Reconcilers racing each other read the
+same generation, so only the first heal applies, even when they read different P (the
+old "add while `usage` < P" guard let two of them both heal); the next run reads afresh.
+`missing_in_postgres` is not rewritten.
 
 **Redis data loss.** After a FLUSHALL or a failover without AOF the gateway's next
 settle recreates `loom:usage` without the consumer group. The consumer answers NOGROUP
@@ -121,7 +126,7 @@ Shared `LOOM_*` variables are in the contracts (§2). Billing adds:
 | `LOOM_USAGE_READ_COUNT` / `_BLOCK_MS` / `_CLAIM_IDLE_MS` | 500 / 2000 / 60000 | |
 | `LOOM_REDIS_SOCKET_TIMEOUT_S` / `LOOM_REDIS_CONNECT_TIMEOUT_S` | 2 / 1 | Redis client timeouts; the read timeout is raised to `_BLOCK_MS` + 3 s so a blocking read is not mistaken for a frozen Redis |
 | `LOOM_BATCH_INTERVAL_S` / `LOOM_RECONCILE_INTERVAL_S` | 60 / 60 | |
-| `LOOM_RECONCILE_DRAIN_WAIT_S` | 2 | how long reconcile waits for the consumer before skipping the `missing_in_postgres` check for the minute |
+| `LOOM_RECONCILE_DRAIN_WAIT_S` | 2 | how long reconcile waits for the consumer (once per run; not when the group is missing) before skipping the `missing_in_postgres` check for the minute |
 | `LOOM_PARTITION_INTERVAL_S` / `LOOM_PARTITION_MONTHS_AHEAD` | 86400 / 3 | |
 | `LOOM_BILLING_HOST` / `_PORT` / `_METRICS_PORT` | `0.0.0.0` / 8090 / 9101 | metrics port 0 = off |
 | `LOOM_BILLING_INTERNAL_TOKEN` | unset (checkout endpoint answers 503) | shared with the web app |

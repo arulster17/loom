@@ -70,10 +70,10 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 
 | Variable | Default | Used by |
 |---|---|---|
-| `LOOM_ENV` | unset = `prod`; compose: `dev` | all services: `dev` or `prod` (anything else refuses to start). Outside dev a service refuses to start on a missing secret or a compose dev default: gateway and billing (a `LOOM_REDIS_URL` without a password or not `rediss://`; Redis `maxmemory-policy` other than `noeviction` when `CONFIG GET` is permitted, a warning when it is not), gateway (DB password, `LOOM_SETTLE_SPOOL_PATH`, `LOOM_POD_CA_CERT`, client certificate, `LOOM_CORS_ORIGINS`; and it never uses an `http://` replica), billing (DB password, `LOOM_STRIPE_MODE=stub`, internal token missing or the compose value), web (`AUTH_SECRET` missing or the compose value, `AUTH_URL` missing, internal token missing or the compose value). "DB password" means none, or either compose one (the owner's `loom` or the runtime login's `loom-app-dev`). Every Python service (gateway, billing, pool manager) also checks at start, over its own connection with `LOOM_DATABASE_URL`, that its role is not a superuser and owns no table in schema `public` (directly or through a role it is a member of), and refuses otherwise (§3 "Roles"); an unreachable database is refused too (the role is unchecked). All problems are listed together in one exit-2 message |
-| `LOOM_DATABASE_URL` | `postgresql://loom:loom@localhost:5432/loom_platform`; compose: `postgresql://loom_app:loom-app-dev@postgres:5432/loom_platform` for every service, the owner `loom` for `migrate` | all (web: as `DATABASE_URL`). Services connect as the runtime login, `loom-migrate` as the owner (§3 "Roles") |
+| `LOOM_ENV` | unset = `prod`; compose: `dev` | all services: `dev` or `prod` (anything else refuses to start). Outside dev a service refuses to start on a missing secret or a compose dev default: gateway and billing (a `LOOM_REDIS_URL` without a password or not `rediss://`; Redis `maxmemory-policy` other than `noeviction` when `CONFIG GET` is permitted, a warning when it is not), gateway (DB password, `LOOM_SETTLE_SPOOL_PATH`, `LOOM_POD_CA_CERT`, client certificate, `LOOM_CORS_ORIGINS`; and it never uses an `http://` replica), billing (DB password, `LOOM_STRIPE_MODE=stub`, internal token missing or the compose value), web (`AUTH_SECRET` missing or the compose value, `AUTH_URL` missing, internal token missing or the compose value). "DB password" means none, or either compose one (the owner's `loom` or the runtime login's `loom-app-dev`). Every Python service (gateway, billing, pool manager) also checks at start, over its own connection with `LOOM_DATABASE_URL`, that its role (the login, `session_user`, and `current_user`) is not a superuser and owns no table in schema `public` (directly or through a role it is a member of), and refuses otherwise (§3 "Roles"). All problems are listed together in one exit-2 message. Postgres unreachable at start is not a refusal: the service logs one warning line naming Postgres and starts (the gateway answers 503 to requests that need Postgres), and runs the role check on its first successful connection. Until that check has passed it does no Postgres work (no pool connection, no `LISTEN`); if it fails, the service prints the problem and exits 2 |
+| `LOOM_DATABASE_URL` | `postgresql://loom:loom@localhost:5432/loom_platform`; compose: `postgresql://loom_app:loom-app-dev@postgres:5432/loom_platform` for every service, the owner `loom` for `migrate` | all (web: as `DATABASE_URL`). Services connect as the runtime login, `loom-migrate` as the owner (§3 "Roles"). Outside dev a Python service starts while this database is unreachable and checks its role once it connects (`LOOM_ENV` above) |
 | `LOOM_APP_DATABASE_PASSWORD` | unset; compose (`migrate` only): `loom-app-dev` | `loom-migrate`: when set, creates or updates the runtime login with this password (`LOGIN`, member of the group role). Unset: the login is left as it is. `loom-migrate` accepts the compose value; a service whose `LOOM_DATABASE_URL` uses it refuses to start outside dev |
-| `LOOM_APP_DATABASE_USER` / `LOOM_APP_DATABASE_GROUP` | `loom_app` / `loom_runtime` | `loom-migrate`: the runtime login's name and its `NOLOGIN` group role's (roles are server-wide: two stacks sharing one Postgres server can use different names) |
+| `LOOM_APP_DATABASE_USER` / `LOOM_APP_DATABASE_GROUP` | `loom_app` / `loom_runtime` | `loom-migrate`: the runtime login's name and its `NOLOGIN` group role's (roles are server-wide: two stacks sharing one Postgres server can use different names). It refuses, before changing anything, a name that is the role it connects as (`current_user` or `session_user`), and a group name that exists as a `LOGIN` role |
 | `LOOM_REDIS_URL` | `redis://localhost:6379/0` | gateway, billing, pool manager, poolsim, web (model status fallback; sign-in rate limit) |
 | `LOOM_MODELS_YAML` | repo `config/models.yaml` | gateway, billing |
 | `LOOM_SERVING_YAML` | repo `config/serving.yaml`; gateway image and compose: that file | gateway (cold-start estimates, §10; a missing file gives every model 300 s, a present but invalid one stops it at start), pool manager (M2). Loaded by `loom_platform.serving.load_serving` |
@@ -243,7 +243,15 @@ runs with the owner's rights (`SECURITY DEFINER`, `search_path = public, pg_temp
 
 Outside `LOOM_ENV=dev` a service refuses to start (exit 2) when its own connection's
 role is a superuser or owns a table in `public`, or when `LOOM_DATABASE_URL` uses a
-compose dev password (§2).
+compose dev password (§2). When Postgres is unreachable at start, the service starts with
+a warning and runs the same check on its first successful connection; it does no work
+on any connection before the check has passed, and exits 2 if it fails. The check reads
+only the system catalogs (`pg_roles`, `pg_class`, `session_user`, `current_user`,
+`pg_has_role`), never the schema's own tables or functions.
+
+`loom-migrate` refuses, and changes nothing, when `LOOM_APP_DATABASE_USER` or
+`LOOM_APP_DATABASE_GROUP` is the role it connects as (`current_user` or `session_user`),
+or when the group name exists as a `LOGIN` role (it is not altered to `NOLOGIN`).
 
 ## 4. Signups, approval, admins
 
@@ -306,6 +314,7 @@ without also discarding the stream (both are one state).
 | `loom:org:<org>:credit` | int | init, billing | `loom_org_credit_total` |
 | `loom:org:<org>:credit_v` | int | init, billing | Its version, `loom_org_credit_version` (migration 0006): the org's count of non-usage ledger transactions, read in the same snapshot |
 | `loom:org:<org>:usage` | int | init, settle | Cumulative settled cost (all time) |
+| `loom:org:<org>:heal_gen` | int (absent = 0) | billing reconcile | Heal generation: bumped by each `redis_behind` heal, so reconcilers that saw the same drift heal it once (§7 "Reconcile") |
 | `loom:org:<org>:rsum` | int | reserve, settle | Sum of live reservations |
 | `loom:org:<org>:rsv` | hash | reserve, settle | request id -> `<max cost>|<key id>|<tpm estimate>` |
 | `loom:org:<org>:rsv:exp` | zset | reserve, settle | request id -> expiry (ms); its size is the org's in-flight count |
@@ -576,16 +585,22 @@ back both; a racing second worker hits the idempotency key.
 `loom_credit_changed` notification. Its drift check (`services/billing/README.md`)
 compares Redis `usage` with the Postgres total P read after the stream snapshot:
 
-- `redis_behind` (P above Redis `usage` read after P) is checked every run, whether or
-  not the stream is drained (P <= that usage holds regardless), and healed in one
-  atomic Lua call: add the missing amount only while the org is loaded and its Redis
-  `usage` is still below P. A correct heal leaves `usage >= P`, so reconcilers racing
-  each other (several workers, or overlapping runs) heal a drift once in total, and
-  settles made meanwhile stay counted (§6 "Redis data loss");
+- `redis_behind` (P above Redis `usage` U2 read after P) is checked every run, whether
+  or not the stream is drained (P <= U2 holds regardless). U2 is read together with the
+  org's heal generation (`loom:org:<org>:heal_gen`, §6) in one `MGET`. The heal is one
+  atomic Lua call: if the org is loaded and its generation is unchanged since that
+  read, add the missing amount (P - U2) and bump the generation; otherwise do nothing
+  (another reconciler healed first; the next run reads afresh). Reconcilers that saw
+  the same drift (several workers, or overlapping runs) therefore add the missing
+  amount at most once, even when they read different P, and settles made meanwhile stay
+  counted (§6 "Redis data loss"). The old guard ("add while `usage` < P") did not:
+  two reconcilers that read different P could both pass it;
 - `missing_in_postgres` (P below Redis `usage` read at the snapshot) needs the consumer
   group to have consumed through the snapshot's last id: reconcile polls for up to
-  `LOOM_RECONCILE_DRAIN_WAIT_S` (2 s), and skips this direction for the minute when it
-  has not caught up (billing is behind, not wrong). It is reported, never rewritten.
+  `LOOM_RECONCILE_DRAIN_WAIT_S` (2 s), at most once per run (its chunks of orgs share
+  the wait) and not at all when the group is missing, and skips this direction for the
+  minute when it has not caught up (billing is behind, not wrong). It is reported,
+  never rewritten.
 
 **Notifications outbox** *(wave 2, billing)*: stream `loom:notify`
 (`LOOM_NOTIFY_STREAM`), flat string entries `type`, `org_id`, `balance_micros`,
