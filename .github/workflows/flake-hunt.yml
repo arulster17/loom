@@ -109,6 +109,12 @@ jobs:
             cat mixed.md
           } > report.md
           cat report.md >> "$GITHUB_STEP_SUMMARY"
+          # GitHub refuses issue bodies over 65,536 characters (a broken run can list
+          # hundreds of tests); the run's summary keeps the whole report.
+          head -c 60000 report.md > issue.md
+          if [ "$(wc -c < report.md)" -gt 60000 ]; then
+            printf '\n\n… truncated; the full report is in the [run summary](%s).\n' "$RUN_URL" >> issue.md
+          fi
 
           gh label create flaky-tests --color B60205 \
             --description "Tests with mixed results (flake-hunt workflow)" --force
@@ -116,13 +122,13 @@ jobs:
             --json number --jq '.[0].number // empty')
           if [ "$status" -eq 1 ]; then
             if [ -n "$issue" ]; then
-              gh issue edit "$issue" --body-file report.md
+              gh issue edit "$issue" --body-file issue.md
               gh issue comment "$issue" --body "Updated by $RUN_URL."
             else
               gh issue create --title "Flaky tests (weekly flake hunt)" \
-                --label flaky-tests --body-file report.md
+                --label flaky-tests --body-file issue.md
             fi
           elif [ -n "$issue" ]; then
-            gh issue comment "$issue" --body-file report.md
+            gh issue comment "$issue" --body-file issue.md
           fi
           exit "$status"

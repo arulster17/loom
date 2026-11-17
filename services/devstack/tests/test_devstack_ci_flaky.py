@@ -50,6 +50,10 @@ def test_strip_repeat_merges_only_pytest_repeat_copies(report: ModuleType) -> No
     assert report.strip_repeat("t[a-b-3-20]", 20) == "t[a-b]"
     assert report.strip_repeat("t[3-20]", None) == "t[3-20]"
     assert report.strip_repeat("t[1-2]", 20) == "t[1-2]"
+    # xdist --dist loadgroup appends the xdist_group name
+    assert report.strip_repeat("t[3-20]@quality-e2e", 20) == "t"
+    assert report.strip_repeat("t[a-3-20]@g", 20) == "t[a]"
+    assert report.strip_repeat("t[x]@g", None) == "t[x]"
 
 
 def test_mixed_results_are_flaky_and_exit_1(
@@ -90,10 +94,14 @@ def test_flake_check_repeats_only_changed_tests_on_prs() -> None:
     assert check["if"] == "needs.flake-files.outputs.files != ''"
     assert {"postgres", "redis"} <= set(check["services"])
     cmd = runs(check)
-    assert '--count 20 --repeat-scope session"' in cmd
+    # 20 runs: 10 sessions (each re-runs module fixtures) x pytest-repeat's 2 copies
+    assert "for i in $(seq 10)" in cmd
+    assert '--count 2 --repeat-scope session"' in cmd
     assert "-n auto $repeat" in cmd and "$FLAKE_FILES" in cmd
+    assert "timeout -k" in cmd
     assert "nproc" in cmd, "no deliberate CPU load"
-    assert 'args="--repeat-count 20' in cmd and "flaky_report.py $args" in cmd
+    assert 'args="--repeat-count 2 --expect-runs 20"' in cmd
+    assert "flaky_report.py $args" in cmd and "flake-*.xml" in cmd
     assert check["timeout-minutes"] <= 15
 
 

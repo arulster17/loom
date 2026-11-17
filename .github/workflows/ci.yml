@@ -91,30 +91,40 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen
-      # One busy loop per CPU next to `-n auto`'s workers: about half the CPU each test
-      # would get alone. `--repeat-scope session` runs every test once, then again, so
-      # when the 7-minute limit stops a slow file each test still got a fair share (the
-      # report warns). pytest is called directly so the limit's SIGINT reaches it and it
-      # still writes the JUnit file. Exit 5: every changed test is network/acceptance.
+      # 20 runs per test: 10 pytest sessions of `--count 2`. Separate sessions, because
+      # pytest-repeat's copies share one module-scoped fixture (an e2e module's whole
+      # bench run): each session samples it again. One busy loop per CPU next to
+      # `-n auto`'s workers gives each test about half the CPU it would get alone.
+      # Sessions stop at the 7-minute limit (SIGINT: pytest still writes its JUnit
+      # file; the report warns about tests short of 20 runs). Exit 5: every changed
+      # test is network/acceptance, nothing to repeat.
       - name: Changed tests x20 under CPU load
         run: |
           for _ in $(seq "$(nproc)"); do sh -c 'while :; do :; done' & done
+          hogs=$(jobs -p)
           set +e
-          repeat="--count 20 --repeat-scope session"
-          timeout -s INT 420 .venv/bin/python -m pytest -q -n auto $repeat --junitxml=flake.xml $FLAKE_FILES
-          status=$?
-          kill $(jobs -p)
-          case $status in
-            0|1|5) ;;
-            124) echo "::warning::stopped at the 7-minute limit; see the report" ;;
-            *) echo "pytest exited $status"; exit $status ;;
-          esac
+          end=$(( $(date +%s) + 420 ))
+          repeat="--count 2 --repeat-scope session"
+          stopped=""
+          for i in $(seq 10); do
+            left=$(( end - $(date +%s) ))
+            if [ "$left" -lt 15 ]; then stopped="before session $i"; break; fi
+            timeout -k 60 -s INT "$left" .venv/bin/python -m pytest -q -n auto $repeat --junitxml="flake-$i.xml" $FLAKE_FILES
+            status=$?
+            case $status in
+              0|1) ;;
+              5) break ;;
+              124|137) stopped="in session $i"; break ;;
+              *) kill $hogs; echo "pytest exited $status"; exit $status ;;
+            esac
+          done
+          kill $hogs
+          if [ -n "$stopped" ]; then echo "::warning::7-minute limit hit $stopped; see the report"; fi
       - name: Report tests that both passed and failed
         run: |
-          [ -s flake.xml ] || { echo "no tests ran (all deselected)"; exit 0; }
-          args="--repeat-count 20 --expect-runs 20"
+          args="--repeat-count 2 --expect-runs 20"
           title="Flake check: changed tests x20"
-          python3 scripts/flaky_report.py $args --title "$title" flake.xml | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 scripts/flaky_report.py $args --title "$title" flake-*.xml | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"
 
   # The pinned pod proxy bundle (docs/phase1-m2-spec.md §9): rebuilt from `git archive

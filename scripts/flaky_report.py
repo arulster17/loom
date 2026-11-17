@@ -6,11 +6,12 @@ flaky when at least one execution passed and at least one failed (a failure or a
 skips count as neither. Exit status: 1 when any test is flaky, else 2 when a file could
 not be read, else 0.
 
-    python3 scripts/flaky_report.py --repeat-count 20 flake.xml     # CI job flake-check
+    python3 scripts/flaky_report.py --repeat-count 2 flake-*.xml    # CI job flake-check
     python3 scripts/flaky_report.py junit-1.xml junit-2.xml ...      # workflow flake-hunt
 
 `--repeat-count N` strips pytest-repeat's `[i-N]` / `-i-N]` suffix from test names so the
-copies of a test count as one test. Stdlib only: it runs on the runner's own python3.
+copies of a test count as one test (across all the files given). Stdlib only: it runs on
+the runner's own python3.
 """
 
 from __future__ import annotations
@@ -37,7 +38,9 @@ class Test:
 
 
 def strip_repeat(name: str, count: int | None) -> str:
-    """`t[3-20]` -> `t`, `t[a-3-20]` -> `t[a]` (only for the given repeat count)."""
+    """`t[3-20]` -> `t`, `t[a-3-20]` -> `t[a]` (only for the given repeat count). Also drops
+    the `@<group>` that xdist's `--dist loadgroup` appends to `xdist_group` tests."""
+    name = re.sub(r"@[^\[\]@]*$", "", name)
     if count is None:
         return name
     name = re.sub(rf"\[\d+-{count}\]$", "", name)
