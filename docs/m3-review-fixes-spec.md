@@ -77,7 +77,8 @@ after the deadline yields 200 with the body and one `ok` usage event, and no 502
 guard (Redis 900, true 1000: A reads P=980 and heals to 980, B reads P=1000 and adds 100,
 ending at 1080). The heal now uses a **per-org heal generation**:
 - each loaded org has a heal-generation counter in Redis (absent means 0);
-- the reconciler reads it in the same atomic snapshot as U2 (step d);
+- the reconciler reads it in the same atomic snapshot as U2 (step d), with `MGET` or a
+  `MULTI` (not a Lua script: only the heal itself is a script);
 - the heal is one atomic Lua call: if the org is loaded and the generation is unchanged
   since that snapshot, add the missing amount (`P - U2`) and bump the generation;
   otherwise do nothing (another reconciler healed first; the next run reads afresh).
@@ -121,7 +122,13 @@ when the consumer group is missing (it cannot catch up within the wait).
   outage still comes up and answers 503s. The role check then runs on the first
   successful connection, and **gates the pool**: no work query runs on any pool
   connection until the check has passed; if it fails, the service logs the problem and
-  exits 2 without having done any work as the wrong role.
+  exits 2 without having done any work as the wrong role. This holds for each Python
+  service: gateway, billing worker and pool manager.
+  - The role check reads only the system catalogs (`pg_roles`, `pg_class`/`pg_tables`,
+    `current_user`/`session_user`); it calls no function and names no table of the
+    schema.
+  - The unreachable-at-start warning is one log line that names Postgres (or "database")
+    and does not repeat the role problems' wording ("superuser", "owns").
 - `loom-migrate` refuses a configured login or group name that is the connecting role
   itself (`current_user` / `session_user`), and a group name that exists as a `LOGIN`
   role, rather than altering it.
