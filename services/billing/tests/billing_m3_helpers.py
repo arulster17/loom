@@ -25,33 +25,80 @@ def _text(v: Any) -> str:
     return str(v)
 
 
+def script_keys(args: tuple[Any, ...]) -> list[str] | None:
+    """The KEYS of a server-side script call (EVAL/EVALSHA/FCALL and their _RO forms:
+    `CMD script|sha|function numkeys key... arg...`), or None for any other command."""
+    if len(args) < 3 or _text(args[0]).upper() not in _SCRIPT_COMMANDS:
+        return None
+    try:
+        numkeys = int(_text(args[2]))
+    except ValueError:
+        return None
+    return [_text(k) for k in args[3 : 3 + numkeys]]
+
+
 class HealGate(aioredis.Redis):
-    """A Redis client (sharing another client's pool) that holds the first server-side
-    script call touching `org` (other than the credit refresh, set_credit.lua) until
+    """A Redis client (sharing another client's pool) that holds the org's heal until
     `release` is set. Given to a Reconciler, it stops that reconciler after it observed
-    the org's usage and before its heal (spec B1: the heal is one atomic Lua call)."""
+    the org's usage and before its heal (spec B1: the heal is one atomic Lua call).
+
+    Assumption: the heal is the one server-side script call (EVAL, EVALSHA, FCALL, or
+    their read-only forms) whose KEYS include the org's `usage` key, the credit refresh
+    (set_credit.lua, told apart by its SHA or source) aside. Only the first such call is
+    held; any other command, and any other script, goes through. The call is caught
+    whether it is sent directly (`execute_command`, which `eval`, `evalsha`, `fcall` and
+    registered `Script`s use) or through a `pipeline()`: queued in a pipeline, it is held
+    when the pipeline is executed; in a watching pipeline (immediate mode), when it is
+    sent."""
 
     def __init__(self, base: aioredis.Redis, org: uuid.UUID) -> None:
         super().__init__(connection_pool=base.connection_pool)
-        self.org = str(org)
+        self.usage_key = org_key(org, "usage")
         self.reached = asyncio.Event()
         self.release = asyncio.Event()
         self._held = False
 
     def _is_heal(self, args: tuple[Any, ...]) -> bool:
-        if not args or _text(args[0]).upper() not in _SCRIPT_COMMANDS:
+        keys = script_keys(args)
+        if keys is None:
             return False
-        texts = [_text(a) for a in args[1:]]
-        if texts and (texts[0] == _SET_CREDIT_SHA or texts[0] == _SET_CREDIT):
+        if _text(args[1]) in (_SET_CREDIT_SHA, _SET_CREDIT):
             return False
-        return any(self.org in t for t in texts[1:])
+        return self.usage_key in keys
 
-    async def execute_command(self, *args: Any, **options: Any) -> Any:
-        if not self._held and self._is_heal(args):
+    async def _hold(self, calls: list[tuple[Any, ...]]) -> None:
+        if not self._held and any(self._is_heal(a) for a in calls):
             self._held = True
             self.reached.set()
             await self.release.wait()
+
+    async def execute_command(self, *args: Any, **options: Any) -> Any:
+        await self._hold([args])
         return await super().execute_command(*args, **options)
+
+    def pipeline(self, transaction: bool = True, shard_hint: Any = None) -> Any:
+        pipe = super().pipeline(transaction=transaction, shard_hint=shard_hint)
+        gate = self
+        queue = pipe.execute_command
+        run = pipe.execute
+
+        def execute_command(*args: Any, **options: Any) -> Any:
+            if not pipe.watching:  # queued: held at execute()
+                return queue(*args, **options)
+
+            async def immediate() -> Any:
+                await gate._hold([args])
+                return await queue(*args, **options)
+
+            return immediate()
+
+        async def execute(raise_on_error: bool = True) -> Any:
+            await gate._hold([a for a, _ in pipe.command_stack])
+            return await run(raise_on_error=raise_on_error)
+
+        pipe.execute_command = execute_command  # type: ignore[method-assign]
+        pipe.execute = execute  # type: ignore[method-assign]
+        return pipe
 
 
 async def wait_reached(gate: HealGate, task: asyncio.Task[Any], timeout_s: float = 15) -> None:

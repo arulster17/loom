@@ -2,22 +2,27 @@
 cannot switch off the ledger's guards.
 
 Each database here is fresh and set up the way the spec says: `loom-migrate` run as the
-owner with `LOOM_APP_DATABASE_PASSWORD`. The group role is not named by the spec: it is
-found as the role(s) `loom_app` is a member of."""
+owner with `LOOM_APP_DATABASE_PASSWORD` and the default role names (`loom_app`, group
+`loom_runtime`). The race test calls the spec's seams (`migrate.upgrade(url,
+group_role=...)`, `migrate.ensure_app_login(...)`) with fresh role names instead."""
 
 from __future__ import annotations
 
 import datetime as dt
+import inspect
 import secrets
-import subprocess
+import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 import psycopg
 import pytest
 from platform_m3_roles import (
     APP_ROLE,
     APPEND_ONLY,
+    GROUP_ROLE,
     admin_info,
     admin_url,
     app_password,
@@ -26,13 +31,12 @@ from platform_m3_roles import (
     drop_database,
     grant_snapshot,
     group_roles,
-    migrate_command,
-    migrate_env,
     run_migrate,
     url_for,
 )
-from psycopg import errors
+from psycopg import errors, sql
 
+from loom_platform import migrate
 from loom_platform.db import connect
 from loom_platform.ledger import STRIPE_CLEARING, Entry, org_credit_account, post_transaction
 from loom_platform.pricing import Price, cost_micros
@@ -115,7 +119,7 @@ def test_item_b3_group_role_grants_every_table(owner_conn, app_conn):
     """Every table has an explicit grant to the group role loom_app is a member of, so a
     later migration cannot forget one. Sequences are usable (USAGE)."""
     groups = group_roles(owner_conn)
-    assert groups, "loom_app is a member of no group role"
+    assert GROUP_ROLE in groups, f"loom_app is not a member of {GROUP_ROLE}: {groups}"
     for g in groups:
         login = owner_conn.execute(
             "SELECT rolcanlogin FROM pg_roles WHERE rolname = %s", (g,)
@@ -264,6 +268,22 @@ def _has_partition(owner_conn: psycopg.Connection, month: dt.date) -> bool:
     return bool(row and row[0])
 
 
+def test_item_b3_partition_upkeep_runs_with_owner_rights(owner_conn):
+    """loom_ensure_usage_partitions runs with the owner's rights (SECURITY DEFINER) and a
+    fixed search_path, so loom_app itself still cannot create objects."""
+    rows = owner_conn.execute(
+        "SELECT p.oid::regprocedure::text, p.prosecdef, p.proconfig FROM pg_proc p "
+        "JOIN pg_namespace n ON n.oid = p.pronamespace "
+        "WHERE n.nspname = 'public' AND p.proname = 'loom_ensure_usage_partitions'"
+    ).fetchall()
+    assert rows, "no loom_ensure_usage_partitions function"
+    for sig, secdef, config in rows:
+        assert secdef is True, f"{sig} is not SECURITY DEFINER"
+        assert any(c.startswith("search_path=") for c in config or []), (
+            f"{sig} has no fixed search_path: {config}"
+        )
+
+
 def test_item_b3_app_role_runs_partition_upkeep(owner_conn, app_conn):
     """The billing worker (as loom_app) keeps the monthly usage_events partitions rolling
     (loom_ensure_usage_partitions), including creating a month that is missing."""
@@ -278,42 +298,110 @@ def test_item_b3_app_role_runs_partition_upkeep(owner_conn, app_conn):
 # ------------------------------------------------- setup run on many databases
 
 
-def test_item_b3_role_setup_concurrent_on_many_databases():
-    """loom-migrate's role setup run at the same time against several fresh databases
-    on one server: every run succeeds (no "role already exists" or duplicate-key error)
-    and the grants come out the same."""
-    info = admin_info()
-    names = [create_database(info) for _ in range(6)]
+RACE_ROUNDS = 3
+RACE_DATABASES = 6
+
+
+def _race_round(info: dict[str, str]) -> None:
+    """One round: fresh login and group names, 6 fresh databases, 6 threads released at
+    once into upgrade + ensure_app_login. Drops what it made."""
+    tag = uuid.uuid4().hex[:10]
+    login, group = f"loom_t_race_{tag}_app", f"loom_t_race_{tag}_grp"
+    password = secrets.token_hex(16)
+    names: list[str] = []
+    barrier = threading.Barrier(RACE_DATABASES)
+
+    def setup(db: str) -> list[migrate.Migration]:
+        barrier.wait(timeout=60)
+        applied = migrate.upgrade(db, group_role=group)
+        migrate.ensure_app_login(db, login=login, group_role=group, password=password)
+        return applied
+
     try:
-        procs = [
-            subprocess.Popen(
-                migrate_command(admin_url(info, n)),
-                env=migrate_env(app_password()),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            for n in names
-        ]
-        outs = [p.communicate(timeout=180) for p in procs]
-        for p, (out, err) in zip(procs, outs, strict=True):
-            assert p.returncode == 0, out + err
-            assert "already exists" not in err and "duplicate key" not in err, err
+        for _ in range(RACE_DATABASES):
+            names.append(create_database(info))
+        urls = [admin_url(info, n) for n in names]
+        with ThreadPoolExecutor(max_workers=RACE_DATABASES) as ex:
+            futures = [ex.submit(setup, u) for u in urls]
+            failures = [(n, f.exception(timeout=90)) for n, f in zip(names, futures, strict=True)]
+        failed = [(n, repr(e)) for n, e in failures if e is not None]
+        assert failed == [], f"role setup failed when run concurrently: {failed}"
+        everything = [m.version for m in migrate.load_migrations()]
+        for n, f in zip(names, futures, strict=True):
+            assert [m.version for m in f.result()] == everything, f"{n}: not fully migrated"
+
         snapshots = []
-        for n in names:
-            with psycopg.connect(admin_url(info, n), autocommit=True) as conn:
-                groups = group_roles(conn)
-                assert groups, "loom_app is a member of no group role"
-                snapshots.append(grant_snapshot(conn, [*groups, APP_ROLE]))
-            app = url_for(info, dbname=n, user=APP_ROLE, password=app_password())
-            with psycopg.connect(app, connect_timeout=5) as conn:
-                assert conn.execute("SELECT current_user").fetchone() == (APP_ROLE,)
+        for n, url in zip(names, urls, strict=True):
+            with psycopg.connect(url, autocommit=True) as conn:
+                assert group_roles(conn, login) == [group], f"{n}: {login} not in {group}"
+                can_login = conn.execute(
+                    "SELECT rolname, rolcanlogin FROM pg_roles WHERE rolname = ANY(%s) ORDER BY 1",
+                    ([login, group],),
+                ).fetchall()
+                assert sorted(can_login) == sorted([(login, True), (group, False)])
+                snapshots.append(grant_snapshot(conn, [group, login]))
+            as_login = url_for(info, dbname=n, user=login, password=password)
+            with psycopg.connect(as_login, connect_timeout=5) as conn:
+                assert conn.execute("SELECT current_user").fetchone() == (login,)
         assert snapshots[0], "no grants to the group role"
-        for s in snapshots[1:]:
-            assert s == snapshots[0]
+        assert {grantee for _, grantee, _ in snapshots[0]} == {group}, (
+            "grants go to the group role only"
+        )
+        for n, snap in zip(names[1:], snapshots[1:], strict=True):
+            assert snap == snapshots[0], f"{n}: grants differ from {names[0]}"
     finally:
-        for n in names:
-            drop_database(info, n)
+        _drop_all(info, names, [login, group])
+
+
+def _drop_all(info: dict[str, str], names: list[str], roles: list[str]) -> None:
+    """Drop the round's databases, then its roles (the login before the group). Every
+    step is tried; any failure is raised at the end so nothing is left silently."""
+    problems: list[str] = []
+
+    def attempt(what: str, fn: Callable[[], Any]) -> None:
+        try:
+            fn()
+        except Exception as e:
+            problems.append(f"{what}: {e!r}")
+
+    for n in names:
+        attempt(f"drop database {n}", lambda n=n: drop_database(info, n))
+
+    def drop_role(role: str) -> None:
+        maintenance = admin_url(info, info.get("dbname", "postgres"))
+        with psycopg.connect(maintenance, autocommit=True) as c:
+            c.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+
+    for role in roles:
+        attempt(f"drop role {role}", lambda role=role: drop_role(role))
+    assert problems == [], f"left behind on the server: {problems}"
+
+
+def test_item_b3_role_setup_concurrent_on_many_databases():
+    """Roles belong to the whole server: the role setup run at the same time against
+    several fresh databases succeeds every time and the grants come out the same.
+
+    Each of several rounds makes fresh random login and group names (the spec's
+    configurable role names) and 6 fresh databases, then releases 6 threads at once,
+    through a barrier, into `migrate.upgrade(db, group_role=g)` followed by
+    `migrate.ensure_app_login(db, login=l, group_role=g, password=p)`. Every call must
+    return normally (no exception at all: "role already exists" and duplicate-key errors
+    surface as exceptions here, so no log text is read), every database ends fully
+    migrated, and the grant snapshots are equal and non-empty.
+
+    The spec says role creation must treat both `duplicate_object` and
+    `unique_violation` as "already exists". The test cannot force the interleaving that
+    produces either error; fresh names each round (so every round really creates the
+    roles) plus the barrier, repeated over several rounds, are how it gives the race a
+    real chance to happen."""
+    params = inspect.signature(migrate.upgrade).parameters
+    assert "group_role" in params, "spec B3 seam missing: migrate.upgrade(url, *, group_role)"
+    assert hasattr(migrate, "ensure_app_login"), (
+        "spec B3 seam missing: migrate.ensure_app_login(url, *, login, group_role, password)"
+    )
+    info = admin_info()
+    for _ in range(RACE_ROUNDS):
+        _race_round(info)
 
 
 # ----------------------------------------------------------- production check

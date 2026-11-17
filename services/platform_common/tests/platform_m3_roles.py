@@ -1,10 +1,12 @@
 """Helpers for the before-M3 role tests (test_platform_m3_*.py, spec B3): fresh databases
 migrated by `loom-migrate` with `LOOM_APP_DATABASE_PASSWORD`, URLs for each role.
 
-Roles belong to the whole Postgres server and other test workers use `loom_app` at the
-same time, so `loom_app` is never dropped and its password is always the same one: the
-dev password docker-compose gives it (so a dev stack on the same server keeps working),
-else a fixed test password."""
+Roles belong to the whole Postgres server and other test workers use the default roles
+(`loom_app`, group `loom_runtime`) at the same time, so those are never dropped and the
+`loom_app` password is always the same one: `LOOM_APP_DATABASE_PASSWORD` when the
+environment sets it, else the dev password docker-compose gives it (so a dev stack on the
+same server keeps working), else a fixed test password. The race test uses fresh role
+names of its own (spec B3: role names are configurable) and drops them."""
 
 from __future__ import annotations
 
@@ -24,33 +26,59 @@ from loom_platform.db import libpq_url
 from loom_platform.testing import DEFAULT_PG, PG_ENV
 
 APP_ROLE = "loom_app"
+GROUP_ROLE = "loom_runtime"  # spec B3: LOOM_APP_DATABASE_GROUP's default
 APPEND_ONLY = ("ledger_entries", "ledger_transactions", "admin_audit_log")
 REPO_ROOT = Path(__file__).resolve().parents[3]
 FALLBACK_APP_PASSWORD = "loom-app-test-password"
 
+# A YAML anchor (`&name`) may sit between the key and its value; an alias (`*name`) is
+# never the password itself (its anchored definition is matched instead).
+_ANCHOR = r"(?:&[^\s]+\s+)?"
+_VALUE = r"([^'\"\s$&*#][^'\"\s$#]*)"
 _COMPOSE_PATTERNS = (
-    r"LOOM_APP_DATABASE_PASSWORD['\"]?\s*[:=]\s*['\"]?\$\{[A-Z0-9_]+:-([^}'\"\s]+)\}",
-    r"LOOM_APP_DATABASE_PASSWORD['\"]?\s*[:=]\s*['\"]?([^'\"\s$]+)",
+    r"LOOM_APP_DATABASE_PASSWORD['\"]?\s*[:=]\s*"
+    + _ANCHOR
+    + r"['\"]?\$\{[A-Z0-9_]+:-([^}'\"\s]+)\}",
+    r"LOOM_APP_DATABASE_PASSWORD['\"]?\s*[:=]\s*" + _ANCHOR + r"['\"]?" + _VALUE,
     r"postgres(?:ql)?(?:\+psycopg)?://loom_app:\$\{[A-Z0-9_]+:-([^}]+)\}@",
     r"postgres(?:ql)?(?:\+psycopg)?://loom_app:([^@\s$'\"]+)@",
 )
+_TRAILING_COMMENT = re.compile(r"\s#.*$")
+
+
+def _compose_lines(text: str) -> list[str]:
+    """docker-compose.yml's lines without comments (whole-line or trailing)."""
+    out = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        out.append(_TRAILING_COMMENT.sub("", line))
+    return out
 
 
 def compose_app_password() -> str | None:
-    """The loom_app dev password docker-compose.yml sets, if any."""
+    """The loom_app dev password docker-compose.yml sets, if any. Comment lines and YAML
+    anchors/aliases are skipped."""
     path = REPO_ROOT / "docker-compose.yml"
     if not path.exists():
         return None
-    text = path.read_text(encoding="utf-8")
+    lines = _compose_lines(path.read_text(encoding="utf-8"))
     for pattern in _COMPOSE_PATTERNS:
-        m = re.search(pattern, text)
-        if m:
-            return urllib.parse.unquote(m.group(1))
+        for line in lines:
+            m = re.search(pattern, line)
+            if m:
+                return urllib.parse.unquote(m.group(1))
     return None
 
 
 def app_password() -> str:
-    return compose_app_password() or FALLBACK_APP_PASSWORD
+    """The loom_app password the tests give loom-migrate: the environment's
+    LOOM_APP_DATABASE_PASSWORD if set, else the compose dev password, else a fixed one."""
+    return (
+        os.environ.get("LOOM_APP_DATABASE_PASSWORD")
+        or compose_app_password()
+        or FALLBACK_APP_PASSWORD
+    )
 
 
 def admin_info() -> dict[str, str]:
@@ -94,7 +122,10 @@ def migrate_command(url: str) -> list[str]:
 
 
 def migrate_env(password: str) -> dict[str, str]:
+    """loom-migrate's environment: no LOOM_* from the caller (so the role names are the
+    defaults), dev mode, and the loom_app password."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("LOOM_")}
+    env["LOOM_ENV"] = "dev"
     env["LOOM_APP_DATABASE_PASSWORD"] = password
     return env
 
@@ -109,13 +140,13 @@ def run_migrate(url: str, password: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def group_roles(conn: psycopg.Connection) -> list[str]:
-    """The roles loom_app is a member of (the spec's NOLOGIN group), built-ins aside."""
+def group_roles(conn: psycopg.Connection, login: str = APP_ROLE) -> list[str]:
+    """The roles `login` is a member of (the spec's NOLOGIN group), built-ins aside."""
     rows = conn.execute(
         "SELECT g.rolname FROM pg_auth_members m "
         "JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles u ON u.oid = m.member "
         "WHERE u.rolname = %s AND g.rolname NOT LIKE 'pg\\_%%' ORDER BY 1",
-        (APP_ROLE,),
+        (login,),
     ).fetchall()
     return [r[0] for r in rows]
 

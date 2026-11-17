@@ -8,7 +8,10 @@ snapshot's last id: the reconciler polls `consumed_through` for up to
 The reconciler is the billing worker's (built from `BillingSettings`, so the wait comes
 from the environment variable). "Steady traffic" is made deterministic by hooking the
 drain check the spec names (`consumed_through`): the first check sees an entry not yet
-consumed, and right after it the consumer catches up and a new entry is settled."""
+consumed, and right after it the consumer catches up and a new entry is settled.
+
+Runs with the consumer stalled are timed: the reconciler polls for the configured wait
+(0.3 s here, 2 s by default) before it skips the direction, and not much longer."""
 
 from __future__ import annotations
 
@@ -31,8 +34,12 @@ pytestmark = [pytest.mark.postgres, pytest.mark.redis]
 
 @pytest.fixture
 def make_reconciler(pool, redis_client, stream, pg_url, monkeypatch):
-    def make(drain_wait_s: float) -> Reconciler:
-        monkeypatch.setenv("LOOM_RECONCILE_DRAIN_WAIT_S", str(drain_wait_s))
+    def make(drain_wait_s: float | None) -> Reconciler:
+        """The worker's reconciler; `None` leaves LOOM_RECONCILE_DRAIN_WAIT_S unset."""
+        if drain_wait_s is None:
+            monkeypatch.delenv("LOOM_RECONCILE_DRAIN_WAIT_S", raising=False)
+        else:
+            monkeypatch.setenv("LOOM_RECONCILE_DRAIN_WAIT_S", str(drain_wait_s))
         settings = BillingSettings(
             env="dev",
             database_url=pg_url,
@@ -102,6 +109,18 @@ def directions(run, t) -> list[str]:
     return [d.direction for d in run.drifts if d.org_id == t.org_id]
 
 
+async def timed[T](coro: Awaitable[T]) -> tuple[T, float]:
+    start = time.monotonic()
+    out = await coro
+    return out, time.monotonic() - start
+
+
+def assert_waited(elapsed: float, wait_s: float) -> None:
+    """The run polled for the configured wait before skipping, and not much longer."""
+    assert elapsed >= wait_s, f"skipped after {elapsed:.2f}s, before the {wait_s}s wait"
+    assert elapsed < 1.5, f"took {elapsed:.2f}s with a {wait_s}s wait"
+
+
 async def test_item_b2_redis_behind_heals_at_first_run_under_steady_traffic(
     monkeypatch, pool, redis_client, org, make_reconciler
 ):
@@ -138,11 +157,12 @@ async def test_item_b2_redis_behind_heals_while_consumer_is_behind(
     pending = await settle(limiter, t, prompt=1500)  # never consumed during the run
     p = await pg_usage(pool, t.org_id)
 
-    run = await make_reconciler(0.3).run([t.org_id])
+    run, elapsed = await timed(make_reconciler(0.3).run([t.org_id]))
 
     assert "redis_behind" in directions(run, t)
     usage = await redis_usage(redis_client, t.org_id)
     assert p <= usage <= p + pending
+    assert_waited(elapsed, 0.3)
 
 
 async def test_item_b2_missing_in_postgres_reported_when_consumer_catches_up(
@@ -172,6 +192,19 @@ async def test_item_b2_missing_in_postgres_skipped_when_consumer_stays_behind(
     t, limiter, _ = org
     await settle(limiter, t, prompt=1500)  # counted in Redis, not yet in Postgres
 
-    run = await make_reconciler(0.3).run([t.org_id])
+    run, elapsed = await timed(make_reconciler(0.3).run([t.org_id]))
 
     assert directions(run, t) == []
+    assert_waited(elapsed, 0.3)
+
+
+async def test_item_b2_drain_wait_defaults_to_2s(pool, redis_client, org, make_reconciler):
+    """LOOM_RECONCILE_DRAIN_WAIT_S unset: the reconciler the worker builds waits 2 s for
+    a stalled consumer. No public seam exposes the wait, so the run is timed."""
+    t, limiter, _ = org
+    await settle(limiter, t, prompt=1500)  # never consumed during the run
+
+    run, elapsed = await timed(make_reconciler(None).run([t.org_id]))
+
+    assert directions(run, t) == []
+    assert 1.25 <= elapsed <= 2.75, f"waited {elapsed:.2f}s for the consumer, not 2 s"

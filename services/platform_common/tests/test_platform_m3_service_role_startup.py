@@ -3,8 +3,11 @@ checks at startup, over its own connection, that its role is not a superuser and
 table in the schema, and otherwise exits 2 naming the problem.
 
 The services are started as subprocesses with LOOM_ENV=prod. Other production problems
-(Redis without AUTH or TLS, missing certificates) are listed too, so the assertions look
-for the role's problem among them."""
+(Redis without AUTH or TLS, missing certificates, the dev password) are listed in the same
+exit-2 message, so the assertions look for the role's problem among them, by wording
+specific to it: "superuser" on the same line as the role's name (or "role"), "owns" /
+"owner" on the same line as "table". A bare "own" (say, "set your own password") is not
+a role problem."""
 
 from __future__ import annotations
 
@@ -37,8 +40,16 @@ SERVICES = {
     "billing": [sys.executable, "-m", "loom_billing", "worker"],
     "poolmgr": [sys.executable, "-m", "loom_poolmgr.cli", "run"],
 }
-SUPERUSER = re.compile(r"superuser", re.IGNORECASE)
-OWNER = re.compile(r"\bown(s|er|ed|ing|ership)?\b", re.IGNORECASE)
+_OWN = r"\bown(?:s|er|ed|ership)\b"
+_TABLE = r"\btables?\b"
+OWNER = re.compile(rf"{_OWN}[^\n]{{0,80}}{_TABLE}|{_TABLE}[^\n]{{0,80}}{_OWN}", re.IGNORECASE)
+
+
+def superuser_problem(stderr: str, role: str) -> bool:
+    """A line naming the role (or "role") and "superuser"."""
+    who = rf"(?:\b{re.escape(role)}\b|\brole\b)"
+    pattern = rf"{who}[^\n]{{0,80}}\bsuperuser\b|\bsuperuser\b[^\n]{{0,80}}{who}"
+    return re.search(pattern, stderr, re.IGNORECASE) is not None
 
 
 @pytest.fixture(scope="module")
@@ -60,6 +71,7 @@ def db() -> Iterator[dict[str, str]]:
             )
             conn.execute(sql.SQL("ALTER TABLE orgs OWNER TO {}").format(sql.Identifier(owner_role)))
         yield {
+            "superuser_name": info["user"],
             "superuser": admin_url(info, name),
             "owner": url_for(info, dbname=name, user=owner_role, password=owner_pw),
             "app": url_for(info, dbname=name, user=APP_ROLE, password=app_password()),
@@ -89,7 +101,7 @@ def start_in_prod(service: str, database_url: str) -> subprocess.CompletedProces
 def test_item_b3_service_as_superuser_exits_2(db, service):
     done = start_in_prod(service, db["superuser"])
     assert done.returncode == 2, done.stderr
-    assert SUPERUSER.search(done.stderr), done.stderr
+    assert superuser_problem(done.stderr, db["superuser_name"]), done.stderr
 
 
 @pytest.mark.parametrize("service", sorted(SERVICES))
@@ -104,5 +116,5 @@ def test_item_b3_service_as_app_role_has_no_role_problem(db, service):
     """Guard: connected as loom_app, the role check finds nothing (the service may still
     refuse for the other production problems)."""
     done = start_in_prod(service, db["app"])
-    assert not SUPERUSER.search(done.stderr), done.stderr
+    assert not superuser_problem(done.stderr, APP_ROLE), done.stderr
     assert not OWNER.search(done.stderr), done.stderr
