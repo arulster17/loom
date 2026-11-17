@@ -106,6 +106,10 @@ being consumed continuously (the stream never empty at the snapshot), an org who
   a production problem.
 - A test checks that every table has an explicit grant to the group role, so a later
   migration cannot forget one.
+- Roles belong to the whole Postgres server, not one database. The migration, and
+  `loom-migrate`'s role setup, must succeed when run at the same time against many
+  databases on one server (parallel test workers each migrating a fresh database): no
+  "role already exists" or duplicate-key error, and the grants come out the same.
 - Contracts §3 is corrected: append-only and zero-sum hold for the runtime role; the
   owner can still disable the triggers, so only migrations run as the owner.
 Done when: connected as `loom_app`, `UPDATE`/`DELETE`/`TRUNCATE` on the three append-only
