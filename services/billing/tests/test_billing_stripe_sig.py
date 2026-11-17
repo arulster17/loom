@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
+from collections.abc import Iterator
 
 import pytest
 from pydantic import ValidationError
@@ -194,7 +196,32 @@ def test_form_encoding_uses_stripe_brackets():
     )
 
 
-def test_billing_refuses_dev_defaults_outside_dev(clean_env, capsys):
+def _pytest_handler(h: logging.Handler) -> bool:
+    """pytest's own capture handlers, added and removed around each test phase."""
+    return type(h).__module__ == "_pytest.logging"
+
+
+@pytest.fixture
+def root_logging() -> Iterator[None]:
+    """Put the root logger back after a test that runs the billing entrypoint.
+
+    `cli.main` configures the process's logging: the root logger's handlers become one
+    StreamHandler on the sys.stderr of that moment (capsys's, closed after the test) and
+    its level INFO. Left so, any later test in the same worker that logs at INFO before
+    configuring logging (alembic's migration lines under `bench reproduce`) writes to the
+    closed stream, and logging prints a "Logging error" traceback into that test's output.
+    """
+    root = logging.getLogger()
+    level, before = root.level, [h for h in root.handlers if not _pytest_handler(h)]
+    yield
+    added = [h for h in root.handlers if not _pytest_handler(h) and h not in before]
+    root.handlers[:] = [h for h in root.handlers if _pytest_handler(h)] + before
+    root.setLevel(level)
+    for h in added:
+        h.close()
+
+
+def test_billing_refuses_dev_defaults_outside_dev(clean_env, capsys, root_logging):
     from loom_billing import cli
 
     prod = {
