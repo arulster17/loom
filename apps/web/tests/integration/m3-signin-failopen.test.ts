@@ -7,9 +7,18 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { email, hasDb } from "./helpers";
 import { Browser, eventually, form, isCheckEmail, location, nextRequest, redirectTarget, startSmtp } from "./m3-helpers";
 
+// A fresh AUTH_SECRET, set before the app is imported, as in m3-signin-limit-authjs.test.ts:
+// the limit's keys are HMAC'd with it, so no earlier run's counters can collide.
+const savedSecret = vi.hoisted(() => {
+  const prev = process.env.AUTH_SECRET;
+  process.env.AUTH_SECRET = `w1-${globalThis.crypto.randomUUID()}`;
+  return prev;
+});
+
 const saved = Object.fromEntries(
   ["LOOM_REDIS_URL", "LOOM_SIGNIN_EMAIL_LIMIT", "LOOM_SIGNIN_IP_LIMIT", "EMAIL_SERVER"].map((k) => [k, process.env[k]]),
 );
+saved.AUTH_SECRET = savedSecret;
 process.env.LOOM_REDIS_URL = "redis://127.0.0.1:1/0"; // nothing listens on port 1
 process.env.LOOM_SIGNIN_EMAIL_LIMIT = "1";
 process.env.LOOM_SIGNIN_IP_LIMIT = "1";

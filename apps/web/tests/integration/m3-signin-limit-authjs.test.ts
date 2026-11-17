@@ -3,7 +3,9 @@
 // @auth/core with the app's real config) and the sign-in form (the signInWithEmail
 // action, whose `signIn` is next-auth's, mirrored in m3-helpers.ts) share one per-email
 // and per-IP budget, each send counted once. Mail goes to a recording SMTP server;
-// counters to the real local Redis (database 15, or LOOM_TEST_REDIS_URL).
+// counters to the real local Redis (database 15, or LOOM_TEST_REDIS_URL). Like the Python
+// fixtures: with LOOM_TEST_REDIS_URL unset and Redis down the tests skip; with it set (as
+// in CI) an unreachable Redis fails them.
 
 import Redis from "ioredis";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -11,12 +13,23 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { email, hasDb } from "./helpers";
 import { Browser, eventually, form, isCheckEmail, location, nextRequest, redirectTarget, startSmtp } from "./m3-helpers";
 
-const redisUrl = process.env.LOOM_TEST_REDIS_URL ?? "redis://localhost:6379/15";
+// A fresh AUTH_SECRET, set before the app is imported: the limit's Redis keys are HMAC'd
+// with it, so counters an earlier run left in the database (24 h windows) never collide
+// with this run's.
+const savedSecret = vi.hoisted(() => {
+  const prev = process.env.AUTH_SECRET;
+  process.env.AUTH_SECRET = `w1-${globalThis.crypto.randomUUID()}`;
+  return prev;
+});
+
+const explicitRedis = process.env.LOOM_TEST_REDIS_URL;
+const redisUrl = explicitRedis ?? "redis://localhost:6379/15";
 const saved = Object.fromEntries(
   ["LOOM_REDIS_URL", "LOOM_SIGNIN_EMAIL_LIMIT", "LOOM_SIGNIN_IP_LIMIT", "LOOM_SIGNIN_WINDOW_S", "EMAIL_SERVER"].map(
     (k) => [k, process.env[k]],
   ),
 );
+saved.AUTH_SECRET = savedSecret;
 process.env.LOOM_REDIS_URL = redisUrl;
 process.env.LOOM_SIGNIN_EMAIL_LIMIT = "2";
 process.env.LOOM_SIGNIN_IP_LIMIT = "3";
@@ -39,11 +52,18 @@ vi.mock("next-auth", async () => ({ AuthError: (await import("@auth/core/errors"
 
 const probe = new Redis(redisUrl, { lazyConnect: true, maxRetriesPerRequest: 0, connectTimeout: 1000, retryStrategy: () => null });
 probe.on("error", () => {});
-const redisUp = await probe.connect().then(
-  () => true,
-  () => false,
+const redisError = await probe.connect().then(
+  () => null,
+  (e: unknown) => (e instanceof Error ? e.message : String(e)),
 );
 probe.disconnect();
+const redisUp = redisError === null;
+if (!redisUp && explicitRedis) {
+  throw new Error(
+    `LOOM_TEST_REDIS_URL is set (${explicitRedis}) but Redis is not reachable: ${redisError}. ` +
+      "The W1 tests need it: start Redis (docker compose up -d redis), or unset the variable to skip them.",
+  );
+}
 
 const { signInWithEmail } = await import("@/app/actions");
 
@@ -93,7 +113,8 @@ describe.skipIf(!hasDb || !redisUp)("W1: the magic-link limit applies wherever A
   });
 
   it("W1: limits a direct POST /api/auth/signin/nodemailer per client IP; over the limit no mail is sent", async () => {
-    const b = new Browser();
+    // A new made-up entry left of the client IP on every request: only the right-most counts.
+    const b = new Browser(undefined, { spoofXff: true });
     const addrs = [1, 2, 3, 4].map((i) => email(`w1-ip${i}`));
     for (const a of addrs.slice(0, 3)) {
       const res = await b.postMagicLink(a);
@@ -137,7 +158,8 @@ describe.skipIf(!hasDb || !redisUp)("W1: the magic-link limit applies wherever A
   });
 
   it("W1: the form's per-IP limit is the same budget as Auth.js's endpoint", async () => {
-    const b = new Browser();
+    // A new made-up entry left of the client IP on every request: only the right-most counts.
+    const b = new Browser(undefined, { spoofXff: true });
     const addrs = [1, 2, 3, 4].map((i) => email(`w1-ipform${i}`));
     // IP budget 3: two direct POSTs and one form send from one client, then the form is refused.
     expect(isCheckEmail(location(await b.postMagicLink(addrs[0])))).toBe(true);

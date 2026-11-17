@@ -34,16 +34,24 @@ export function resolvedConfig(): AuthConfig {
   return c;
 }
 
-/** One browser: a cookie jar and a client IP (what Next.js puts in X-Forwarded-For). */
+/**
+ * One browser: a cookie jar and a client IP (what Next.js puts in X-Forwarded-For).
+ * With `spoofXff`, every request also sends a made-up X-Forwarded-For entry of its own,
+ * a different one each time, to the left of the client IP (`<random>, <ip>`), as a
+ * client can; only the right-most entry, the one our proxy appended, identifies it.
+ */
 export class Browser {
   readonly cookies = new Map<string, string>();
 
-  constructor(readonly ip: string = randomIp()) {}
+  constructor(
+    readonly ip: string = randomIp(),
+    readonly opts: { spoofXff?: boolean } = {},
+  ) {}
 
   headers(extra: Record<string, string> = {}): Headers {
     const h = new Headers({
       host: "localhost:3000",
-      "x-forwarded-for": this.ip,
+      "x-forwarded-for": this.opts.spoofXff ? `${spoofedIp()}, ${this.ip}` : this.ip,
       "x-forwarded-proto": "http",
       ...extra,
     });
@@ -109,6 +117,12 @@ export function isCheckEmail(url: string): boolean {
 export function randomIp(): string {
   const b = () => Math.floor(Math.random() * 254) + 1;
   return `10.${b()}.${b()}.${b()}`;
+}
+
+/** A client-supplied X-Forwarded-For entry: outside 10/8, so never a test client's IP. */
+function spoofedIp(): string {
+  const b = () => Math.floor(Math.random() * 256);
+  return `198.${18 + Math.floor(Math.random() * 2)}.${b()}.${b()}`;
 }
 
 /**

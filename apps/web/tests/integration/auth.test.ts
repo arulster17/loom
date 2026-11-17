@@ -110,6 +110,8 @@ describe.skipIf(!hasDb)("signup", () => {
   });
 
   it("does not grant admin to anyone else", async () => {
+    // In dev, where the list does grant, so this tests the email match, not the LOOM_ENV gate.
+    vi.stubEnv("LOOM_ENV", "dev");
     const ctx = await signUp();
     expect(await syncBootstrapAdmin(ctx.userId, "boss@example.com")).toBe(false);
     expect((await loadOrgContext(ctx.userId))?.userRole).toBe("user");

@@ -119,6 +119,31 @@ describe.skipIf(!hasDb)("W2: an admin credit adjustment posts once per form", ()
     expect(await creditMicros(org.orgId)).toBe(before + 4_000_000n);
   });
 
+  it("W2: refuses a used form_token posted again for another org or another amount, changing nothing", async () => {
+    const other = await activeUser(admin);
+    const token = randomUUID();
+    const fields = { org_id: org.orgId, amount: "5", memo: "once", form_token: token };
+    const first = await adjustCreditsAction(undefined, form(fields));
+    expect(first?.error).toBeUndefined();
+    expect(first?.ok).toBeTruthy();
+
+    const before = await adminSnapshot();
+    const credit = await creditMicros(org.orgId);
+    const otherCredit = await creditMicros(other.orgId);
+    for (const [label, change] of [
+      ["another org_id", { org_id: other.orgId }],
+      ["another amount", { amount: "6" }],
+    ] as const) {
+      const r = await adjustCreditsAction(undefined, form({ ...fields, ...change }));
+      expect(r?.error, label).toBeTruthy();
+      expect(r?.ok, label).toBeUndefined();
+      expect(await adminSnapshot(), label).toEqual(before);
+    }
+    expect(await creditMicros(org.orgId)).toBe(credit);
+    expect(await creditMicros(other.orgId)).toBe(otherCredit);
+    expect(await ledgerFor(token)).toBe(1);
+  });
+
   it.each([
     ["missing", undefined],
     ["empty", ""],

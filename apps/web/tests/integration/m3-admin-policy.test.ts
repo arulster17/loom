@@ -2,13 +2,15 @@
 // with LOOM_ENV=dev, and outside dev an admin cannot approve, or adjust the credit of, an
 // org they are a member of. The sign-in grant is tested through Auth.js's `events.signIn`
 // (src/auth.config.ts), approval and credit through the admin actions (and approveOrg in
-// the data layer); only the identity layer (`auth()` from @/auth) is faked.
+// the data layer), the startup warning through `register()` (src/instrumentation.ts);
+// only the identity layer (`auth()` from @/auth) is faked.
 
 import { randomUUID } from "node:crypto";
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { authConfig } from "@/auth.config";
+import { register } from "@/instrumentation";
 import type { Actor, OrgContext } from "@/lib/authz";
 import { getPool } from "@/lib/db";
 import { approveOrg } from "@/lib/data/admin";
@@ -118,7 +120,11 @@ describe.skipIf(!hasDb)("W5: LOOM_ADMIN_EMAILS grants admin at sign-in only in d
   });
 });
 
-describe.skipIf(!hasDb)("W5: outside dev, no admin acts on an org they belong to", () => {
+// "Outside dev" is any LOOM_ENV other than dev, unset included.
+describe.skipIf(!hasDb).each([
+  ["unset", undefined],
+  ["prod", "prod"],
+])("W5: with LOOM_ENV %s (outside dev), no admin acts on an org they belong to", (_label, env) => {
   let otherAdmin: Actor;
 
   beforeAll(async () => {
@@ -126,7 +132,7 @@ describe.skipIf(!hasDb)("W5: outside dev, no admin acts on an org they belong to
   });
 
   beforeEach(() => {
-    setLoomEnv("prod");
+    setLoomEnv(env);
   });
 
   it("W5: refuses an admin approving their own org (action and data layer), changing nothing", async () => {
@@ -216,5 +222,55 @@ describe.skipIf(!hasDb)("W5: in dev, an admin may still approve and credit their
     expect(r?.error).toBeUndefined();
     expect(r?.ok).toBeTruthy();
     expect(await creditMicros(own.orgId)).toBe(credit + 4_000_000n);
+  });
+});
+
+// Startup (src/instrumentation.ts): outside dev, a set LOOM_ADMIN_EMAILS is ignored, and
+// the server says so. The environment passes every other production check, so the warning
+// is all there is to see (the server still starts).
+describe("W5: the startup warning for LOOM_ADMIN_EMAILS outside dev", () => {
+  const PROD_OK = {
+    NEXT_RUNTIME: "nodejs",
+    AUTH_SECRET: "a-real-random-secret",
+    AUTH_URL: "https://app.loom.example",
+    LOOM_BILLING_INTERNAL_TOKEN: "a-real-token",
+  };
+
+  /** What register() logs as a warning or an error, with LOOM_ENV and LOOM_ADMIN_EMAILS as given. */
+  async function startupLog(loomEnvValue: string | undefined, adminEmails: string | undefined): Promise<string[]> {
+    const exit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      for (const [k, v] of Object.entries(PROD_OK)) vi.stubEnv(k, v);
+      vi.stubEnv("LOOM_ENV", loomEnvValue);
+      vi.stubEnv("LOOM_ADMIN_EMAILS", adminEmails);
+      await register();
+      expect(exit).not.toHaveBeenCalled();
+      return [...warn.mock.calls, ...error.mock.calls].map((args) => args.map(String).join(" "));
+    } finally {
+      vi.unstubAllEnvs();
+      exit.mockRestore();
+      warn.mockRestore();
+      error.mockRestore();
+    }
+  }
+
+  it.each([
+    ["unset", undefined],
+    ["prod", "prod"],
+  ])("W5: with LOOM_ENV %s and LOOM_ADMIN_EMAILS set, register() logs a warning naming it", async (_label, env) => {
+    const logged = await startupLog(env, "boss@example.com");
+    expect(logged).toContainEqual(expect.stringMatching(/LOOM_ADMIN_EMAILS/));
+  });
+
+  it("W5: with LOOM_ENV prod and LOOM_ADMIN_EMAILS unset, register() logs no such warning", async () => {
+    const logged = await startupLog("prod", undefined);
+    expect(logged.filter((m) => /LOOM_ADMIN_EMAILS/.test(m))).toEqual([]);
+  });
+
+  it("W5: with LOOM_ENV=dev, register() logs no warning about LOOM_ADMIN_EMAILS", async () => {
+    const logged = await startupLog("dev", "boss@example.com");
+    expect(logged.filter((m) => /LOOM_ADMIN_EMAILS/.test(m))).toEqual([]);
   });
 });
