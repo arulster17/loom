@@ -30,9 +30,12 @@ deadline, and the reservation and in-flight counts are released by then.
 **G2 (R2a). A reserve whose reply is lost is released.**
 When the reserve call raises a Redis error (socket timeout, connection reset), the gateway
 still answers 503 `service_unavailable` with `Retry-After: 1`, and it also starts a
-background release of that request id (`Limiter.release`), retried with backoff until it
-succeeds or `LOOM_RESERVATION_GRACE_S` (60 s) has passed. The release also marks the
-request id as done for the reservation TTL (`release.lua` writes the same `:done:<rid>`
+background release of that request id (`Limiter.release`), retried with backoff (first
+retry within 0.2 s, doubling, at most 2 s apart) until it succeeds or
+`LOOM_RESERVATION_GRACE_S` (60 s) has passed, then given up. `Limiter.release(org_id,
+request_id)` keeps working with those two arguments (anything new is optional). The
+release also marks the request id as done for at least the reservation TTL
+(`LOOM_REQUEST_TIMEOUT_S + LOOM_RESERVATION_GRACE_S`) (`release.lua` writes the same `:done:<rid>`
 marker `reserve.lua` already refuses), so a reserve script that runs *after* the release
 (it was queued behind a Redis stall) answers `duplicate_request` and holds nothing.
 Done when: (a) a reserve that took effect in Redis but whose reply was lost leaves no
