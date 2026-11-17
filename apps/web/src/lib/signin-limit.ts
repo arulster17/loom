@@ -1,4 +1,4 @@
-// Rate limit for magic-link emails (signInWithEmail in src/app/actions.ts): fixed
+// Rate limit for magic-link emails (checked where Auth.js sends, src/lib/signin-send.ts): fixed
 // windows per email address and per client IP, counted in Redis. Pure apart from the
 // injected counter store, so it is unit tested; src/lib/redis.ts has the Redis store.
 

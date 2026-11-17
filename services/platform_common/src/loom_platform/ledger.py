@@ -8,7 +8,8 @@ Idempotency key formats (one transaction per key, ever):
     usage:<org_id>:<YYYY-MM-DDTHH:MMZ>   per-org per-minute usage batch (billing worker)
     promo:signup:<org_id>                signup credit (loom_approve_org)
     stripe:<stripe event id>             purchase / refund from a Stripe webhook
-    admin:<admin_audit_log id>           admin adjustment, keyed by its audit row
+    admin:adjust:<form token>            admin adjustment from the web app's form (per-render UUID)
+    admin:<admin_audit_log id>           admin adjustment posted without a form token
 """
 
 from __future__ import annotations

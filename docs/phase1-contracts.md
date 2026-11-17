@@ -92,8 +92,8 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_SHUTDOWN_GRACE_S` | 10 | gateway: on SIGTERM, how long in-flight requests may finish before open streams are cut (§6 "Shutdown") |
 | `AUTH_SECRET`, `AUTH_URL`, `AUTH_GOOGLE_ID` / `_SECRET`, `EMAIL_SERVER` | none | web (Auth.js); `AUTH_URL` is required outside `LOOM_ENV=dev` |
 | `LOOM_GOOGLE_EMAIL_LINKING` | `true` | web: a Google sign-in may link to an existing user with the same email; Google sign-in always requires `email_verified` |
-| `LOOM_ADMIN_EMAILS` | empty | web: dev bootstrap of the first admin (§4) |
-| `LOOM_SIGNIN_EMAIL_LIMIT` / `LOOM_SIGNIN_IP_LIMIT` / `LOOM_SIGNIN_WINDOW_S` | 5 / 20 / 900 | web: magic-link emails per address and per client IP (right-most `X-Forwarded-For`) per fixed window; Redis keys `loom:web:signin:{email,ip}:<hmac>:<window>`; fails open when Redis is down |
+| `LOOM_ADMIN_EMAILS` | empty | web: dev bootstrap of the first admin (§4); only with `LOOM_ENV=dev`, ignored (with a startup warning) anywhere else |
+| `LOOM_SIGNIN_EMAIL_LIMIT` / `LOOM_SIGNIN_IP_LIMIT` / `LOOM_SIGNIN_WINDOW_S` | 5 / 20 / 900 | web: magic-link emails per address and per client IP (right-most `X-Forwarded-For`) per fixed window, counted once per email Auth.js sends (the sign-in form and `POST /api/auth/signin/nodemailer` alike; over the limit nothing is sent); Redis keys `loom:web:signin:{email,ip}:<hmac>:<window>`; fails open when Redis is down |
 | `LOOM_INTERNAL_TOKEN` / `LOOM_BILLING_INTERNAL_TOKEN` | compose: one shared dev value | web / billing: bearer token of billing's internal API |
 | `LOOM_STRIPE_MODE` | `stripe`; compose: `stub` | billing: real Stripe (test keys required) or the local stub (explicit opt-in, never a fallback) |
 | `LOOM_STRIPE_STUB_WEBHOOK_SECRET` / `_FILE` | none; compose: `.dev/certs/stripe-stub-webhook.secret` from `loom-devcerts --secret` | billing and stripe-stub in stub mode |
@@ -164,7 +164,7 @@ the first transaction with `created = false`; other content raises `unique_viola
 | usage | -X | revenue +X | `usage:<org id>:<YYYY-MM-DDTHH:MMZ>` (`ledger.usage_batch_key`) |
 | promo | +X | promo_expense -X | `promo:signup:<org id>` |
 | refund | -X | stripe_clearing +X | `stripe:<event id>` (`charge.refunded`: the new part of the cumulative `amount_refunded`; `charge.dispute.created`: the disputed amount, once per dispute; at most the purchase in total; the balance may go negative). One that arrives before its purchase is stored unapplied and applied in the purchase's transaction; the billing worker also re-runs unapplied events every minute (migration 0009 indexes them) |
-| adjustment | +/-X | promo_expense (grant) or revenue (correction) | `admin:<admin_audit_log id>` |
+| adjustment | +/-X | promo_expense (grant) or revenue (correction) | `admin:adjust:<form token>` (the admin page's adjust-credits form; §4). A data-layer call without a token: `admin:<admin_audit_log id>` |
 
 Platform accounts have fixed ids: revenue `...0001`, stripe_clearing `...0002`,
 promo_expense `...0003` (`loom_platform.ledger`).
@@ -210,9 +210,48 @@ Why the credit waits for approval: the free $5 is the abuse target the approval 
 exists to protect, and posting it on approval means a rejected or never-reviewed signup
 costs nothing and leaves no ledger entries to unwind.
 
-Admins are `users.role = 'admin'`. In local dev the web app grants it at sign-in to
-emails in `LOOM_ADMIN_EMAILS`. Every grant, suspension, credit adjustment and model
-disable is an `admin_audit_log` row written in the same transaction as the change.
+Admins are `users.role = 'admin'`. Only with `LOOM_ENV=dev` does the web app grant it at
+sign-in to emails in `LOOM_ADMIN_EMAILS` (the local bootstrap). Outside dev (any other
+`LOOM_ENV`, unset included) the list grants nothing, and the web app logs a warning at
+startup if it is set. Nothing revokes the role: admins already granted keep it. Every
+grant, suspension, credit adjustment and model disable is an `admin_audit_log` row written
+in the same transaction as the change.
+
+The first production admin is granted by hand, in SQL, after that person has signed in
+once (so the `users` row exists). In `psql`, connected with a role that may update `users`:
+
+```sql
+WITH granted AS (
+    UPDATE users SET role = 'admin'
+    WHERE email = 'ops@example.com' AND role = 'user'   -- citext: case does not matter
+    RETURNING id)
+INSERT INTO admin_audit_log (actor_user_id, action, target_type, target_id, details)
+SELECT id, 'user.grant_admin', 'user', id::text, '{"via": "sql"}' FROM granted;
+```
+
+`INSERT 0 1` means the role was granted and audited; `INSERT 0 0` means no such user, or
+already an admin. Later admins are granted the same way (there is no admin page or CLI for
+it yet).
+
+Outside dev an admin cannot approve, or adjust the credit of, an org they are a member of
+(any `org_members` role): the admin action refuses with a message, and the data layer
+refuses again in the write's transaction, with no state change, audit row or ledger
+entry. Another admin must do it. In dev it is allowed, because the local flow has the
+bootstrap admin approve their own org.
+
+Credit adjustments: the adjust-credits form carries a per-render token (a random UUID in
+the hidden field `form_token`), and the ledger idempotency key is `admin:adjust:<token>`.
+Posting one rendered form again (a resubmit, or the same form from two tabs) posts one
+ledger transaction and one `org.credit_adjust` audit row; the repeat answers with the
+same success message and changes nothing. A missing or malformed token is refused, and so
+is a token already used for a different org or amount. Each render of the page has a new
+token.
+
+Sign-in: the magic-link limit (§2, `LOOM_SIGNIN_*`) is checked inside the Nodemailer
+provider's send, so it covers every path Auth.js sends by. Over the limit the app's form
+shows "Too many sign-in emails. Try again in a few minutes."; Auth.js's own endpoint
+redirects to `/signin?error=AccessDenied`. Every sign-out, through the app's button or
+Auth.js's own `POST /api/auth/signout`, revokes the user's playground keys (§5).
 
 ## 5. API keys
 
@@ -221,6 +260,11 @@ disable is an `admin_audit_log` row written in the same transaction as the chang
 key, 32 bytes). The plaintext is shown once. The web app generates keys with the same
 format (crypto-random base62) or calls a shared helper; the gateway only hashes. A
 malformed bearer token is a 401 without any lookup.
+
+A key's optional `spend_limit_micros` is more than 0 and at most 10^12 ($1,000,000),
+well inside Postgres `bigint` and the exact integer range of the doubles in
+`reserve.lua`. The web app refuses a larger one, in the API keys form's action and in the
+data layer, with a message naming the bound.
 
 **Playground keys** *(wave 2, web)*. The browser never holds an API key. The playground
 posts to the web app's `POST /api/playground/chat` with its session cookie (a cross-site
@@ -240,7 +284,8 @@ posts to the web app's `POST /api/playground/chat` with its session cookie (a cr
   rebuilds the plaintext per request;
 - rotated after `LOOM_PLAYGROUND_KEY_TTL_S` (default 3600 s, at least 600): a newer key is
   minted and older ones revoked (the revocation reaches the gateway as in §6). Signing out
-  revokes the user's playground keys at once.
+  (the app's button, or Auth.js's own `POST /api/auth/signout`) revokes the user's
+  playground keys at once.
 
 ## 6. Redis
 

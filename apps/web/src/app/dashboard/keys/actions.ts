@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 
 import { userMessage } from "@/lib/action-errors";
-import { createKey, revokeKey } from "@/lib/data/keys";
+import { createKey, MAX_SPEND_LIMIT_MICROS, revokeKey, SPEND_LIMIT_TOO_HIGH } from "@/lib/data/keys";
 import { parseUsdToMicros } from "@/lib/money";
 import { currentOrgContext } from "@/lib/session";
 
@@ -21,6 +21,9 @@ export async function createKeyAction(_prev: CreateKeyState, form: FormData): Pr
     const spendLimitMicros = limitRaw ? parseUsdToMicros(limitRaw) : null;
     if (spendLimitMicros !== null && spendLimitMicros <= 0n) {
       return { ok: false, error: "A spend limit must be more than $0, or left empty for none." };
+    }
+    if (spendLimitMicros !== null && spendLimitMicros > MAX_SPEND_LIMIT_MICROS) {
+      return { ok: false, error: SPEND_LIMIT_TOO_HIGH };
     }
     const key = await createKey(ctx, { name, spendLimitMicros });
     revalidatePath("/dashboard/keys");
