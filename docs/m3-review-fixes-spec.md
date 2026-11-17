@@ -79,9 +79,13 @@ ending at 1080). The heal now uses a **per-org heal generation**:
 - each loaded org has a heal-generation counter in Redis (absent means 0);
 - the reconciler reads it in the same atomic snapshot as U2 (step d), with `MGET` or a
   `MULTI` (not a Lua script: only the heal itself is a script);
-- the heal is one atomic Lua call: if the org is loaded and the generation is unchanged
-  since that snapshot, add the missing amount (`P - U2`) and bump the generation;
-  otherwise do nothing (another reconciler healed first; the next run reads afresh).
+- the heal is one atomic Lua call: if the org is loaded, the generation is unchanged
+  since that snapshot, **and** Redis `usage` is still below `P`, add the missing amount
+  (`P - U2`) and bump the generation; otherwise do nothing (another reconciler healed
+  first, or Redis was reloaded from Postgres meanwhile; the next run reads afresh). Both
+  guards are needed: the generation alone lets a heal run after a Redis reload resets it
+  (absent = 0: 900 → reload to 1000 → heal to 1100, found in the second review), and
+  `usage < P` alone lets reconcilers with different `P` both heal.
 Done when: reconcilers that observed the same `redis_behind` drift, whether they read the
 same or different `P`, healing in any order or concurrently, add the missing amount at most
 once: Redis `usage` never ends above the true total (settles since stay counted).
@@ -129,6 +133,17 @@ when the consumer group is missing (it cannot catch up within the wait).
     schema (built-in catalog functions such as `pg_has_role` are fine).
   - The unreachable-at-start warning is one log line that names Postgres (or "database")
     and does not repeat the role problems' wording ("superuser", "owns").
+  - **Only an outage counts as unreachable**, not a misconfiguration. A connection error
+    whose message says `password authentication failed`, `does not exist` (role or
+    database) or `no pg_hba.conf entry` exits 2 as before, at start and in the gate.
+    Refused or timed-out connections and transient server states (`the database system
+    is starting up` / `shutting down`, `too many clients`, `remaining connection slots`)
+    are retried. While the gate keeps retrying it logs at warning, at most once a minute.
+  - When the deferred check fails, the service exits 2 through its normal shutdown path
+    (the gateway drains and settles its open streams as at SIGTERM), not `os._exit`.
+  - Contracts §6 and §11 list Postgres (including the pool held back by the gate) under
+    503 `service_unavailable`.
+  - `loom-migrate --create-database` checks the role names before creating anything.
 - `loom-migrate` refuses a configured login or group name that is the connecting role
   itself (`current_user` / `session_user`), and a group name that exists as a `LOGIN`
   role, rather than altering it.
