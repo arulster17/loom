@@ -6,6 +6,8 @@ plan time, and tasks only one side ran are reported, not gated."""
 import asyncio
 import json
 import shutil
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -260,17 +262,29 @@ def test_the_gate_pairs_the_shared_tasks_and_lists_the_new_one(gated, stored):
     assert "arithmetic_new: not gated: the baseline did not run it" in ok.reasons
 
 
-def test_bench_quality_gate_re_decides_across_experiments(gated, stored):
+@pytest.fixture
+def private_db(gated, stored, tmp_path) -> str:
+    """A copy of the shared DB, taken after the candidate ran, for a test that writes to
+    it: `gate_stored` records one more gate decision on the candidate's experiment, which
+    the other tests (counting that experiment's decisions) must never see."""
+    src = stored[0].db_url.removeprefix("sqlite:///")
+    dst = tmp_path / "loom.db"
+    with closing(sqlite3.connect(src)) as a, closing(sqlite3.connect(dst)) as b:
+        a.backup(b)
+    return f"sqlite:///{dst}"
+
+
+def test_bench_quality_gate_re_decides_across_experiments(gated, private_db):
     outcome, _, ref = gated
-    ctx = stored[0]
-    with session_scope(ctx.db_url) as s:
+    db_url = private_db
+    with session_scope(db_url) as s:
         cand = s.scalars(
             select(BenchGateDecision.candidate_config_hash).where(
                 BenchGateDecision.experiment_id == outcome.experiment_id,
                 BenchGateDecision.decision == "pass",
             )
         ).one()
-    decision, base_hash, cand_hash = gate_stored(ctx.db_url, ref["config_hash"], cand)
+    decision, base_hash, cand_hash = gate_stored(db_url, ref["config_hash"], cand)
     assert (base_hash, cand_hash) == (ref["config_hash"], cand)
     assert decision.decision.value == "pass"
     assert decision.ungated == {"arithmetic_new": "the baseline did not run it"}
