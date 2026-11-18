@@ -1,6 +1,8 @@
 # Spec: the before-M3 review fixes (plan §13, R1-R6, R8, R9, R11-R14)
 
-Status: approved by the user 2026-11-17. Source: the tables in
+Status: approved by the user 2026-11-17, then revised during the test and code reviews;
+each later user decision is marked inline ("user decision 2026-11-17"). This one file is
+identical on the three branches. Source: the tables in
 [phase1-runpod-plan.md §13](phase1-runpod-plan.md#follow-ups-from-the-m1-pre-merge-review-2026-11-15).
 R7 and R10 wait for M5. R15 is done.
 
@@ -30,9 +32,12 @@ deadline, and the reservation and in-flight counts are released by then.
 **G2 (R2a). A reserve whose reply is lost is released.**
 When the reserve call raises a Redis error (socket timeout, connection reset), the gateway
 still answers 503 `service_unavailable` with `Retry-After: 1`, and it also starts a
-background release of that request id (`Limiter.release`), retried with backoff until it
-succeeds or `LOOM_RESERVATION_GRACE_S` (60 s) has passed. The release also marks the
-request id as done for the reservation TTL (`release.lua` writes the same `:done:<rid>`
+background release of that request id (`Limiter.release`), retried with backoff (first
+retry within 0.2 s, doubling, at most 2 s apart) until it succeeds or
+`LOOM_RESERVATION_GRACE_S` (60 s) has passed, then given up. `Limiter.release(org_id,
+request_id)` keeps working with those two arguments (anything new is optional). The
+release also marks the request id as done for at least the reservation TTL
+(`LOOM_REQUEST_TIMEOUT_S + LOOM_RESERVATION_GRACE_S`) (`release.lua` writes the same `:done:<rid>`
 marker `reserve.lua` already refuses), so a reserve script that runs *after* the release
 (it was queued behind a Redis stall) answers `duplicate_request` and holds nothing.
 Done when: (a) a reserve that took effect in Redis but whose reply was lost leaves no
@@ -40,6 +45,24 @@ reservation, `rsum` or in-flight count behind once Redis answers again; (b) a re
 runs before the delayed reserve makes that reserve refuse with `duplicate_request` and
 write nothing; (c) the existing release after a 503 `model_unavailable` still refunds the
 tpm estimate and leaves no usage event.
+
+**G2a (added after review, user decision 2026-11-17). Skip unsent reserves; cap the releases.**
+- A reserve error raised **before the command was written** to Redis starts no background
+  release, because nothing can have been reserved. Only two cases count as unsent:
+  waiting for a pool connection timed out (redis-py's `BlockingConnectionPool` "No
+  connection available."), or connecting failed (connection refused, or the connect
+  timeout). Any error after the write (a socket timeout or reset while reading the
+  reply, or anything not known to be unsent) is treated as possibly sent and released as
+  in G2. The client gets the same 503 in every case.
+- At most **1,000** background releases run at once per gateway process. A possibly-sent
+  reserve that fails while 1,000 are running starts none: its reservation is left to its
+  TTL. Both skips count in `loom_gateway_reserve_release_skipped_total{reason}`, with
+  `reason` `unsent` or `cap`.
+- `Limiter.release` refuses a marker TTL below 1 s (`ValueError`) rather than sending
+  Redis a `SET ... EX 0` that fails the script.
+- The release marker gets a test in `loom_platform`'s own tests (`services/platform_common/tests`),
+  as CLAUDE.md asks for a contract change: it is written whether or not a reservation
+  existed, with `NX`, for at least the reservation TTL.
 
 **G3 (R2b). A Postgres failure while loading the balance is a 503.**
 Any Postgres error (`psycopg.Error`, a pool timeout) in `load_from_postgres` after a
@@ -54,7 +77,11 @@ It settles `aborted` with estimated tokens instead of zero:
   any model's measured decode rate at its SLO, so the estimate errs toward the client;
   0 turns estimating off and restores today's zero bill);
 - prompt tokens = `prompts × min(prompt_upper, ceil(body bytes / 4))`; cached = 0;
-- so the cost never exceeds the reservation (`max_cost_micros`).
+- the cost is clamped to the reservation (`max_cost_micros`): a body above about
+  4 × context could otherwise push it over.
+A request whose deadline passed before it was dispatched bills nothing (`error`), even if
+the code gives the attempt a last millisecond. With the rate at 0, behaviour is exactly
+today's (`aborted`, zero cost, counted in `usage_missing`, no cost headers).
 The client still gets 502 `upstream_lost`, now with `X-Loom-Cost-Micros` /
 `X-Loom-Cost-USD` naming the amount billed. The event counts in a new counter
 `loom_gateway_usage_estimated_total{model}` and no longer in `usage_missing`; the request
@@ -72,12 +99,38 @@ after the deadline yields 200 with the body and one `ok` usage event, and no 502
 ## Billing (`fix-m3-billing`)
 
 **B1 (R5). Concurrent reconcilers heal `redis_behind` once.**
-The heal is one atomic Lua call: add the missing amount only if the org's Redis `usage`
-is still below the Postgres total `P` that run read (and the org is loaded). Since a
-correct heal leaves `usage >= P`, a second reconciler (another worker, or an overlapping
-run) finds nothing to do. Done when: two reconcilers that both observed the same
-`redis_behind` drift, healing in either order or concurrently, leave Redis `usage` equal
-to `P` plus the settles made since, never more.
+~~The heal adds the missing amount only while `usage < P`.~~ Replaced after review
+(2026-11-17, user decision): two reconcilers that read *different* `P` can both pass that
+guard (Redis 900, true 1000: A reads P=980 and heals to 980, B reads P=1000 and adds 100,
+ending at 1080). The heal now uses a **per-org heal token**:
+- each loaded org has a heal **token** in Redis: a random value (a UUID made by the
+  caller and passed to the script, so no script depends on a clock or Redis-side
+  randomness; a clock that steps back after a failover could repeat a value). The only
+  question asked of it is "did it change";
+- **every load of an org sets a fresh token**: `init_org.lua` writes one whenever it
+  initialises the org (the gateway's `noinit` load and any other `init_org` caller), so
+  a reload after Redis lost data can never match a token read before the loss. An org
+  loaded before this change has no token; "absent" is a value like any other;
+- the reconciler reads the token in the same atomic snapshot as U2 (step d), with `MGET`
+  or a `MULTI` (not a Lua script: only the heal itself is a script);
+- the heal is one atomic Lua call: if the org is loaded and the token is unchanged since
+  that snapshot, add the missing amount (`P - U2`) and set a fresh token; otherwise do
+  nothing (another reconciler healed first, or the org was reloaded meanwhile; the next
+  run reads afresh).
+- History: the first guard ("only while `usage < P`") let reconcilers with different `P`
+  both heal (900 → 980 → 1080 against a true 1000); a counter that read absent as 0 let a
+  heal run again after a reload (900 → reload 1000 → 1100); and requiring `usage < P` as
+  well blocked heals for good on a busy org, when more than the missing amount settled
+  between the snapshot and the heal (900 + 150 settled, P = 1000: nothing healed, Redis
+  stays 100 under). The fresh token on every load replaces both earlier guards (user
+  decision 2026-11-17).
+Done when: reconcilers that observed the same `redis_behind` drift, whether they read the
+same or different `P`, healing in any order or concurrently, with or without a reload in
+between, add the missing amount at most once: Redis `usage` never ends above the true
+total; settles since stay counted; and a busy org still heals at its first run (U2 = 900,
+150 settled between snapshot and heal, P = 1000 ends at 1150, the true total).
+Contracts §6 (the token key, written by `init_org` and the heal), §7 and the billing
+README say so.
 
 **B2 (R6). `redis_behind` heals under steady traffic.**
 The `redis_behind` check and heal run every reconcile, whether or not the stream is
@@ -88,6 +141,8 @@ reconciler polls `consumed_through` for up to `LOOM_RECONCILE_DRAIN_WAIT_S` (new
 being consumed continuously (the stream never empty at the snapshot), an org whose Redis
 `usage` lost an amount is healed at the first reconcile run, and a real
 `missing_in_postgres` is still reported once the consumer catches up within the wait.
+The wait happens at most once per reconcile run (not per chunk of orgs), and not at all
+when the consumer group is missing (it cannot catch up within the wait).
 
 **B3 (R8). Services run as a role that cannot switch off the ledger's guards.**
 - Two Postgres roles: the **owner** (runs `loom-migrate`, owns every object) and a
@@ -103,13 +158,71 @@ being consumed continuously (the stream never empty at the snapshot), an org who
 - Outside `LOOM_ENV=dev`, each Python service checks at startup, over its own connection,
   that its role is not a superuser and owns no table in the schema, and refuses to start
   (exit 2, like `production_problems`) otherwise. The dev password for `loom_app` is also
-  a production problem.
+  a production problem. The role problems are listed together with the other production
+  problems in the one exit-2 message, so the service connects and checks the role even
+  when static problems already refuse the start. `loom-migrate` itself does not refuse
+  the dev password.
+- **Postgres unreachable at start** (user decision 2026-11-17): outside dev the service
+  starts with a warning instead of refusing, so a gateway restarted during a Postgres
+  outage still comes up and answers 503s. The role check then runs on the first
+  successful connection, and **gates the pool**: no work query runs on any pool
+  connection until the check has passed; if it fails, the service logs the problem and
+  exits 2 without having done any work as the wrong role. This holds for each Python
+  service: gateway, billing worker and pool manager.
+  - The role check reads only the system catalogs (`pg_roles`, `pg_class`/`pg_tables`,
+    `current_user`/`session_user`); it calls no function and names no table of the
+    schema (built-in catalog functions such as `pg_has_role` are fine).
+  - The unreachable-at-start warning is one log line that names Postgres (or "database")
+    and does not repeat the role problems' wording ("superuser", "owns").
+  - **Only an outage counts as unreachable**, not a misconfiguration. A connection error
+    whose message says `password authentication failed`, `does not exist` (role or
+    database) or `no pg_hba.conf entry` exits 2 as before, at start and in the gate.
+    **Every other connection error is retried** (user decision 2026-11-17, after a review
+    found DNS failures, network unreachable and "in recovery mode" made fatal by a short
+    retry list): refused or timed-out connections, a host name that does not resolve (in
+    compose a stopped Postgres container looks like this), network unreachable, a missing
+    socket, any `the database system is ...` state, `too many clients`, a connection
+    closed unexpectedly, and anything not on the misconfiguration list. While the gate
+    keeps retrying it logs at warning, at most once a minute, naming the error, so an
+    unexpected case is visible rather than fatal.
+  - When the deferred check fails, the service exits 2 through its normal shutdown path
+    (the gateway drains and settles its open streams as at SIGTERM), not `os._exit`.
+  - Contracts §6 and §11 list Postgres (including the pool held back by the gate) under
+    503 `service_unavailable`.
+  - `loom-migrate --create-database` checks the role names before creating anything.
+- `loom-migrate` refuses a configured login or group name that is the connecting role
+  itself (`current_user` / `session_user`), and a group name that exists as a `LOGIN`
+  role, rather than altering it.
 - A test checks that every table has an explicit grant to the group role, so a later
-  migration cannot forget one.
+  migration cannot forget one (the migrations bookkeeping table and individual
+  partitions excepted: services reach partitions through their parent).
+- The one thing services create at run time, the monthly `usage_events` partitions, is
+  done through `loom_ensure_usage_partitions` running with the owner's rights (`SECURITY
+  DEFINER`, fixed `search_path`), so `loom_app` itself still cannot create objects.
+- The dev password is a production problem when a service's `LOOM_DATABASE_URL` uses
+  the compose dev password for `loom_app`.
 - Roles belong to the whole Postgres server, not one database. The migration, and
   `loom-migrate`'s role setup, must succeed when run at the same time against many
   databases on one server (parallel test workers each migrating a fresh database): no
   "role already exists" or duplicate-key error, and the grants come out the same.
+  Concurrent `CREATE ROLE` (and adding the same membership) can fail with either
+  `duplicate_object` or `unique_violation`; both mean "already exists" and are not
+  errors. Advisory locks are per database, so they do not serialise this.
+- **Role names are configurable** (user decision 2026-11-17), so two stacks can share one
+  Postgres server and the race can be tested on fresh names: the login comes from
+  `LOOM_APP_DATABASE_USER` (default `loom_app`) and the group from
+  `LOOM_APP_DATABASE_GROUP` (default `loom_runtime`). The seams:
+  - `loom_platform.migrate.upgrade(url, *, group_role=None)` creates the group role
+    (if missing) **before** applying any migration, then migrates and grants to it;
+    `None` means the env value or the default;
+  - `loom_platform.migrate.ensure_app_login(url, *, login, group_role, password)`
+    creates or updates the login (password, `LOGIN`, member of the group);
+  - `loom-migrate` runs `upgrade`, then `ensure_app_login` when
+    `LOOM_APP_DATABASE_PASSWORD` is set.
+  The race test runs several rounds; each round makes fresh random login and group
+  names and 6 fresh databases, releases 6 threads at once through a barrier into
+  `upgrade` + `ensure_app_login`, requires every call to succeed and the grant
+  snapshots to match, then drops the databases and roles.
 - Contracts §3 is corrected: append-only and zero-sum hold for the runtime role; the
   owner can still disable the triggers, so only migrations run as the owner.
 Done when: connected as `loom_app`, `UPDATE`/`DELETE`/`TRUNCATE` on the three append-only
