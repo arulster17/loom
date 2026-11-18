@@ -37,7 +37,7 @@ from loom_bench.prices import load_prices
 from loom_bench.providers.runpod_api import RunpodApi
 from loom_bench.providers.runpod_ssh import OpenSshExec, SshExec
 from loom_bench.registry import REPO_ROOT, load_registry
-from loom_platform.db import libpq_url
+from loom_platform.db import RoleCheckFailed, libpq_url, role_gate
 from loom_platform.pool import get_pool, request_wake
 from loom_platform.pricing import servable
 from loom_platform.serving import LOCAL_PROVIDERS, load_serving
@@ -198,6 +198,13 @@ async def _run(settings: PoolmgrSettings) -> int:
         extra_allow=settings.allow_cidrs,
     )
     try:
+        # Postgres unreachable at start (outside dev): nothing touches it until the
+        # role check has passed on the first connection. If it fails (printed), stop
+        # through the normal shutdown below and exit 2.
+        try:
+            await role_gate.wait()
+        except RoleCheckFailed:
+            return 2
         try:
             await manager.start()
         except ManagerLocked as e:
@@ -231,6 +238,21 @@ async def _run(settings: PoolmgrSettings) -> int:
             await local.aclose()
         await redis.aclose()
     return 0
+
+
+def _serve(settings: PoolmgrSettings) -> int:
+    """`loom-poolmgr run`. A failed deferred role check (printed) exits 2, even when the
+    shutdown after it fails too."""
+    try:
+        code = asyncio.run(_run(settings))
+    except BaseException as e:
+        if not role_gate.failed:
+            raise
+        logging.getLogger("loom_poolmgr").error(
+            "stopped with an error after the failed database role check", exc_info=e
+        )
+        return 2
+    return 2 if role_gate.failed else code
 
 
 def _age(now: dt.datetime, then: dt.datetime | None) -> str:
@@ -318,7 +340,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
             raise SystemExit(2)
     if args.command == "run":
-        code = asyncio.run(_run(settings))
+        code = _serve(settings)
     elif args.command == "status":
         code = asyncio.run(_status(settings))
     else:

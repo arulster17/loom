@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import logging
 import os
 import sys
 
@@ -25,8 +26,10 @@ from loom_billing.logs import configure_logging
 from loom_billing.settings import BillingSettings
 from loom_billing.stripe_stub import create_stub_app
 from loom_billing.worker import Worker, redis_from_settings, run_worker
-from loom_platform.db import open_pool
+from loom_platform.db import RoleCheckFailed, open_pool, role_gate
 from loom_platform.settings import enforce_environment, redis_policy_problems
+
+log = logging.getLogger("loom_billing")
 
 COMMANDS = (
     "all",
@@ -82,7 +85,13 @@ def main(argv: list[str] | None = None) -> int:
     problems = settings.production_problems(serves_api=args.command in ("all", "api"))
     if settings.env != "dev" and args.command != "stripe-stub":
         problems += redis_policy_problems(settings.redis_url)
-    enforce_environment(settings, f"loom-billing {args.command}", problems)
+    # The stub never connects to Postgres: no database role to check.
+    enforce_environment(
+        settings,
+        f"loom-billing {args.command}",
+        problems,
+        check_database_role=args.command != "stripe-stub",
+    )
 
     if args.command == "stripe-stub":
         if settings.stripe_mode != "stub":
@@ -106,17 +115,28 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command in ("all", "worker", "api") and settings.billing_metrics_port:
         start_http_server(settings.billing_metrics_port)
-    with contextlib.suppress(KeyboardInterrupt):
-        if args.command == "all":
-            asyncio.run(_all(settings))
-        elif args.command == "worker":
-            asyncio.run(run_worker(settings))
-        elif args.command == "api":
-            app = create_app(settings)
-            asyncio.run(_server(app, settings.billing_host, settings.billing_port).serve())
-        else:
-            asyncio.run(_once(settings, args.command))
-    return 0
+    try:
+        with contextlib.suppress(KeyboardInterrupt):
+            if args.command == "all":
+                asyncio.run(_all(settings))
+            elif args.command == "worker":
+                asyncio.run(run_worker(settings))
+            elif args.command == "api":
+                app = create_app(settings)
+                asyncio.run(_server(app, settings.billing_host, settings.billing_port).serve())
+            else:
+                asyncio.run(_once(settings, args.command))
+    except BaseException as e:
+        # A failed deferred role check (printed) exits 2 whatever ended the run:
+        # `RoleCheckFailed` from `open_pool`, before any work (the unwinding closed what
+        # was open); `api`: uvicorn's exit 3 for the lifespan's failed `open_pool`; or
+        # any other error on the way out.
+        if not role_gate.failed:
+            raise
+        if not isinstance(e, RoleCheckFailed | SystemExit):
+            log.error("stopped with an error after the failed database role check", exc_info=e)
+        return 2
+    return 2 if role_gate.failed else 0
 
 
 if __name__ == "__main__":

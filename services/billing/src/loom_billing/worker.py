@@ -108,6 +108,7 @@ class Worker:
             group=settings.usage_group,
             notifier=notifier,
             recharge=AutoRecharge(notifier, enabled=settings.auto_recharge_enabled),
+            drain_wait_s=settings.reconcile_drain_wait_s,
         )
         self.listener = CreditListener(
             settings.database_url, pool, Limiter(redis, usage_stream=settings.usage_stream)

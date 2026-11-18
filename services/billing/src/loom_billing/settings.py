@@ -61,6 +61,10 @@ class BillingSettings(PlatformSettings):
     # Periodic jobs.
     batch_interval_s: PositiveInt = 60
     reconcile_interval_s: PositiveInt = 60
+    # Reconcile: how long to wait for the consumer group to consume through the
+    # snapshot's last stream id before skipping the missing_in_postgres check that
+    # minute (redis_behind is checked and healed every run regardless).
+    reconcile_drain_wait_s: Annotated[float, Field(ge=0)] = 2.0
     partition_interval_s: PositiveInt = 86_400
     partition_months_ahead: PositiveInt = 3
 

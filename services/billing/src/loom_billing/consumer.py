@@ -14,9 +14,12 @@ Order of work:
 3. then new entries (`>`), blocking up to `block_ms` only if 1-2 found nothing.
 
 Failures:
-- an entry that does not parse (`UsageEvent.from_stream_fields`) or that Postgres
-  refuses as data (unknown org/key, out-of-range value) is poison: it is copied to the
-  dead-letter stream with the reason and then acked. Never dropped silently.
+- an entry that does not decode (a field name or value that is not UTF-8), does not
+  parse (`UsageEvent.from_stream_fields`), or that Postgres refuses as data (unknown
+  org/key, out-of-range value) is poison: it is copied to the dead-letter stream with
+  the reason (its fields as read, bad bytes kept) and then acked, and the entries after
+  it go on. Decoding happens in `process`, entry by entry, so one bad entry never fails
+  a whole read. Never dropped silently.
 - a missing `usage_events` partition leaves the entry pending (contracts §3) and counts
   `usage_insert_errors_total{reason="no_partition"}`; partition upkeep fixes it.
 - Postgres or Redis being down raises out of the round; the worker backs off and
@@ -31,7 +34,7 @@ import datetime as dt
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 import psycopg
 from psycopg_pool import AsyncConnectionPool
@@ -46,7 +49,10 @@ from loom_platform.usage import UsageEvent, insert_usage_events
 
 log = logging.getLogger("loom_billing.consumer")
 
-Entry = tuple[str, dict[str, str] | None]
+# (stream id, the entry's fields as Redis returned them: bytes, not yet decoded; None
+# when the entry was trimmed or deleted before it was read).
+RawFields = Mapping[bytes | str, bytes | str]
+Entry = tuple[str, RawFields | None]
 
 
 class LeavePending(Exception):
@@ -63,10 +69,27 @@ class RoundResult:
     acked: list[str] = field(default_factory=list)
 
 
-def _decode(fields_raw: Any) -> dict[str, str] | None:
-    if not fields_raw:
-        return None
-    return {s(k): s(v) for k, v in fields_raw.items()}
+def _raw(fields_raw: Any) -> RawFields | None:
+    return fields_raw or None
+
+
+class Undecodable(ValueError):
+    """A field name or value that is not UTF-8. The message names no bytes."""
+
+
+def _decode(fields_raw: RawFields) -> dict[bytes | str, bytes | str]:
+    """The entry's fields as text (keys and values all `str`)."""
+    out: dict[bytes | str, bytes | str] = {}
+    for k, v in fields_raw.items():
+        try:
+            name = s(k)
+        except UnicodeDecodeError:
+            raise Undecodable("a field name is not valid UTF-8") from None
+        try:
+            out[name] = s(v)
+        except UnicodeDecodeError:
+            raise Undecodable(f"field {name[:40]!r} is not valid UTF-8") from None
+    return out
 
 
 def _no_partition(e: psycopg.Error) -> bool:
@@ -122,7 +145,7 @@ class UsageConsumer:
             count=self.count,
         )
         # [next start, [(id, fields)...], [deleted ids]] (Redis 7)
-        claimed = [(s(i), _decode(f)) for i, f in res[1]]
+        claimed = [(s(i), _raw(f)) for i, f in res[1]]
         deleted = [(s(i), None) for i in (res[2] if len(res) > 2 else [])]
         return claimed + deleted
 
@@ -137,7 +160,7 @@ class UsageConsumer:
         out: list[Entry] = []
         for _stream, items in res or []:
             for i, f in items:
-                out.append((s(i), _decode(f)))
+                out.append((s(i), _raw(f)))
         return out
 
     async def run_once(self, *, block_ms: int | None = None) -> RoundResult:
@@ -196,16 +219,15 @@ class UsageConsumer:
         result = RoundResult(read=len(entries))
         good: list[tuple[str, UsageEvent]] = []
         to_ack: list[str] = []
-        for entry_id, data in entries:
-            if data is None:  # trimmed or deleted before we read it: nothing to store
+        for entry_id, raw in entries:
+            if raw is None:  # trimmed or deleted before we read it: nothing to store
                 metrics.USAGE_ENTRIES.labels("deleted").inc()
                 to_ack.append(entry_id)
                 continue
             try:
-                raw = cast(Mapping[bytes | str, bytes | str], data)
-                good.append((entry_id, UsageEvent.from_stream_fields(raw)))
-            except (ValidationError, ValueError) as e:
-                await self._dead_letter(entry_id, data, f"invalid: {_short(e)}")
+                good.append((entry_id, UsageEvent.from_stream_fields(_decode(raw))))
+            except (ValidationError, ValueError) as e:  # Undecodable is a ValueError
+                await self._dead_letter(entry_id, raw, f"invalid: {_short(e)}")
                 result.dead += 1
                 to_ack.append(entry_id)
 
@@ -272,8 +294,10 @@ class UsageConsumer:
                 raise LeavePending() from e
             raise
 
-    async def _dead_letter(self, entry_id: str, data: dict[str, str], reason: str) -> None:
-        payload = {
+    async def _dead_letter(self, entry_id: str, data: RawFields, reason: str) -> None:
+        """Copy the entry's fields as read (bytes, so undecodable ones are kept) to the
+        dead-letter stream, with why."""
+        payload: dict[bytes | str, bytes | str] = {
             **data,
             "dead_reason": reason,
             "dead_source_id": entry_id,

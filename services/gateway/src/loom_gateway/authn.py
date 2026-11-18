@@ -33,7 +33,7 @@ from redis.asyncio import Redis
 from loom_platform import errors
 from loom_platform.apikeys import InvalidApiKey, bearer_token, hash_api_key
 from loom_platform.auth import AuthRecord, auth_cache_key, load_auth_record, put_cached
-from loom_platform.db import libpq_url
+from loom_platform.db import RoleCheckFailed, libpq_url, role_gate
 
 log = logging.getLogger("loom_gateway.auth")
 
@@ -170,7 +170,13 @@ class Authenticator:
 
     async def listen_forever(self, database_url: str) -> None:
         """LISTEN loom_auth_changed and drop cached records; reconnect on failure. A
-        reconnect needs no resync: the TTL covers anything missed meanwhile."""
+        reconnect needs no resync: the TTL covers anything missed meanwhile. Waits for
+        the deferred role check first (`role_gate`): LISTEN is work. Returns when that
+        check fails (the gateway is stopping: `GatewayServer`)."""
+        try:
+            await role_gate.wait()
+        except RoleCheckFailed:
+            return
         backoff = 0.5
         while True:
             try:
