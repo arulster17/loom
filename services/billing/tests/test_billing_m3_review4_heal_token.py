@@ -6,7 +6,8 @@ Redis state: the token's key is the one contracts §6 documents (the spec: "Cont
 (the token key, written by `init_org` and the heal)"). It is read from the §6 key table:
 the `loom:org:<org>:...` row whose text names a heal token. The tests check only what the
 spec fixes: a load or a heal leaves a non-empty token, and it differs from the one
-before ("the only question asked of it is 'did it change'").
+before ("the only question asked of it is 'did it change'"). The key lookup lives in
+billing_m3_helpers (`token_key`), which `HealGate` uses too.
 
 Behaviour: a reconciler held at its heal across a reload of the org must do nothing,
 even when the reload came from an older Postgres snapshot (it has part of the missing
@@ -17,9 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import re
 import uuid
-from pathlib import Path
 
 import pytest
 from billing_fixtures import GROUP
@@ -30,6 +29,7 @@ from billing_m3_helpers import (
     pg_usage,
     redis_usage,
     settle,
+    token_key,
     wait_reached,
 )
 
@@ -37,35 +37,6 @@ from loom_billing.reconcile import Reconciler
 from loom_platform.limiter import Limiter, org_key, org_prefix
 
 pytestmark = [pytest.mark.postgres, pytest.mark.redis]
-
-CONTRACTS = Path(__file__).resolve().parents[3] / "docs" / "phase1-contracts.md"
-_ORG_KEY = re.compile(r"^\|\s*`loom:org:<org>:([^`]+)`")
-
-
-def documented_token_key() -> str | None:
-    """The suffix of the heal-token key in contracts §6's key table (`loom:org:<org>:X`,
-    the row naming a heal token), or None when §6 documents none."""
-    text = CONTRACTS.read_text(encoding="utf-8")
-    start = text.find("\n## 6.")
-    end = text.find("\n## 7.", start + 1)
-    section = text[start:end] if start >= 0 else ""
-    for line in section.splitlines():
-        m = _ORG_KEY.match(line)
-        low = line.lower()
-        if m and "heal" in low and "token" in low:
-            return m.group(1)
-    return None
-
-
-def token_key(org: uuid.UUID) -> str:
-    """The org's heal-token key, as contracts §6 documents it (fails the test when §6
-    documents none)."""
-    name = documented_token_key()
-    assert name is not None, (
-        "contracts §6 documents no heal token key (spec B1: a `loom:org:<org>:...` row "
-        "for the random heal token, written by init_org and the heal)"
-    )
-    return org_key(org, name)
 
 
 async def _lose_org_keys(redis_client, org: uuid.UUID) -> None:

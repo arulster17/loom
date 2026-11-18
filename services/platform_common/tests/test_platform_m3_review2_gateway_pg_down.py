@@ -12,8 +12,9 @@ unknown to Redis and needs Postgres.
 Postgres is reached through `QuietPgProxy` (a `PgProxy`: refuses connections until
 `open()`, then forwards and records every statement before forwarding it). Statements
 are read only after every proxied session has ended. "Work" is what
-`platform_m3_review_proxy.work_classifier` calls work: a statement naming one of the
-schema's tables, views or functions, or one that writes, listens or notifies.
+`platform_m3_review_proxy.work_classifier` calls work: a statement that refers to one of
+the schema's tables, views, sequences or functions (a mere mention in a literal, comment
+or alias is not), or one that writes, locks, listens or notifies.
 
 Roles (fresh, dropped afterwards, each drop on its own): a runtime login made through
 the spec's seams (`upgrade(url, group_role=...)`, `ensure_app_login(...)`) with a fresh
@@ -40,7 +41,7 @@ from platform_m3_review2_kit import (
     REPO_ROOT,
     QuietPgProxy,
     TlsRedis,
-    assert_warning_wording,
+    assert_start_warning_wording,
     drop_all,
     free_port,
     make_certs,
@@ -205,17 +206,20 @@ def start_gateway(roles, proxy, tls_redis, certs, tmp_path: Path) -> Iterator:
             svc.stop()
 
 
-def _started_while_down(gw: Gateway, warn_s: float = 25) -> None:
+def _started_while_down(gw: Gateway, warn_s: float = 25) -> str:
+    """The gateway warned about Postgres and is still running; returns the warning line
+    (the first line naming Postgres it wrote)."""
     svc = gw.svc
-    warned = svc.wait_for(PG_WARNING, warn_s)
+    warned = svc.wait_line(PG_WARNING, warn_s)
     assert svc.returncode != 2, (
         "exited 2 while Postgres was unreachable at start (spec: start with a warning "
         f"instead of refusing):\n{svc.output}"
     )
-    assert warned, f"no warning about Postgres being unreachable:\n{svc.output}"
+    assert warned is not None, f"no warning about Postgres being unreachable:\n{svc.output}"
     assert svc.returncode is None, (
         f"exited ({svc.returncode}) before Postgres came up:\n{svc.output}"
     )
+    return warned[1]
 
 
 def test_item1a_gateway_pg_down_at_start_warns_stays_up_and_answers_503(start_gateway, proxy):
@@ -224,8 +228,7 @@ def test_item1a_gateway_pg_down_at_start_warns_stays_up_and_answers_503(start_ga
     (without the role problems' wording), stays up, and answers /v1/chat/completions
     with a 503, not a crash."""
     gw = start_gateway("runtime")
-    _started_while_down(gw)
-    assert_warning_wording(gw.svc.output)
+    assert_start_warning_wording(_started_while_down(gw))
     assert gw.wait_healthy(15), f"the gateway never answered /health:\n{gw.svc.output}"
 
     try:

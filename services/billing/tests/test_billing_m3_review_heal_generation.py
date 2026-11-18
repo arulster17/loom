@@ -126,7 +126,17 @@ async def test_item_b1_different_p_heal_one_after_the_other(
         f"over-healed: usage {usage} above the true total {true_total} by "
         f"{usage - true_total} (the missing amount was added twice)"
     )
-    assert usage >= o["observed_usage"] + s1 + s2, "a settle made since the snapshot was lost"
+    # The first heal applies (the token is unchanged since both snapshots) and the second
+    # finds it changed: A (smaller P) adds P_A - U2, X short of the true total; B adds
+    # P_B - U2. Both settles stay counted either way. (A bound below by the usage both
+    # observed could not fail: any heal adds far more than the settles.)
+    healed_first = o["lost"] - o["x"] if first == "smaller_p_first" else o["lost"]
+    expected = o["observed_usage"] + healed_first + s1 + s2
+    assert usage == expected, (
+        f"usage {usage}, expected {expected}: the observed {o['observed_usage']}, the "
+        f"first heal's missing amount {healed_first} ({first}) once, and the settles "
+        f"{s1} + {s2} (a settle made since the snapshot lost, or the wrong heal applied)"
+    )
     await _converges(pool, redis_client, stream, o)
 
 
@@ -144,7 +154,16 @@ async def test_item_b1_different_p_heal_concurrently(pool, redis_client, stream,
     usage = await redis_usage(redis_client, t.org_id)
     true_total = o["true"] + s1
     assert usage <= true_total, f"over-healed: usage {usage} above the true total {true_total}"
-    assert usage >= o["observed_usage"] + s1, "the settle made since the snapshot was lost"
+    # Whichever heal lands first applies, once: A's (X short of the true total) or B's.
+    # The settle stays counted. (A bound below by the observed usage could not fail.)
+    allowed = {
+        o["observed_usage"] + o["lost"] - o["x"] + s1: "A (smaller P) healed",
+        o["observed_usage"] + o["lost"] + s1: "B (larger P) healed",
+    }
+    assert usage in allowed, (
+        f"usage {usage}, expected one heal applied once plus the settle {s1}: "
+        f"{allowed} (the settle made since the snapshot lost, or a heal applied wrongly)"
+    )
     await _converges(pool, redis_client, stream, o)
 
 

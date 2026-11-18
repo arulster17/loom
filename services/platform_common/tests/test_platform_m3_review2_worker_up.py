@@ -23,7 +23,7 @@ from platform_m3_review2_kit import (
     PG_WARNING,
     QuietPgProxy,
     TlsRedis,
-    assert_warning_wording,
+    assert_start_warning_wording,
     make_certs,
     redis_upstream,
 )
@@ -90,12 +90,12 @@ def test_item4_worker_pg_down_at_start_still_running_after_warning(setup):
     connections_before = setup["front"].connections
     svc = Service(WORKER, setup["env"])
     try:
-        warned = svc.wait_for(PG_WARNING, 45)
+        warned = svc.wait_line(PG_WARNING, 45)
         assert svc.returncode != 2, (
             f"exited 2 while Postgres was unreachable at start:\n{svc.output}"
         )
-        assert warned, f"no warning about Postgres being unreachable:\n{svc.output}"
-        assert_warning_wording(svc.output)
+        assert warned is not None, f"no warning about Postgres being unreachable:\n{svc.output}"
+        assert_start_warning_wording(warned[1])
         warned_at = time.monotonic()
         code = svc.wait_exit(STAYS_UP_S + 1)
         assert code is None, (

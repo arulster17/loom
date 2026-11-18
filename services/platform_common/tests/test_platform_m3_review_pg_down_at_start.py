@@ -13,9 +13,10 @@ warning at start). Its metrics server is off.
 
 Postgres is reached through `PgProxy` (platform_m3_review_proxy): refusing connections
 at first, then forwarding to the real server. The proxy records every statement every
-connection sends, before forwarding it. "Work" is a statement that names one of the
-schema's tables, views or functions, or that writes, listens or notifies; the role
-check only reads the catalogs.
+connection sends, before forwarding it. "Work" is what `work_classifier` calls work: a
+statement that refers to one of the schema's tables, views, sequences or functions (a
+mere mention in a literal, comment or alias is not), or that writes, locks, listens or
+notifies; the role check only reads the catalogs.
 
 Roles (fresh, dropped afterwards): a runtime login made by the spec's seams
 (`upgrade(url, group_role=...)` + `ensure_app_login`, with a fresh group, so loom_app and
@@ -32,6 +33,7 @@ from collections.abc import Iterator
 
 import psycopg
 import pytest
+from platform_m3_review2_kit import drop_all
 from platform_m3_review_proxy import (
     PgProxy,
     Service,
@@ -40,7 +42,7 @@ from platform_m3_review_proxy import (
     service_env,
     work_classifier,
 )
-from platform_m3_roles import admin_info, admin_url, create_database, drop_database
+from platform_m3_roles import admin_info, admin_url, create_database
 from psycopg import sql
 
 from loom_platform.migrate import ensure_app_login, upgrade
@@ -48,6 +50,11 @@ from loom_platform.migrate import ensure_app_login, upgrade
 pytestmark = [pytest.mark.postgres]
 
 WORKER = [sys.executable, "-m", "loom_billing", "worker"]
+# Waits, at most 90 s in all per test (pytest's timeout is 120 s, so a failing wait ends
+# in its assertion, not in a timeout): the unreachable-at-start warning, then what the
+# worker does once Postgres is reachable (gate retry of a few seconds, then the check).
+WARN_S = 30.0
+REACHABLE_S = 60.0
 # A warning about Postgres / the database: one line naming both.
 _WARN = r"\bwarn(?:ing)?\b"
 _PG = r"(?:postgres|database)"
@@ -108,10 +115,8 @@ def roles() -> Iterator[dict]:
             "is_work": work_classifier(objects),
         }
     finally:
-        drop_database(info, db)
-        with psycopg.connect(admin_url(info, info.get("dbname", "postgres")), autocommit=True) as c:
-            for key in ("runtime", "owner", "superuser", "group"):
-                c.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(names[key])))
+        # the database first, then each role: every drop runs even if an earlier one fails
+        drop_all(info, db, [names[k] for k in ("runtime", "owner", "superuser", "group")])
 
 
 @pytest.fixture
@@ -155,7 +160,7 @@ def start_worker(roles, proxy) -> Iterator:
 
 def _started_while_down(svc: Service) -> None:
     """The worker warned about Postgres and is still running (it did not refuse)."""
-    warned = svc.wait_for(PG_WARNING, 45)
+    warned = svc.wait_for(PG_WARNING, WARN_S)
     assert svc.returncode != 2, (
         "exited 2 while Postgres was unreachable at start (spec: start with a warning "
         f"instead of refusing):\n{svc.output}"
@@ -184,7 +189,7 @@ def test_item_b3_wrong_role_exits_2_without_work_once_reachable(roles, start_wor
     svc = start_worker(role)
     _started_while_down(svc)
     proxy.open()
-    code = svc.wait_exit(90)
+    code = svc.wait_exit(REACHABLE_S)
 
     assert code == 2, f"exit {code} as the wrong role:\n{svc.output}"
     assert role_problem(svc.output, roles["names"][role]), svc.output
@@ -207,7 +212,7 @@ def test_item_b3_runtime_role_starts_once_reachable(roles, start_worker, proxy):
     def did_work() -> bool:
         return any(u == login and is_work(q) for u, q in proxy.statements())
 
-    deadline_s = 90.0
+    deadline_s = REACHABLE_S
     waited = 0.0
     while not did_work() and svc.returncode is None and waited < deadline_s:
         svc.wait_exit(0.25)

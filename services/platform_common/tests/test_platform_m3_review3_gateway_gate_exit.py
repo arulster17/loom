@@ -75,10 +75,13 @@ from gateway_testkit import (
 
 pytestmark = [pytest.mark.postgres, pytest.mark.redis]
 
-WARN_S = 30  # the unreachable-at-start warning
-HEALTH_S = 30
-EXIT_S = 45  # after the proxy opens: gate retry (a few s) + 1 s grace + shutdown
-STREAM_S = 50  # the whole stream: the engine alone would take 100 s
+# The waits add up to 95 s, under the test's 115 s timeout with setup and cleanup, so a
+# failing wait ends in its assertion, not in the timeout.
+WARN_S = 20  # the unreachable-at-start warning
+HEALTH_S = 15
+STREAM_S = 35  # the whole stream (the engine alone would take 100 s): gate retry (a few
+# s) + the failed check + 1 s grace
+EXIT_S = 25  # after the stream ended: the rest of the shutdown
 CHUNKS_BEFORE_OPEN = 3
 
 

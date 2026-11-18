@@ -20,11 +20,11 @@ from collections.abc import Iterator
 
 import psycopg
 import pytest
+from platform_m3_review2_kit import drop_all
 from platform_m3_roles import (
     admin_info,
     admin_url,
     create_database,
-    drop_database,
     migrate_command,
     migrate_env,
     url_for,
@@ -74,11 +74,8 @@ def server() -> Iterator[dict]:
     try:
         yield {"info": info, "db": db, "name": name}
     finally:
-        drop_database(info, db)
-        with psycopg.connect(_server_url(info), autocommit=True) as c:
-            for kind in ("login", "group", "connecting"):
-                if kind in made:
-                    c.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(made[kind])))
+        # the database, then each role, every drop run even if an earlier one fails
+        drop_all(info, db, [made[k] for k in ("login", "group", "connecting") if k in made])
 
 
 def create_login(info: dict[str, str], name: str, *, superuser: bool) -> str:
@@ -103,9 +100,12 @@ def run_migrate(url: str, *, login: str, group: str) -> subprocess.CompletedProc
     env = migrate_env(secrets.token_hex(16))
     env["LOOM_APP_DATABASE_USER"] = login
     env["LOOM_APP_DATABASE_GROUP"] = group
-    return subprocess.run(
-        migrate_command(url), env=env, capture_output=True, text=True, timeout=180
-    )
+    try:  # under pytest's 120 s timeout, so a hang fails here with its output
+        return subprocess.run(
+            migrate_command(url), env=env, capture_output=True, text=True, timeout=90
+        )
+    except subprocess.TimeoutExpired as e:
+        raise AssertionError(f"loom-migrate did not exit within 90 s: {e.stderr!r}") from e
 
 
 def assert_refused(

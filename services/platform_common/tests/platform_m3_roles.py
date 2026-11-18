@@ -130,14 +130,22 @@ def migrate_env(password: str) -> dict[str, str]:
     return env
 
 
+MIGRATE_TIMEOUT_S = 90  # under pytest's 120 s timeout: a hang fails here, with its output
+
+
 def run_migrate(url: str, password: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        migrate_command(url),
-        env=migrate_env(password),
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
+    try:
+        return subprocess.run(
+            migrate_command(url),
+            env=migrate_env(password),
+            capture_output=True,
+            text=True,
+            timeout=MIGRATE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise AssertionError(
+            f"loom-migrate did not exit within {MIGRATE_TIMEOUT_S} s: {e.stderr!r}"
+        ) from e
 
 
 def group_roles(conn: psycopg.Connection, login: str = APP_ROLE) -> list[str]:

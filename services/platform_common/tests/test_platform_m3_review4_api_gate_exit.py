@@ -4,24 +4,33 @@ when its deferred role check fails, the same way the worker does, "without havin
 any work as the wrong role".
 
 The api starts outside dev with Postgres unreachable (a `QuietPgProxy` not yet open),
-so it warns and the role check is deferred to the gate. Then the proxy opens onto the
-test server, where the configured login is a superuser (a fresh role, dropped
-afterwards). The deferred check fails: the api exits 2 naming the problem, and no work
-statement reached Postgres."""
+so it warns and the role check is deferred to the gate. Then the proxy opens onto a
+fresh migrated database on the test server, where the configured login is a superuser
+(a fresh role; both dropped afterwards). The deferred check fails: the api exits 2
+naming the problem, and no work statement reached Postgres."""
 
 from __future__ import annotations
 
 import secrets
 import sys
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
 import psycopg
 import pytest
-from platform_m3_review2_kit import PG_WARNING, QuietPgProxy, free_port, superuser_problem
+from platform_m3_review2_kit import (
+    PG_WARNING,
+    QuietPgProxy,
+    drop_all,
+    free_port,
+    superuser_problem,
+)
 from platform_m3_review3_kit import Login, RedisFront, fresh_login, redis_front, worker_env
 from platform_m3_review_proxy import Service, proxied_url, schema_object_names, work_classifier
-from platform_m3_roles import admin_info, admin_url
+from platform_m3_roles import admin_info, admin_url, create_database
+
+from loom_platform.migrate import upgrade
 
 pytestmark = [pytest.mark.postgres, pytest.mark.redis]
 
@@ -33,6 +42,24 @@ EXIT_S = 45  # after the proxy opens: the gate retries every few seconds at most
 @pytest.fixture(scope="module")
 def info() -> dict[str, str]:
     return admin_info()
+
+
+@pytest.fixture(scope="module")
+def migrated(info) -> Iterator[tuple[str, list[str]]]:
+    """A fresh database with the schema (migrated through the spec's seam, with a fresh
+    group role), and its schema objects: so a work query the api sent would name one of
+    them and be seen as work (an unmigrated database has none to name)."""
+    group = f"loom_t_r4g_{uuid.uuid4().hex[:12]}"
+    db: str | None = None
+    try:
+        db = create_database(info)
+        upgrade(admin_url(info, db), group_role=group)
+        with psycopg.connect(admin_url(info, db), autocommit=True) as conn:
+            names = schema_object_names(conn)
+        assert names, "the migrated database has no schema objects"
+        yield db, names
+    finally:
+        drop_all(info, db, [group])
 
 
 @pytest.fixture(scope="module")
@@ -69,13 +96,12 @@ def _api_env(rf: RedisFront, url: str) -> dict[str, str]:
     return env
 
 
-def test_item4_api_exits_2_when_the_deferred_role_check_fails(info, superuser, rf, proxy):
+def test_item4_api_exits_2_when_the_deferred_role_check_fails(info, migrated, superuser, rf, proxy):
     """done-when B3 (billing api mode): started outside dev with Postgres unreachable
     (warns, keeps running), then Postgres becomes reachable and the login turns out to
     be a superuser. The api exits 2 naming the problem, with no work query sent."""
-    dbname = info.get("dbname", "postgres")
-    with psycopg.connect(admin_url(info, dbname), autocommit=True) as conn:
-        is_work = work_classifier(schema_object_names(conn) or ["loom_no_schema_object"])
+    dbname, names = migrated
+    is_work = work_classifier(names)
     url = proxied_url(proxy, dbname=dbname, user=superuser.name, password=superuser.password)
     svc = Service(API, _api_env(rf, url))
     try:

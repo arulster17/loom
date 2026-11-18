@@ -181,19 +181,101 @@ def proxied_url(proxy: PgProxy, *, dbname: str, user: str, password: str) -> str
     return f"postgresql://{q(user, safe='')}:{q(password, safe='')}@127.0.0.1:{proxy.port}/{dbname}"
 
 
-_WORK_VERBS = re.compile(
-    r"^\s*(INSERT|UPDATE|DELETE|MERGE|TRUNCATE|COPY|CREATE|ALTER|DROP|GRANT|REVOKE|"
-    r"LISTEN|NOTIFY|CALL|DO|LOCK|VACUUM|ANALYZE|REFRESH|CLUSTER|REINDEX|COMMENT)\b",
-    re.IGNORECASE,
+# Keywords of statements (or clauses) that change something, take locks, or talk to
+# other sessions, wherever they appear as a keyword (not inside a string literal, a
+# quoted identifier or a comment): `WITH x AS (DELETE ...)`, `EXPLAIN ANALYZE INSERT`,
+# `SELECT ... FOR UPDATE` / `FOR SHARE`, a second statement in one simple query.
+_WORK_KEYWORDS = frozenset(
+    "INSERT UPDATE DELETE MERGE TRUNCATE COPY CREATE ALTER DROP GRANT REVOKE LISTEN "
+    "NOTIFY CALL DO LOCK SHARE VACUUM ANALYZE REFRESH CLUSTER REINDEX COMMENT SECURITY "
+    "IMPORT REASSIGN EXECUTE".split()
+)
+# Built-in functions with an effect beyond reading: sequences, NOTIFY, advisory locks,
+# large objects, other backends.
+_WORK_FUNCTIONS = re.compile(
+    r"^(?:nextval|setval|pg_notify|pg_(?:try_)?advisory_(?:xact_)?lock(?:_shared)?|lo_\w+|"
+    r"pg_terminate_backend|pg_cancel_backend)$"
+)
+_TOKEN = re.compile(
+    r"(?P<space>\s+)"
+    r"|(?P<line_comment>--[^\n]*)"
+    r"|(?P<block_comment>/\*.*?\*/)"
+    r"|(?P<dollar>\$(?P<tag>[A-Za-z_][A-Za-z_0-9]*)?\$)"
+    r"|(?P<estring>[eE]'(?:[^'\\]|\\.|'')*')"
+    r"|(?P<string>'(?:[^']|'')*')"
+    r"|(?P<qident>\"(?:[^\"]|\"\")*\")"
+    r"|(?P<ident>[A-Za-z_][A-Za-z_0-9$]*)"
+    r"|(?P<param>\$\d+)"
+    r"|(?P<number>\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)"
+    r"|(?P<cast>::)"
+    r"|(?P<op>.)",
+    re.DOTALL,
 )
 
 
+@dataclass(frozen=True)
+class _Tok:
+    kind: str  # ident (lower-cased), qident (as written), string (its text), op, other
+    text: str
+
+
+def sql_tokens(sql: str) -> list[_Tok]:
+    """The statement's tokens, comments and whitespace dropped. Unquoted identifiers and
+    keywords are lower-cased (as Postgres folds them); a quoted identifier keeps its case;
+    a string literal (standard, E'' or dollar-quoted) is one `string` token."""
+    out: list[_Tok] = []
+    pos = 0
+    while pos < len(sql):
+        m = _TOKEN.match(sql, pos)
+        if m is None:  # an unterminated literal or comment: the rest is one literal
+            out.append(_Tok("string", sql[pos:]))
+            break
+        kind = m.lastgroup
+        if kind == "tag":
+            kind = "dollar"
+        text = m.group()
+        pos = m.end()
+        if kind in ("space", "line_comment", "block_comment"):
+            continue
+        if kind == "dollar":
+            end = sql.find(text, pos)
+            if end < 0:
+                out.append(_Tok("string", sql[pos:]))
+                break
+            out.append(_Tok("string", sql[pos:end]))
+            pos = end + len(text)
+        elif kind == "estring":
+            out.append(_Tok("string", text[2:-1]))
+        elif kind == "string":
+            out.append(_Tok("string", text[1:-1].replace("''", "'")))
+        elif kind == "qident":
+            out.append(_Tok("qident", text[1:-1].replace('""', '"')))
+        elif kind == "ident":
+            out.append(_Tok("ident", text.lower()))
+        elif kind in ("cast", "op"):
+            out.append(_Tok("op", text))
+        else:
+            out.append(_Tok("other", text))
+    return out
+
+
+def _literal_names(text: str) -> list[tuple[str | None, str]]:
+    """(schema, name) for the object a `'...'::regclass` style literal names."""
+    base = text.split("(", 1)[0].strip()
+    parts = [p.strip() for p in base.split(".")]
+    names = [p[1:-1] if p.startswith('"') and p.endswith('"') else p.lower() for p in parts]
+    if len(names) == 1:
+        return [(None, names[0])]
+    return [(names[-2], names[-1])]
+
+
 def schema_object_names(conn: psycopg.Connection) -> list[str]:
-    """Names of the schema's own tables, views and functions (not an extension's):
-    a statement naming one of them is service work, not a catalog check."""
+    """Names of the schema's own tables, partitions, views, sequences and functions (not
+    an extension's): a statement that refers to one of them is service work, not a
+    catalog check."""
     rows = conn.execute(
         "SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm') "
+        "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f') "
         "AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass "
         "  AND d.objid = c.oid AND d.deptype = 'e') "
         "UNION SELECT p.proname::text FROM pg_proc p "
@@ -205,13 +287,61 @@ def schema_object_names(conn: psycopg.Connection) -> list[str]:
 
 
 def work_classifier(names: list[str]) -> Callable[[str], bool]:
-    """Whether a statement is service work: it names one of the schema's tables, views
-    or functions, or it writes, listens or notifies. Catalog reads (pg_roles, pg_class,
-    current_user ...), SET/SHOW and transaction control are not work."""
-    named = re.compile(r"\b(" + "|".join(re.escape(n) for n in names) + r")\b", re.IGNORECASE)
+    """Whether a statement is service work against the schema (`names`: its objects,
+    from `schema_object_names`). Work is a statement that
+
+    - refers to one of the schema's objects: an identifier (unquoted, folded to lower
+      case, or quoted, as written) that is one of `names`, unqualified or qualified by
+      `public`; or a literal resolved to one by a `::reg...` cast (`'orgs'::regclass`);
+    - or has a keyword that writes, locks, listens or notifies (anywhere: CTEs,
+      EXPLAIN ANALYZE, FOR UPDATE / FOR SHARE, a second statement in the same message);
+    - or calls a built-in with an effect (nextval/setval, pg_notify, advisory locks...).
+
+    A mere mention is not work: a schema name inside a string literal compared in a
+    catalog query (`relname = 'orgs'`), in a comment, as a column alias (`AS users`),
+    or as a column of another relation or schema (`s.sessions`, `pg_catalog.x`).
+    Catalog reads (pg_roles, pg_class, current_user, pg_has_role ...), SET/SHOW and
+    transaction control are not work. `test_platform_m3_work_classifier.py` pins both
+    sides."""
+    # An unquoted identifier is folded to lower case before lookup (as `sql_tokens`
+    # does), a quoted one is not: either way it names an object only if the folded or
+    # quoted text is that object's name exactly.
+    exact = set(names)
+
+    def schema_name(tok: _Tok) -> bool:
+        return tok.kind in ("ident", "qident") and tok.text in exact
 
     def is_work(sql: str) -> bool:
-        return bool(_WORK_VERBS.search(sql) or named.search(sql))
+        toks = sql_tokens(sql)
+        for i, tok in enumerate(toks):
+            prev = toks[i - 1] if i else None
+            nxt = toks[i + 1] if i + 1 < len(toks) else None
+            qualified = prev is not None and prev == _Tok("op", ".")
+            qualifier = toks[i - 2] if qualified and i >= 2 else None
+            if tok.kind == "ident" and not qualified and tok.text.upper() in _WORK_KEYWORDS:
+                return True
+            if tok.kind in ("ident", "qident"):
+                called = nxt == _Tok("op", "(")
+                in_catalog = qualifier is None or qualifier.text == "pg_catalog"
+                if called and in_catalog and _WORK_FUNCTIONS.match(tok.text):
+                    return True
+                if qualified and (qualifier is None or qualifier.text != "public"):
+                    continue  # a column of an alias, or another schema's object
+                if prev == _Tok("ident", "as") and not called:
+                    continue  # an output alias
+                if schema_name(tok):
+                    return True
+            if (
+                tok.kind == "string"
+                and nxt == _Tok("op", "::")
+                and i + 2 < len(toks)
+                and toks[i + 2].kind == "ident"
+                and toks[i + 2].text.startswith("reg")
+            ):
+                for schema, name in _literal_names(tok.text):
+                    if schema in (None, "public") and name in exact:
+                        return True
+        return False
 
     return is_work
 
@@ -249,18 +379,39 @@ class Service:
     def returncode(self) -> int | None:
         return self.proc.poll()
 
+    def _lines_from(self, start: int) -> list[str]:
+        with self._lock:
+            return self._lines[start:]
+
+    def wait_line(
+        self, pattern: re.Pattern[str], timeout_s: float, *, after: int = 0
+    ) -> tuple[int, str] | None:
+        """The first output line at index `after` or later that matches `pattern`, as
+        (index, line), once it appears within `timeout_s`; None when it does not (early
+        when the process exits without one). Each line is read and matched once, as it
+        arrives: the wait never re-reads the output it already checked."""
+        deadline = time.monotonic() + timeout_s
+        checked = after
+        while True:
+            exited = self.proc.poll() is not None
+            if exited:
+                self._reader.join(5)  # the lines written before the exit
+            for line in self._lines_from(checked):
+                if pattern.search(line):
+                    return checked, line.rstrip("\n")
+                checked += 1
+            if exited or time.monotonic() >= deadline:
+                return None
+            time.sleep(0.05)
+
     def wait_for(self, pattern: re.Pattern[str], timeout_s: float) -> bool:
         """Whether a line matching `pattern` appears within `timeout_s` (False early if
         the process exits without one)."""
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if pattern.search(self.output):
-                return True
-            if self.proc.poll() is not None:
-                self._reader.join(5)
-                return bool(pattern.search(self.output))
-            time.sleep(0.05)
-        return False
+        return self.wait_line(pattern, timeout_s) is not None
+
+    def lines_matching(self, pattern: re.Pattern[str], *, after: int = 0) -> list[str]:
+        """The output lines so far, from index `after` on, that match `pattern`."""
+        return [line.rstrip("\n") for line in self._lines_from(after) if pattern.search(line)]
 
     def wait_exit(self, timeout_s: float) -> int | None:
         try:

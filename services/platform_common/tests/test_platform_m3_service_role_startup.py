@@ -21,13 +21,13 @@ from collections.abc import Iterator
 
 import psycopg
 import pytest
+from platform_m3_review2_kit import drop_all
 from platform_m3_roles import (
     APP_ROLE,
     admin_info,
     admin_url,
     app_password,
     create_database,
-    drop_database,
     run_migrate,
     url_for,
 )
@@ -77,9 +77,9 @@ def db() -> Iterator[dict[str, str]]:
             "app": url_for(info, dbname=name, user=APP_ROLE, password=app_password()),
         }
     finally:
-        drop_database(info, name)
-        with psycopg.connect(admin_url(info, info.get("dbname", "postgres")), autocommit=True) as c:
-            c.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(owner_role)))
+        # the database first (it holds the table the role owns), then the role, even if
+        # the database drop fails
+        drop_all(info, name, [owner_role])
 
 
 def start_in_prod(service: str, database_url: str) -> subprocess.CompletedProcess[str]:

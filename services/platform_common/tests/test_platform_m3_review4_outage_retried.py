@@ -9,9 +9,15 @@ Postgres is unreachable and keep running (the role check deferred to the gate, w
 keeps retrying): it must not exit 2. The cases of one test run as concurrent workers to
 keep the waits down.
 
-- Client-side failures: a host name that does not resolve (`.invalid`), network
-  unreachable (an IPv6 documentation address, on a host without an IPv6 route), a Unix
-  socket path that does not exist.
+- Client-side failures: a host name that does not resolve (`.invalid`), a Unix socket
+  path that does not exist, and network unreachable (an IPv6 documentation address, on
+  a host without an IPv6 route: its own test, skipped with the reason on a host that
+  cannot produce the error).
+
+The misconfiguration list grew (user decision 2026-11-17: any `authentication failed`
+and `pg_hba.conf rejects` exit 2 too; test_platform_m3_auth_misconfig.py). None of the
+outages here says either, so they stay retried; test_platform_m3_auth_outage_retried.py
+adds outages during the authentication exchange.
 - Server answers (`ForgedPg`, a server that answers the startup like Postgres in that
   state): `the database system is in recovery mode` / `... is not accepting
   connections`, a connection closed without an answer, and an error not on either list;
@@ -57,17 +63,17 @@ def _assert_all_kept_running(outcomes, what: str) -> None:
     exited_2 = [n for n in bad if outcomes[n].returncode == 2]
     assert not bad, (
         f"{what}: the worker did not warn and keep running for {bad} (exit 2 for "
-        f"{exited_2}; spec B3: only `password authentication failed`, `does not exist` and "
-        "`no pg_hba.conf entry` exit 2, every other connection error is retried):\n"
+        f"{exited_2}; spec B3: only `password authentication failed`, `does not exist`, "
+        "`no pg_hba.conf entry` and (user decision 2026-11-17) any `authentication failed` "
+        "and `pg_hba.conf rejects` exit 2, every other connection error is retried):\n"
         + report(outcomes, bad)
     )
 
 
 @pytest.mark.timeout(110)
 def test_item3_client_side_outages_are_retried(tmp_path: Path):
-    """done-when B3 (retried outages): a host name that does not resolve, network
-    unreachable (when the host has no IPv6 route) and a missing Unix socket. The worker
-    warns and keeps running for each; none exits 2."""
+    """done-when B3 (retried outages): a host name that does not resolve and a missing
+    Unix socket. The worker warns and keeps running for each; none exits 2."""
     tag = uuid.uuid4().hex[:8]
     urls = {
         "unresolvable_host": f"postgresql://loom_t_r4:pw@loom-r4-{tag}.invalid:5432/loom_review4",
@@ -75,10 +81,25 @@ def test_item3_client_side_outages_are_retried(tmp_path: Path):
             f"postgresql://loom_t_r4:pw@/loom_review4?host=/nonexistent/loom-r4-{tag}"
         ),
     }
-    if _network_unreachable():
-        urls["network_unreachable"] = f"postgresql://loom_t_r4:pw@[{UNROUTED_V6}]:5432/loom_review4"
     outcomes = run_workers(urls, tmp_path, warn_s=WARN_S, watch_s=WATCH_S)
     _assert_all_kept_running(outcomes, "client-side connection failures")
+
+
+@pytest.mark.timeout(110)
+def test_item3_network_unreachable_is_retried(tmp_path: Path):
+    """done-when B3 (retried outages): network unreachable (a connection to an IPv6
+    documentation address on a host without an IPv6 route fails at once with 'network
+    unreachable' / 'no route to host'). The worker warns and keeps running; it does not
+    exit 2. Skipped, with the reason, where this host cannot produce that error."""
+    if not _network_unreachable():
+        pytest.skip(
+            f"this host cannot produce 'network unreachable': a connection to {UNROUTED_V6} "
+            "does not fail at once with ENETUNREACH/EHOSTUNREACH (no IPv6 sockets, or an "
+            "IPv6 route that makes it time out instead)"
+        )
+    urls = {"network_unreachable": f"postgresql://loom_t_r4:pw@[{UNROUTED_V6}]:5432/loom_review4"}
+    outcomes = run_workers(urls, tmp_path, warn_s=WARN_S, watch_s=WATCH_S)
+    _assert_all_kept_running(outcomes, "network unreachable")
 
 
 # Postgres's own SQLSTATEs and wording for these states.

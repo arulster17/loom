@@ -12,9 +12,10 @@ import datetime as dt
 import inspect
 import secrets
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any
 
 import psycopg
@@ -300,19 +301,28 @@ def test_item_b3_app_role_runs_partition_upkeep(owner_conn, app_conn):
 
 RACE_ROUNDS = 3
 RACE_DATABASES = 6
+# All rounds together, under pytest's 120 s timeout: a round that hangs fails on its
+# assertion (and its databases are dropped WITH (FORCE), ending the hung sessions)
+# rather than on the timeout. As late as fits: under CI-like CPU load the three rounds
+# take about 90 s, and before this budget the test simply ran until pytest's timeout.
+RACE_BUDGET_S = 110.0
 
 
-def _race_round(info: dict[str, str]) -> None:
+def _race_round(info: dict[str, str], deadline: float) -> None:
     """One round: fresh login and group names, 6 fresh databases, 6 threads released at
-    once into upgrade + ensure_app_login. Drops what it made."""
+    once into upgrade + ensure_app_login, all done by `deadline` (time.monotonic()).
+    Drops what it made."""
     tag = uuid.uuid4().hex[:10]
     login, group = f"loom_t_race_{tag}_app", f"loom_t_race_{tag}_grp"
     password = secrets.token_hex(16)
     names: list[str] = []
     barrier = threading.Barrier(RACE_DATABASES)
 
+    def left() -> float:
+        return max(0.1, deadline - time.monotonic())
+
     def setup(db: str) -> list[migrate.Migration]:
-        barrier.wait(timeout=60)
+        barrier.wait(timeout=left())
         applied = migrate.upgrade(db, group_role=group)
         migrate.ensure_app_login(db, login=login, group_role=group, password=password)
         return applied
@@ -321,9 +331,17 @@ def _race_round(info: dict[str, str]) -> None:
         for _ in range(RACE_DATABASES):
             names.append(create_database(info))
         urls = [admin_url(info, n) for n in names]
-        with ThreadPoolExecutor(max_workers=RACE_DATABASES) as ex:
+        ex = ThreadPoolExecutor(max_workers=RACE_DATABASES)
+        try:
             futures = [ex.submit(setup, u) for u in urls]
-            failures = [(n, f.exception(timeout=90)) for n, f in zip(names, futures, strict=True)]
+            _, pending = wait(futures, timeout=left())
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
+        assert not pending, (
+            f"role setup still running on {len(pending)} of {RACE_DATABASES} databases "
+            f"after the {RACE_BUDGET_S:.0f}s budget (hung when run concurrently?)"
+        )
+        failures = [(n, f.exception()) for n, f in zip(names, futures, strict=True)]
         failed = [(n, repr(e)) for n, e in failures if e is not None]
         assert failed == [], f"role setup failed when run concurrently: {failed}"
         everything = [m.version for m in migrate.load_migrations()]
@@ -400,8 +418,9 @@ def test_item_b3_role_setup_concurrent_on_many_databases():
         "spec B3 seam missing: migrate.ensure_app_login(url, *, login, group_role, password)"
     )
     info = admin_info()
+    deadline = time.monotonic() + RACE_BUDGET_S
     for _ in range(RACE_ROUNDS):
-        _race_round(info)
+        _race_round(info, deadline)
 
 
 # ----------------------------------------------------------- production check

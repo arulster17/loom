@@ -23,7 +23,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from platform_m3_review2_kit import PG_WARNING, QuietPgProxy, warning_lines
+from platform_m3_review2_kit import PG_WARNING, QuietPgProxy
 from platform_m3_review3_kit import WORKER, RedisFront, redis_front, worker_env
 from platform_m3_review_proxy import Service, proxied_url
 
@@ -41,9 +41,10 @@ def rf(tmp_path: Path) -> Iterator[RedisFront]:
         yield front
 
 
-def _gate_warnings(output: str) -> list[str]:
-    """Warning lines naming Postgres after the first one (the start warning)."""
-    return warning_lines(output)[1:]
+def _gate_warnings(svc: Service, start_index: int) -> list[str]:
+    """Warning lines naming Postgres after the start warning (output line `start_index`,
+    the first such line)."""
+    return svc.lines_matching(PG_WARNING, after=start_index + 1)
 
 
 @pytest.mark.timeout(115)
@@ -57,32 +58,27 @@ def test_item4_gate_retrying_refused_connections_logs_a_warning(rf):
     )
     svc = Service(WORKER, worker_env(rf, url))
     try:
-        assert svc.wait_for(PG_WARNING, START_WARN_S), (
-            f"no unreachable-at-start warning naming Postgres:\n{svc.output}"
-        )
+        start = svc.wait_line(PG_WARNING, START_WARN_S)
+        assert start is not None, f"no unreachable-at-start warning naming Postgres:\n{svc.output}"
         started = time.monotonic()
-        deadline = started + GATE_WARN_S
-        while time.monotonic() < deadline and svc.returncode is None:
-            if _gate_warnings(svc.output):
-                break
-            time.sleep(0.1)
+        first_gate = svc.wait_line(PG_WARNING, GATE_WARN_S, after=start[0] + 1)
         elapsed = time.monotonic() - started
         assert svc.returncode is None, (
             f"the worker exited ({svc.returncode}) during a Postgres outage:\n{svc.output}"
         )
-        assert _gate_warnings(svc.output), (
+        assert first_gate is not None, (
             f"no warning naming Postgres in {GATE_WARN_S}s of the gate retrying refused "
             f"connections (spec: it logs at warning, at most once a minute):\n{svc.output}"
         )
         if elapsed < EARLY_S:
             time.sleep(WATCH_S)
-            gate = _gate_warnings(svc.output)
+            gate = _gate_warnings(svc, start[0])
             assert len(gate) == 1, (
                 f"{len(gate)} gate warnings within {elapsed + WATCH_S:.0f}s (spec: at most "
                 f"once a minute):\n{gate}"
             )
         else:
-            gate = _gate_warnings(svc.output)
+            gate = _gate_warnings(svc, start[0])
             assert len(gate) <= 2, f"{len(gate)} gate warnings in {elapsed:.0f}s:\n{gate}"
         assert svc.returncode is None, f"the worker exited during the outage:\n{svc.output}"
         assert pg.sessions() == [], "connected although Postgres refused connections"

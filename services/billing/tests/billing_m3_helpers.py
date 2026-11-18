@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import uuid
+from pathlib import Path
 from typing import Any
 
 import redis.asyncio as aioredis
@@ -15,8 +17,41 @@ from loom_platform.limiter import Limiter, org_key, script_source
 from loom_platform.usage import UsageEvent, insert_usage_events
 
 _SCRIPT_COMMANDS = {"EVAL", "EVALSHA", "EVAL_RO", "EVALSHA_RO", "FCALL", "FCALL_RO"}
-_SET_CREDIT = script_source("set_credit")
-_SET_CREDIT_SHA = hashlib.sha1(_SET_CREDIT.encode()).hexdigest()
+# The limiter's own scripts (loading an org, reserve/settle/release, the credit refresh):
+# none of them is the reconciler's heal, told apart by source or SHA.
+_LIMITER_SCRIPTS = frozenset(
+    v
+    for name in ("init_org", "reserve", "settle", "release", "set_credit")
+    for v in (script_source(name), hashlib.sha1(script_source(name).encode()).hexdigest())
+)
+CONTRACTS = Path(__file__).resolve().parents[3] / "docs" / "phase1-contracts.md"
+_ORG_KEY = re.compile(r"^\|\s*`loom:org:<org>:([^`]+)`")
+
+
+def documented_token_key() -> str | None:
+    """The suffix of the heal-token key in contracts §6's key table (`loom:org:<org>:X`,
+    the row naming a heal token), or None when §6 documents none."""
+    text = CONTRACTS.read_text(encoding="utf-8")
+    start = text.find("\n## 6.")
+    end = text.find("\n## 7.", start + 1)
+    section = text[start:end] if start >= 0 else ""
+    for line in section.splitlines():
+        m = _ORG_KEY.match(line)
+        low = line.lower()
+        if m and "heal" in low and "token" in low:
+            return m.group(1)
+    return None
+
+
+def token_key(org: uuid.UUID) -> str:
+    """The org's heal-token key, as contracts §6 documents it (fails the test when §6
+    documents none)."""
+    name = documented_token_key()
+    assert name is not None, (
+        "contracts §6 documents no heal token key (spec B1: a `loom:org:<org>:...` row "
+        "for the random heal token, written by init_org and the heal)"
+    )
+    return org_key(org, name)
 
 
 def _text(v: Any) -> str:
@@ -42,18 +77,21 @@ class HealGate(aioredis.Redis):
     `release` is set. Given to a Reconciler, it stops that reconciler after it observed
     the org's usage and before its heal (spec B1: the heal is one atomic Lua call).
 
-    Assumption: the heal is the one server-side script call (EVAL, EVALSHA, FCALL, or
-    their read-only forms) whose KEYS include the org's `usage` key, the credit refresh
-    (set_credit.lua, told apart by its SHA or source) aside. Only the first such call is
-    held; any other command, and any other script, goes through. The call is caught
-    whether it is sent directly (`execute_command`, which `eval`, `evalsha`, `fcall` and
-    registered `Script`s use) or through a `pipeline()`: queued in a pipeline, it is held
-    when the pipeline is executed; in a watching pipeline (immediate mode), when it is
-    sent."""
+    The heal is recognised by what the spec fixes about it: the server-side script call
+    (EVAL, EVALSHA, FCALL, or their read-only forms) that adds to the org's `usage` and
+    sets its heal token, so its KEYS include both the `usage` key and the heal-token key
+    (contracts §6), and it is not one of the limiter's own scripts (`init_org`, which
+    writes both keys too, reserve, settle, release, set_credit; told apart by SHA or
+    source). Only the first such call is held; any other command, and any other script,
+    goes through. The call is caught whether it is sent directly (`execute_command`,
+    which `eval`, `evalsha`, `fcall` and registered `Script`s use) or through a
+    `pipeline()`: queued in a pipeline, it is held when the pipeline is executed; in a
+    watching pipeline (immediate mode), when it is sent."""
 
     def __init__(self, base: aioredis.Redis, org: uuid.UUID) -> None:
         super().__init__(connection_pool=base.connection_pool)
         self.usage_key = org_key(org, "usage")
+        self.token_key = token_key(org)
         self.reached = asyncio.Event()
         self.release = asyncio.Event()
         self._held = False
@@ -62,9 +100,9 @@ class HealGate(aioredis.Redis):
         keys = script_keys(args)
         if keys is None:
             return False
-        if _text(args[1]) in (_SET_CREDIT_SHA, _SET_CREDIT):
+        if _text(args[1]) in _LIMITER_SCRIPTS:
             return False
-        return self.usage_key in keys
+        return self.usage_key in keys and self.token_key in keys
 
     async def _hold(self, calls: list[tuple[Any, ...]]) -> None:
         if not self._held and any(self._is_heal(a) for a in calls):

@@ -74,16 +74,24 @@ def warning_lines(output: str) -> list[str]:
     return [line for line in output.splitlines() if PG_WARNING.search(line)]
 
 
-def assert_warning_wording(output: str) -> None:
+def assert_start_warning_wording(line: str) -> None:
     """Spec: the unreachable-at-start warning is one log line that names Postgres (or
-    "database") and does not repeat the role problems' wording ("superuser", "owns")."""
+    "database") and does not repeat the role problems' wording ("superuser", "owns").
+    `line` is that warning: the first line naming Postgres the service wrote (a later
+    line, such as a gate warning, cannot stand in for it)."""
+    assert PG_WARNING.search(line), f"not a warning line naming Postgres / the database: {line}"
+    assert not _ROLE_WORDING.search(line), (
+        "the unreachable-at-start warning repeats the role problems' wording (superuser / "
+        f"owns), so it reads like a refusal:\n{line}"
+    )
+
+
+def assert_warning_wording(output: str) -> None:
+    """`assert_start_warning_wording` on the first warning line naming Postgres in
+    `output` (the unreachable-at-start warning)."""
     lines = warning_lines(output)
     assert lines, f"no warning line naming Postgres / the database:\n{output}"
-    clean = [line for line in lines if not _ROLE_WORDING.search(line)]
-    assert clean, (
-        "the Postgres warning repeats the role problems' wording (superuser / owns), so "
-        f"it reads like a refusal:\n{lines}"
-    )
+    assert_start_warning_wording(lines[0])
 
 
 # ------------------------------------------------------------------ Postgres proxy

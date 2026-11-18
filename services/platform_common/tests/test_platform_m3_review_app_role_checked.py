@@ -35,6 +35,9 @@ SERVICES = {
     "billing": [sys.executable, "-m", "loom_billing", "worker"],
     "poolmgr": [sys.executable, "-m", "loom_poolmgr.cli", "run"],
 }
+# The refusal takes seconds; with the module's loom-migrate run (under 90 s, usually a
+# few) the test stays under pytest's 120 s timeout, so a hang fails on its assertion.
+EXIT_S = 60
 CANNOT_CHECK = re.compile(r"cannot check", re.IGNORECASE)
 LOGIN_FAILED = re.compile(
     r"authentication failed|password authentication|role \S+ does not exist", re.IGNORECASE
@@ -80,7 +83,7 @@ def test_item_b3_app_role_start_has_no_cannot_check_message(db, service):
             LOOM_BILLING_METRICS_PORT="0",
         )
         svc = Service(SERVICES[service], env)
-        code = svc.wait_exit(90)
+        code = svc.wait_exit(EXIT_S)
         out = svc.output
         assert code is not None, f"{service} did not exit (it started?):\n{out}"
         assert not CANNOT_CHECK.search(out), out
