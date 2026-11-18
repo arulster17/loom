@@ -31,3 +31,20 @@ export async function enforceSigninLimit(email: string, headers: Pick<Headers, "
   });
   if (!verdict.allowed) throw new SigninLimitExceeded(`too many sign-in emails (per ${verdict.reason})`);
 }
+
+/**
+ * Returns `p` itself, with a no-op rejection handler attached at once, so a rejection is
+ * never reported as unhandled while the caller has not awaited `p` yet. The caller still
+ * awaits `p` and gets its error unchanged.
+ *
+ * Needed for the provider's `sendVerificationRequest`: @auth/core's sendToken
+ * (lib/actions/signin/send-token.js, 0.41.x) calls it, then awaits a SHA-256 of the token
+ * (crypto.subtle, off the event loop), and only then awaits the send's promise
+ * (`Promise.all([sendRequest, createToken])`). A SigninLimitExceeded (or a failed send)
+ * that rejects before the hash is done is, for Node, an unhandled rejection: a warning in
+ * tests, a crash under the default --unhandled-rejections=throw.
+ */
+export function handledNow<T>(p: Promise<T>): Promise<T> {
+  p.catch(() => {});
+  return p;
+}

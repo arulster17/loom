@@ -10,7 +10,7 @@ import type { UserRole } from "@/lib/authz";
 import { getPool } from "@/lib/db";
 import { ensureUserOrg, syncBootstrapAdmin } from "@/lib/data/orgs";
 import { revokePlaygroundKeys } from "@/lib/data/playground";
-import { enforceSigninLimit } from "@/lib/signin-send";
+import { enforceSigninLimit, handledNow } from "@/lib/signin-send";
 
 // The Auth.js configuration, apart from `NextAuth(...)` itself (src/auth.ts), so tests can
 // build it without the Next.js runtime.
@@ -33,9 +33,13 @@ function magicLink(env: Env): Provider {
     ...mail,
     // Every magic-link email Auth.js sends passes the per-email and per-IP limit first
     // (src/lib/signin-send.ts): the sign-in form and POST /api/auth/signin/nodemailer.
-    async sendVerificationRequest(params) {
-      await enforceSigninLimit(params.identifier, params.request.headers);
-      await send(params);
+    sendVerificationRequest(params) {
+      return handledNow(
+        (async () => {
+          await enforceSigninLimit(params.identifier, params.request.headers);
+          await send(params);
+        })(),
+      );
     },
   });
 }
