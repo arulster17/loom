@@ -108,24 +108,49 @@ class FaultyRedis:
         self.landed: list[bytes] = []
         self.failing = False
         self._server: asyncio.Server | None = None
+        self._holder: socket.socket | None = None
         self._writers: set[asyncio.StreamWriter] = set()
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def __aenter__(self) -> FaultyRedis:
-        await self._listen()
+        # The port stays ours while the proxy lives: this socket is bound to it and never
+        # listens. While no listener is open, Linux answers a connect with a reset
+        # (ECONNREFUSED, as when Redis is down), and no other process (xdist worker,
+        # outgoing connect) can be given the port before `heal()` listens on it again.
+        self._holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            self._holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._holder.bind(("127.0.0.1", 0))
+            self.port = self._holder.getsockname()[1]
+            await self._listen()
+        except BaseException:
+            self._holder.close()
+            raise
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        self._stop_listening()
-        for w in list(self._writers):
-            w.transport.abort()
-        for t in list(self._tasks):
-            t.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        try:
+            self._stop_listening()
+            for w in list(self._writers):
+                w.transport.abort()
+            for t in list(self._tasks):
+                t.cancel()
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        finally:
+            if self._holder is not None:
+                self._holder.close()
 
     async def _listen(self) -> None:
-        self._server = await asyncio.start_server(self._handle, "127.0.0.1", self.port)
-        self.port = self._server.sockets[0].getsockname()[1]
+        # Both sockets set SO_REUSEADDR, so Linux lets this one bind the port the
+        # (non-listening) holder is bound to; asyncio makes it listen.
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", self.port))
+            self._server = await asyncio.start_server(self._handle, sock=sock)
+        except BaseException:
+            sock.close()
+            raise
 
     def _stop_listening(self) -> None:
         if self._server is not None:
