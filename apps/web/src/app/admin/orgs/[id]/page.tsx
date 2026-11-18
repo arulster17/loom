@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -62,7 +64,9 @@ export default async function OrgAdminPage(props: PageProps<"/admin/orgs/[id]">)
           <SuspendForm orgId={org.id} status={org.status} />
         </Card>
         <Card title="Adjust credit">
-          <AdjustCreditsForm orgId={org.id} />
+          {/* A new token per render: a successful post revalidates this page, so the next
+              adjustment gets a fresh one, while a resubmit of this one posts nothing more. */}
+          <AdjustCreditsForm orgId={org.id} formToken={randomUUID()} />
         </Card>
       </div>
 

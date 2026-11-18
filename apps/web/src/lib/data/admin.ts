@@ -3,8 +3,9 @@ import "server-only";
 import type { PoolClient } from "pg";
 
 import { assertPlatformAdmin, AuthzError, isUuid, type Actor, type OrgStatus } from "@/lib/authz";
-import { getPool, withTx } from "@/lib/db";
+import { getPool, withTx, type Db } from "@/lib/db";
 import { audit } from "@/lib/data/orgs";
+import { isDev } from "@/lib/env-check";
 
 // Platform accounts (loom_platform.ledger.SYSTEM_ACCOUNTS).
 export const REVENUE_ACCOUNT = "00000000-0000-0000-0000-000000000001";
@@ -155,6 +156,20 @@ function pgCode(e: unknown): string | undefined {
   return typeof e === "object" && e !== null && "code" in e ? String((e as { code: unknown }).code) : undefined;
 }
 
+export const OWN_ORG_REFUSAL = "Admins cannot approve or credit an org they belong to. Ask another admin.";
+
+/**
+ * Outside LOOM_ENV=dev an admin may not approve, or adjust the credit of, an org they are
+ * a member of (contracts §4). In dev it is allowed: the bootstrap admin approves their own
+ * org in the local flow. The admin actions call this first, and the data layer again in
+ * the write's transaction.
+ */
+export async function assertNotOwnOrg(actor: Actor, orgId: string, db: Db = getPool()): Promise<void> {
+  if (isDev() || !isUuid(orgId)) return;
+  const r = await db.query("SELECT 1 FROM org_members WHERE org_id = $1 AND user_id = $2", [orgId, actor.userId]);
+  if (r.rows[0]) throw new AuthzError(OWN_ORG_REFUSAL);
+}
+
 /**
  * Approves a pending signup: loom_approve_org activates the org, posts the signup credit
  * (idempotency key promo:signup:<org>) and writes the audit row, in one transaction.
@@ -163,7 +178,10 @@ export async function approveOrg(actor: Actor, orgId: string, promoMicros: bigin
   assertPlatformAdmin(actor);
   if (!isUuid(orgId)) throw new AuthzError("Org not found.", "not_found");
   try {
-    await getPool().query("SELECT loom_approve_org($1, $2, $3)", [orgId, actor.userId, promoMicros.toString()]);
+    await withTx(async (c) => {
+      await assertNotOwnOrg(actor, orgId, c);
+      await c.query("SELECT loom_approve_org($1, $2, $3)", [orgId, actor.userId, promoMicros.toString()]);
+    });
   } catch (e) {
     const code = pgCode(e);
     if (code === "42501") throw new AuthzError("Admins only.");
@@ -213,40 +231,46 @@ export const suspendOrg = (actor: Actor, orgId: string, reason: string) =>
 export const unsuspendOrg = (actor: Actor, orgId: string) =>
   transition(actor, orgId, "suspended", "active", "org.unsuspend", null);
 
+export const FORM_TOKEN_REUSED =
+  "This form was already used for a different adjustment. Reload the page and enter it again.";
+
 /**
- * Adds (grant, against promo_expense) or removes (correction, against revenue) credit.
- * The audit row comes first so its id is the ledger idempotency key `admin:<audit id>`
- * (contracts §3), and both commit together.
+ * Adds (grant, against promo_expense) or removes (correction, against revenue) credit,
+ * with its audit row in the same transaction.
+ *
+ * `formToken` (the adjust-credits form's per-render UUID, which the admin action always
+ * passes) is required: the ledger idempotency key is `admin:adjust:<token>` (contracts §3),
+ * so a resubmit or the same form posted from a second tab posts once: the repeat writes
+ * nothing (no ledger transaction, no audit row) and returns the first transaction, with
+ * `created: false`. A missing or malformed token is refused, and so is a token already used
+ * for another org or amount.
  */
 export async function adjustCredits(
   actor: Actor,
   orgId: string,
   amountMicros: bigint,
   memo: string,
-): Promise<{ transactionId: string }> {
+  opts: { formToken: string },
+): Promise<{ transactionId: string; created: boolean }> {
   if (!isUuid(orgId)) throw new AuthzError("Org not found.", "not_found");
+  if (typeof opts?.formToken !== "string" || !isUuid(opts.formToken)) {
+    throw new RangeError("This form has expired. Reload the page and try again.");
+  }
   const note = memo.trim().slice(0, 500);
   if (!note) throw new RangeError("Say why: the note is required.");
   if (amountMicros === 0n) throw new RangeError("The amount cannot be zero.");
   if (amountMicros > MAX_ADJUSTMENT_MICROS || -amountMicros > MAX_ADJUSTMENT_MICROS) {
     throw new RangeError("Adjustments are at most $10,000 either way.");
   }
-  return withTx(async (c) => {
-    await lockAdmin(c, actor);
-    const org = await c.query("SELECT 1 FROM orgs WHERE id = $1 FOR UPDATE", [orgId]);
-    if (!org.rows[0]) throw new AuthzError("Org not found.", "not_found");
-    const grant = amountMicros > 0n;
-    const auditId = await audit(c, actor.userId, "org.credit_adjust", "org", orgId, {
-      amount_micros: amountMicros.toString(),
-      kind: grant ? "grant" : "correction",
-      memo: note,
-    });
-    const r = await c.query<{ transaction_id: string }>(
-      `SELECT transaction_id FROM loom_post_transaction(
+  const grant = amountMicros > 0n;
+  const details = { amount_micros: amountMicros.toString(), kind: grant ? "grant" : "correction", memo: note };
+  const post = (c: PoolClient, key: string) =>
+    c.query<{ transaction_id: string; created: boolean }>(
+      `SELECT transaction_id, created FROM loom_post_transaction(
          'adjustment', $1, $2, NULL, $3,
          ARRAY[loom_org_credit_account($2), $4::uuid], ARRAY[$5::bigint, $6::bigint])`,
       [
-        `admin:${auditId}`,
+        key,
         orgId,
         note,
         grant ? PROMO_EXPENSE_ACCOUNT : REVENUE_ACCOUNT,
@@ -254,6 +278,28 @@ export async function adjustCredits(
         (-amountMicros).toString(),
       ],
     );
-    return { transactionId: r.rows[0].transaction_id };
-  });
+  try {
+    return await withTx(async (c) => {
+      await lockAdmin(c, actor);
+      await assertNotOwnOrg(actor, orgId, c);
+      // Also serialises two posts of one form for the same org.
+      const org = await c.query("SELECT 1 FROM orgs WHERE id = $1 FOR UPDATE", [orgId]);
+      if (!org.rows[0]) throw new AuthzError("Org not found.", "not_found");
+      const token = opts.formToken.toLowerCase();
+      const r = await post(c, `admin:adjust:${token}`);
+      const { transaction_id: transactionId, created } = r.rows[0];
+      if (created) {
+        await audit(c, actor.userId, "org.credit_adjust", "org", orgId, {
+          ...details,
+          form_token: token,
+          transaction_id: transactionId,
+        });
+      }
+      return { transactionId, created };
+    });
+  } catch (e) {
+    // loom_post_transaction: this key was already posted with another org or amount.
+    if (pgCode(e) === "23505") throw new RangeError(FORM_TOKEN_REUSED);
+    throw e;
+  }
 }

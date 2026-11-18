@@ -1,6 +1,7 @@
 // The sign-in rate limit's Redis store against the real local Redis (docker compose up
 // -d redis). Uses database 15 (LOOM_TEST_REDIS_URL to change) and only keys under a
-// random secret, deleted at the end. Skips when Redis is not reachable.
+// random secret, deleted at the end. Like the Python fixtures: with LOOM_TEST_REDIS_URL
+// unset and Redis down the test skips; with it set (as in CI) an unreachable Redis fails it.
 
 import { randomUUID } from "node:crypto";
 
@@ -9,15 +10,23 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { checkSigninLimit, signinLimitKeys } from "@/lib/signin-limit";
 
-const url = process.env.LOOM_TEST_REDIS_URL ?? "redis://localhost:6379/15";
+const explicitRedis = process.env.LOOM_TEST_REDIS_URL;
+const url = explicitRedis ?? "redis://localhost:6379/15";
 process.env.LOOM_REDIS_URL = url;
 
 const probe = new Redis(url, { lazyConnect: true, maxRetriesPerRequest: 0, connectTimeout: 1000, retryStrategy: () => null });
 probe.on("error", () => {});
-const up = await probe.connect().then(
-  () => true,
-  () => false,
+const redisError = await probe.connect().then(
+  () => null,
+  (e: unknown) => (e instanceof Error ? e.message : String(e)),
 );
+const up = redisError === null;
+if (!up && explicitRedis) {
+  throw new Error(
+    `LOOM_TEST_REDIS_URL is set (${explicitRedis}) but Redis is not reachable: ${redisError}. ` +
+      "Start Redis (docker compose up -d redis), or unset the variable to skip this test.",
+  );
+}
 
 const { redisCounterStore, redis } = await import("@/lib/redis");
 

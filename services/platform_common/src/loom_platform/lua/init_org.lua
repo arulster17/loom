@@ -6,10 +6,14 @@
 -- ARGV[3]  api key id
 -- ARGV[4]  key usage total, micros (loom_key_usage_total)
 -- ARGV[5]  credit version (loom_org_credit_version, same snapshot as ARGV[1])
+-- ARGV[6]  a fresh heal token (a random UUID made by the caller)
 --
 -- Org credit and usage are set together or not at all: a state where one exists without
 -- the other could misstate the balance. Values already present are newer than any
 -- Postgres snapshot (they include settled requests still in the stream), so they win.
+-- Every initialisation of the org also writes the fresh heal token (`heal_token`): a
+-- reconciler's heal read before this load then finds the token changed and does nothing
+-- (docs/phase1-contracts.md sections 6 and 7, "Reconcile").
 -- Returns {org initialized now 1|0, key initialized now 1|0}.
 
 local p = KEYS[1]
@@ -20,6 +24,7 @@ if redis.call('EXISTS', p .. ':usage') == 0 then
   redis.call('SET', p .. ':credit', ARGV[1])
   redis.call('SET', p .. ':credit_v', ARGV[5])
   redis.call('SET', p .. ':usage', ARGV[2])
+  redis.call('SET', p .. ':heal_token', ARGV[6])
   org_new = 1
 end
 if redis.call('SET', kp .. ':usage', ARGV[4], 'NX') then

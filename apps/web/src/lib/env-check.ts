@@ -17,6 +17,23 @@ export function loomEnv(env: Env = process.env): LoomEnv | null {
   return v === "dev" || v === "prod" ? v : null;
 }
 
+/** LOOM_ENV=dev. Anything else, unset included, is "outside dev". */
+export function isDev(env: Env = process.env): boolean {
+  return loomEnv(env) === "dev";
+}
+
+/** What this server warns about at start without refusing to start. */
+export function environmentWarnings(env: Env = process.env): string[] {
+  const warnings: string[] = [];
+  if (!isDev(env) && (env.LOOM_ADMIN_EMAILS ?? "").trim()) {
+    warnings.push(
+      "LOOM_ADMIN_EMAILS is set but ignored: it grants admin only with LOOM_ENV=dev. " +
+        "Grant an admin with SQL instead (contracts §4).",
+    );
+  }
+  return warnings;
+}
+
 /** What stops this server from starting; empty when it may start. */
 export function checkEnvironment(env: Env = process.env): string[] {
   const mode = loomEnv(env);

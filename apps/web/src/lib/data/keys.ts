@@ -10,6 +10,11 @@ export const PLAYGROUND_SCOPE = "playground";
 
 export const MAX_KEY_NAME = 100;
 
+/** The largest spend limit a key may have: $1,000,000 (10^12 micros), well inside Postgres
+ * bigint and the exact integer range of the doubles in the gateway's reserve.lua. */
+export const MAX_SPEND_LIMIT_MICROS = 1_000_000_000_000n;
+export const SPEND_LIMIT_TOO_HIGH = "A spend limit can be at most $1,000,000.";
+
 export interface ApiKeyView {
   id: string;
   name: string;
@@ -77,6 +82,9 @@ export async function createKey(
   const name = input.name.trim().slice(0, MAX_KEY_NAME);
   if (input.spendLimitMicros !== null && input.spendLimitMicros < 0n) {
     throw new RangeError("Spend limit cannot be negative.");
+  }
+  if (input.spendLimitMicros !== null && input.spendLimitMicros > MAX_SPEND_LIMIT_MICROS) {
+    throw new RangeError(SPEND_LIMIT_TOO_HIGH);
   }
   return withTx(async (c) => {
     if ((await lockOrgStatus(c, ctx.orgId)) !== "active") {

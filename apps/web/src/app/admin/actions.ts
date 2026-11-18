@@ -3,8 +3,8 @@
 import { revalidatePath } from "next/cache";
 
 import { userMessage } from "@/lib/action-errors";
-import { isPlatformAdmin } from "@/lib/authz";
-import { adjustCredits, approveOrg, rejectOrg, suspendOrg, unsuspendOrg } from "@/lib/data/admin";
+import { isPlatformAdmin, isUuid } from "@/lib/authz";
+import { adjustCredits, approveOrg, assertNotOwnOrg, rejectOrg, suspendOrg, unsuspendOrg } from "@/lib/data/admin";
 import { loadActor } from "@/lib/data/orgs";
 import { formatUsd, parseUsdToMicros } from "@/lib/money";
 import { sessionUserId } from "@/lib/session";
@@ -13,6 +13,8 @@ export type AdminState = { ok?: string; error?: string } | undefined;
 
 // Every action re-checks the caller is an admin (here, and again inside the data layer's
 // transaction), and the data layer writes the admin_audit_log row with the change.
+// Outside LOOM_ENV=dev, approving or crediting an org the admin belongs to is refused the
+// same way: here, and again in the data layer (assertNotOwnOrg).
 
 async function adminActor() {
   const userId = await sessionUserId();
@@ -40,6 +42,7 @@ export async function orgStatusAction(_prev: AdminState, form: FormData): Promis
   try {
     switch (op) {
       case "approve":
+        await assertNotOwnOrg(actor, orgId);
         await approveOrg(actor, orgId, promoMicros());
         return done(orgId, `Approved; ${formatUsd(promoMicros())} credit added.`);
       case "reject":
@@ -60,13 +63,21 @@ export async function orgStatusAction(_prev: AdminState, form: FormData): Promis
   }
 }
 
+/**
+ * The adjust-credits form carries a per-render `form_token` (a random UUID): the ledger
+ * posting is keyed by it, so a resubmit or a second tab posts once and the repeat gets
+ * the same answer (src/lib/data/admin.ts adjustCredits).
+ */
 export async function adjustCreditsAction(_prev: AdminState, form: FormData): Promise<AdminState> {
   const actor = await adminActor();
   if (!actor) return { error: "Admins only." };
   const orgId = String(form.get("org_id") ?? "");
+  const formToken = form.get("form_token");
+  if (!isUuid(formToken)) return { error: "This form has expired. Reload the page and try again." };
   try {
+    await assertNotOwnOrg(actor, orgId);
     const amount = parseUsdToMicros(String(form.get("amount") ?? ""));
-    await adjustCredits(actor, orgId, amount, String(form.get("memo") ?? ""));
+    await adjustCredits(actor, orgId, amount, String(form.get("memo") ?? ""), { formToken });
     return done(orgId, `${amount > 0n ? "Added" : "Removed"} ${formatUsd(amount > 0n ? amount : -amount)}.`);
   } catch (e) {
     return { error: userMessage(e) };
