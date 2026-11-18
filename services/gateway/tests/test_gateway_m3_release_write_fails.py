@@ -96,7 +96,10 @@ class FaultyRedis:
       connection reset without forwarding it (its time and request id go to `blocked`);
       with `then="refuse"` the proxy stops listening and drops its connections, so
       connecting is refused.
-    `landed` holds the request ids of release script calls forwarded to Redis."""
+    `landed` holds the request ids of release script calls forwarded to Redis, less those
+    Redis answered with NOSCRIPT: the script cache is server-wide, so on a fresh server
+    the first release EVALSHA does not run, and redis-py loads the script and calls
+    again. Every other forwarded call counts, whether or not its reply came back."""
 
     def __init__(self, upstream: tuple[str, int], then: str) -> None:
         assert then in ("reset", "refuse")
@@ -183,9 +186,16 @@ class FaultyRedis:
                 return
             ur, uw = await asyncio.open_connection(*self.upstream)
             dropping: list[bytes] = []  # the reserve whose reply is to be dropped
+            # The release call awaiting its reply. redis-py has one command in flight per
+            # connection, so the next reply read starts with this call's.
+            releasing: list[bytes] = []
 
             async def relay_replies() -> None:
                 while data := await ur.read(65536):
+                    if releasing:
+                        if data.startswith(b"-NOSCRIPT"):
+                            self.landed.remove(releasing[0])  # it did not run
+                        releasing.clear()
                     if dropping:
                         if data.startswith(b"-NOSCRIPT"):
                             dropping.clear()
@@ -210,6 +220,7 @@ class FaultyRedis:
                     dropping[:] = [cmd[4]]
                 if script and _sha(cmd) == RELEASE_SHA:
                     self.landed.append(cmd[4])
+                    releasing[:] = [cmd[4]]
                 uw.write(_encode(cmd))
                 await uw.drain()
         except (ConnectionError, asyncio.IncompleteReadError, ValueError, OSError):
