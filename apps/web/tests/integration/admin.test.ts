@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { Client } from "pg";
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -27,6 +29,9 @@ async function status(orgId: string): Promise<string> {
   return (await getPool().query("SELECT status FROM orgs WHERE id = $1", [orgId])).rows[0].status;
 }
 
+/** A fresh adjust-credits form token, passed the way the admin action passes it (W2). */
+const formToken = () => ({ formToken: randomUUID() });
+
 describe.skipIf(!hasDb)("admin actions are admin-only", () => {
   it("refuses every admin operation to a normal user", async () => {
     const user = await signUp();
@@ -40,7 +45,7 @@ describe.skipIf(!hasDb)("admin actions are admin-only", () => {
       () => rejectOrg(notAdmin, victim.orgId, null),
       () => suspendOrg(notAdmin, victim.orgId, "x"),
       () => unsuspendOrg(notAdmin, victim.orgId),
-      () => adjustCredits(notAdmin, victim.orgId, 1_000_000n, "x"),
+      () => adjustCredits(notAdmin, victim.orgId, 1_000_000n, "x", formToken()),
     ];
     for (const c of calls) await expect(c()).rejects.toBeInstanceOf(AuthzError);
     expect(await status(victim.orgId)).toBe("pending_approval");
@@ -54,7 +59,7 @@ describe.skipIf(!hasDb)("admin actions are admin-only", () => {
     await expect(listOrgs(forged)).rejects.toBeInstanceOf(AuthzError);
     await expect(approveOrg(forged, victim.orgId, 5_000_000n)).rejects.toBeInstanceOf(AuthzError);
     await expect(suspendOrg(forged, victim.orgId, "x")).rejects.toBeInstanceOf(AuthzError);
-    await expect(adjustCredits(forged, victim.orgId, 1_000_000n, "x")).rejects.toBeInstanceOf(AuthzError);
+    await expect(adjustCredits(forged, victim.orgId, 1_000_000n, "x", formToken())).rejects.toBeInstanceOf(AuthzError);
     expect(await status(victim.orgId)).toBe("pending_approval");
   });
 });
@@ -116,11 +121,13 @@ describe.skipIf(!hasDb)("suspension", () => {
 });
 
 describe.skipIf(!hasDb)("credit adjustments", () => {
-  it("posts grants and corrections through the ledger, keyed by the audit row", async () => {
+  it("posts grants and corrections through the ledger, keyed by the form token, one audit row each", async () => {
     const admin = await makeAdmin();
     const u = await activeUser(admin);
-    await adjustCredits(admin, u.orgId, 2_500_000n, "goodwill");
-    await adjustCredits(admin, u.orgId, -1_000_000n, "double credit fix");
+    const grantToken = randomUUID();
+    const fixToken = randomUUID();
+    await adjustCredits(admin, u.orgId, 2_500_000n, "goodwill", { formToken: grantToken });
+    await adjustCredits(admin, u.orgId, -1_000_000n, "double credit fix", { formToken: fixToken });
     expect((await getBalance(u)).balanceMicros).toBe(6_500_000n);
 
     const tx = await getPool().query(
@@ -133,18 +140,55 @@ describe.skipIf(!hasDb)("credit adjustments", () => {
       "SELECT id, details FROM admin_audit_log WHERE target_id = $1 AND action = 'org.credit_adjust' ORDER BY id",
       [u.orgId],
     );
-    expect(tx.rows.map((r) => r.idempotency_key)).toEqual(audits.rows.map((r) => `admin:${r.id}`));
+    // Contracts §3: the ledger idempotency key is admin:adjust:<form token>.
+    expect(tx.rows.map((r) => r.idempotency_key)).toEqual([`admin:adjust:${grantToken}`, `admin:adjust:${fixToken}`]);
     expect(tx.rows[0].accounts).toContain("00000000-0000-0000-0000-000000000003"); // grant vs promo_expense
     expect(tx.rows[1].accounts).toContain("00000000-0000-0000-0000-000000000001"); // correction vs revenue
+    expect(audits.rows).toHaveLength(2);
+    expect(audits.rows[0].details).toMatchObject({ amount_micros: "2500000", kind: "grant" });
     expect(audits.rows[1].details).toMatchObject({ amount_micros: "-1000000", kind: "correction" });
   });
 
   it("refuses zero, oversized and unexplained adjustments", async () => {
     const admin = await makeAdmin();
     const u = await activeUser(admin);
-    await expect(adjustCredits(admin, u.orgId, 0n, "x")).rejects.toBeInstanceOf(RangeError);
-    await expect(adjustCredits(admin, u.orgId, 1_000_000n, "  ")).rejects.toBeInstanceOf(RangeError);
-    await expect(adjustCredits(admin, u.orgId, 20_000_000_000n, "x")).rejects.toBeInstanceOf(RangeError);
+    await expect(adjustCredits(admin, u.orgId, 0n, "x", formToken())).rejects.toBeInstanceOf(RangeError);
+    await expect(adjustCredits(admin, u.orgId, 1_000_000n, "  ", formToken())).rejects.toBeInstanceOf(RangeError);
+    await expect(adjustCredits(admin, u.orgId, 20_000_000_000n, "x", formToken())).rejects.toBeInstanceOf(RangeError);
     expect((await getBalance(u)).balanceMicros).toBe(5_000_000n);
+  });
+
+  // W2: "A missing or malformed token is refused", in the data layer too: no path posts an
+  // adjustment without a form token (the admin action always passes one).
+  it("refuses an adjustment without a valid form token, with no ledger entry or audit row", async () => {
+    const admin = await makeAdmin();
+    const u = await activeUser(admin);
+    const adjustments = async () =>
+      (
+        await getPool().query("SELECT count(*)::int AS n FROM ledger_transactions WHERE org_id = $1 AND kind = 'adjustment'", [
+          u.orgId,
+        ])
+      ).rows[0].n;
+    // Loosely typed, so the calls below compile whether the token argument is optional or required.
+    const loose = adjustCredits as unknown as (...args: unknown[]) => Promise<unknown>;
+    const attempts: [string, () => Promise<unknown>][] = [
+      ["no token argument", () => loose(admin, u.orgId, 1_000_000n, "goodwill")],
+      ["empty options", () => loose(admin, u.orgId, 1_000_000n, "goodwill", {})],
+      ["undefined token", () => loose(admin, u.orgId, 1_000_000n, "goodwill", { formToken: undefined })],
+      ["empty token", () => loose(admin, u.orgId, 1_000_000n, "goodwill", { formToken: "" })],
+      ["malformed token", () => loose(admin, u.orgId, 1_000_000n, "goodwill", { formToken: "not-a-uuid" })],
+    ];
+    for (const [what, call] of attempts) {
+      await expect(call(), what).rejects.toThrow();
+    }
+    expect((await getBalance(u)).balanceMicros).toBe(5_000_000n);
+    expect(await adjustments()).toBe(0);
+    expect(await auditActions(u.orgId)).toEqual(["org.approve"]);
+
+    // The same adjustment with a valid token goes through: the refusals were about the token.
+    await adjustCredits(admin, u.orgId, 1_000_000n, "goodwill", formToken());
+    expect((await getBalance(u)).balanceMicros).toBe(6_000_000n);
+    expect(await adjustments()).toBe(1);
+    expect(await auditActions(u.orgId)).toEqual(["org.approve", "org.credit_adjust"]);
   });
 });
