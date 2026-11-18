@@ -259,6 +259,75 @@ def sql_tokens(sql: str) -> list[_Tok]:
     return out
 
 
+# The object-identifier types a literal is read as an object name by: `'orgs'::regclass`,
+# `CAST('orgs' AS regclass)`, `regclass 'orgs'`.
+_REG_TYPES = frozenset(
+    "regclass regcollation regconfig regdictionary regnamespace regoper regoperator regproc "
+    "regprocedure regrole regtype".split()
+)
+# Words a parenthesis follows that make it no function call: `x IN ('orgs')`,
+# `VALUES ('orgs')`, `= ANY ('{orgs}')`, `ARRAY('orgs')`, a sub-expression after a
+# keyword. Anything else directly before `(` is a function name.
+_PAREN_KEYWORDS = frozenset(
+    "in values any all some exists array row as over filter within using on and or not "
+    "where select from then else when case by is like ilike similar between with returning "
+    "into set join lateral distinct group order having limit offset union except intersect "
+    "recursive materialized escape".split()
+)
+
+
+def _reg_type_at(toks: list[_Tok], j: int) -> bool:
+    """toks[j:] starts with an object-identifier type name, maybe `pg_catalog.`-qualified."""
+    if j < len(toks) and toks[j].kind == "ident" and toks[j].text in _REG_TYPES:
+        return True
+    return (
+        j + 2 < len(toks)
+        and toks[j] == _Tok("ident", "pg_catalog")
+        and toks[j + 1] == _Tok("op", ".")
+        and toks[j + 2].kind == "ident"
+        and toks[j + 2].text in _REG_TYPES
+    )
+
+
+def _literal_reads_as_object(toks: list[_Tok], i: int) -> bool:
+    """Whether the string literal toks[i] is read as an object's name: cast to a reg type
+    (`'x'::regclass`, `CAST('x' AS regclass)`, `regclass 'x'`) or passed directly as a
+    function's argument (`to_regclass('x')`, `has_table_privilege(u, 'x', 'INSERT')`,
+    `pg_relation_size('x')`)."""
+    prev = toks[i - 1] if i else None
+    nxt = toks[i + 1] if i + 1 < len(toks) else None
+    if nxt == _Tok("op", "::") and _reg_type_at(toks, i + 2):
+        return True
+    if prev is not None and prev.kind == "ident" and prev.text in _REG_TYPES:
+        return True  # a typed literal: regclass 'x'
+    if (
+        prev == _Tok("op", "(")
+        and i >= 2
+        and toks[i - 2] == _Tok("ident", "cast")
+        and nxt == _Tok("ident", "as")
+        and _reg_type_at(toks, i + 2)
+    ):
+        return True
+    if prev not in (_Tok("op", "("), _Tok("op", ",")) or nxt not in (
+        _Tok("op", ")"),
+        _Tok("op", ","),
+    ):
+        return False
+    depth = 0
+    for j in range(i - 1, -1, -1):  # the parenthesis the literal is directly inside
+        if toks[j] == _Tok("op", ")"):
+            depth += 1
+        elif toks[j] == _Tok("op", "("):
+            if depth == 0:
+                before = toks[j - 1] if j else None
+                return before is not None and (
+                    before.kind == "qident"
+                    or (before.kind == "ident" and before.text not in _PAREN_KEYWORDS)
+                )
+            depth -= 1
+    return False
+
+
 def _literal_names(text: str) -> list[tuple[str | None, str]]:
     """(schema, name) for the object a `'...'::regclass` style literal names."""
     base = text.split("(", 1)[0].strip()
@@ -292,13 +361,17 @@ def work_classifier(names: list[str]) -> Callable[[str], bool]:
 
     - refers to one of the schema's objects: an identifier (unquoted, folded to lower
       case, or quoted, as written) that is one of `names`, unqualified or qualified by
-      `public`; or a literal resolved to one by a `::reg...` cast (`'orgs'::regclass`);
+      `public`; or a string literal naming one that is read as an object name: cast to
+      a reg type (`'orgs'::regclass`, `CAST('orgs' AS regclass)`, `regclass 'orgs'`) or
+      passed directly as a function's argument (`to_regclass('public.orgs')`,
+      `has_table_privilege(current_user, 'orgs', 'INSERT')`, `pg_relation_size('orgs')`);
     - or has a keyword that writes, locks, listens or notifies (anywhere: CTEs,
       EXPLAIN ANALYZE, FOR UPDATE / FOR SHARE, a second statement in the same message);
     - or calls a built-in with an effect (nextval/setval, pg_notify, advisory locks...).
 
     A mere mention is not work: a schema name inside a string literal compared in a
-    catalog query (`relname = 'orgs'`), in a comment, as a column alias (`AS users`),
+    catalog query (`relname = 'orgs'`, `relname IN ('orgs')`, cast to a type that is no
+    reg type), in a comment, as a column alias (`AS users`),
     or as a column of another relation or schema (`s.sessions`, `pg_catalog.x`).
     Catalog reads (pg_roles, pg_class, current_user, pg_has_role ...), SET/SHOW and
     transaction control are not work. `test_platform_m3_work_classifier.py` pins both
@@ -331,13 +404,7 @@ def work_classifier(names: list[str]) -> Callable[[str], bool]:
                     continue  # an output alias
                 if schema_name(tok):
                     return True
-            if (
-                tok.kind == "string"
-                and nxt == _Tok("op", "::")
-                and i + 2 < len(toks)
-                and toks[i + 2].kind == "ident"
-                and toks[i + 2].text.startswith("reg")
-            ):
+            if tok.kind == "string" and _literal_reads_as_object(toks, i):
                 for schema, name in _literal_names(tok.text):
                     if schema in (None, "public") and name in exact:
                         return True

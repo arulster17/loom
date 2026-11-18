@@ -5,18 +5,23 @@ table of the schema").
 
 `platform_m3_review_proxy.work_classifier` decides, for each statement a service sent,
 whether it was work against the schema. Those tests can only fail for the right reason
-if a catalog read that merely mentions a schema name (in a literal, a comment, an alias,
-another relation's column) is not work, and can only pass for the right reason if every
-way of reaching a schema object (any case, quoted, `public.`-qualified, in a CTE, after
-a comment, a second statement, a `::regclass` literal) and every write, lock, LISTEN or
-NOTIFY is work. This file pins both sides, without a database, and checks that the
-schema's object names come from the real migrated schema."""
+if a catalog read that merely mentions a schema name (in a literal compared or listed, a
+comment, an alias, another relation's column) is not work, and can only pass for the
+right reason if every way of reaching a schema object (any case, quoted,
+`public.`-qualified, in a CTE, after a comment, a second statement, a literal read as an
+object name: `'orgs'::regclass`, `CAST('orgs' AS regclass)`, `regclass 'orgs'`, or a
+function's direct argument such as `to_regclass('orgs')`) and every write, lock, LISTEN
+or NOTIFY is work. This file pins both sides, without a database (the services' own role
+check among the not-work cases), and checks that the schema's object names come from
+the real migrated schema."""
 
 from __future__ import annotations
 
 import psycopg
 import pytest
 from platform_m3_review_proxy import schema_object_names, work_classifier
+
+from loom_platform.settings import ROLE_CHECK_SQL
 
 NAMES = [
     "orgs",
@@ -65,6 +70,17 @@ NOT_WORK = {
         "   AND (pg_has_role(session_user, c.relowner, 'MEMBER') "
         "     OR pg_has_role(current_user, c.relowner, 'MEMBER')) ORDER BY 1)"
     ),
+    "role_check_itself": ROLE_CHECK_SQL,  # the services' own check, as they send it
+    # A schema name in a literal that is not read as an object name.
+    "values_list": "SELECT x FROM (VALUES ('orgs'), ('users')) v(x)",
+    "any_array": "SELECT 1 FROM pg_class WHERE relname = ANY (ARRAY['orgs', 'users'])",
+    "in_list_after_call": "SELECT 1 FROM pg_class WHERE lower(relname) IN ('orgs', 'users')",
+    "compared_to_call": "SELECT 1 FROM pg_class WHERE lower(relname) = 'orgs'",
+    "concatenated_argument": "SELECT length('x' || 'orgs')",
+    "cast_to_text": "SELECT CAST('orgs' AS text)",
+    "typed_literal_text": "SELECT text 'orgs'",
+    "catalog_name_as_argument": "SELECT to_regclass('pg_catalog.pg_class')",
+    "other_schema_as_argument": "SELECT has_table_privilege(current_user, 'other.orgs', 'SELECT')",
 }
 
 WORK = {
@@ -82,6 +98,24 @@ WORK = {
     "after_line_comment": "-- note\nSELECT 1 FROM usage_events",
     "regclass_literal": "SELECT 'orgs'::regclass",
     "regclass_qualified_literal": "SELECT 'public.usage_events'::regclass::oid",
+    "regclass_catalog_qualified_type": "SELECT 'orgs'::pg_catalog.regclass",
+    "cast_as_regclass": "SELECT CAST('orgs' AS regclass)",
+    "cast_as_regclass_qualified": "SELECT cast('public.usage_events' AS pg_catalog.regclass)",
+    "cast_as_regprocedure": "SELECT CAST('loom_org_usage_total(uuid)' AS regprocedure)",
+    "typed_literal_regclass": "SELECT regclass 'orgs'",
+    "typed_literal_quoted_name": "SELECT regclass '\"Odd Name\"'",
+    "typed_literal_regproc": "SELECT regproc 'public.loom_ensure_usage_partitions'",
+    "to_regclass_argument": "SELECT to_regclass('public.orgs')",
+    "to_regclass_upper_case": "SELECT to_regclass('ORGS')",
+    "privilege_check_argument": "SELECT has_table_privilege(current_user, 'orgs', 'INSERT')",
+    "relation_size_argument": "SELECT pg_relation_size('orgs')",
+    "catalog_qualified_call_argument": "SELECT pg_catalog.pg_total_relation_size('api_keys')",
+    "function_privilege_argument": (
+        "SELECT has_function_privilege('public.loom_org_usage_total(uuid)', 'EXECUTE')"
+    ),
+    "argument_after_nested_call": (
+        "SELECT has_table_privilege(lower(current_user::text), 'usage_events', 'SELECT')"
+    ),
     "insert_verb": "INSERT INTO t VALUES (1)",
     "update_after_comment": "/* x */ UPDATE t SET a = 1",
     "delete_in_cte": "WITH d AS (DELETE FROM t RETURNING 1) SELECT count(*) FROM d",

@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Any
 
 import psycopg
@@ -299,30 +299,44 @@ def test_item_b3_app_role_runs_partition_upkeep(owner_conn, app_conn):
 # ------------------------------------------------- setup run on many databases
 
 
-RACE_ROUNDS = 3
 RACE_DATABASES = 6
-# All rounds together, under pytest's 120 s timeout: a round that hangs fails on its
-# assertion (and its databases are dropped WITH (FORCE), ending the hung sessions)
-# rather than on the timeout. As late as fits: under CI-like CPU load the three rounds
-# take about 90 s, and before this budget the test simply ran until pytest's timeout.
-RACE_BUDGET_S = 110.0
+RACE_MIN_ROUNDS = 2
+RACE_MAX_ROUNDS = 3
+# pytest's timeout for the race test. Every limit below ends well before it, so a slow or
+# hung round fails on its own assertion and its cleanup still runs (nothing is left on
+# the server), rather than on the timeout.
+RACE_TIMEOUT_S = 300
+# After the first RACE_MIN_ROUNDS rounds, another starts only while the time so far plus
+# 1.5 x the slowest round so far (all of it: databases, race, checks, cleanup) is under
+# this. 100 s below the timeout.
+RACE_BUDGET_S = 200.0
+# A round whose 6 calls are not all back this long after the threads were started is a
+# hang (its own assertion). Capped so that it ends RACE_CLEANUP_S before the timeout.
+RACE_HANG_S = 120.0
+RACE_CLEANUP_S = 40.0
+# Every thread reaches the barrier within this (a fixed limit: a thread that starts this
+# late is an overloaded machine, reported as such, not a role-setup failure).
+RACE_BARRIER_S = 60.0
+# After a failure: how long the round's threads get to finish once their databases are
+# gone (they cannot reach the server any more), before the roles are dropped anyway.
+RACE_JOIN_S = 20.0
 
 
-def _race_round(info: dict[str, str], deadline: float) -> None:
-    """One round: fresh login and group names, 6 fresh databases, 6 threads released at
-    once into upgrade + ensure_app_login, all done by `deadline` (time.monotonic()).
-    Drops what it made."""
+def _race_round(info: dict[str, str], hard_end: float) -> None:
+    """One round: fresh login and group names, 6 fresh databases (made before its clock
+    starts), then 6 threads released at once through a barrier into upgrade +
+    ensure_app_login, all back within RACE_HANG_S (and by `hard_end`, time.monotonic()).
+    Drops what it made, its threads ended first."""
     tag = uuid.uuid4().hex[:10]
     login, group = f"loom_t_race_{tag}_app", f"loom_t_race_{tag}_grp"
     password = secrets.token_hex(16)
     names: list[str] = []
-    barrier = threading.Barrier(RACE_DATABASES)
-
-    def left() -> float:
-        return max(0.1, deadline - time.monotonic())
+    barrier = threading.Barrier(RACE_DATABASES, timeout=RACE_BARRIER_S)
+    ex: ThreadPoolExecutor | None = None
+    futures: list[Future[list[migrate.Migration]]] = []
 
     def setup(db: str) -> list[migrate.Migration]:
-        barrier.wait(timeout=left())
+        barrier.wait()
         applied = migrate.upgrade(db, group_role=group)
         migrate.ensure_app_login(db, login=login, group_role=group, password=password)
         return applied
@@ -331,15 +345,19 @@ def _race_round(info: dict[str, str], deadline: float) -> None:
         for _ in range(RACE_DATABASES):
             names.append(create_database(info))
         urls = [admin_url(info, n) for n in names]
-        ex = ThreadPoolExecutor(max_workers=RACE_DATABASES)
-        try:
-            futures = [ex.submit(setup, u) for u in urls]
-            _, pending = wait(futures, timeout=left())
-        finally:
-            ex.shutdown(wait=False, cancel_futures=True)
+        hang_s = max(1.0, min(RACE_HANG_S, hard_end - time.monotonic()))
+        ex = ThreadPoolExecutor(max_workers=RACE_DATABASES, thread_name_prefix=f"race_{tag}")
+        futures = [ex.submit(setup, u) for u in urls]
+        _, pending = wait(futures, timeout=hang_s)
         assert not pending, (
             f"role setup still running on {len(pending)} of {RACE_DATABASES} databases "
-            f"after the {RACE_BUDGET_S:.0f}s budget (hung when run concurrently?)"
+            f"{hang_s:.0f}s after the threads started (hung when run concurrently?)"
+        )
+        late = [n for n, f in zip(names, futures, strict=True) if _barrier_broken(f)]
+        assert not late, (
+            f"not every thread reached the barrier within {RACE_BARRIER_S:.0f}s "
+            f"({len(late)} of {RACE_DATABASES} saw it broken): an overloaded machine, a "
+            "slow start, not a role-setup failure"
         )
         failures = [(n, f.exception()) for n, f in zip(names, futures, strict=True)]
         failed = [(n, repr(e)) for n, e in failures if e is not None]
@@ -368,12 +386,27 @@ def _race_round(info: dict[str, str], deadline: float) -> None:
         for n, snap in zip(names[1:], snapshots[1:], strict=True):
             assert snap == snapshots[0], f"{n}: grants differ from {names[0]}"
     finally:
-        _drop_all(info, names, [login, group])
+        _end_round(info, names, [login, group], barrier, ex, futures)
 
 
-def _drop_all(info: dict[str, str], names: list[str], roles: list[str]) -> None:
-    """Drop the round's databases, then its roles (the login before the group). Every
-    step is tried; any failure is raised at the end so nothing is left silently."""
+def _barrier_broken(f: Future[Any]) -> bool:
+    return f.done() and isinstance(f.exception(), threading.BrokenBarrierError)
+
+
+def _end_round(
+    info: dict[str, str],
+    names: list[str],
+    roles: list[str],
+    barrier: threading.Barrier,
+    ex: ThreadPoolExecutor | None,
+    futures: list[Future[Any]],
+) -> None:
+    """End the round's threads, then drop its databases and its roles (the login before
+    the group). Threads still running (a failed round) are stopped first: the barrier is
+    aborted, their backends terminated, their databases dropped WITH (FORCE) (they then
+    cannot reach the server), and they are joined, so none can recreate a role after it
+    is dropped. Every step is tried; any failure is raised at the end so nothing is left
+    silently."""
     problems: list[str] = []
 
     def attempt(what: str, fn: Callable[[], Any]) -> None:
@@ -382,12 +415,36 @@ def _drop_all(info: dict[str, str], names: list[str], roles: list[str]) -> None:
         except Exception as e:
             problems.append(f"{what}: {e!r}")
 
-    for n in names:
-        attempt(f"drop database {n}", lambda n=n: drop_database(info, n))
+    maintenance = admin_url(info, info.get("dbname", "postgres"))
+    barrier.abort()  # threads still waiting at it leave now
+    if ex is not None:
+        ex.shutdown(wait=False, cancel_futures=True)
+    running = [f for f in futures if not f.done()]
+
+    def terminate() -> None:
+        with psycopg.connect(maintenance, autocommit=True, connect_timeout=10) as c:
+            c.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = ANY(%s) AND pid <> pg_backend_pid()",
+                (names,),
+            )
+
+    if running and names:
+        attempt("terminate the round's backends", terminate)
+    if names:  # at once: each DROP DATABASE waits for a checkpoint, which they then share
+        with ThreadPoolExecutor(max_workers=len(names)) as dropper:
+            drops = {n: dropper.submit(drop_database, info, n) for n in names}
+        for n, d in drops.items():
+            attempt(f"drop database {n}", d.result)
+    _, alive = wait(futures, timeout=RACE_JOIN_S)
+    if alive:
+        problems.append(
+            f"{len(alive)} setup threads still running {RACE_JOIN_S:.0f}s after their "
+            "databases were dropped"
+        )
 
     def drop_role(role: str) -> None:
-        maintenance = admin_url(info, info.get("dbname", "postgres"))
-        with psycopg.connect(maintenance, autocommit=True) as c:
+        with psycopg.connect(maintenance, autocommit=True, connect_timeout=10) as c:
             c.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
 
     for role in roles:
@@ -395,6 +452,7 @@ def _drop_all(info: dict[str, str], names: list[str], roles: list[str]) -> None:
     assert problems == [], f"left behind on the server: {problems}"
 
 
+@pytest.mark.timeout(RACE_TIMEOUT_S)
 def test_item_b3_role_setup_concurrent_on_many_databases():
     """Roles belong to the whole server: the role setup run at the same time against
     several fresh databases succeeds every time and the grants come out the same.
@@ -410,17 +468,24 @@ def test_item_b3_role_setup_concurrent_on_many_databases():
     The spec says role creation must treat both `duplicate_object` and
     `unique_violation` as "already exists". The test cannot force the interleaving that
     produces either error; fresh names each round (so every round really creates the
-    roles) plus the barrier, repeated over several rounds, are how it gives the race a
-    real chance to happen."""
+    roles) plus the barrier, repeated over several rounds (at least RACE_MIN_ROUNDS, a
+    third while time allows), are how it gives the race a real chance to happen."""
     params = inspect.signature(migrate.upgrade).parameters
     assert "group_role" in params, "spec B3 seam missing: migrate.upgrade(url, *, group_role)"
     assert hasattr(migrate, "ensure_app_login"), (
         "spec B3 seam missing: migrate.ensure_app_login(url, *, login, group_role, password)"
     )
     info = admin_info()
-    deadline = time.monotonic() + RACE_BUDGET_S
-    for _ in range(RACE_ROUNDS):
-        _race_round(info, deadline)
+    start = time.monotonic()
+    hard_end = start + RACE_TIMEOUT_S - RACE_CLEANUP_S
+    slowest = 0.0
+    for done in range(RACE_MAX_ROUNDS):
+        elapsed = time.monotonic() - start
+        if done >= RACE_MIN_ROUNDS and elapsed + 1.5 * slowest >= RACE_BUDGET_S:
+            break
+        began = time.monotonic()
+        _race_round(info, hard_end)
+        slowest = max(slowest, time.monotonic() - began)
 
 
 # ----------------------------------------------------------- production check
