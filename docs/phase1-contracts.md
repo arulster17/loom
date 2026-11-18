@@ -497,7 +497,8 @@ What happens and how it heals (tested in `services/billing/tests/test_billing_re
 |---|---|---|
 | `loom:usage` and its group | The next settle's `XADD` recreates the stream without the group; `XREADGROUP` answers NOGROUP | The billing consumer recreates the group at id 0 and continues (`loom_billing_usage_group_recreated_total`, alert); reconcile logs `reconcile.usage_group_missing` until then |
 | Unconsumed stream entries | Those requests are never billed (under-charge) | Not recoverable; the bound in "Worst-case overshoot" (d) |
-| Org `credit`, `credit_v`, `usage`, `heal_token`, key `usage` | Next `reserve` answers `noinit` | `load_from_postgres` (§6 "Loading") |
+| Org `credit`, `credit_v`, `usage`, key `usage` | Next `reserve` answers `noinit` | `load_from_postgres` (§6 "Loading"), which also writes a fresh `heal_token` |
+| Org `heal_token` alone | Nothing for requests (reserve does not read it); a heal whose snapshot predates the loss finds a different token and is skipped, the next run heals normally | The next load or heal writes a fresh one |
 | Usage settled while the org was unloaded, then the org reloaded before billing stored it | Redis `usage` below Postgres (`redis_behind`) | Reconcile adds the difference back (INCRBY) within a minute |
 | Reservations, in-flight counts, token buckets | Limits briefly looser; settles without a reservation still charge | Nothing to do |
 | `done:` markers | A spooled settle replays normally (its original never landed) | Nothing to do |

@@ -1,6 +1,8 @@
 # Spec: the before-M3 review fixes (plan §13, R1-R6, R8, R9, R11-R14)
 
-Status: approved by the user 2026-11-17. Source: the tables in
+Status: approved by the user 2026-11-17, then revised during the test and code reviews;
+each later user decision is marked inline ("user decision 2026-11-17"). This one file is
+identical on the three branches. Source: the tables in
 [phase1-runpod-plan.md §13](phase1-runpod-plan.md#follow-ups-from-the-m1-pre-merge-review-2026-11-15).
 R7 and R10 wait for M5. R15 is done.
 
@@ -30,9 +32,12 @@ deadline, and the reservation and in-flight counts are released by then.
 **G2 (R2a). A reserve whose reply is lost is released.**
 When the reserve call raises a Redis error (socket timeout, connection reset), the gateway
 still answers 503 `service_unavailable` with `Retry-After: 1`, and it also starts a
-background release of that request id (`Limiter.release`), retried with backoff until it
-succeeds or `LOOM_RESERVATION_GRACE_S` (60 s) has passed. The release also marks the
-request id as done for the reservation TTL (`release.lua` writes the same `:done:<rid>`
+background release of that request id (`Limiter.release`), retried with backoff (first
+retry within 0.2 s, doubling, at most 2 s apart) until it succeeds or
+`LOOM_RESERVATION_GRACE_S` (60 s) has passed, then given up. `Limiter.release(org_id,
+request_id)` keeps working with those two arguments (anything new is optional). The
+release also marks the request id as done for at least the reservation TTL
+(`LOOM_REQUEST_TIMEOUT_S + LOOM_RESERVATION_GRACE_S`) (`release.lua` writes the same `:done:<rid>`
 marker `reserve.lua` already refuses), so a reserve script that runs *after* the release
 (it was queued behind a Redis stall) answers `duplicate_request` and holds nothing.
 Done when: (a) a reserve that took effect in Redis but whose reply was lost leaves no
@@ -40,6 +45,24 @@ reservation, `rsum` or in-flight count behind once Redis answers again; (b) a re
 runs before the delayed reserve makes that reserve refuse with `duplicate_request` and
 write nothing; (c) the existing release after a 503 `model_unavailable` still refunds the
 tpm estimate and leaves no usage event.
+
+**G2a (added after review, user decision 2026-11-17). Skip unsent reserves; cap the releases.**
+- A reserve error raised **before the command was written** to Redis starts no background
+  release, because nothing can have been reserved. Only two cases count as unsent:
+  waiting for a pool connection timed out (redis-py's `BlockingConnectionPool` "No
+  connection available."), or connecting failed (connection refused, or the connect
+  timeout). Any error after the write (a socket timeout or reset while reading the
+  reply, or anything not known to be unsent) is treated as possibly sent and released as
+  in G2. The client gets the same 503 in every case.
+- At most **1,000** background releases run at once per gateway process. A possibly-sent
+  reserve that fails while 1,000 are running starts none: its reservation is left to its
+  TTL. Both skips count in `loom_gateway_reserve_release_skipped_total{reason}`, with
+  `reason` `unsent` or `cap`.
+- `Limiter.release` refuses a marker TTL below 1 s (`ValueError`) rather than sending
+  Redis a `SET ... EX 0` that fails the script.
+- The release marker gets a test in `loom_platform`'s own tests (`services/platform_common/tests`),
+  as CLAUDE.md asks for a contract change: it is written whether or not a reservation
+  existed, with `NX`, for at least the reservation TTL.
 
 **G3 (R2b). A Postgres failure while loading the balance is a 503.**
 Any Postgres error (`psycopg.Error`, a pool timeout) in `load_from_postgres` after a
@@ -54,7 +77,11 @@ It settles `aborted` with estimated tokens instead of zero:
   any model's measured decode rate at its SLO, so the estimate errs toward the client;
   0 turns estimating off and restores today's zero bill);
 - prompt tokens = `prompts × min(prompt_upper, ceil(body bytes / 4))`; cached = 0;
-- so the cost never exceeds the reservation (`max_cost_micros`).
+- the cost is clamped to the reservation (`max_cost_micros`): a body above about
+  4 × context could otherwise push it over.
+A request whose deadline passed before it was dispatched bills nothing (`error`), even if
+the code gives the attempt a last millisecond. With the rate at 0, behaviour is exactly
+today's (`aborted`, zero cost, counted in `usage_missing`, no cost headers).
 The client still gets 502 `upstream_lost`, now with `X-Loom-Cost-Micros` /
 `X-Loom-Cost-USD` naming the amount billed. The event counts in a new counter
 `loom_gateway_usage_estimated_total{model}` and no longer in `usage_missing`; the request
@@ -75,7 +102,7 @@ after the deadline yields 200 with the body and one `ok` usage event, and no 502
 ~~The heal adds the missing amount only while `usage < P`.~~ Replaced after review
 (2026-11-17, user decision): two reconcilers that read *different* `P` can both pass that
 guard (Redis 900, true 1000: A reads P=980 and heals to 980, B reads P=1000 and adds 100,
-ending at 1080). The heal now uses a **per-org heal generation**:
+ending at 1080). The heal now uses a **per-org heal token**:
 - each loaded org has a heal **token** in Redis: a random value (a UUID made by the
   caller and passed to the script, so no script depends on a clock or Redis-side
   randomness; a clock that steps back after a failover could repeat a value). The only
@@ -220,17 +247,24 @@ wrapped `sendVerificationRequest`), so a direct `POST /api/auth/signin/nodemaile
 limited the same as the form. Each send is counted once (the server action no longer
 counts separately). Over the limit no mail is sent, and the sign-in form still shows
 "Too many sign-in emails. Try again in a few minutes." It still fails open if Redis is down.
+The client IP on that path is the right-most `X-Forwarded-For` entry, as today. The W1
+tests need a real Redis, so CI's `web` job gets a Redis service and
+`LOOM_TEST_REDIS_URL`; with the variable set, an unreachable Redis fails those tests
+instead of skipping them.
 
 **W2 (R12). An admin credit adjustment posts once per form.**
 The adjust-credits form carries a per-render token (a random UUID in a hidden field named `form_token`); the
 ledger idempotency key is derived from it (`admin:adjust:<token>`). A resubmit, or the same
 form posted from two tabs, posts one ledger transaction and one audit row; the repeat
 answers with the same success message and changes nothing. A missing or malformed token
-is refused. A newly rendered form gets a new token.
+is refused. A newly rendered form gets a new token. A token already used for a different
+org or amount is refused, not answered as a success.
 
 **W3 (R13). Every sign-out revokes the playground keys.**
-Auth.js's `events.signOut` revokes the user's playground keys, so signing out through
-`POST /api/auth/signout` revokes them as the app's sign-out button does.
+Signing out through Auth.js's own `POST /api/auth/signout` revokes the user's playground
+keys, as the app's sign-out button does. (With `@auth/pg-adapter`, `deleteSession` returns
+nothing, so `events.signOut` gets no session; the fix must find the user another way, such
+as a wrapped `deleteSession`.)
 
 **W4 (R14). A key's spend limit has an upper bound.**
 A spend limit above **$1,000,000** (10^12 micros, well inside both Postgres `bigint` and
@@ -239,11 +273,13 @@ naming the bound, in the action and in the data layer. No input gives "Something
 wrong".
 
 **W5 (admin policy). `LOOM_ADMIN_EMAILS` only in dev; no self-service admin.**
+"Outside dev" means any `LOOM_ENV` other than `dev`, unset included.
 - Outside `LOOM_ENV=dev`, `LOOM_ADMIN_EMAILS` grants nothing at sign-in, and the app logs
   a warning at startup if it is set. Admins already granted keep their role (granting the
   first production admin is a manual SQL step, written down in the contracts).
 - Outside dev, an admin cannot approve, or adjust the credit of, an org they are a member
-  of: refused with a message, with no state change, audit row or ledger entry. In dev it
+  of: refused with a message, with no state change, audit row or ledger entry, by the
+  action and again by the data layer (as every admin check is). In dev it
   stays allowed, because the local flow has the bootstrap admin approve their own org
   (user decision: outside dev only).
 - Contracts §4 says both.
