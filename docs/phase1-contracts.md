@@ -252,8 +252,8 @@ check reads only the system catalogs (`pg_roles`, `pg_class`, `session_user`,
 
 Only an outage counts as unreachable, not a misconfiguration
 (`loom_platform.settings.connection_outage`). A connection error whose message says
-`password authentication failed`, `does not exist` (role or database) or `no pg_hba.conf
-entry` exits 2, at start and in the deferred check. Every other connection error is an
+`authentication failed` (any method: password, peer, ident, cert, ldap), `does not exist`
+(role or database), `no pg_hba.conf entry` or `pg_hba.conf rejects` exits 2, at start and in the deferred check. Every other connection error is an
 outage and is retried: refused or timed-out connections, a host name that does not
 resolve (in compose a stopped Postgres container looks like this), network unreachable,
 a missing socket, any `the database system is ...` state, `too many clients`, a

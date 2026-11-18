@@ -115,9 +115,10 @@ class DatabaseUnreachable(Exception):
 # network unreachable, a missing socket, any "the database system is ..." state, too
 # many clients, a connection closed unexpectedly, and anything unforeseen).
 MISCONFIGURATION_MARKERS = (
-    "password authentication failed",
+    "authentication failed",  # any method: password, peer, ident, cert, ldap, ...
     "does not exist",  # a role or a database
     "no pg_hba.conf entry",
+    "pg_hba.conf rejects",
 )
 
 
@@ -195,8 +196,8 @@ def database_role_problems(database_url: str, *, timeout_s: int = 5) -> list[str
     member of). Either could disable, drop or replace the ledger's append-only and
     zero-sum triggers (contracts §3); services run as the runtime role (`loom_app`).
     Raises `DatabaseUnreachable` when Postgres cannot be connected to because of an
-    outage (any connection error but a misconfiguration); a misconfiguration (wrong
-    password, missing role or database, no pg_hba entry) is a problem like the others
+    outage (any connection error but a misconfiguration); a misconfiguration (failed
+    authentication, missing role or database, pg_hba rejection) is a problem like the others
     (`connection_outage`)."""
     import psycopg
 
@@ -258,8 +259,8 @@ def enforce_environment(
     misconfiguration: `connection_outage`), that alone does not refuse the start: one
     warning line, and the check is left to `loom_platform.db.role_gate`, which runs it
     on the first successful connection and holds back all of the process's Postgres
-    work (its pools, its listeners) until it has passed. A misconfiguration (wrong
-    password, missing role or database, no pg_hba entry) refuses the start like any
+    work (its pools, its listeners) until it has passed. A misconfiguration (failed
+    authentication, missing role or database, pg_hba rejection) refuses the start like any
     other problem."""
     problems = list(settings.production_problems() if problems is None else problems)
     if settings.env != "dev" and check_database_role:

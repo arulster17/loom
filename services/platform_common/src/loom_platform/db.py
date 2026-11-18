@@ -61,7 +61,7 @@ class RoleGate:
     Every connection error but an explicit misconfiguration is an outage and is retried
     (`connection_outage`), with a warning naming Postgres and the error at most once a
     minute, so an unexpected case is visible rather than fatal. A misconfiguration
-    (wrong password, missing role or database, no pg_hba entry) or a role problem is
+    (failed authentication, missing role or database, pg_hba rejection) or a role problem is
     printed and fails the gate:
     `wait()` raises `RoleCheckFailed` (now and on every later call, so no pool or
     listener ever starts) and `failed` is set. The service then stops through its normal

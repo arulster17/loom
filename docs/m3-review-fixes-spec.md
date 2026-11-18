@@ -175,8 +175,10 @@ when the consumer group is missing (it cannot catch up within the wait).
   - The unreachable-at-start warning is one log line that names Postgres (or "database")
     and does not repeat the role problems' wording ("superuser", "owns").
   - **Only an outage counts as unreachable**, not a misconfiguration. A connection error
-    whose message says `password authentication failed`, `does not exist` (role or
-    database) or `no pg_hba.conf entry` exits 2 as before, at start and in the gate.
+    whose message says `authentication failed` (any method: password, peer, ident, cert,
+    ldap, or none named), `does not exist` (role or database), `no pg_hba.conf entry` or
+    `pg_hba.conf rejects` exits 2, at start and in the gate (user decision 2026-11-17).
+    `not permitted to log in` and `canceling authentication due to timeout` stay retried.
     **Every other connection error is retried** (user decision 2026-11-17, after a review
     found DNS failures, network unreachable and "in recovery mode" made fatal by a short
     retry list): refused or timed-out connections, a host name that does not resolve (in
