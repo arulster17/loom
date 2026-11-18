@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import logging
 import os
 import sys
 
@@ -27,6 +28,8 @@ from loom_billing.stripe_stub import create_stub_app
 from loom_billing.worker import Worker, redis_from_settings, run_worker
 from loom_platform.db import RoleCheckFailed, open_pool, role_gate
 from loom_platform.settings import enforce_environment, redis_policy_problems
+
+log = logging.getLogger("loom_billing")
 
 COMMANDS = (
     "all",
@@ -123,16 +126,16 @@ def main(argv: list[str] | None = None) -> int:
                 asyncio.run(_server(app, settings.billing_host, settings.billing_port).serve())
             else:
                 asyncio.run(_once(settings, args.command))
-    except RoleCheckFailed:
-        # The deferred role check failed (printed) in `open_pool`, before any work; the
-        # unwinding closed what was open.
+    except BaseException as e:
+        # A failed deferred role check (printed) exits 2 whatever ended the run:
+        # `RoleCheckFailed` from `open_pool`, before any work (the unwinding closed what
+        # was open); `api`: uvicorn's exit 3 for the lifespan's failed `open_pool`; or
+        # any other error on the way out.
+        if not role_gate.failed:
+            raise
+        if not isinstance(e, RoleCheckFailed | SystemExit):
+            log.error("stopped with an error after the failed database role check", exc_info=e)
         return 2
-    except SystemExit:
-        # `api`: the deferred role check failed in the lifespan's `open_pool`, and
-        # uvicorn ends a failed lifespan with exit 3. A failed role check exits 2.
-        if role_gate.failed:
-            return 2
-        raise
     return 2 if role_gate.failed else 0
 
 

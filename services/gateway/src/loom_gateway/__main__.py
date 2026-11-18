@@ -3,6 +3,7 @@ LOOM_GATEWAY_METRICS_PORT (9100), uvloop + httptools."""
 
 from __future__ import annotations
 
+import logging
 import socket
 
 import uvicorn
@@ -19,6 +20,12 @@ from loom_platform.settings import enforce_environment, redis_policy_problems
 # which then settle `error` and release their reservations).
 FINAL_CLOSE_S = 2
 
+log = logging.getLogger("loom_gateway")
+
+
+class _GateFailedBeforeBind(Exception):
+    """Raised from the end of the app's startup to skip uvicorn's bind (`GatewayServer`)."""
+
 
 class GatewayServer(uvicorn.Server):
     """uvicorn with the gateway's drain between closing the listener and closing the
@@ -28,12 +35,34 @@ class GatewayServer(uvicorn.Server):
     reservation TTL (429s for the key meanwhile).
 
     A failed deferred role check (`loom_platform.db.role_gate`: Postgres was unreachable
-    at start) stops the server the same way, and `main` then exits 2."""
+    at start) stops the server the same way, and `main` then exits 2. If it has failed
+    by the end of the app's startup (the auth listener's wait), the server never binds
+    its port: it goes straight to that shutdown (nothing to drain), so a port taken
+    meanwhile cannot turn the exit into uvicorn's startup failure (3)."""
 
     def __init__(self, config: uvicorn.Config, gateway: Gateway, grace_s: float) -> None:
         super().__init__(config)
         self.gateway = gateway
         self.grace_s = grace_s
+
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        # uvicorn's startup runs the app's lifespan startup, then binds (exit 3 when the
+        # bind fails). Check the gate between the two.
+        lifespan = self.lifespan
+        app_startup = lifespan.startup
+
+        async def app_startup_then_gate() -> None:
+            await app_startup()
+            if role_gate.failed and not lifespan.should_exit:
+                raise _GateFailedBeforeBind
+
+        lifespan.startup = app_startup_then_gate
+        try:
+            await super().startup(sockets)
+        except _GateFailedBeforeBind:
+            self.should_exit = True  # `_serve` skips the main loop and its own shutdown
+            self.servers = []
+            await self.shutdown(sockets)
 
     async def on_tick(self, counter: int) -> bool:
         if role_gate.failed:
@@ -71,7 +100,18 @@ def main() -> None:
         timeout_keep_alive=75,
         timeout_graceful_shutdown=FINAL_CLOSE_S,
     )
-    GatewayServer(config, app.state.gateway, settings.shutdown_grace_s).run()
+    try:
+        GatewayServer(config, app.state.gateway, settings.shutdown_grace_s).run()
+    except BaseException as e:
+        # A failed role check decides the exit code, whatever else ended the server
+        # (uvicorn's `sys.exit(3)` for a failed bind or app startup, an exception).
+        if not role_gate.failed:
+            raise
+        if isinstance(e, SystemExit):
+            log.error("server exited (%s) after the failed database role check", e.code)
+        else:
+            log.error("server failed after the failed database role check", exc_info=e)
+        raise SystemExit(2) from None
     if role_gate.failed:  # the problem is printed; the open streams are settled
         raise SystemExit(2)
 

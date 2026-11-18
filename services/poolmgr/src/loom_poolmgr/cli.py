@@ -240,6 +240,21 @@ async def _run(settings: PoolmgrSettings) -> int:
     return 0
 
 
+def _serve(settings: PoolmgrSettings) -> int:
+    """`loom-poolmgr run`. A failed deferred role check (printed) exits 2, even when the
+    shutdown after it fails too."""
+    try:
+        code = asyncio.run(_run(settings))
+    except BaseException as e:
+        if not role_gate.failed:
+            raise
+        logging.getLogger("loom_poolmgr").error(
+            "stopped with an error after the failed database role check", exc_info=e
+        )
+        return 2
+    return 2 if role_gate.failed else code
+
+
 def _age(now: dt.datetime, then: dt.datetime | None) -> str:
     if then is None:
         return "-"
@@ -325,7 +340,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
             raise SystemExit(2)
     if args.command == "run":
-        code = asyncio.run(_run(settings))
+        code = _serve(settings)
     elif args.command == "status":
         code = asyncio.run(_status(settings))
     else:

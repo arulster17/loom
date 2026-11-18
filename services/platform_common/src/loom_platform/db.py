@@ -66,7 +66,8 @@ class RoleGate:
     `wait()` raises `RoleCheckFailed` (now and on every later call, so no pool or
     listener ever starts) and `failed` is set. The service then stops through its normal
     shutdown (the gateway drains and settles its open streams as at SIGTERM) and exits
-    2. With nothing deferred (dev, or the check already passed at start) `wait()`
+    2, even if that shutdown or the server then fails (the service's entrypoint checks
+    `failed` last). With nothing deferred (dev, or the check already passed at start) `wait()`
     returns at once."""
 
     RETRY_MIN_S = 0.5

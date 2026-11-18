@@ -247,6 +247,9 @@ compose dev password (§2). When Postgres is unreachable at start, the service s
 a warning and runs the same check on its first successful connection; it does no work
 on any connection before the check has passed, and exits 2 if it fails, through its
 normal shutdown (the gateway drains and settles its open streams as at SIGTERM). The
+failed check decides the exit code even when something else fails on the way out (an
+error during the shutdown, or the gateway's port taken: uvicorn would exit 3); a
+gateway whose check has failed by the end of its startup does not bind its port. The
 check reads only the system catalogs (`pg_roles`, `pg_class`, `session_user`,
 `current_user`, `pg_has_role`), never the schema's own tables or functions.
 
