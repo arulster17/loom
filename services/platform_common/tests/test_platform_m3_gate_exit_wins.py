@@ -14,7 +14,9 @@ its port was taken exited 3 (uvicorn's startup failure), not 2.
   listening), then Postgres answers the login with `LDAP authentication failed` as soon
   as the start warning is out. The check fails within the app's startup (the auth
   listener's 5 s wait, while the gate retries at 0.5/1/2 s steps). The gateway must exit
-  2, print the refusal naming the error, and never try to bind (no bind error logged).
+  2, print the refusal naming the error, go through its normal shutdown (its drain
+  record and the lifespan's shutdown are logged), and never try to bind (no bind error
+  logged).
 - Gateway `main` (in process, no Postgres/Redis): uvicorn's `Server.startup` is replaced
   by one that lets the gate fail for real (a fresh `RoleGate` deferred to an `AuthPg`
   misconfiguration, patched in for the process's gate) and then fails the way uvicorn's
@@ -59,7 +61,11 @@ from loom_poolmgr.manager import ManagerLocked, PoolManager
 WARN_S = 30  # the unreachable-at-start warning
 EXIT_S = 45  # after Postgres answers: the listener's 5 s wait, the shutdown; generous
 CASE = "ldap"  # `LDAP authentication failed for user ...`: a misconfiguration, exit 2
-REFUSAL = re.compile(r"stopping with LOOM_ENV=", re.IGNORECASE)
+# The normal shutdown path, as at SIGTERM: the gateway's drain (`Gateway.drain`, which
+# cuts and bills the open streams) and the lifespan's shutdown (`Gateway.stop`, which
+# waits for the settles), each with its own record.
+DRAINED = re.compile(r"shutdown: drained")
+LIFESPAN_SHUTDOWN = re.compile(r"application shutdown complete", re.IGNORECASE)
 BIND_ERROR = re.compile(
     r"address already in use|error while attempting to bind|errno 98", re.IGNORECASE
 )
@@ -172,7 +178,8 @@ def test_item_b3_gateway_port_held_gate_fails_in_startup_exits_2_without_binding
     """done-when B3 (exit 2 through the normal shutdown; contracts §3: a gateway whose
     check has failed by the end of its startup does not bind its port): the port is held
     by the test throughout; the deferred check fails during the app's startup; the
-    gateway exits 2 (not uvicorn's 3), prints the refusal, and logs no bind error."""
+    gateway exits 2 (not uvicorn's 3), prints the refusal, runs its normal shutdown (the
+    drain, then the lifespan's shutdown), and logs no bind error."""
     error, ask, named = misconfig_error(CASE)
     server = AuthPg(error, ask_password=ask, listening=False)
     env = gateway_env(rf, server.url(), port=held_port, spool=tmp_path / "spool.jsonl")
@@ -195,8 +202,16 @@ def test_item_b3_gateway_port_held_gate_fails_in_startup_exits_2_without_binding
             f"port ({held_port}) was taken (3 is uvicorn's startup failure: the bind was "
             f"tried, and its failure decided the exit):\n{out}"
         )
-        assert REFUSAL.search(out) and named.search(out), (
+        assert named.search(out), (
             f"the refusal naming the error ({named.pattern}) was not printed:\n{out}"
+        )
+        assert DRAINED.search(out), (
+            "the gateway exited without its normal shutdown: no drain record "
+            f"('{DRAINED.pattern}', as at SIGTERM) after its check failed in startup:\n{out}"
+        )
+        assert LIFESPAN_SHUTDOWN.search(out), (
+            "the app's lifespan shutdown (the gateway's stop, which waits for the settles) "
+            f"did not complete after the check failed in startup:\n{out}"
         )
         bind_lines = [ln for ln in out.splitlines() if BIND_ERROR.search(ln)]
         assert bind_lines == [], (
