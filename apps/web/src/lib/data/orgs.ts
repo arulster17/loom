@@ -4,6 +4,7 @@ import type { PoolClient } from "pg";
 
 import { isBootstrapAdmin, type Actor, type OrgContext, type OrgRole, type OrgStatus, type UserRole } from "@/lib/authz";
 import { getPool, withTx, type Db } from "@/lib/db";
+import { isDev } from "@/lib/env-check";
 
 /** "alice.smith@example.com" -> "alice.smith". Users can be shown a nicer name later. */
 export function defaultOrgName(email: string | null | undefined): string {
@@ -43,12 +44,15 @@ export async function ensureUserOrg(userId: string): Promise<string> {
 /**
  * Local dev bootstrap (contracts §4): a user whose email is in LOOM_ADMIN_EMAILS gets
  * users.role = 'admin' at sign-in. The grant is audited in the same transaction.
+ * Only with LOOM_ENV=dev: anywhere else the list grants nothing (src/instrumentation.ts
+ * warns when it is set), and admins are granted with SQL. Never revokes.
  * Returns true if this call granted it.
  */
 export async function syncBootstrapAdmin(
   userId: string,
   adminEmailsRaw: string | undefined = process.env.LOOM_ADMIN_EMAILS,
 ): Promise<boolean> {
+  if (!isDev()) return false;
   return withTx(async (c) => {
     const r = await c.query<{ email: string | null; role: UserRole }>(
       "SELECT email, role FROM users WHERE id = $1 FOR UPDATE",

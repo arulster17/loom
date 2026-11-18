@@ -59,7 +59,7 @@ web app and the registry.
 | `EMAIL_FROM` | `Loom <no-reply@loom.local>` | Sender |
 | `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` | none | Google sign-in appears only when both are set; redirect URI `<AUTH_URL>/api/auth/callback/google`. A Google sign-in is refused unless Google reports `email_verified: true` |
 | `LOOM_GOOGLE_EMAIL_LINKING` | `true` | `true`/`false`: a Google sign-in may attach to an existing user with the same (verified) email, e.g. one who signed up by magic link (Auth.js `allowDangerousEmailAccountLinking`) |
-| `LOOM_ADMIN_EMAILS` | empty | Comma-separated; these users get `users.role = 'admin'` at sign-in (audited) |
+| `LOOM_ADMIN_EMAILS` | empty | Comma-separated; with `LOOM_ENV=dev` only, these users get `users.role = 'admin'` at sign-in (audited). Elsewhere it grants nothing and the app logs a startup warning if it is set |
 | `LOOM_SIGNUP_PROMO_MICROS` | `5000000` | Credit posted when an admin approves a signup |
 | `LOOM_GATEWAY_URL` | `http://localhost:8080` | Gateway as the server reaches it (compose: `http://gateway:8080`) |
 | `LOOM_PUBLIC_API_URL` | `http://localhost:8080/v1` | API base shown in code samples |
@@ -102,8 +102,9 @@ redirects the browser to the `url` in the answer (locally the Stripe stub's pay 
 webhook posts it: the return page shows it as pending and refreshes itself for a minute.
 Auto-recharge settings are stored; billing does not charge saved cards yet.
 
-**Sign-in rate limit** (`src/lib/signin-limit.ts`). `signInWithEmail` counts each
-magic-link email in Redis per normalised address (trimmed, lowercased) and per client IP,
+**Sign-in rate limit** (`src/lib/signin-limit.ts`, checked in `src/lib/signin-send.ts`
+where Auth.js sends, so the form and a direct `POST /api/auth/signin/nodemailer` share one
+budget). Each magic-link email is counted once in Redis per normalised address (trimmed, lowercased) and per client IP,
 in fixed windows (`loom:web:signin:email:<hmac>:<window>`, `loom:web:signin:ip:<hmac>:<window>`;
 the HMAC key is `AUTH_SECRET`, so no email or IP is stored in a key name), and answers
 "Too many sign-in emails" over either limit without sending. The client IP is the
