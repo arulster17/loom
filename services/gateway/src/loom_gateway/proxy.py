@@ -22,6 +22,7 @@ import contextlib
 import datetime as dt
 import json
 import logging
+import math
 import time
 import uuid
 from collections.abc import AsyncIterator, Coroutine
@@ -51,7 +52,7 @@ from loom_platform.auth import AuthRecord
 from loom_platform.errors import ApiError
 from loom_platform.limiter import Limiter
 from loom_platform.pool import PoolState, Replica
-from loom_platform.pricing import Price, cost_micros
+from loom_platform.pricing import TOKENS_PER_MTOK, Price, cost_micros
 from loom_platform.usage import UsageEvent, UsageStatus
 
 log = logging.getLogger("loom_gateway.request")
@@ -106,6 +107,9 @@ class RequestCtx:
     held: Replica | None = None
     upstream: httpx.Response | None = None
     fitted: bool = False  # an omitted max_tokens was fitted to the prompt (once)
+    # The request deadline's timer, so it can be switched off once the engine's answer is
+    # in hand and only the settle remains (`_complete`).
+    deadline: asyncio.Timeout | None = None
 
     @property
     def model_id(self) -> str:
@@ -184,15 +188,20 @@ class Proxy:
         usage: dict[str, Any] | None,
         status: UsageStatus,
         ttft_s: float | None,
+        *,
+        estimated: bool = False,
     ) -> int:
-        """Charge the request once (later calls return the first result)."""
+        """Charge the request once (later calls return the first result). `estimated`:
+        `usage` is the gateway's estimate for a request cut at the timeout."""
         if ctx.settled:
             return ctx.cost
         ctx.settled = True
         ctx.status = status
         m = ctx.model_id
         prompt, completion, cached = token_counts(usage)
-        if usage is None and status != "error":
+        if estimated:
+            self.metrics.usage_estimated.labels(m).inc()
+        elif usage is None and status != "error":
             self.metrics.usage_missing.labels(m).inc()
         cost = cost_micros(ctx.price, prompt, completion, cached)
         ctx.cost = cost
@@ -260,6 +269,7 @@ class Proxy:
                     "max_cost_micros": ctx.prep.max_cost_micros,
                     "latency_ms": event.latency_ms,
                     "ttft_ms": event.ttft_ms,
+                    **({"estimated": True} if estimated else {}),
                 }
             },
         )
@@ -407,8 +417,19 @@ class Proxy:
         settles well inside its reservation's TTL whatever the replicas do."""
         timeout = self.settings.request_timeout_s
         remaining = ctx.t0 + timeout - time.perf_counter()
+        lost = ApiError(
+            502,
+            "server_error",
+            "upstream_lost",
+            f"The model server did not respond within {timeout} s.",
+        )
+        if remaining <= 0:
+            # The deadline passed before any dispatch (a slow body): bill nothing.
+            attempts.close()
+            return await self._fail_request(ctx, lost)
         try:
-            async with asyncio.timeout(max(remaining, 0.001)):
+            async with asyncio.timeout(remaining) as deadline:
+                ctx.deadline = deadline
                 return await attempts
         except TimeoutError:
             if ctx.upstream is not None:
@@ -416,20 +437,41 @@ class Proxy:
                     await ctx.upstream.aclose()
             if ctx.held is not None:
                 self._failed(ctx, ctx.held, "timeout")
-                if not ctx.prep.stream:
+                if not ctx.prep.stream and ctx.t_dispatch is not None:
                     # A non-streaming engine call reports usage only in its final body,
-                    # so the tokens generated before the cut are unknown and unbilled:
-                    # `aborted` without usage counts in usage_missing (contracts §6).
-                    await shielded(self.settle(ctx, None, "aborted", None))
-            return await self._fail_request(
-                ctx,
-                ApiError(
-                    502,
-                    "server_error",
-                    "upstream_lost",
-                    f"The model server did not respond within {timeout} s.",
-                ),
-            )
+                    # so the tokens generated before the cut are estimated (contracts §6).
+                    estimate = self._timeout_estimate(ctx)
+                    await shielded(
+                        self.settle(ctx, estimate, "aborted", None, estimated=estimate is not None)
+                    )
+                    if estimate is None:  # estimating is off: nothing billed
+                        return error_response(lost, ctx.headers)
+                    return error_response(lost, {**ctx.headers, **cost_headers(ctx.cost)})
+            return await self._fail_request(ctx, lost)
+
+    def _timeout_estimate(self, ctx: RequestCtx) -> dict[str, int] | None:
+        """Usage to bill a non-streaming request cut at the timeout: completion tokens
+        = sequences x min(max_tokens, floor(t x rate)) for the t seconds since the first
+        dispatch, prompt tokens = prompts x min(prompt bound, ceil(body bytes / 4)).
+        None when LOOM_TIMEOUT_BILL_TOKENS_PER_S is 0."""
+        rate = self.settings.timeout_bill_tokens_per_s
+        if rate <= 0 or ctx.t_dispatch is None:
+            return None
+        prep = ctx.prep
+        t = time.perf_counter() - ctx.t_dispatch
+        completion = prep.sequences * min(prep.max_tokens, math.floor(t * rate))
+        prompt = prep.prompts * min(prep.prompt_upper, math.ceil(prep.body_bytes / 4))
+        # Clamp to the reservation (a body above about 4 x the context could exceed it):
+        # fewer prompt tokens first, then fewer completion tokens, so the usage event's
+        # cost (which must match its tokens) is the largest one not above max_cost_micros.
+        price = ctx.price
+        budget = prep.max_cost_micros * TOKENS_PER_MTOK
+        if prompt * price.input_per_mtok + completion * price.output_per_mtok > budget:
+            if completion * price.output_per_mtok > budget:
+                prompt, completion = 0, budget // price.output_per_mtok
+            else:
+                prompt = (budget - completion * price.output_per_mtok) // price.input_per_mtok
+        return {"prompt_tokens": prompt, "completion_tokens": completion}
 
     async def _complete(self, ctx: RequestCtx) -> Response:
         tried: set[str] = set()
@@ -453,6 +495,10 @@ class Proxy:
                 self._failed(ctx, replica, "bad JSON")
                 continue
             self._release(ctx, replica)
+            # The engine's answer is in hand: only the settle remains, and it must not
+            # be cut by the deadline (the client would get a 502 for work it is billed for).
+            if ctx.deadline is not None:
+                ctx.deadline.reschedule(None)
             usage = body.get("usage") if isinstance(body.get("usage"), dict) else None
             cost = await shielded(self.settle(ctx, usage, "ok", None))
             if usage is not None:
@@ -596,9 +642,14 @@ class StreamResponse(Response):
             await shielded(self._finish())
 
     async def _send_shutdown(self, send: Send) -> None:
-        """Tell the client why the stream ends (unless it already saw [DONE]); bounded,
-        since a client that stopped reading must not hold up the shutdown."""
+        """Tell the client why the stream ends (unless it already saw [DONE])."""
         body = b"" if self.saw_done else errors.server_shutdown().sse_chunk() + DONE_EVENT
+        await self._send_end(send, body)
+
+    @staticmethod
+    async def _send_end(send: Send, body: bytes) -> None:
+        """The trailing writes, bounded together at 1 s: a client that stopped reading
+        must not hold up the settle or the shutdown."""
         with contextlib.suppress(Exception):
             async with asyncio.timeout(1.0):
                 if body:
@@ -621,14 +672,13 @@ class StreamResponse(Response):
             self.lost = "upstream_lost"
         if not self.saw_done:
             self.lost = self.lost or "upstream_lost"
-            await send(
-                {
-                    "type": "http.response.body",
-                    "body": errors.upstream_lost().sse_chunk() + DONE_EVENT,
-                    "more_body": True,
-                }
-            )
-        await send({"type": "http.response.body", "body": b"", "more_body": False})
+            # Settle (aborted, for the tokens forwarded so far) and release before any
+            # trailing write: a client that stopped reading would block them.
+            await shielded(self._finish())
+            body = errors.upstream_lost().sse_chunk() + DONE_EVENT
+        else:
+            body = b""
+        await self._send_end(send, body)
 
     async def _emit(self, send: Send, payload: bytes) -> None:
         p = self.rewriter.process(payload)

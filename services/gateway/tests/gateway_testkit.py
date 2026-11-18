@@ -378,13 +378,23 @@ class TcpProxy:
         await asyncio.gather(pipe(r, uw), pipe(ur, w), return_exceptions=True)
 
 
+# The gateway's production keep-alive (`loom_gateway.__main__`). uvicorn's default is 5 s,
+# the same as httpx's client-side keep-alive expiry: a client then reuses an idle
+# connection just as the server's timer closes it, and the request fails with a reset.
+# With the server's timeout longer than the client's expiry, the client always drops an
+# idle connection first.
+KEEP_ALIVE_S = 75
+
+
 @contextlib.asynccontextmanager
 async def serve(app: Any, **config: Any) -> AsyncIterator[int]:
-    """Run an ASGI app with uvicorn in this event loop on a free port."""
+    """Run an ASGI app with uvicorn in this event loop on a free port, with production's
+    keep-alive (`KEEP_ALIVE_S`) unless `config` sets `timeout_keep_alive`."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
+    config.setdefault("timeout_keep_alive", KEEP_ALIVE_S)
     server = uvicorn.Server(
         uvicorn.Config(
             app,

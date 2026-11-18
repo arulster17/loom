@@ -19,6 +19,7 @@ import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import psycopg
@@ -26,7 +27,11 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg_pool import AsyncConnectionPool
 from redis.asyncio import BlockingConnectionPool, Redis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
+from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import RedisError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, Response
 
@@ -64,6 +69,26 @@ from loom_platform.usage import UsageEvent
 
 log = logging.getLogger("loom_gateway")
 
+RELEASE_CAP = 1000  # background releases of lost reserves running at once
+
+
+def _unsent(error: BaseException) -> bool:
+    """True when redis-py raised `error` before it wrote the command, so nothing can
+    have been reserved: waiting for a pool connection timed out, or connecting failed
+    (refused, or the connect timeout). Read from the exception's type and message, which
+    are redis-py's own; anything else, including a failure while writing, is possibly
+    sent. This is sound only because the gateway's pool connections retry 0 times (see
+    `Gateway.start`); a retried send could be reported as a connecting failure."""
+    if not isinstance(error, RedisConnectionError | RedisTimeoutError):
+        return False
+    msg = str(error)
+    return (
+        msg.startswith("No connection available")
+        or msg.startswith("Timeout connecting to server")
+        or (msg.startswith("Error") and " connecting to " in msg)
+    )
+
+
 EXPOSED_HEADERS = [
     "X-Loom-Request-Id",
     "X-Loom-Price-Version",
@@ -97,9 +122,15 @@ class Gateway:
         }
         self._listener: asyncio.Task[None] | None = None
         self._calls = 0  # generate() calls in progress (a stream's ends at its first byte)
+        self._releases: set[asyncio.Task[None]] = set()  # releases of lost reserves
 
     async def start(self) -> None:
         s = self.settings
+        # `_unsent` needs 0 retries: pass `retry` explicitly (not a URL option, so the URL
+        # cannot override it; a `retry_on_timeout` URL option only adds error types to a
+        # copy of it, and the retry count stays 0).
+        if "retry_on_timeout" in parse_qs(urlsplit(s.redis_url).query):
+            log.warning("LOOM_REDIS_URL sets retry_on_timeout; the gateway ignores it (0 retries)")
         # Blocking: the default pool raises MaxConnectionsError under bursts.
         self.redis = Redis(
             connection_pool=BlockingConnectionPool.from_url(
@@ -108,6 +139,7 @@ class Gateway:
                 timeout=5,
                 socket_timeout=s.redis_socket_timeout_s,
                 socket_connect_timeout=s.redis_connect_timeout_s,
+                retry=Retry(NoBackoff(), 0),
             )
         )
         # Not waited for while the role check is deferred (Postgres unreachable at
@@ -164,6 +196,9 @@ class Gateway:
         left = await wait_background(SHUTDOWN_SETTLE_S)
         if left:
             log.error("shutdown: settles still running at close", extra={"fields": {"n": left}})
+        for task in list(self._releases):
+            task.cancel()
+        await asyncio.gather(*self._releases, return_exceptions=True)
         await self.spool.stop()
         if self._listener is not None:
             self._listener.cancel()
@@ -211,6 +246,45 @@ class Gateway:
                 raise errors.request_too_large(limit)
         return bytes(body)
 
+    def _release_in_background(
+        self, org_id: uuid.UUID, request_id: uuid.UUID, error: BaseException
+    ) -> None:
+        """Release a request id whose reserve call failed (the script may have run, its
+        reply lost), retried with backoff (0.1 s doubling, at most 2 s apart) until it
+        succeeds or LOOM_RESERVATION_GRACE_S has passed; after that the reservation is
+        left to its TTL (request_timeout_s + reservation_grace_s). The release also marks
+        the id done, so a reserve still queued in Redis is refused when it runs.
+
+        Skipped (counted in `reserve_release_skipped`) when `error` shows the command was
+        never written ("unsent"), and when RELEASE_CAP releases already run ("cap")."""
+        if _unsent(error):
+            self.metrics.reserve_release_skipped.labels("unsent").inc()
+            return
+        if len(self._releases) >= RELEASE_CAP:
+            self.metrics.reserve_release_skipped.labels("cap").inc()
+            return
+        task = asyncio.create_task(self._release_until(org_id, request_id))
+        self._releases.add(task)
+        task.add_done_callback(self._releases.discard)
+
+    async def _release_until(self, org_id: uuid.UUID, request_id: uuid.UUID) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.settings.reservation_grace_s
+        delay = 0.1
+        while True:
+            try:
+                await self.limiter.release(org_id, request_id)
+                return
+            except (RedisError, OSError):
+                if loop.time() + delay >= deadline:
+                    log.error(
+                        "release of a lost reserve given up",
+                        extra={"fields": {"request_id": str(request_id)}},
+                    )
+                    return
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 2.0)
+
     async def reserve(self, record: AuthRecord, request_id: uuid.UUID, prep: Prepared) -> None:
         s = self.settings
         kwargs: dict[str, Any] = {
@@ -222,13 +296,30 @@ class Gateway:
             "limits": record.limits(s),
             "ttl_ms": s.reservation_ttl_ms,
         }
-        result = await self.limiter.reserve(**kwargs)
-        if result.reason == "noinit":
-            async with self.pg.connection() as conn:
-                await self.limiter.load_from_postgres(
-                    conn, org_id=record.org_id, key_id=record.key_id
-                )
+        try:
             result = await self.limiter.reserve(**kwargs)
+            if result.reason == "noinit":
+                try:
+                    async with self.pg.connection() as conn:
+                        await self.limiter.load_from_postgres(
+                            conn, org_id=record.org_id, key_id=record.key_id
+                        )
+                except psycopg.Error as e:  # includes a pool timeout
+                    log.warning(
+                        "balance load failed", extra={"fields": {"error": type(e).__name__}}
+                    )
+                    raise ApiError(
+                        503,
+                        "server_error",
+                        "balance_unavailable",
+                        "The balance could not be loaded. Retry shortly.",
+                        headers={"Retry-After": "1"},
+                    ) from None
+                result = await self.limiter.reserve(**kwargs)
+        except (RedisError, OSError) as e:
+            # The script may have run although its reply was lost: release the request id.
+            self._release_in_background(record.org_id, request_id, e)
+            raise
         if result.admitted:
             return
         if result.reason == "noinit":

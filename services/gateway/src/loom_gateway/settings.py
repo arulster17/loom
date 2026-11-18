@@ -64,6 +64,12 @@ class GatewaySettings(PlatformSettings):
     # outage but not a restart; production puts it on a volume.
     settle_spool_path: str | None = None
 
+    # A non-streaming request cut at LOOM_REQUEST_TIMEOUT_S is billed an estimate of the
+    # tokens generated so far: tokens per second per sequence since the first dispatch
+    # (below any model's measured decode rate at its SLO, so it errs toward the client).
+    # 0 turns estimating off: such a request is billed nothing (contracts §6).
+    timeout_bill_tokens_per_s: Annotated[float, Field(ge=0)] = 10.0
+
     redis_max_connections: Annotated[int, Field(gt=0)] = 256
     pg_pool_max: Annotated[int, Field(gt=0)] = 10
 
