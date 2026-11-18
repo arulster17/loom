@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import socket
 import struct
 from collections.abc import Iterator
@@ -21,7 +22,6 @@ from typing import Any
 import httpx
 import pytest
 from gateway_m3_kit import MESSAGES, sample
-from redis.asyncio import Redis
 
 from loom_platform.limiter import Limiter
 
@@ -49,32 +49,64 @@ def assert_unavailable(r: httpx.Response) -> None:
     assert r.headers["retry-after"] == "1"
 
 
+# Connection kwargs of a redis-py pool that are not the gateway's configuration: where it
+# connects (taken from the new URL instead), and values redis-py derives per pool (each
+# new pool makes its own).
+LOCATION_KWARGS = frozenset({"host", "port", "db", "username", "password", "path"})
+PER_POOL_KWARGS = frozenset(
+    {
+        "orig_host_address",
+        "orig_socket_timeout",
+        "orig_socket_connect_timeout",
+        "maint_notifications_pool_handler",
+        "maint_notifications_config",
+        "himport_registry",
+    }
+)
+
+
+def configured_kwargs(pool: Any) -> dict[str, Any]:
+    """The connection kwargs `pool` was configured with (retry, timeouts, ...), without
+    its location and the values redis-py derives per pool."""
+    return {
+        k: v
+        for k, v in pool.connection_kwargs.items()
+        if k not in LOCATION_KWARGS | PER_POOL_KWARGS
+    }
+
+
 def limiter_on(
     stack: Any,
     url: str,
     *,
     max_connections: int | None = None,
-    pool_timeout: float = 5,
+    pool_timeout: float | None = None,
     socket_timeout: float | None = None,
     socket_connect_timeout: float | None = None,
 ) -> Limiter:
-    """A Limiter like the gateway's (same pool and connection classes, same settings
-    unless overridden) on the Redis at `url`. Close its client with `aclose_limiter`."""
+    """A Limiter like the gateway's on the Redis at `url`: the same client, pool and
+    connection classes, and every connection kwarg the gateway's pool was built with
+    (its pinned `retry` included), except the location (from `url`) and the arguments
+    given here. Close its client at teardown (`await lim.redis.aclose()`)."""
     gw = stack.gateway
-    s = gw.settings
-    pool = gw.redis.connection_pool
+    client = gw.redis
+    pool = client.connection_pool
+    kwargs = copy.deepcopy(configured_kwargs(pool))
+    if socket_timeout is not None:
+        kwargs["socket_timeout"] = socket_timeout
+    if socket_connect_timeout is not None:
+        kwargs["socket_connect_timeout"] = socket_connect_timeout
     new_pool = type(pool).from_url(
         url,
         connection_class=pool.connection_class,
-        max_connections=max_connections or s.redis_max_connections,
-        timeout=pool_timeout,
-        socket_timeout=s.redis_socket_timeout_s if socket_timeout is None else socket_timeout,
-        socket_connect_timeout=(
-            s.redis_connect_timeout_s if socket_connect_timeout is None else socket_connect_timeout
-        ),
+        max_connections=max_connections or pool.max_connections,
+        timeout=pool.timeout if pool_timeout is None else pool_timeout,
+        **kwargs,
     )
     return Limiter(
-        Redis(connection_pool=new_pool),
+        type(client)(
+            connection_pool=new_pool, single_connection_client=client.single_connection_client
+        ),
         usage_stream=gw.limiter.usage_stream,
         settled_ttl_s=gw.limiter.settled_ttl_s,
     )
@@ -90,13 +122,19 @@ def spy_release(
 ) -> dict[str, list[Any]]:
     """Replace `limiter.release` with a spy that records `(org_id, request_id)` in
     `calls`, waits for `gate` when given, records the request id in `returned`, and
-    succeeds without touching Redis."""
-    seen: dict[str, list[Any]] = {"calls": [], "returned": []}
+    succeeds without touching Redis. `running` holds the request ids of the calls under
+    way, and `peak[0]` the most that were under way at once."""
+    seen: dict[str, list[Any]] = {"calls": [], "returned": [], "running": [], "peak": [0]}
 
     async def release(org_id: Any, request_id: Any, *args: Any, **kw: Any) -> bool:
         seen["calls"].append((org_id, request_id))
-        if gate is not None:
-            await gate.wait()
+        seen["running"].append(request_id)
+        seen["peak"][0] = max(seen["peak"][0], len(seen["running"]))
+        try:
+            if gate is not None:
+                await gate.wait()
+        finally:
+            seen["running"].remove(request_id)
         seen["returned"].append(request_id)
         return True
 
