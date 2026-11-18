@@ -3,7 +3,7 @@
 
 import { randomUUID } from "node:crypto";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getPool } from "@/lib/db";
 import { ensureUserOrg, loadOrgContext, syncBootstrapAdmin } from "@/lib/data/orgs";
@@ -11,6 +11,10 @@ import { ensureUserOrg, loadOrgContext, syncBootstrapAdmin } from "@/lib/data/or
 import { adapter, email, hasDb, signUp } from "./helpers";
 
 const UUID = /^[0-9a-f-]{36}$/;
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe.skipIf(!hasDb)("@auth/pg-adapter on the uuid schema", () => {
   it("creates users with database-generated uuid ids and reads them back", async () => {
@@ -90,7 +94,9 @@ describe.skipIf(!hasDb)("signup", () => {
     expect(n.rows[0].n).toBe(1);
   });
 
-  it("grants admin to LOOM_ADMIN_EMAILS at sign-in, audited, once", async () => {
+  it("grants admin to LOOM_ADMIN_EMAILS at sign-in in dev, audited, once", async () => {
+    // Only in dev (docs/m3-review-fixes-spec.md W5); outside dev is tested in m3-admin-policy.test.ts.
+    vi.stubEnv("LOOM_ENV", "dev");
     const user = await adapter().createUser!({ id: "", email: "Boss@Example.com", emailVerified: null, name: null, image: null });
     expect(await syncBootstrapAdmin(user.id, "boss@example.com")).toBe(true);
     expect(await syncBootstrapAdmin(user.id, "boss@example.com")).toBe(false);
@@ -104,6 +110,8 @@ describe.skipIf(!hasDb)("signup", () => {
   });
 
   it("does not grant admin to anyone else", async () => {
+    // In dev, where the list does grant, so this tests the email match, not the LOOM_ENV gate.
+    vi.stubEnv("LOOM_ENV", "dev");
     const ctx = await signUp();
     expect(await syncBootstrapAdmin(ctx.userId, "boss@example.com")).toBe(false);
     expect((await loadOrgContext(ctx.userId))?.userRole).toBe("user");

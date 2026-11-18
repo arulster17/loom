@@ -76,11 +76,14 @@ export function SuspendForm({ orgId, status }: { orgId: string; status: string }
   );
 }
 
-export function AdjustCreditsForm({ orgId }: { orgId: string }) {
+/** `formToken`: a new random UUID per render of the page; the posting is keyed by it, so
+ * submitting one rendered form twice posts once. */
+export function AdjustCreditsForm({ orgId, formToken }: { orgId: string; formToken: string }) {
   const [state, action, pending] = useActionState(adjustCreditsAction, undefined);
   return (
     <form action={action} className="space-y-2">
       <input type="hidden" name="org_id" value={orgId} />
+      <input type="hidden" name="form_token" value={formToken} />
       <div className="grid gap-2 sm:grid-cols-[10rem_1fr]">
         <div>
           <label htmlFor="amount" className={label}>
