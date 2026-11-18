@@ -9,7 +9,6 @@ Idempotency key formats (one transaction per key, ever):
     promo:signup:<org_id>                signup credit (loom_approve_org)
     stripe:<stripe event id>             purchase / refund from a Stripe webhook
     admin:adjust:<form token>            admin adjustment from the web app's form (per-render UUID)
-    admin:<admin_audit_log id>           admin adjustment posted without a form token
 """
 
 from __future__ import annotations

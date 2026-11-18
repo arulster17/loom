@@ -238,22 +238,22 @@ export const FORM_TOKEN_REUSED =
  * Adds (grant, against promo_expense) or removes (correction, against revenue) credit,
  * with its audit row in the same transaction.
  *
- * With `formToken` (the adjust-credits form's per-render UUID, which the admin action
- * always passes), the ledger idempotency key is `admin:adjust:<token>` (contracts §3), so
- * a resubmit or the same form posted from a second tab posts once: the repeat writes
+ * `formToken` (the adjust-credits form's per-render UUID, which the admin action always
+ * passes) is required: the ledger idempotency key is `admin:adjust:<token>` (contracts §3),
+ * so a resubmit or the same form posted from a second tab posts once: the repeat writes
  * nothing (no ledger transaction, no audit row) and returns the first transaction, with
- * `created: false`. A token already used for another org or amount is refused. Without a
- * token, the key is `admin:<audit id>` and every call is a new adjustment.
+ * `created: false`. A missing or malformed token is refused, and so is a token already used
+ * for another org or amount.
  */
 export async function adjustCredits(
   actor: Actor,
   orgId: string,
   amountMicros: bigint,
   memo: string,
-  opts: { formToken?: string } = {},
+  opts: { formToken: string },
 ): Promise<{ transactionId: string; created: boolean }> {
   if (!isUuid(orgId)) throw new AuthzError("Org not found.", "not_found");
-  if (opts.formToken !== undefined && !isUuid(opts.formToken)) {
+  if (typeof opts?.formToken !== "string" || !isUuid(opts.formToken)) {
     throw new RangeError("This form has expired. Reload the page and try again.");
   }
   const note = memo.trim().slice(0, 500);
@@ -285,11 +285,6 @@ export async function adjustCredits(
       // Also serialises two posts of one form for the same org.
       const org = await c.query("SELECT 1 FROM orgs WHERE id = $1 FOR UPDATE", [orgId]);
       if (!org.rows[0]) throw new AuthzError("Org not found.", "not_found");
-      if (opts.formToken === undefined) {
-        const auditId = await audit(c, actor.userId, "org.credit_adjust", "org", orgId, details);
-        const r = await post(c, `admin:${auditId}`);
-        return { transactionId: r.rows[0].transaction_id, created: true };
-      }
       const token = opts.formToken.toLowerCase();
       const r = await post(c, `admin:adjust:${token}`);
       const { transaction_id: transactionId, created } = r.rows[0];
@@ -304,7 +299,7 @@ export async function adjustCredits(
     });
   } catch (e) {
     // loom_post_transaction: this key was already posted with another org or amount.
-    if (opts.formToken !== undefined && pgCode(e) === "23505") throw new RangeError(FORM_TOKEN_REUSED);
+    if (pgCode(e) === "23505") throw new RangeError(FORM_TOKEN_REUSED);
     throw e;
   }
 }
