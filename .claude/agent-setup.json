@@ -1,6 +1,5 @@
 {
   "protect": {
-    "locked": false,
     "paths": [
       "**/tests/**",
       "**/test/**",
@@ -16,7 +15,12 @@
       "services/gateway/tests/**",
       "services/billing/tests/**",
       "services/podproxy/tests/**",
-      "services/devstack/tests/**"
+      "services/devstack/tests/**",
+      "apps/web/src/**/*.test.ts",
+      ".github/workflows/ci.yml",
+      "apps/web/vitest.config.ts",
+      "apps/web/package.json",
+      "scripts/flaky_report.py"
     ],
     "testWriters": [
       "agent-setup:test-writer"
