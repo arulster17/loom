@@ -535,11 +535,12 @@ Accepted: it can only keep a pod up longer, never drain one early.
 
 While Redis is unavailable new requests are refused fast: any Redis error during auth,
 reserve or the pool check is a 503 `service_unavailable` with `Retry-After: 1` (§11).
-So is a Postgres error during auth or reserve, for a key or org not cached in Redis:
-Postgres down, or its pool not opened yet because the deferred role check is still
-waiting for Postgres (§3 "Roles"); nothing is reserved.
+So is a Postgres error during auth, for a key not cached in Redis: Postgres down, or its
+pool not opened yet because the deferred role check is still waiting for Postgres (§3
+"Roles"); nothing is reserved. A Postgres error while loading an org's balance at reserve,
+including that held-back pool, is 503 `balance_unavailable` instead (§8 step 3).
 
-A reserve call that fails this way may still have run in Redis (its reply was lost), so the
+A reserve call that fails with a Redis error may still have run in Redis (its reply was lost), so the
 gateway starts a background `release` of that request id (`Limiter.release(org_id,
 request_id)`), retried with backoff (0.1 s, doubling, at most 2 s apart) until it succeeds
 or `LOOM_RESERVATION_GRACE_S` has passed. `release.lua` also writes the `:done:<rid>` marker
@@ -770,8 +771,8 @@ by the signed `checkout.session.completed` webhook, as a `purchase` keyed
    naming it, before reserve.
 3. Reserve (402/429). If the org's balance cannot be loaded from Postgres into Redis
    (`noinit` again after the load), 503 `balance_unavailable` with `Retry-After: 1`
-   *(wave 2)*, and likewise on any Postgres error (including a pool timeout) during the
-   load; nothing is reserved.
+   *(wave 2)*, and likewise on any Postgres error (including a pool timeout, or the pool
+   held back by the deferred role check, §3 "Roles") during the load; nothing is reserved.
 4. Pool state (§10): not routable -> release the reservation, 503 `model_unavailable`.
    Reserving first means a cold model is only woken (a GPU start, §10) by a request that
    has the balance for it and passes the rate limits; every 503 spends an rpm token, so
@@ -933,8 +934,8 @@ Clients branch on the status; `code` gives the reason.
 | 429 | `rate_limit_error` | `rate_limit_exceeded`, `concurrency_limit_exceeded` | Limits; `Retry-After` in seconds |
 | 502 | `server_error` | `upstream_lost` | Pod lost before any byte reached the client, retry used up; *(wave 2)* also no answer within `LOOM_REQUEST_TIMEOUT_S` of receipt. Billed nothing (usage event `error`). A non-streaming request cut at the timeout is billed an estimate (§6 "Shutdown"): usage event `aborted`, cost in `X-Loom-Cost-Micros` / `X-Loom-Cost-USD` |
 | 503 | `server_error` | `model_unavailable` | §10; `Retry-After` in seconds |
-| 503 | `server_error` | `balance_unavailable` | *(wave 2)* the org's balance could not be loaded into Redis, or Postgres failed while loading it (§8 step 3); `Retry-After: 1`; no reservation, no usage event |
-| 503 | `server_error` | `service_unavailable` | Redis unreachable or frozen past `LOOM_REDIS_SOCKET_TIMEOUT_S` during auth, reserve or the pool check (§6 "Settle spool"); Postgres unreachable during auth or reserve for a key or org not cached in Redis, including the pool held back by the deferred role check (§3 "Roles"); `Retry-After: 1`; nothing reserved. A reserve that may have run is released in the background; one that never reached Redis, or that fails while 1,000 releases run, is not (§6 "Settle spool") |
+| 503 | `server_error` | `balance_unavailable` | *(wave 2)* the org's balance could not be loaded into Redis, or Postgres failed while loading it, including the pool held back by the deferred role check (§8 step 3); `Retry-After: 1`; no reservation, no usage event |
+| 503 | `server_error` | `service_unavailable` | Redis unreachable or frozen past `LOOM_REDIS_SOCKET_TIMEOUT_S` during auth, reserve or the pool check (§6 "Settle spool"); Postgres unreachable during auth for a key not cached in Redis, including the pool held back by the deferred role check (§3 "Roles"; a failed balance load is `balance_unavailable`); `Retry-After: 1`; nothing reserved. A reserve that may have run is released in the background; one that never reached Redis, or that fails while 1,000 releases run, is not (§6 "Settle spool") |
 | 503 | `server_error` | `server_shutdown` | Only as a stream's last error chunk: the gateway is shutting down (§6 "Shutdown"); the tokens streamed are billed; retry |
 
 Mid-stream failures end the stream with `data: {"error": {... "code": "upstream_lost"}}`
