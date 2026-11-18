@@ -61,27 +61,83 @@ async def test_g3_postgres_error_after_noinit_is_503_balance_unavailable(stack, 
     assert r.status_code == 200, r.text
 
 
+class _FailingPool:
+    """Stands in for a Postgres pool whose every `connection()` raises `error` (a
+    PoolTimeout: the pool exhausted); anything else is passed to the real pool. `calls`
+    counts the connection attempts."""
+
+    def __init__(self, real: Any, error: Exception) -> None:
+        self._real = real
+        self._error = error
+        self.calls = 0
+
+    def connection(self, *args: Any, **kw: Any) -> Any:
+        self.calls += 1
+        raise self._error
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
 async def test_g3_exhausted_pool_when_loading_the_balance_is_503(stack, monkeypatch):
     """A pool timeout taking the connection for the balance load (the gateway's Postgres
-    pool exhausted) is the same 503, not a 500."""
+    pool exhausted) is the same 503 `balance_unavailable`, not a 500, and not auth's
+    `service_unavailable`.
+
+    Only the balance load gets the exhausted pool: authentication keeps the real one. The
+    key is not cached, so auth reads it from Postgres on this very request; the test
+    does not depend on an auth cache staying warm (a PoolTimeout during auth is a
+    `service_unavailable`, contracts §6: see the test below)."""
     t = await stack.tenant()
-    # Authenticate once (the record is then cached outside Postgres) without reserving:
-    # an unknown model is refused after auth, before reserve.
-    async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.post(
-            f"{stack.url}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {t.key}"},
-            json={"model": "no-such-model", "messages": MESSAGES},
-        )
-    assert r.status_code == 404, r.text
+    gw = stack.gateway
+    assert gw.auth.pg_pool is gw.pg, "auth and the balance load share one pool (setup)"
+    exhausted = _FailingPool(gw.pg, PoolTimeout("couldn't get a connection after 30.00 sec"))
+    monkeypatch.setattr(gw, "pg", exhausted)
 
-    def exhausted(*args: Any, **kw: Any) -> Any:
-        raise PoolTimeout("couldn't get a connection after 30.00 sec")
-
-    monkeypatch.setattr(stack.gateway.pg, "connection", exhausted)
     r = await _post(stack, t.key)
+    assert exhausted.calls == 1, "the balance load did not take a connection (test setup)"
     assert r.status_code == 503, r.text
-    assert r.json()["error"]["code"] == "balance_unavailable"
+    err = r.json()["error"]
+    assert err["code"] == "balance_unavailable"
+    assert err["type"] == "server_error"
     assert r.headers["retry-after"] == "1"
     assert await held(stack, t) == (0, 0, 0)
     assert await stack.events() == []
+    assert stack.engine.requests == []
+
+    # Once the pool has connections again the same key is served.
+    monkeypatch.undo()
+    r = await _post(stack, t.key)
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        psycopg.OperationalError("connection to server failed: Connection refused"),
+        PoolTimeout("couldn't get a connection after 30.00 sec"),
+    ],
+    ids=["operational", "pool_timeout"],
+)
+async def test_postgres_error_during_auth_is_503_service_unavailable(stack, monkeypatch, error):
+    """Contracts §6: a Postgres error during auth, for a key not cached in Redis, is 503
+    `service_unavailable` with `Retry-After: 1` (not the balance load's
+    `balance_unavailable`). Nothing is reserved, nothing reaches an engine."""
+    t = await stack.tenant()  # a new key: not cached, auth must ask Postgres
+    failing = _FailingPool(stack.gateway.auth.pg_pool, error)
+    monkeypatch.setattr(stack.gateway.auth, "pg_pool", failing)
+
+    r = await _post(stack, t.key)
+    assert failing.calls >= 1, "auth did not look the key up in Postgres (test setup)"
+    assert r.status_code == 503, r.text
+    err = r.json()["error"]
+    assert err["code"] == "service_unavailable"
+    assert err["type"] == "server_error"
+    assert r.headers["retry-after"] == "1"
+    assert await held(stack, t) == (0, 0, 0)
+    assert await stack.events() == []
+    assert stack.engine.requests == []
+
+    monkeypatch.undo()
+    r = await _post(stack, t.key)
+    assert r.status_code == 200, r.text
