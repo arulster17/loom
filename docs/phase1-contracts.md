@@ -986,9 +986,12 @@ a replica's URL host and `server_name` are the same (`https://mock-pod-1:8443`).
   current one has under 6 days left, into `LOOM_POOLMGR_GATEWAY_CERT_DIR`: one PEM file
   with key and certificate, written to a temporary name and renamed into place, so a reader
   never sees a key without its certificate. The gateway checks that file and
-  `LOOM_POD_CA_CERT` every 60 s; on a change it builds a new TLS context and uses it for new
-  upstream connections (open streams keep theirs). A file that fails to load keeps the old
-  context and logs an error. `LOOM_POD_CA_CERT` may hold several CA certificates (old and
+  `LOOM_POD_CA_CERT` every `LOOM_GATEWAY_CERT_CHECK_S` (60 s); on a change it builds a new TLS
+  context and uses it for new upstream connections (open streams keep theirs). A file that
+  fails to load keeps the old context and logs an error. A missing or unloadable file at
+  start does not stop the gateway (the manager, deployed after it, writes the file): until
+  the files load, upstream requests fail as connect errors (502 `upstream_lost`), and each
+  check retries the load. `LOOM_POD_CA_CERT` may hold several CA certificates (old and
   new during a rollover) and the gateway trusts any of them. The gateway exports
   `loom_gateway_client_cert_expiry_seconds` (alarm G3). `loom-poolmgr rekey [--model M]`
   re-issues every ready pod's server certificate now (the SIGHUP path below);
