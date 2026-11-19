@@ -2,10 +2,11 @@
 (docs/phase1-m3-spec.md §7; contracts §2 `LOOM_GATEWAY_CLIENT_CERT`/`_KEY`,
 `LOOM_POD_CA_CERT`, §9).
 
-The gateway checks its client-certificate file and `LOOM_POD_CA_CERT` every 60 s; on a
-change it builds a new TLS context for new upstream connections while open streams keep
-theirs; a file that fails to load keeps the old context and logs an error;
-`LOOM_POD_CA_CERT` may hold several CAs, any of them trusted; it exports
+The gateway checks its client-certificate file and `LOOM_POD_CA_CERT` every
+`LOOM_GATEWAY_CERT_CHECK_S` seconds (default 60, §6.13); on a change it builds a new TLS
+context for new upstream connections while open streams keep theirs; a file that fails
+to load keeps the old context and logs an error; `LOOM_POD_CA_CERT` may hold several
+CAs, any of them trusted; it exports
 `loom_gateway_client_cert_expiry_seconds` (alarm G3).
 
 The client certificate is the pool manager's combined file (key and certificate in one
@@ -14,8 +15,10 @@ local mTLS servers (`gateway_m3_cert_kit.pod`); what the gateway's context holds
 from which pods it can reach: a pod that accepts only the new client certificate, or
 presents a certificate only the new CA signs, answers once the change is picked up.
 
-The spec names no setting for the 60 s interval, so these tests wait for it in real time
-(each up to `PICKUP_BOUND_S`, 90 s) and carry their own timeout.
+The tests set `LOOM_GATEWAY_CERT_CHECK_S=1` (§7: "tests set 1") in the gateway's
+environment and expect each change in use within `PICKUP_BOUND_S` (5 s: the 1-s check
+plus slack for a loaded runner). The default of 60 is checked in
+`test_gateway_m3_cert_settings.py`.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from typing import Any
 
 import pytest
 from gateway_m3_cert_kit import (
+    CERT_CHECK_S,
     DAY_S,
     PICKUP_BOUND_S,
     HeldEngine,
@@ -81,7 +85,9 @@ class Setup:
 
 
 @pytest.fixture
-async def setup(make_stack: Any, tmp_path: Path) -> Setup:
+async def setup(make_stack: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Setup:
+    # Read by the gateway's settings when `make_stack` builds them (env prefix LOOM_).
+    monkeypatch.setenv("LOOM_GATEWAY_CERT_CHECK_S", str(CERT_CHECK_S))
     ca1 = new_ca("pod-ca-1")
     client = issue(ca1, server=False, days=1)
     gw = tmp_path / "gateway-cert"
@@ -151,7 +157,7 @@ async def test_client_cert_expiry_gauge_at_start(setup: Setup) -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.timeout(300)
+@pytest.mark.timeout(60)
 async def test_new_client_cert_is_used_for_new_connections_while_an_open_stream_finishes(
     setup: Setup,
 ) -> None:
@@ -181,7 +187,7 @@ async def test_new_client_cert_is_used_for_new_connections_while_an_open_stream_
 
 
 @pytest.mark.slow
-@pytest.mark.timeout(300)
+@pytest.mark.timeout(60)
 async def test_new_ca_bundle_is_trusted_for_new_connections_while_an_open_stream_finishes(
     setup: Setup,
 ) -> None:
@@ -210,7 +216,7 @@ async def test_new_ca_bundle_is_trusted_for_new_connections_while_an_open_stream
 
 
 @pytest.mark.slow
-@pytest.mark.timeout(300)
+@pytest.mark.timeout(60)
 @pytest.mark.parametrize("which", ["client_cert", "ca_bundle"])
 async def test_a_file_that_fails_to_load_keeps_the_old_context_and_logs_an_error(
     setup: Setup, which: str, caplog: pytest.LogCaptureFixture
@@ -242,7 +248,7 @@ async def test_a_file_that_fails_to_load_keeps_the_old_context_and_logs_an_error
             f"no error logged within {PICKUP_BOUND_S} s of the broken {which} file"
         )
         assert await s.chat() == 200, "a request failed while the file was broken"
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.25)
 
     port = await s.pod(server_ca=s.ca1, client_cas=[s.ca1])  # a new connection
     await route(s.stack, s.model, port)

@@ -4,7 +4,8 @@ A27; contracts §2 `LOOM_GATEWAY_CLIENT_CERT`/`_KEY`, `LOOM_POD_CA_CERT`, §9).
 - CAs and certificates of any validity (`new_ca`, `issue`), written as the pool manager
   writes the gateway's client certificate: key and certificate in one PEM, renamed into
   place (`write_atomic`). The gateway is given that one file as both
-  `LOOM_GATEWAY_CLIENT_CERT` and `LOOM_GATEWAY_CLIENT_KEY`.
+  `LOOM_GATEWAY_CLIENT_CERT` and `LOOM_GATEWAY_CLIENT_KEY`, and checks it (and
+  `LOOM_POD_CA_CERT`) every `CERT_CHECK_S` (1 s, `LOOM_GATEWAY_CERT_CHECK_S`).
 - `pod`: a local pod (the shared `FakeEngine`, or `HeldEngine`) behind uvicorn's mTLS
   with a server certificate and the client CAs it accepts, on a free port, for the
   stack's lifetime. A new pod means a new upstream connection: the gateway cannot reuse
@@ -40,9 +41,11 @@ from starlette.responses import Response
 
 DAY_S = 86400
 MESSAGES = [{"role": "user", "content": "Count."}]
-# The gateway checks its files every 60 s (spec §7); a change must be in use for new
-# connections within that, plus slack for a loaded CI runner.
-PICKUP_BOUND_S = 90.0
+# The gateway checks its files every `LOOM_GATEWAY_CERT_CHECK_S` seconds (spec §7, §6.13:
+# default 60, tests set 1); a change must be in use for new connections within that, plus
+# slack for a loaded CI runner.
+CERT_CHECK_S = 1
+PICKUP_BOUND_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -227,9 +230,9 @@ async def chat(stack: Any, key: str, model: str, *, timeout_s: float = 30) -> in
 
 
 async def wait_until_ok(
-    stack: Any, key: str, model: str, *, timeout_s: float = PICKUP_BOUND_S, every_s: float = 1.0
+    stack: Any, key: str, model: str, *, timeout_s: float = PICKUP_BOUND_S, every_s: float = 0.2
 ) -> float:
-    """Ask once a second until a request succeeds; seconds it took. Fails after
+    """Ask every `every_s` until a request succeeds; seconds it took. Fails after
     `timeout_s`."""
     start = time.monotonic()
     statuses: list[int] = []
