@@ -166,28 +166,38 @@ All alarms notify the SNS topic `loom-platform-alerts` (email subscription to `o
 on ALARM and OK. Metrics from the services reach CloudWatch through the CloudWatch agent's
 Prometheus scraping (§6.9), namespace `Loom/Platform`, only the series listed here.
 
-| # | Alarm | Metric and condition | Missing data |
-|---|---|---|---|
-| P1a | Serving reaper errors | `AWS/Lambda Errors` (FunctionName = serving reaper), Sum >= 1 over 1 h | not breaching |
-| P1b | Serving reaper not running | `AWS/Lambda Invocations`, Sum < 1 over 2 consecutive 15-min periods | **breaching** |
-| P2a | Spend-cap refusal | `loom_poolmgr_creates_total{result="spend_cap"}` increased (> 0 over 5 min) | not breaching |
-| P2b | Model held at the cap | new gauge `loom_poolmgr_pool_reason{model,reason="spend_cap"}` = 1 for 5 consecutive minutes | not breaching |
-| P3 | Pod CA near expiry | new gauge `loom_poolmgr_ca_expiry_seconds` < 2,592,000 (30 days), 1-h period | **breaching** (a manager that refuses to start publishes nothing) |
-| H1 | Platform heartbeat | `up{job="gateway"}`, `up{job="billing"}`, `up{job="poolmgr"}` (the agent's scrape result) < 1 for 5 min | **breaching** (box or agent down) |
-| H2 | Instance health | `AWS/EC2 StatusCheckFailed_System` -> EC2 **recover** action; `StatusCheckFailed_Instance` -> notify | breaching |
-| H3 | Webhook endpoint unreachable from the internet | `AWS/Route53 HealthCheckStatus` (dimension `HealthCheckId` = the `hooks.` health check, §8.5) Minimum < 1 for 5 consecutive 1-min periods; the alarm is in us-east-1, created through `aws.us_east_1` (Route 53 publishes health-check metrics only there) | **breaching** |
-| G1 | Settle spool | `loom_gateway_settle_spool_depth` > 0 for 5 min (contracts §6) | not breaching |
-| G2 | Lost usage | `loom_gateway_settle_failures_total` increased (contracts §6: alert at once) | not breaching |
-| G3 | Gateway client certificate | new gauge `loom_gateway_client_cert_expiry_seconds` < 172,800 (rotation broken, §7) | breaching |
-| S1a | A Stripe event became stuck | new counter `loom_billing_stripe_unapplied_stale_total{type}` increased (> 0 over 5 min): an event has stayed unapplied for 15 min (§8.6). Each new stuck event alarms again (ALARM, then OK when the window passes), so one old stuck event never hides the next | not breaching |
-| S1b | Stuck events outstanding | new gauge `loom_billing_stripe_unapplied_stale_events` (as defined in §8.6) > 0 for 24 h: a daily-scale reminder that an admin must resolve them or a release must fix them (§8.6 "Resolve") | not breaching |
-| S2a | Webhook secret mismatch | `loom_billing_stripe_webhooks_total{result="signature_mismatch"}` (a well-formed header with a current `t`, no `v1` matching: the box's secret is not the endpoint's, §8.3) >= 1 in 15 min | not breaching |
-| S2b | Clock skew | `loom_billing_stripe_webhooks_total{result="stale_timestamp"}` (HMAC valid, `t` outside the tolerance) >= 1 in 15 min (test-mode retries are few, so any genuine one matters). Junk POSTs count as `bad_signature`, which no alarm reads; a wrong secret shows up as S2a | not breaching |
-| S2c | Webhook 5xx | new counter `loom_billing_stripe_webhook_errors_total{status}` (503, 500) >= 1 in 1 h (one event gets only a few attempts over hours in test mode, and a 503 stores nothing, so one is enough; a Postgres outage also shows as S5, a stopped billing as H1) | not breaching |
-| S4 | Handler failures | new counter `loom_billing_stripe_handler_failures_total{path}` (`webhook`, `retry`, `pending_clawback`, each initialised at 0: an attempt on one event raised; counted on the event's first failure since its last clean attempt, i.e. the write that makes `error_count` 1, not on each minute's repeat, §8.3) increased | not breaching |
-| S5 | Retry job stopped | `loom_billing_stripe_retry_last_success_seconds` (the Unix time of the last completed run) older than 5 min: metric math `EPOCH(m) - m` > 300 over one 60-s period, `m` its Maximum (§8.3, §6.13) | **breaching** |
-| D1 | Disk | CloudWatch agent `disk_used_percent` > 80% on `/` or `/var/lib/loom` | not breaching |
-| R1 | RDS | `FreeStorageSpace` < 2 GB; `CPUUtilization` > 80% for 15 min | not breaching |
+| # | Alarm | Statistic | Metric and condition | Missing data |
+|---|---|---|---|---|
+| P1a | Serving reaper errors | Sum | `AWS/Lambda Errors` (FunctionName = serving reaper), Sum >= 1 over 1 h | not breaching |
+| P1b | Serving reaper not running | Sum | `AWS/Lambda Invocations`, Sum < 1 over 2 consecutive 15-min periods | **breaching** |
+| P2a | Spend-cap refusal | counter (below) | `loom_poolmgr_creates_total{result="spend_cap"}` increased (> 0 over 5 min) | not breaching |
+| P2b | Model held at the cap | Maximum | new gauge `loom_poolmgr_pool_reason{model,reason="spend_cap"}` = 1 for 5 consecutive minutes | not breaching |
+| P3 | Pod CA near expiry | Minimum | new gauge `loom_poolmgr_ca_expiry_seconds` < 2,592,000 (30 days), 1-h period | **breaching** (a manager that refuses to start publishes nothing) |
+| H1 | Platform heartbeat | Minimum | `up{job="gateway"}`, `up{job="billing"}`, `up{job="poolmgr"}` (the agent's scrape result) < 1 for 5 min | **breaching** (box or agent down) |
+| H2 | Instance health | Maximum | `AWS/EC2 StatusCheckFailed_System` -> EC2 **recover** action; `StatusCheckFailed_Instance` -> notify | breaching |
+| H3 | Webhook endpoint unreachable from the internet | Minimum | `AWS/Route53 HealthCheckStatus` (dimension `HealthCheckId` = the `hooks.` health check, §8.5) Minimum < 1 for 5 consecutive 1-min periods; the alarm is in us-east-1, created through `aws.us_east_1` (Route 53 publishes health-check metrics only there) | **breaching** |
+| G1 | Settle spool | Maximum | `loom_gateway_settle_spool_depth` > 0 for 5 min (contracts §6) | not breaching |
+| G2 | Lost usage | counter (below) | `loom_gateway_settle_failures_total` increased (contracts §6: alert at once) | not breaching |
+| G3 | Gateway client certificate | Minimum | new gauge `loom_gateway_client_cert_expiry_seconds` < 172,800 (rotation broken, §7) | breaching |
+| S1a | A Stripe event became stuck | counter (below) | new counter `loom_billing_stripe_unapplied_stale_total{type}` increased (> 0 over 5 min): an event has stayed unapplied for 15 min (§8.6). Each new stuck event alarms again (ALARM, then OK when the window passes), so one old stuck event never hides the next | not breaching |
+| S1b | Stuck events outstanding | Maximum | new gauge `loom_billing_stripe_unapplied_stale_events` (as defined in §8.6) > 0 for 24 h: a daily-scale reminder that an admin must resolve them or a release must fix them (§8.6 "Resolve") | not breaching |
+| S2a | Webhook secret mismatch | counter (below) | `loom_billing_stripe_webhooks_total{result="signature_mismatch"}` (a well-formed header with a current `t`, no `v1` matching: the box's secret is not the endpoint's, §8.3) >= 1 in 15 min | not breaching |
+| S2b | Clock skew | counter (below) | `loom_billing_stripe_webhooks_total{result="stale_timestamp"}` (HMAC valid, `t` outside the tolerance) >= 1 in 15 min (test-mode retries are few, so any genuine one matters). Junk POSTs count as `bad_signature`, which no alarm reads; a wrong secret shows up as S2a | not breaching |
+| S2c | Webhook 5xx | counter (below) | new counter `loom_billing_stripe_webhook_errors_total{status}` (503, 500) >= 1 in 1 h (one event gets only a few attempts over hours in test mode, and a 503 stores nothing, so one is enough; a Postgres outage also shows as S5, a stopped billing as H1) | not breaching |
+| S4 | Handler failures | counter (below) | new counter `loom_billing_stripe_handler_failures_total{path}` (`webhook`, `retry`, `pending_clawback`, each initialised at 0: an attempt on one event raised; counted on the event's first failure since its last clean attempt, i.e. the write that makes `error_count` 1, not on each minute's repeat, §8.3) increased | not breaching |
+| S5 | Retry job stopped | Maximum of `m` | `loom_billing_stripe_retry_last_success_seconds` (the Unix time of the last completed run) older than 5 min: metric math `EPOCH(m) - m` > 300 over one 60-s period, `m` its Maximum (§8.3, §6.13) | **breaching** |
+| D1 | Disk | Maximum | CloudWatch agent `disk_used_percent` > 80% on `/` or `/var/lib/loom` | not breaching |
+| R1 | RDS | Minimum (storage), Maximum (CPU) | `FreeStorageSpace` < 2 GB; `CPUUtilization` > 80% for 15 min | not breaching |
+
+**Statistics** (user, 2026-11-19). An alarm on a value above a threshold ("> X for N min",
+"= 1 for N minutes", "> X") reads its metric's **Maximum** in each period: one sample above
+X in a period counts for that period, so an alarm over N consecutive periods means the
+value was high in each of them (Minimum there would let one low sample a period hide a
+value that stays high, e.g. a spool that drains and refills). A health alarm or one on a
+value below a threshold (H1 and H3 "below 1", P3, G3, R1's free storage) reads the
+**Minimum**: one failed scrape or check, or one low sample, in a period counts. P1 reads
+the Lambda metrics' Sum, S5 the Maximum of `m` inside its metric math, and an alarm on a
+counter ("counter (below)") uses the counter math below. A8 checks each alarm's statistic.
 
 Every Prometheus counter an alarm reads is initialised to 0 for each label value at
 process start, so the series exists before its first increment. Whether the agent sends
@@ -236,7 +246,7 @@ left out, nothing else may be added.
 
 | Identity | Grant | Required | Reason |
 |---|---|---|---|
-| instance role | `secretsmanager:PutSecretValue` on `loom/platform/*` | yes | `secrets init` and `ses-smtp-password` store the values Loom makes, on the box (§6.3) |
+| instance role | `secretsmanager:PutSecretValue` on `loom/platform/*` | yes | `secrets init` stores the values Loom makes, and the runbook's Google merge puts `auth`, both on the box (§6.3); `ses-smtp-password` runs on the operator's laptop with the operator's credentials, not this role (§6.3) |
 | instance role | `secretsmanager:DescribeSecret` on `loom/platform/*` | yes | `secrets init` checks whether a secret has a value before writing (it never overwrites) |
 | instance role | `secretsmanager:ListSecretVersionIds` on `loom/platform/*` | optional | the same check by listing versions |
 | instance role | **Deny** `secretsmanager:*` on the `serving-runpod-key` secret | yes | the `loom/platform/*` grants would otherwise let the box read the serving RunPod key (in one account the identity policy alone suffices); only the serving reaper reads it |
@@ -249,6 +259,11 @@ left out, nothing else may be added.
 | OIDC role | `ecr:BatchGetImage` on the Loom repositories | optional | in AWS's documented push permissions |
 | OIDC role trust | `token.actions.githubusercontent.com:sub` StringEquals `repo:arulster17/loom:environment:platform-images` and `aud` StringEquals `sts.amazonaws.com`, no other subject | yes | IAM cannot test a branch and an event together: the GitHub environment `platform-images` (deployment branches: `main` only, set by the user, runbook) holds the branch rule, and `images.yml`, the only workflow naming that environment, runs on `workflow_dispatch` only |
 | SES SMTP user | `ses:SendRawEmail` on `identity/*` and the configuration set, with condition `ses:FromAddress` = `no-reply@<domain>` (replaces "on the domain identity only") | yes | in the SES sandbox SES also authorises the recipient's identity (B24's verified address) and the configuration set; the condition keeps the sender to the one address. Not checkable in Stage A; B24 shows it |
+
+**Not granted** (user, 2026-11-19): `logs:FilterLogEvents` (or any other log read) to any
+Loom role. m3-i's CloudWatch half is therefore not run by `loom-deploy acceptance`; B26
+runs it with the operator's credentials and plain `aws` (§6.12, §10). No `iam:` action
+either: the SES access key is created with the operator's credentials (§6.3).
 
 **Releases bucket.** A second bucket, named by the variable `releases_bucket` (no default:
 S3 names are global), with the lease bucket's settings (private, SSE, public access block,
@@ -301,9 +316,13 @@ validity), the manager's client certificate and the Grafana admin password (§6.
 never reads or writes `serving-runpod-key` (the instance role is denied it, §5.6). It refuses to overwrite a secret that has
 a value. The user puts Stripe and Google values with the runbook's
 `printf %s ... | aws secretsmanager put-secret-value --secret-string file:///dev/stdin`
-pattern (as `aws-setup.md` step 8). SES SMTP: the runbook creates an access key for
-`loom-ses-smtp` and `loom-deploy ses-smtp-password` derives the SMTP password (AWS's
-documented HMAC derivation) and stores it; the access key secret is never printed.
+pattern (as `aws-setup.md` step 8); Google's values are merged into `auth` in an
+interactive SSM session on the box, since only the instance role may read a secret
+(§5.2). SES SMTP, on the operator's laptop with the operator's credentials (the instance
+role has no `iam:` action): `aws iam create-access-key --user-name loom-ses-smtp` is piped
+straight into `python3 -S loom-deploy.py ses-smtp-password` (any Python 3.9 or later),
+which derives the SMTP password (AWS's documented HMAC derivation) and stores it; the
+access key secret is never printed, pasted or written to a file (user, 2026-11-19).
 
 At each deploy `loom-deploy` reads the secrets with the instance role and renders them to
 `/run/loom/secrets/<service>/` (tmpfs, `0400`, owned by the container's uid), mounted
@@ -347,11 +366,16 @@ web app the same URL with `NODE_EXTRA_CA_CERTS` pointing at the CA file.
 ### 6.6 `loom-deploy` and the deploy order (P4)
 
 `loom-deploy` is one Python module in `services/devstack` that uses **only the standard
-library** (a test enforces it), so it runs on the box with the host's Python 3.12 and calls
-the `aws` CLI and `docker compose`. Subcommands: `secrets init`, `ses-smtp-password`,
-`apply --release <sha>`, `status`, `rollback`, `acceptance` (paths, inputs, the deploy
-log, exit codes: §6.12). The operator runs it through SSM Run
-Command (`aws ssm send-command`, wrapped in the runbook).
+library** (a test enforces it), so it runs on the box with the host's Python 3.12
+(`python3.12 -S`; the host's `python3` is the older system Python, on which the module
+also runs) and calls the `aws` CLI and `docker compose`. Subcommands: `secrets init`,
+`ses-smtp-password`, `apply --release <sha>`, `status`, `rollback`, `acceptance` (paths,
+inputs, the deploy log, exit codes: §6.12). The operator runs `apply`, `rollback` and
+`acceptance` in an **interactive SSM session** on the box (`aws ssm start-session`, then
+`sudo`): they take minutes, `acceptance` waits for the operator (m3-g, m3-s), and Run
+Command shows no output until a command ends. Short subcommands (`status`, `secrets
+init`) may go through Run Command (`aws ssm send-command`, polled; the runbook wraps it).
+`ses-smtp-password` runs on the operator's laptop (§6.3) (user, 2026-11-19).
 
 `apply` steps, stopping at the first failure:
 
@@ -413,8 +437,10 @@ the box with `LOOM_ENV=dev` would switch off every production check. New, explic
 - logs a warning at start and exports `loom_poolmgr_mock_backend 1`.
 
 The box's serving file is `deploy/serving.m3.yaml` (`provider: local`, the committed
-`serving.yaml`'s models and timings, `gateway_egress_cidrs` = the Elastic IP). The gateway
-needs no change: it reaches the local pods' proxies over mTLS as in compose.
+`serving.yaml`'s models and timings, `gateway_egress_cidrs` = the compose network's fixed
+subnet `10.214.0.0/24`, not the Elastic IP: the gateway reaches the local pods from inside
+that network, so the pods' proxies see its container address; user, 2026-11-19). The
+gateway needs no change: it reaches the local pods' proxies over mTLS as in compose.
 
 ### 6.9 Metrics, dashboards, logs
 
@@ -460,7 +486,10 @@ renders the services' environment from it:
 - Unset `LOOM_BRAND_NAME` (dev, the existing tests): the services show no name (the web app
   uses each page's own title and a neutral header; billing's product is `API credits`).
   `loom-deploy` refuses an apply when the parameter lacks either value (as it refuses a
-  database URL without `verify-full`, D10); the services' start-up checks are unchanged
+  database URL without `verify-full`, D10), and when `brand_name` is longer than 64
+  characters or holds a control character (below U+0020) or any of `, ; : @ ( ) [ ] < > " \`
+  (it is `EMAIL_FROM`'s display name, unquoted; user, 2026-11-19, as the tests pin); the
+  services' start-up checks are unchanged
   (protected tests pin them, §16). The dev `docker-compose.yml` is unchanged (its sender
   `login@loom.localhost` is on a reserved local name).
 - The magic-link email is Auth.js's default template, which names the site by the host of
@@ -503,7 +532,9 @@ volumes of §6.2). `<root>/run/loom` must be on a tmpfs (read from `/proc/self/m
 otherwise `apply` and `acceptance` refuse (tests use a directory under `/dev/shm`). The
 compose file writes its bind-mount sources `${LOOM_DEPLOY_ROOT:-}/run/loom/...` and
 `${LOOM_DEPLOY_ROOT:-}/var/lib/loom/...`; inside a container the path is the same without
-the prefix. The compose project is `LOOM_DEPLOY_PROJECT` (default `loom`);
+the prefix. The compose project is `LOOM_DEPLOY_PROJECT` (default `loom`): `loom-deploy`
+always passes `-p "$LOOM_DEPLOY_PROJECT"` to every `docker compose` call, and
+`compose.prod.yml` has no top-level `name:` (user decision 2026-11-19);
 `LOOM_DEPLOY_COMPOSE_OVERRIDE` (tests only) names one more `-f` file after the release's.
 Every `aws` call gets `--region` from `AWS_REGION`, else `us-east-1` (§8.5). `apply` also
 creates each volume directory of §6.2 and `<root>/var/lib/loom/gateway-cert` (the
@@ -527,8 +558,9 @@ gateway-cert 10001 (Docker would create a missing bind source as root).
   `<root>/var/lib/loom/releases/<sha>/` and runs compose from there. Of `images` it checks
   only that each value is a non-empty string (A15's manifest holds local tags).
 - `releases/<sha>/loom-deploy.py`: a copy of `loom_devstack/deploy.py`, which imports nothing
-  from its package, so the runbook's SSM wrapper fetches it and runs `python3 -S
-  loom-deploy.py <subcommand>`.
+  from its package, so the runbook fetches it and runs `python3.12 -S
+  loom-deploy.py <subcommand>` on the box (§6.6), or `python3 -S loom-deploy.py
+  ses-smtp-password` on the operator's laptop (§6.3).
 - The RDS master secret at `db_master_secret_arn` (JSON `username`, `password`). The owner
   URL is `postgresql://<username>:<password>@<db_host>:<db_port>/loom_platform?sslmode=verify-full&sslrootcert=/etc/loom/rds-ca.pem`
   (password percent-encoded); the app URL the same with `loom_app` and `app-db-password`.
@@ -554,7 +586,9 @@ service runs. m3-p's `--p4-release` is therefore any release but the current one
 - `<root>/run/loom/env/<service>.env` (`0400`, owner root; compose `env_file`, never
   mounted): the service's env-only settings, §6.11's table and the secret ones that have no
   `*_FILE` form (e.g. the web app's `DATABASE_URL`, `AUTH_SECRET`, `EMAIL_SERVER`); `migrate`'s
-  holds the owner URL and `LOOM_APP_DATABASE_PASSWORD`.
+  holds the owner URL and `LOOM_APP_DATABASE_PASSWORD`. A value holding a line break (CR
+  or LF) or NUL cannot be quoted for compose's env-file reader: the apply stops before that
+  file is written and names no value (user, 2026-11-19, as the tests pin).
 - `<root>/run/loom/secrets/<service>/` (directory `0500`, files `0400`, owned by the
   service's uid): the files the service reads, mounted read-only at
   `/run/loom/secrets/<service>` in that service only. Env files are not chowned (compose
@@ -583,8 +617,9 @@ release's last `apply`/`start` record, `update`/`gateway`/`ok` comes before
 -m loom_devstack.deploy`): `plan_steps(current, target, only)` (manifests as above; steps
 `("migrate",)` and `("up", <service>)`), `check_database_url(url) -> None`, and
 `Refused(Exception)`, raised by both. `ses-smtp-password` reads `aws iam create-access-key`'s
-JSON on stdin, so the runbook runs it in an interactive SSM session (`aws ssm
-start-session`), not through Run Command (no stdin, parameters kept in its history).
+JSON on stdin, so the runbook pipes the one into the other on the operator's laptop, with
+the operator's credentials (§6.3): the key is never printed, never on a command line, and
+never passes through Run Command (no stdin, parameters kept in its history).
 
 **Caddy.** Image from `deploy/caddy/Dockerfile`, build context `deploy/caddy/` (its
 `go.mod`/`go.sum` pin the rate-limit module). The Caddyfile is not in the image: compose
@@ -604,14 +639,15 @@ docker socket) with `loom-m3-acceptance --domain <site domain> --release <curren
 `LOOM_ACCEPT_DATABASE_URL` (the app URL, `loom_app`) and `LOOM_ACCEPT_REDIS_URL` (the
 `rediss://` URL of §6.5), and `secrets/acceptance/` with `redis-ca.crt` and
 `webhook_secret`. The
-container runs every box item; for m3-i it scans the containers' logs and writes the
-canaries it planted to `/var/lib/loom/acceptance/canaries.json` (`0600`); for m3-p it
-checks the deploy log's order. Then, on the host, `loom-deploy` runs the two halves that
-need the instance role: m3-i's CloudWatch scan (`aws logs filter-log-events` on
-`/loom/platform` for each canary, then deletes the file) and m3-p's refusal (`apply --only
-poolmgr --release <p4-release>` exits 2 naming the gateway, and the poolmgr container is
-not recreated). It writes `/var/lib/loom/acceptance/host.json` (`{"m3-i": {"ok", "detail"},
-"m3-p": {...}}`) and exits 0 only when the container and both halves passed.
+container runs every box item; for m3-i it scans the containers' logs only (it writes no
+canaries file: nothing on the box reads one), and for m3-p it checks the deploy log's
+order. Then, on the host, `loom-deploy` runs the one half that needs the instance role:
+m3-p's refusal (`apply --only poolmgr --release <p4-release>` exits 2 naming the gateway,
+and the poolmgr container is not recreated). It writes
+`/var/lib/loom/acceptance/host.json` (`{"m3-p": {"ok", "detail"}}`) and exits 0 only when
+the container and that half passed. m3-i's CloudWatch half is **not** run here: it needs
+`logs:FilterLogEvents`, which no Loom role has (§5.6); B26 runs it with the operator's
+credentials (user, 2026-11-19). `loom-deploy acceptance` calls no `aws logs` command.
 
 **A15's harness** (`test_devstack_m3_prodstack.py`). Builds the Loom images from the
 repository's Dockerfiles (the web image without `LOOM_BRAND_NAME`, Caddy from
@@ -694,6 +730,24 @@ order, runs m3-0, m3-b and m3-d in the `acceptance` service, and removes the pro
   gateway's client certificate from the new CA (the manager does on start); 6) drop the
   old CA from the bundle and deploy. With the mock backend the whole runbook runs on the
   box (B20).
+- **Rollover downtime (accepted for M3; user, 2026-11-19).** The rollover is **not**
+  zero-downtime in M3, and the runbook says so instead of "zero downtime". A pod trusts,
+  for its clients, only the CA that signed its own certificate (the manager passes that
+  one at bootstrap and re-key), so once the manager has switched to the new CA and
+  re-keyed a pod, that pod refuses the gateway's old-CA client certificate until the
+  manager has issued one from the new CA (at its start, §6.13) and the gateway's next
+  check has loaded it: requests can fail for up to about `LOOM_GATEWAY_CERT_CHECK_S`
+  (60 s) after the CA switch. M3 has no `pod-ca-next` secret, and `loom-deploy` renders
+  `LOOM_POD_CA_CERT` from `pod-ca` alone, so the bundle steps (1, 2 and 6 with
+  `pod-ca-next`) are M4's (below); in M3 the runbook switches `pod-ca` and
+  `poolmgr-client` to the new values (new secret versions; the previous version is the
+  way back), deploys (gateway first, P4) and re-keys, and tells the operator to expect
+  that window (a quiet period). B20 records it.
+- **M4 prerequisite: zero-downtime CA rollover** (plan §13, "M4 prerequisites from M3"):
+  the pods' client-trust bundle holds the old and the new CA during a rollover (a pod
+  setting the manager passes at bootstrap and re-key); `loom-deploy` renders the gateway's
+  and the pods' bundles from `pod-ca` and `pod-ca-next`; a `pod-ca-next` secret container
+  in §5.2 with the instance role's read (§5.6). Required before real pods serve customers.
 
 ## 8. Stripe test mode: webhooks
 
@@ -1019,7 +1073,7 @@ Stripe stopped waiting is T9 (b). `W` = webhook delivery, `R` = `retry_unapplied
 | T7 | Replay | (a) A captured request re-sent 10 min later: `t` outside 300 s -> 400. (b) Re-sent within 300 s: signature valid -> L1 `duplicate`, 200. (c) Re-sent while the first was stored unapplied: re-runs the same idempotent handling | No double credit; (a) never reaches Postgres |
 | T8 | Postgres down | The pool wait times out at 5 s, the second transaction's too: 503 after about 10 s, nothing stored; Stripe retries; R's run ends at its first statement (S5 within 5 min) and the 503s count (S2c). Outage shorter than Stripe's schedule: a retry stores and applies it. Longer (test mode: hours): Stripe gives up; once Postgres is back the operator resends the events of the outage (§8.5) | Applied once, late, after the operator acts; an event past Stripe's resend limit is lost (§8.10) |
 | T9 | Crash between ledger write and 2xx | (a) Before COMMIT (process killed, box lost): Postgres rolls back; no 2xx; Stripe retries -> applied. (b) After COMMIT, before the response (or Stripe stopped waiting): Stripe retries -> `duplicate`, 200. (c) COMMIT sent, connection lost before its result: the second transaction runs on another connection: if the COMMIT landed, its guard finds the event processed -> 200 `duplicate`; if not, it stores it with `last_error` -> 500 and a retry applies it; if it cannot connect either -> 503 and a retry finds `duplicate` or applies it | Exactly one ledger transaction in each case (a test injects each failure point) |
-| T10 | Webhook and retry at once | W(E1) holds E1's row while R runs | R takes rows `FOR UPDATE SKIP LOCKED`, so it never waits on a delivery's event row: it skips E1 this run; one application |
+| T10 | Webhook and retry at once | W(E1) holds E1's row while R runs | R takes rows `FOR UPDATE SKIP LOCKED`, so it never waits on the event row it re-runs: it skips E1 this run; one application (a wait on another row, e.g. a pending clawback's, is bounded by `lock_timeout`, A33) |
 | T11 | Signed but not applicable | `completed` for an unknown org, wrong currency, no amount | Stored unapplied, logged at error, 200 (Stripe retrying cannot fix it); after 15 min S1a fires once for it; R re-runs it each minute until an admin resolves it (§8.6), audited, nothing credited. A second such event later fires S1a again |
 | T12 | Clock skew on the box | The box's clock drifts > 300 s: every delivery 400 | Counted as `stale_timestamp`, alarm S2b; Stripe keeps retrying (new timestamps); once chrony corrects the clock, retries succeed; deliveries Stripe gave up on are resent (§8.5). Prevented by chrony on Amazon Time Sync (§5.2) |
 | T13 | Billing starting or role gate waiting | The API process does not listen until its pool is open (deferred role check, contracts §3): Caddy answers 502 | Stripe retries a 502 like any non-2xx; S2c does not count it (billing never saw it); a longer stop shows as H1 and H3; A19's role-gate case uses an injected unopened pool and expects 503 (the second transaction cannot get a connection either) |
@@ -1212,6 +1266,7 @@ copies this list into `docs/phase1-runpod-plan.md` §13 ("Live-mode prerequisite
 | LM8 | Decide the public API key prefix and header names (`loom_sk_`, `X-Loom-*`, `LOOM_API_KEY` in the playground snippet): a contracts change with a transition for issued keys (§6.11) | Paying customers write these names into their code; changing them later breaks their integrations | M3 keeps the `loom` wire names; testers are few and known |
 | LM9 | Secrets as files only (no secret in a container's environment) | `loom-deploy` puts the secrets that have no `*_FILE` form in env files (§6.12), and Docker keeps a container's environment in its on-disk configuration under `/var/lib/docker`, outside the tmpfs: it outlives a reboot and anyone with root or the docker socket can read it | Accepted for M3 (user, 2026-11-19): test-mode keys only, and only the operator reaches the box |
 | LM10 | Boot-time apply (a systemd unit that runs `loom-deploy apply` for the current release at boot) | A reboot or an EC2 recover (H2) empties the tmpfs `/run/loom`, so the services come back without their secret files and stay down until the operator runs `apply` (§6.3): customers would wait for a human | The operator is the only user; H1 and H3 page, and the runbook step (§6.3) brings the stack back |
+| LM11 | Review the trivy acceptances (open egress, customer-managed keys, flow logs): the 13 findings `.github/terraform/trivyignore.yaml` accepts, each with its reason in `infra/aws/platform/README.md` | Live mode holds customers' data and money: open egress lets a compromised container send data anywhere, AWS-managed keys cannot be scoped or revoked apart from the account, and without VPC flow logs or bucket access logs an incident leaves no network or access record | Accepted for M3 (user, 2026-11-19): test-mode data only, one operator, one account |
 
 Considered and **not** required for live mode: the 6 s deadline with its cancelled task (an
 answer Stripe stopped waiting for and a 503 are the same failed delivery to Stripe, and L1
@@ -1246,8 +1301,10 @@ in a one-shot container on the production compose network (started by `loom-depl
 acceptance` through SSM), reaching the web app, gateway and Stripe webhook **through the
 public URLs** (real DNS, real TLS) and Postgres, Redis and the containers from inside, as
 M1's driver does. A second mode, `--external`, runs from the operator's machine and checks
-only what the internet sees. The container has no AWS credentials (§4): the two checks that
-need the instance role run in `loom-deploy acceptance` on the host (§6.12).
+only what the internet sees. The container has no AWS credentials (§4): m3-p's refusal,
+which needs the instance role, runs in `loom-deploy acceptance` on the host (§6.12), and
+m3-i's CloudWatch half, which needs `logs:FilterLogEvents` (no Loom role has it, §5.6),
+is B26's, run with the operator's credentials (user, 2026-11-19).
 
 Sign-in: the automated items sign in test users by inserting an Auth.js database session
 for them (the web app uses database sessions) and sending its cookie; the admin is granted
@@ -1262,7 +1319,7 @@ M1's are). Real sign-in paths are checked by hand (B24) (§15 D6).
 | m3-g | Stripe: the script creates a checkout as a test user through the web app and prints Stripe's URL; **the operator pays** with test card 4242 4242 4242 4242; the script then waits for exactly one `purchase` keyed `stripe:<event id>` with the paid amount, the Redis credit, and the dashboard's balance; then (1) re-posts the stored event with a fresh valid signature -> 200 `duplicate`, ledger unchanged; (2) re-posts with an old `t` -> 400; (3) **the operator resends** the event from the dashboard -> `duplicate`; (4) **the operator refunds** part, then the rest -> two `refund` transactions summing to the purchase, balance down by it | automated checks around manual steps |
 | m3-s | Missed delivery and resend (§8.5): the script stops `billing` on the box; **the operator** makes a second test payment; Caddy answers 502 and Stripe's delivery fails; H1's and H3's alarm emails arrive; the script starts `billing` again; **the operator resends** the event from the dashboard (unless Stripe's own retry delivered it first) -> exactly one `purchase` for it; a second resend -> `duplicate` | manual steps, automated checks |
 | m3-h | Exposure (`--external`): only 80/443 answer; `api.<domain>` serves `/v1/*` only; `hooks.<domain>` only `POST /stripe/webhook` and `GET /stripe/health` (200 with `stripe_webhook`); `/internal/checkout-sessions`, `/health`, `/metrics` unreachable from outside; 80 redirects; HSTS; certificate valid for the three names; the sign-in page's title and heading show `brand_name` (§6.11) | automated (external) |
-| m3-i | No prompt or completion text or API key in any container's logs (the container) or in the CloudWatch log group (`loom-deploy acceptance` on the host, §6.12) | automated |
+| m3-i | No prompt or completion text or API key in any container's logs (the container); the CloudWatch log group is B26's (plain `aws` with the operator's credentials, §13) | automated (containers); B26 by hand (CloudWatch) |
 | m3-p | P4: the deploy log (§6.12) shows `gateway` healthy before `poolmgr` was updated (the container); `loom-deploy apply --only poolmgr` with a newer poolmgr than gateway is refused (`loom-deploy acceptance` on the host) | automated |
 | m3-x | Containers cannot reach the instance metadata service (IMDS hop limit) | automated |
 | m3-a | Alarm routes: `aws cloudwatch set-alarm-state` on each alarm -> email arrives; each §5.3 metric present in CloudWatch | runbook, manual |
@@ -1299,7 +1356,8 @@ sandbox), `apps/web/README.md`
 `services/poolmgr/README.md` (mock backend flag, gauges, `rekey`, `new-ca`),
 `docs/security.md` ("Phase 1 control plane": IMDS hop limit, secrets as files, exposure),
 `docs/phase1-runpod-plan.md` §13 (M3 status; P1-P4 done; a new "Live-mode prerequisites"
-list copied from §8.13, LM1-LM10), `PLAN.md` status line and
+list copied from §8.13, LM1-LM11; a new "M4 prerequisites from M3" list: the
+zero-downtime CA rollover of §7), `PLAN.md` status line and
 question 4-6 answers, `docs/phase1-m3-acceptance.md` (at the end).
 
 ## 13. Done when
@@ -1329,8 +1387,8 @@ Terraform
   `serving/leases/*` only (P1). *tftest on the `jsonencode` locals.*
 - A7 [A] Serving reaper: serving rule on, lease bucket set, dry run on, schedule
   disabled while `serving_reaper_enabled = false`, enabled when true. *tftest.*
-- A8 [A] Alarms: each §5.3 alarm exists with its metric, threshold, period and missing-data
-  treatment; P1 alarms' `actions_enabled` follows `serving_reaper_enabled`; all alarm on
+- A8 [A] Alarms: each §5.3 alarm exists with its metric, statistic, threshold, period and
+  missing-data treatment; P1 alarms' `actions_enabled` follows `serving_reaper_enabled`; all alarm on
   the SNS topic. *tftest.*
 - A9 [A] Metric names agree: every metric an alarm in `alarms.tf` reads is in the
   CloudWatch agent allowlist (`deploy/cloudwatch-agent.json`) and exported by the service
@@ -1443,9 +1501,12 @@ Stripe
   savepoint that raises is rolled back alone and the others commit. The pool timeout and
   the two statement-level timeouts are settings, and the timing tests (A19, A20, A22) pass
   the flake-check recipe (20 runs under CPU load within its 7 minutes). *pytest.*
-- A33 [A] Remaining §8 points: `retry_unapplied` never waits on a delivery's **event row**
-  (T10: `SKIP LOCKED`; it may still wait up to `lock_timeout` on a session or
-  `stripe_payments` lock inside the handler) and skips a held row; it re-runs newest first
+- A33 [A] Remaining §8 points: `retry_unapplied`'s waits on locks are **bounded by the lock
+  timeout** (`LOOM_STRIPE_LOCK_TIMEOUT_MS`): it never waits on the event row it re-runs
+  (T10: `SKIP LOCKED`, a held row is skipped for the run), and every other wait inside the
+  handler ends at `lock_timeout`: a session or `stripe_payments` lock, and a pending
+  clawback's event row that a redelivery of that clawback holds while R re-runs its
+  purchase (§8.3's blocking `FOR UPDATE` on pending clawbacks); it re-runs newest first
   up to `limit`; it ends its run when an attempt's error store fails (`StoreFailed`),
   without stale marking or the S5 gauge; the second transaction's guard answers
   `duplicate`. *pytest.*
@@ -1534,8 +1595,11 @@ Endpoint health check
   CloudWatch agent's metrics arrive through its log group under `/loom/platform`, and
   every §5.3 metric, `up{job=...}` (H1) included, is in CloudWatch. *The script's JSON
   report + the acceptance doc.*
-- B20 [B] `docs/runbook-pod-ca.md` executed once on the box (mock pods): rollover with no
-  failed request in a concurrent load run. *Runbook + load test numbers.*
+- B20 [B] `docs/runbook-pod-ca.md` executed once on the box (mock pods) during a
+  concurrent load run: requests fail only in the window after the CA switch that §7
+  accepts for M3 (none before the switch, none once every pod is re-keyed and the gateway
+  has loaded its new client certificate); the window's length and the failed requests are
+  recorded. *Runbook + load test numbers.*
 - B21 [B] (optional, D8) RDS point-in-time restore to a new instance, `loom_platform`
   readable, instance deleted. *Runbook.*
 - B22 [B] Teardown or keep (D8): if teardown, `terraform destroy` leaves only the final
@@ -1549,9 +1613,11 @@ Endpoint health check
   doc.*
 - B25 [B] H3 end to end: with the stack up, stop Caddy on the box: H3's ALARM email
   arrives (minutes recorded); start Caddy: the OK email arrives. *Runbook check.*
-- B26 [B] m3-i's CloudWatch half and m3-p's refusal re-run independently (user,
-  2026-11-19): after B10-B19 the verifier repeats both with plain `aws` commands, not
-  through `loom-deploy acceptance`. m3-i: one request through `https://api.<domain>/v1`
+- B26 [B] m3-i's CloudWatch half, and m3-p's refusal re-run independently (user,
+  2026-11-19): after B10-B19 the verifier runs both with plain `aws` commands and the
+  operator's credentials, not through `loom-deploy acceptance`. B26 is m3-i's only
+  CloudWatch check: `loom-deploy acceptance` does not run that half (no Loom role may
+  read logs, §5.6). m3-i: one request through `https://api.<domain>/v1`
   with an acceptance key and a fresh canary in the prompt; once the logs have had time to
   arrive (~5 min), `aws logs filter-log-events --region us-east-1 --log-group-name
   /loom/platform --start-time <ms before the request> --filter-pattern '"<string>"'`
