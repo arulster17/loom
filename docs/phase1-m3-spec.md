@@ -312,6 +312,11 @@ read-only into the one service that needs each. Env-only settings point at files
 `/run/loom`, `0400`). Nothing secret is on a command line, in compose files, in the
 release manifest or in logs.
 
+Runbook (`docs/runbook-platform.md`; user, 2026-11-19): a reboot or an EC2 auto-recovery
+(H2) empties `/run/loom`, so the services come back without their secret files and H1
+and H3 fire; the step is `loom-deploy apply --release <sha>` for the current release
+(`release.json`). M3 has no boot unit (LM10, §8.13).
+
 ### 6.4 Postgres roles and migrations (R8 on RDS)
 
 - The **owner** is the RDS master user `loom_owner` (member of `rds_superuser`, not a
@@ -652,10 +657,10 @@ order, runs m3-0, m3-b and m3-d in the `acceptance` service, and removes the pro
 - **CloudWatch agent**: its Prometheus metrics reach CloudWatch as embedded metric format
   through a log group, which `deploy/cloudwatch-agent.json` names under `/loom/platform`
   so §5.2's logs grant covers it (the `PutMetricData` namespace condition governs only
-  direct calls). Not checked against AWS in Stage A.
+  direct calls). Not checked against AWS in Stage A; Stage B's m3-a checks it (B10-B19).
 - **H1** reads `up{job=...}` as §5.3 says; whether the CloudWatch agent publishes `up` for
-  its Prometheus targets is not checked in Stage A (m3-a checks that every §5.3 metric is in
-  CloudWatch).
+  its Prometheus targets is not checked in Stage A; Stage B's m3-a (B10-B19) checks that
+  every §5.3 metric, `up` included, is in CloudWatch.
 
 ## 7. Pod PKI: CA expiry, gateway client-certificate rotation (P3)
 
@@ -1205,6 +1210,8 @@ copies this list into `docs/phase1-runpod-plan.md` §13 ("Live-mode prerequisite
 | LM6 | Disputes and refunds: a won dispute reinstated automatically (D5) with the won-then-refunded case (T18) handled, and a refund that later fails (`charge.refund.updated`) handled | Real money moves both ways; the hand adjustments of §8.10 do not scale and are easy to miss | Test disputes and refunds are the operator's own, adjusted by hand |
 | LM7 | Lift the live-mode refusals deliberately (`sk_live_`/`rk_live_`, `livemode: true` -> 400) in a reviewed change, with a restricted live key (Checkout Sessions write, plus Events read for LM1) and a live endpoint and secret | Billing refuses live keys and live events today (§8.1) | Not used |
 | LM8 | Decide the public API key prefix and header names (`loom_sk_`, `X-Loom-*`, `LOOM_API_KEY` in the playground snippet): a contracts change with a transition for issued keys (§6.11) | Paying customers write these names into their code; changing them later breaks their integrations | M3 keeps the `loom` wire names; testers are few and known |
+| LM9 | Secrets as files only (no secret in a container's environment) | `loom-deploy` puts the secrets that have no `*_FILE` form in env files (§6.12), and Docker keeps a container's environment in its on-disk configuration under `/var/lib/docker`, outside the tmpfs: it outlives a reboot and anyone with root or the docker socket can read it | Accepted for M3 (user, 2026-11-19): test-mode keys only, and only the operator reaches the box |
+| LM10 | Boot-time apply (a systemd unit that runs `loom-deploy apply` for the current release at boot) | A reboot or an EC2 recover (H2) empties the tmpfs `/run/loom`, so the services come back without their secret files and stay down until the operator runs `apply` (§6.3): customers would wait for a human | The operator is the only user; H1 and H3 page, and the runbook step (§6.3) brings the stack back |
 
 Considered and **not** required for live mode: the 6 s deadline with its cancelled task (an
 answer Stripe stopped waiting for and a 503 are the same failed delivery to Stripe, and L1
@@ -1292,7 +1299,7 @@ sandbox), `apps/web/README.md`
 `services/poolmgr/README.md` (mock backend flag, gauges, `rekey`, `new-ca`),
 `docs/security.md` ("Phase 1 control plane": IMDS hop limit, secrets as files, exposure),
 `docs/phase1-runpod-plan.md` §13 (M3 status; P1-P4 done; a new "Live-mode prerequisites"
-list copied from §8.13, LM1-LM8), `PLAN.md` status line and
+list copied from §8.13, LM1-LM10), `PLAN.md` status line and
 question 4-6 answers, `docs/phase1-m3-acceptance.md` (at the end).
 
 ## 13. Done when
@@ -1523,7 +1530,10 @@ Endpoint health check
   how long an event can still be resent (dashboard and `stripe events resend`) are recorded
   in the runbook (§8.5, §8.10). *Runbook check.*
 - B10-B19 [B] `loom-m3-acceptance` items m3-0, m3-b, m3-d, m3-g, m3-s, m3-h, m3-i, m3-p,
-  m3-x pass; m3-a done by hand. *The script's JSON report + the acceptance doc.*
+  m3-x pass; m3-a done by hand, which also settles two Stage A unknowns (§6.13): the
+  CloudWatch agent's metrics arrive through its log group under `/loom/platform`, and
+  every §5.3 metric, `up{job=...}` (H1) included, is in CloudWatch. *The script's JSON
+  report + the acceptance doc.*
 - B20 [B] `docs/runbook-pod-ca.md` executed once on the box (mock pods): rollover with no
   failed request in a concurrent load run. *Runbook + load test numbers.*
 - B21 [B] (optional, D8) RDS point-in-time restore to a new instance, `loom_platform`
@@ -1534,10 +1544,27 @@ Endpoint health check
 - B23 [B] Webhook secret roll (T15) done once: no delivery fails. *Runbook.*
 - B24 [B] By hand: a magic-link sign-in to a real inbox (SES; a verified address while in
   the sandbox; the mail's sender shows the product name and an address on the domain, its
-  link the domain) and a Google sign-in, on the public URL. *Recorded in the acceptance
+  link the domain; SES sends that display-name sender under §5.6's `ses:FromAddress`
+  condition) and a Google sign-in, on the public URL. *Recorded in the acceptance
   doc.*
 - B25 [B] H3 end to end: with the stack up, stop Caddy on the box: H3's ALARM email
   arrives (minutes recorded); start Caddy: the OK email arrives. *Runbook check.*
+- B26 [B] m3-i's CloudWatch half and m3-p's refusal re-run independently (user,
+  2026-11-19): after B10-B19 the verifier repeats both with plain `aws` commands, not
+  through `loom-deploy acceptance`. m3-i: one request through `https://api.<domain>/v1`
+  with an acceptance key and a fresh canary in the prompt; once the logs have had time to
+  arrive (~5 min), `aws logs filter-log-events --region us-east-1 --log-group-name
+  /loom/platform --start-time <ms before the request> --filter-pattern '"<string>"'`
+  returns no event for the canary, the key or a distinctive part of the completion, and
+  the same command without `--filter-pattern` returns events (the group receives logs).
+  m3-p: `aws ssm send-command --region us-east-1 --instance-ids <instance>
+  --document-name AWS-RunShellScript` with commands that print the poolmgr container's id
+  (`docker ps -q --no-trunc --filter label=com.docker.compose.project=loom --filter
+  label=com.docker.compose.service=poolmgr`), run the current release's `loom-deploy.py`
+  (fetched with `aws s3 cp`) as `python3 -S loom-deploy.py apply --only poolmgr --release
+  <any release but the current one>` and print its exit code, then print the container's
+  id again; `aws ssm get-command-invocation` shows exit 2, stderr naming the gateway and
+  the same id twice. *The commands and their output in the acceptance doc.*
 
 ## 14. Costs and the Stage B cap
 
@@ -1604,7 +1631,7 @@ checkpoint.
 | 2 review | Fresh reviewer per change (Opus); Stripe design-level findings compared with the Fable review (below) | | |
 | 2 verify | Verifier (Opus) on a fixed commit per branch; test-strength check (mutation) on `webhooks.py`, `resolve.py`, `api.py`'s webhook path, `deploy.plan_steps`, the manager's `production_problems`; hidden tests run on the Stripe branch | | |
 | 3 integrate | Orchestrator merges into `phase1-m3` in this order, each after the user's yes: stripe, pki, deploy, infra (A9's cross-check passes only with all four); whole-branch review (Opus), verifier, CI (flake-check on the new test files first, per the retros), PR to `main` | | |
-| Stage B | Only after the user's yes and cap: the user (or an agent with that yes) runs B1-B24 with the runbook | | |
+| Stage B | Only after the user's yes and cap: the user (or an agent with that yes) runs B1-B26 with the runbook | | |
 
 Cross-area settings: the domain and the product name (§6.11). The infra worker writes the
 site parameter, the deploy worker reads it in `loom-deploy` and renders the variables, the
