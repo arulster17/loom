@@ -154,9 +154,15 @@ aws ssm get-command-invocation --region $AWS_REGION --instance-id $INSTANCE --co
       the clipboard (it is read from stdin, not a command-line argument):
 
       ```sh
-      AWS_REGION=$AWS_REGION aws iam create-access-key --user-name loom-ses-smtp \
-        | python3 -S loom-deploy.py ses-smtp-password
+      aws iam create-access-key --user-name loom-ses-smtp \
+        | AWS_REGION=$AWS_REGION python3 -S loom-deploy.py ses-smtp-password
       ```
+
+      If the pipe fails after the key was created (no `python3`, `PutSecretValue` denied,
+      wrong directory), the new key's secret is lost: delete that key
+      (`aws iam list-access-keys --user-name loom-ses-smtp`, then
+      `aws iam delete-access-key --user-name loom-ses-smtp --access-key-id <id>`) and run
+      the pipe again (IAM allows two keys per user).
 
    Why on the laptop: `ses-smtp-password` needs only the `aws` CLI, Python 3.9+ and
    `secretsmanager:PutSecretValue` on `loom/platform/ses-smtp` with your credentials (the
@@ -216,6 +222,7 @@ loom_deploy_remote() {  # usage: loom_deploy_remote <loom-deploy arguments...>, 
   done
   aws ssm get-command-invocation --region $AWS_REGION --command-id $id --instance-id $INSTANCE \
     --query '[Status,StandardOutputContent,StandardErrorContent]' --output text
+  [ "$st" = Success ]  # the helper's exit status is the remote command's outcome
 }
 ```
 
