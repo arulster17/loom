@@ -527,7 +527,8 @@ gateway-cert 10001 (Docker would create a missing bind source as root).
 - The RDS master secret at `db_master_secret_arn` (JSON `username`, `password`). The owner
   URL is `postgresql://<username>:<password>@<db_host>:<db_port>/loom_platform?sslmode=verify-full&sslrootcert=/etc/loom/rds-ca.pem`
   (password percent-encoded); the app URL the same with `loom_app` and `app-db-password`.
-- ECR: `aws ecr get-login-password | docker login --username AWS --password-stdin <registry>`.
+- ECR: `aws ecr get-login-password | docker login --username AWS --password-stdin <registry>`,
+  once per ECR registry the images name (none when no image is in ECR, as in A15).
 
 **Order and health.** manifest, render, ECR login, `docker compose pull`, migrate (`run --rm
 migrate`, exit 0), the updates of §6.6, record. Files already rendered stay when a later
