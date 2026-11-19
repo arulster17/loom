@@ -214,6 +214,9 @@ AWS_BOOL_FLAGS = frozenset(
         "--no-guess-mime-type",
         "--follow-symlinks",
         "--no-follow-symlinks",
+        "--no-overwrite",
+        "--force-glacier-transfer",
+        "--ignore-glacier-warnings",
         "--force",
         "--force-overwrite-replica-secret",
         "--no-force-overwrite-replica-secret",
@@ -904,17 +907,63 @@ def compose_calls(timeline: list[dict[str, Any]]) -> list[tuple[int, list[str], 
 
 def compose_target(record: dict[str, Any], global_opts: list[str]) -> tuple[str | None, list[Path]]:
     """The compose project and files a recorded `docker compose` call used, however they
-    were passed: `-p`/`--project-name` or COMPOSE_PROJECT_NAME; `-f`/`--file` (absolute or
-    relative to the call's cwd) or COMPOSE_FILE (split on COMPOSE_PATH_SEPARATOR, else `:`)."""
+    were passed, in docker compose's order of precedence. Files: `-f`/`--file` (absolute or
+    relative to the call's cwd), else COMPOSE_FILE (split on COMPOSE_PATH_SEPARATOR, else
+    `:`) from the process env, else from the env file. Project: `-p`/`--project-name`, else
+    COMPOSE_PROJECT_NAME from the process env, else from the env file, else a top-level
+    `name:` in the first compose file, else None. The env file is the last `--env-file`
+    given, else `.env` in the project directory (`--project-directory`, else the first
+    compose file's directory, else the cwd). Files are read now; a missing or unreadable
+    one is skipped."""
     env: dict[str, str] = record.get("env") or {}
     cwd = Path(record.get("cwd") or "/")
-    projects = option_values(global_opts, "-p", "--project-name")
-    project = projects[-1] if projects else env.get("COMPOSE_PROJECT_NAME")
+
+    def files_of(e: dict[str, str]) -> list[Path]:
+        names = e["COMPOSE_FILE"].split(e.get("COMPOSE_PATH_SEPARATOR") or ":")
+        return [Path(os.path.normpath(cwd / f)) for f in names if f]
+
     names = option_values(global_opts, "-f", "--file")
-    if not names and env.get("COMPOSE_FILE"):
-        names = env["COMPOSE_FILE"].split(env.get("COMPOSE_PATH_SEPARATOR") or ":")
     files = [Path(os.path.normpath(cwd / f)) for f in names if f]
+    if not names and env.get("COMPOSE_FILE"):
+        files = files_of(env)
+    env_files = option_values(global_opts, "--env-file")
+    if env_files:
+        env_file = cwd / env_files[-1]
+    else:
+        dirs = option_values(global_opts, "--project-directory")
+        project_dir = cwd / dirs[-1] if dirs else files[0].parent if files else cwd
+        env_file = project_dir / ".env"
+    try:
+        file_env = read_env_file(Path(os.path.normpath(env_file)))
+    except (OSError, UnicodeDecodeError):
+        file_env = {}
+    merged = {**file_env, **env}  # the process env wins over the env file
+    if not names and not env.get("COMPOSE_FILE") and file_env.get("COMPOSE_FILE"):
+        files = files_of(merged)
+    projects = option_values(global_opts, "-p", "--project-name")
+    project = projects[-1] if projects else merged.get("COMPOSE_PROJECT_NAME") or None
+    if project is None and files:
+        project = compose_name(files[0])
     return project, files
+
+
+def compose_name(path: Path) -> str | None:
+    """A compose file's top-level `name:` (None if it has none or cannot be read)."""
+    try:
+        lines = path.read_text().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    for line in lines:
+        if not line.startswith("name:"):
+            continue
+        value = line[len("name:") :].strip()
+        if value and value[0] in "\"'":
+            end = value.find(value[0], 1)
+            value = value[1:end] if end > 0 else value[1:]
+        else:
+            value = value.split(" #", 1)[0].strip()
+        return value or None
+    return None
 
 
 def option_values(words: list[str], *names: str) -> list[str]:

@@ -489,45 +489,67 @@ def set_up(st: Stack) -> None:
 
 def tear_down(st: Stack) -> None:
     """Remove project `loom-m3prod` and the scratch root, from whatever point set-up
-    reached (it may have been interrupted anywhere, e.g. by the timeout)."""
+    reached (it may have been interrupted anywhere, e.g. by the timeout). Every step runs
+    whatever an earlier one raised (a `down` that times out still leaves the label sweep
+    and the root's removal to run); the first error is raised at the end, and a root left
+    behind is an error too, so a leak stays visible."""
     box, base = st.box, st.base
-    if shutil.which("docker") is None:
-        if base is not None:
-            rmtree(base)
-        return
-    files: list[str] = []
-    if box is not None and st.override is not None:
-        rel = box.var_lib / "releases" / st.sha / "compose.prod.yml"
-        if rel.is_file() and (box.run_loom / "compose.env").is_file():
-            env_file = str(box.run_loom / "compose.env")
-            files = ["-f", str(rel), "-f", str(st.override), "--env-file", env_file]
-    if box is not None:  # (the label sweep below covers the rest)
+    errors: list[BaseException] = []
+
+    def step(fn: Any, *args: Any, **kw: Any) -> Any:
+        try:
+            return fn(*args, **kw)
+        except BaseException as e:  # also pytest-timeout's Failed, KeyboardInterrupt
+            errors.append(e)
+            return None
+
+    def down(box: Box) -> None:
+        files: list[str] = []
+        if st.override is not None:
+            rel = box.var_lib / "releases" / st.sha / "compose.prod.yml"
+            if rel.is_file() and (box.run_loom / "compose.env").is_file():
+                env_file = str(box.run_loom / "compose.env")
+                files = ["-f", str(rel), "-f", str(st.override), "--env-file", env_file]
         sh(
             "docker", "compose", "-p", PROJECT, *files,
             "--profile", "acceptance", "--profile", "migrate",
             "down", "-v", "--remove-orphans", "--timeout", "20",
             timeout=600, check=False, cwd=str(box.work),
         )  # fmt: skip
-    label = f"label=com.docker.compose.project={PROJECT}"
-    for kind, ls in (
-        ("container", ["docker", "ps", "-aq", "--filter", label]),
-        ("volume", ["docker", "volume", "ls", "-q", "--filter", label]),
-        ("network", ["docker", "network", "ls", "-q", "--filter", label]),
-    ):
+
+    def sweep(kind: str, ls: list[str]) -> None:
         ids = sh(*ls, check=False, timeout=60).stdout.split()
         if ids:
             rm = ["docker", "rm", "-f"] if kind == "container" else ["docker", kind, "rm"]
             sh(*rm, *ids, check=False, timeout=120)
-    if base is None:
-        return
-    rmtree(base)
-    if base.exists():  # files a root container wrote
-        sh(
+
+    docker = shutil.which("docker") is not None
+    if docker:
+        if box is not None:  # (the label sweep below covers the rest)
+            step(down, box)
+        label = f"label=com.docker.compose.project={PROJECT}"
+        for kind, ls in (
+            ("container", ["docker", "ps", "-aq", "--filter", label]),
+            ("volume", ["docker", "volume", "ls", "-q", "--filter", label]),
+            ("network", ["docker", "network", "ls", "-q", "--filter", label]),
+        ):
+            step(sweep, kind, ls)
+    if base is not None:
+        step(rmtree, base)
+        if docker and step(base.exists):  # files a root container wrote
+            step(
+                sh,
                 "docker", "run", "--rm", "--entrypoint", "rm", "-v", f"{base}:/x",
                 tag("migrate"), "-rf", "/x/root", "/x/state", "/x/pg",
                 check=False, timeout=120,
             )  # fmt: skip
-        rmtree(base)
+            step(rmtree, base)
+        if step(base.exists):
+            errors.append(AssertionError(f"tear-down left the scratch root {base} behind"))
+    if errors:
+        for e in errors[1:]:
+            errors[0].add_note(f"tear-down, then: {type(e).__name__}: {e}")
+        raise errors[0]
 
 
 @pytest.fixture(scope="module")
