@@ -501,7 +501,8 @@ class M3Acceptance(m1.Acceptance):
                 check(r.status_code in (301, 302, 307, 308), f"http://{h}/: {r.status_code}")
                 check(r.headers.get("location", "").startswith(f"https://{h}"), f"{h} redirect")
             expect = {
-                f"https://api.{d}/v1/models": 401,
+                # The public model list needs no key (contracts §"Public model list").
+                f"https://api.{d}/v1/models": 200,
                 f"https://api.{d}/health": 404,
                 f"https://api.{d}/metrics": 404,
                 f"https://api.{d}/internal/checkout-sessions": 404,
@@ -519,6 +520,15 @@ class M3Acceptance(m1.Acceptance):
                 check(r.status_code == status, f"GET {url}: {r.status_code}, wanted {status}")
                 hsts = r.headers.get("strict-transport-security", "")
                 check("max-age=31536000" in hsts, f"{url}: HSTS {hsts!r}")
+            # A keyed route refuses a request without a key (contracts §11: 401,
+            # code invalid_api_key).
+            prompt = {"model": "qwen3-8b", "messages": [{"role": "user", "content": "x"}]}
+            chat = http.post(f"https://api.{d}/v1/chat/completions", json=prompt)
+            check(
+                chat.status_code == 401 and error_code(chat) == "invalid_api_key",
+                f"POST https://api.{d}/v1/chat/completions without a key: "
+                f"{chat.status_code} {chat.text[:200]}",
+            )
             health = http.get(f"https://hooks.{d}/stripe/health")
             check(health.status_code == 200 and "stripe_webhook" in health.text, "hooks. health")
             post = http.post(f"https://hooks.{d}/stripe/webhook", content=b"{}")
@@ -532,7 +542,17 @@ class M3Acceptance(m1.Acceptance):
             heading = re.search(r"<(h1|h2)(?:\s[^>]*)?>(.*?)</\1>", page.text, re.S)
             check(title and name in visible(title.group(1)), f"title lacks {name!r}")
             check(heading and name in visible(heading.group(2)), f"heading lacks {name!r}")
-        nums["routes_checked"] = len(expect) + 2
+        nums["routes_checked"] = len(expect) + 3
+
+
+def error_code(r: httpx.Response) -> object:
+    """The `error.code` of an OpenAI-shaped error body (contracts §11), or None."""
+    try:
+        body = r.json()
+    except ValueError:
+        return None
+    err = body.get("error") if isinstance(body, dict) else None
+    return err.get("code") if isinstance(err, dict) else None
 
 
 def _record(line: str) -> dict[str, Any] | None:

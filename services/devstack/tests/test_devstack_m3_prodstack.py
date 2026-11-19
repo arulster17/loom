@@ -674,10 +674,12 @@ def test_a37_the_public_routes_answer_through_caddy(stack: Stack) -> None:
         assert isinstance(m.get("id"), str) and m["id"] and m.get("object") == "model", m
         assert isinstance(m.get("pricing"), dict) and isinstance(m.get("availability"), dict), m
         assert m["availability"].get("state") in ("ready", "warming", "cold", "unavailable"), m
-    # A keyed route through the same host refuses a request without a key.
+    # A keyed route through the same host refuses a request without a key (contracts §11:
+    # 401, OpenAI error shape with code invalid_api_key).
     prompt = {"model": "qwen3-8b", "messages": [{"role": "user", "content": "x"}]}
     chat = caddy_get(stack, f"api.{DOMAIN}", "/v1/chat/completions", "POST", json=prompt)
     assert chat.status_code == 401, f"api. POST /v1/chat/completions, no key: {chat.status_code}"
+    assert chat.json().get("error", {}).get("code") == "invalid_api_key", chat.text[:200]
     for host in (DOMAIN, f"api.{DOMAIN}", f"hooks.{DOMAIN}"):
         with httpx.Client(timeout=30, trust_env=False, follow_redirects=False) as http:
             r = http.get(f"http://127.0.0.1:{stack.ports[80]}/", headers={"Host": host})
