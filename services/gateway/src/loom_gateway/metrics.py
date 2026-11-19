@@ -16,8 +16,10 @@ _RATE = (1, 5, 10, 20, 40, 60, 80, 100, 150, 200, 400, 1000)
 
 class _ClientCertExpiry(Collector):
     """`loom_gateway_client_cert_expiry_seconds` (alarm G3): seconds until the client
-    certificate in use expires, read at each scrape. No series while none is configured
-    or loaded (dev without mTLS), so it never reads as an expired certificate."""
+    certificate in use expires, read at each scrape. The family (HELP/TYPE) is always
+    exported, so the owning service's exports name it (A9), but it has no sample while
+    none is configured or loaded (dev without mTLS), so it never reads as an expired
+    certificate."""
 
     def __init__(self) -> None:
         self.read: Callable[[], float | None] | None = None
@@ -29,13 +31,13 @@ class _ClientCertExpiry(Collector):
                 value = self.read()
             except Exception:
                 value = None
+        family = GaugeMetricFamily(
+            "loom_gateway_client_cert_expiry_seconds",
+            "Seconds until the gateway's client certificate (the one in use) expires",
+        )
         if value is not None:
-            family = GaugeMetricFamily(
-                "loom_gateway_client_cert_expiry_seconds",
-                "Seconds until the gateway's client certificate (the one in use) expires",
-            )
             family.add_metric([], value)
-            yield family
+        yield family
 
 
 class GatewayMetrics:
