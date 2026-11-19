@@ -14,7 +14,7 @@ resource "aws_instance" "platform" {
   iam_instance_profile        = aws_iam_instance_profile.instance.name
   associate_public_ip_address = true # replaced by the Elastic IP once associated
   disable_api_termination     = true
-  monitoring                  = true
+  monitoring                  = false
 
   metadata_options {
     http_endpoint               = "enabled"
@@ -29,9 +29,10 @@ resource "aws_instance" "platform" {
     delete_on_termination = true
   }
 
-  user_data = templatefile("${path.module}/user_data.sh.tftpl", {
+  # CRLF-proof: a Windows checkout must not hand cloud-init "#!/bin/bash\r".
+  user_data = replace(templatefile("${path.module}/user_data.sh.tftpl", {
     data_volume_serial = replace(aws_ebs_volume.data.id, "-", "")
-  })
+  }), "\r\n", "\n")
 
   tags = { Name = "loom-platform" }
 
@@ -81,5 +82,11 @@ resource "aws_eip_association" "platform" {
 # The services' log group (the awslogs driver and the CloudWatch agent write here).
 resource "aws_cloudwatch_log_group" "platform" {
   name              = "/loom/platform"
+  retention_in_days = 30
+}
+
+# The CloudWatch agent's Prometheus-metrics log group (the agent writes the metric events here).
+resource "aws_cloudwatch_log_group" "prometheus" {
+  name              = "/loom/platform/prometheus"
   retention_in_days = 30
 }

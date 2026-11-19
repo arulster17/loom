@@ -80,7 +80,7 @@ resource "aws_cloudwatch_metric_alarm" "p2b" {
   namespace           = "Loom/Platform"
   metric_name         = "loom_poolmgr_pool_reason"
   dimensions          = { reason = "spend_cap" }
-  statistic           = "Minimum"
+  statistic           = "Maximum"
   comparison_operator = "GreaterThanOrEqualToThreshold"
   threshold           = 1
   period              = 60

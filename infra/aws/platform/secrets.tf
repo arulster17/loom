@@ -34,14 +34,30 @@ resource "aws_secretsmanager_secret_policy" "platform" {
   secret_arn = aws_secretsmanager_secret.platform[each.key].arn
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Sid    = "OnlyTheReaderRole"
-      Effect = "Allow"
-      Principal = {
-        AWS = each.key == "serving-runpod-key" ? aws_iam_role.serving_reaper.arn : aws_iam_role.instance.arn
-      }
-      Action   = ["secretsmanager:GetSecretValue"]
-      Resource = "*"
-    }]
+    Statement = [
+      {
+        # Whatever other IAM policies in the account allow, only the reader role reads
+        # (the pattern infra/aws/bench uses for the reaper key).
+        Sid       = "OnlyTheReaderRoleReads"
+        Effect    = "Deny"
+        Principal = { AWS = "*" }
+        Action    = ["secretsmanager:GetSecretValue"]
+        Resource  = "*"
+        Condition = {
+          ArnNotEquals = {
+            "aws:PrincipalArn" = each.key == "serving-runpod-key" ? aws_iam_role.serving_reaper.arn : aws_iam_role.instance.arn
+          }
+        }
+      },
+      {
+        Sid    = "TheReaderRole"
+        Effect = "Allow"
+        Principal = {
+          AWS = each.key == "serving-runpod-key" ? aws_iam_role.serving_reaper.arn : aws_iam_role.instance.arn
+        }
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = "*"
+      },
+    ]
   })
 }

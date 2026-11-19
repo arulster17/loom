@@ -9,6 +9,8 @@ data "aws_region" "current" {}
 
 data "aws_availability_zones" "available" {
   state = "available"
+  # use1-az3 lacks many newer instance types; the box and RDS subnets avoid it.
+  exclude_zone_ids = ["use1-az3"]
 }
 
 locals {

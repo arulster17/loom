@@ -37,7 +37,7 @@ fi
 install -d /var/lib/loom
 UUID=$(blkid -s UUID -o value "$DEVICE")
 if ! grep -q "$UUID" /etc/fstab; then
-  echo "UUID=$UUID /var/lib/loom xfs defaults,nofail 0 2" >> /etc/fstab
+  echo "UUID=$UUID /var/lib/loom xfs defaults,nofail,x-systemd.before=docker.service 0 2" >> /etc/fstab
 fi
 mountpoint -q /var/lib/loom || mount /var/lib/loom
 

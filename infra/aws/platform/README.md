@@ -101,3 +101,76 @@ step passes. Spend and the spec's own choices drive most of them.
 | AWS-0143 | LOW | `aws_iam_user.ses_smtp` | The SES SMTP user holds its policy directly (spec §5.2, and a test reads `aws_iam_user_policy.ses_smtp`); it is the only user |
 | AWS-0133 | LOW | `aws_db_instance.platform` | Performance Insights is off: the spec does not ask for it, and support on `db.t4g.micro` is unverified without AWS access |
 | AWS-0066 | LOW | `aws_lambda_function.serving_reaper` | No X-Ray tracing: its role is an exact allowlist (spec §5.6, A6) with no tracing permission |
+
+## Resource count and names (spec A28)
+
+Counted from the code with the default variables (`route53_zone_id = null`,
+`create_github_oidc_provider = true`): `grep -h '^resource' *.tf` gives **89 resource
+blocks**; four of them fan out (`aws_secretsmanager_secret` and `_secret_policy`: 10 each;
+`aws_ecr_repository` and `aws_ecr_lifecycle_policy`: 6 each) and `aws_route53_record` has
+none without a zone id, so a plan with defaults has **116 resource instances**. Per type
+(block count; instances where different): `aws_cloudwatch_metric_alarm` 25 (24 in
+`alarms.tf`, H3 in `healthcheck.tf`); `aws_secretsmanager_secret` and
+`aws_secretsmanager_secret_policy` 1 block each (10 instances each);
+`aws_ecr_repository` and `aws_ecr_lifecycle_policy` 1 block each (6 instances each);
+`aws_route53_record` 1 block (0 instances with defaults); `aws_iam_role` 4 (`instance`,
+`github_images`, `serving_reaper`, `dlm`); `aws_iam_role_policy` 3;
+`aws_iam_role_policy_attachment` 2; `aws_iam_openid_connect_provider` 1;
+`aws_iam_instance_profile` 1; `aws_iam_user` and `aws_iam_user_policy` 1 each;
+`aws_cloudwatch_log_group` 3 (`/loom/platform`, `/loom/platform/prometheus`, the serving
+reaper's); `aws_s3_bucket`, `_policy`, `_public_access_block` and
+`_server_side_encryption_configuration` 2 each (`leases`, `releases`); `aws_subnet` 3;
+`aws_route_table` 2; `aws_route_table_association` 3; `aws_security_group` 2;
+`aws_vpc`, `aws_default_security_group`, `aws_internet_gateway`, `aws_instance`,
+`aws_ebs_volume`, `aws_volume_attachment`, `aws_eip`, `aws_eip_association`,
+`aws_dlm_lifecycle_policy`, `aws_db_instance`, `aws_db_parameter_group`,
+`aws_db_subnet_group`, `aws_budgets_budget`, `aws_sns_topic`,
+`aws_sns_topic_subscription`, `aws_route53_health_check`, `aws_ssm_parameter`,
+`aws_sesv2_configuration_set`, `aws_sesv2_email_identity`,
+`aws_sesv2_email_identity_mail_from_attributes`, `aws_lambda_function`,
+`aws_lambda_function_event_invoke_config`, `aws_lambda_permission`,
+`aws_cloudwatch_event_rule` and `aws_cloudwatch_event_target` 1 each. Recount with the
+same `grep` after any change here. (`terraform test` runs under mock providers and prints
+no resource total.) The RDS-managed master secret is created by RDS, not Terraform.
+
+## Teardown (spec §6.10, B22)
+
+A plain `terraform destroy` fails on purpose: the data volume has `prevent_destroy`, the
+instance has `disable_api_termination`, the database has `deletion_protection`, and the
+ECR repositories and buckets refuse to delete while they hold objects. Nothing is
+weakened in code; run these steps in order, with the user's go-ahead, from this
+directory. Replace `<region>` with `us-east-1`.
+
+1. Keep the data, if wanted: `aws ec2 create-snapshot --volume-id <data volume id>
+   --description loom-platform-final` (find the id in the console or `terraform state show
+   aws_ebs_volume.data`) and wait for it to complete. The DLM snapshots stay after the
+   policy is deleted; delete them by hand when no longer needed.
+2. Database: `terraform apply -var db_deletion_protection=false` (add your usual `-var`s
+   or `terraform.tfvars`; this changes only that setting). Destroy takes a final snapshot
+   named `loom-platform-final`; if one exists from an earlier teardown, delete it first or
+   the destroy fails.
+3. Drop the volume from state so destroy can proceed: `terraform state rm
+   aws_volume_attachment.data aws_ebs_volume.data`. The volume detaches when the instance
+   terminates and stays in the account; delete it by hand after step 1.
+4. Turn off termination protection: `aws ec2 modify-instance-attribute --instance-id
+   <instance id> --no-disable-api-termination`.
+5. Empty the ECR repositories (`loom/gateway`, `billing`, `web`, `poolmgr`, `devstack`,
+   `caddy`): for each, list `aws ecr list-images --repository-name loom/<name>` and
+   remove them with `aws ecr batch-delete-image --repository-name loom/<name>
+   --image-ids ...`, or `aws ecr delete-repository --force --repository-name loom/<name>`
+   followed by `terraform state rm 'aws_ecr_repository.loom["<name>"]'
+   'aws_ecr_lifecycle_policy.loom["<name>"]'`.
+6. Empty the buckets (versioning is off, so no version cleanup): `aws s3 rm
+   s3://<releases bucket> --recursive` and the same for the lease bucket
+   (`terraform output lease_bucket`).
+7. `terraform destroy`. Secrets are deleted with a 7-day recovery window, so the names
+   `loom/platform/*` cannot be reused for 7 days; to reuse them sooner run `aws
+   secretsmanager delete-secret --force-delete-without-recovery --secret-id <name>` for
+   each. The Elastic IP is released and the DNS records (when Terraform owns them) are
+   removed; remove records you created by hand at your DNS host.
+8. State stack, last: empty `infra/aws/state`'s bucket including every object version
+   (`aws s3api list-object-versions` and `delete-objects`), then `terraform state rm
+   aws_s3_bucket.state` (its `prevent_destroy` blocks destroy) and `aws s3 rb
+   s3://<state bucket>`; `terraform destroy` there then removes the rest (versioning,
+   encryption and public-access configuration). Do this only after step 7: the platform
+   state lives in that bucket.
