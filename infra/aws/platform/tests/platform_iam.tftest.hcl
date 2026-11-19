@@ -1,11 +1,29 @@
 # A6 (docs/phase1-m3-spec.md §13, §5.1, §5.2 iam, reaper_serving): the instance role's
 # grants and their scoping (CloudWatch namespace condition, logs, secrets, ECR pull, the
-# lease prefix, the site parameter); the GitHub OIDC role trusts only this repository's
-# `main` and `workflow_dispatch` and can push to ECR; the serving reaper's role has
-# s3:ListBucket on the bucket and s3:GetObject on serving/leases/* only; the SES SMTP user.
+# lease prefix, the site parameter), as an exact allowlist of actions per resource; the
+# GitHub OIDC role trusts only this repository's `main` and `workflow_dispatch` and may
+# only push to ECR (an allowlist too); the serving reaper's role has s3:ListBucket on the
+# bucket and s3:GetObject on serving/leases/* only; trust policies (instance role: EC2
+# only; serving reaper: Lambda only); the instance profile; the SES SMTP user.
+#
+# Allowlists, beyond the grants §5.2 lists:
+#   instance role  tolerated, not required: secretsmanager:PutSecretValue and
+#                  secretsmanager:DescribeSecret on loom/platform/* (`loom-deploy secrets
+#                  init` and `ses-smtp-password` run on the box, §6.3); logs:CreateLogGroup
+#                  and logs:DescribeLogStreams on /loom/platform*; ecr:BatchCheckLayerAvailability;
+#                  ssm:GetParameters on the site parameter; s3:GetObject on an object
+#                  resource ending /releases/* (the release manifest, §6.1, §6.6 step 1).
+#   OIDC role      required: the ECR push actions on repository/loom/* and
+#                  ecr:GetAuthorizationToken on *; tolerated: ecr:BatchGetImage on
+#                  repository/loom/* (AWS's documented push permissions include it) and
+#                  s3:PutObject on an object resource ending /releases/* (the workflow
+#                  uploads releases/<sha>.json, §6.1).
+# The release-manifest grants (the two /releases/* tolerances) are tolerated pending a spec
+# decision: §5.2 does not list them, §6.1 and §6.6 need them, and the bucket is unnamed.
 #
 # Addresses this file expects (the spec names none):
 #   aws_iam_role.instance, aws_iam_role_policy.instance           instance role, its inline policy
+#   aws_iam_instance_profile.instance                             the instance's profile (role = instance role)
 #   aws_iam_role_policy_attachment.instance_ssm                   AmazonSSMManagedInstanceCore
 #   aws_iam_role.github_images, aws_iam_role_policy.github_images OIDC role for images.yml
 #   aws_iam_role.serving_reaper, aws_iam_role_policy.serving_reaper
@@ -60,15 +78,18 @@ run "instance_role_grants_of_5_2" {
   }
 
   assert {
-    condition = anytrue(flatten([
-      for s in jsondecode(aws_iam_role_policy.instance.policy).Statement : [
-        for a in flatten([s.Action]) : [
-          for r in flatten([s.Resource]) :
-          a == "logs:PutLogEvents" && startswith(r, "arn:aws:logs:us-east-1:123456789012:log-group:/loom/platform")
+    condition = alltrue([
+      for want in ["logs:CreateLogStream", "logs:PutLogEvents"] :
+      anytrue(flatten([
+        for s in jsondecode(aws_iam_role_policy.instance.policy).Statement : [
+          for a in flatten([s.Action]) : [
+            for r in flatten([s.Resource]) :
+            a == want && startswith(r, "arn:aws:logs:us-east-1:123456789012:log-group:/loom/platform")
+          ]
         ]
-      ]
-    ]))
-    error_message = "The instance role may logs:PutLogEvents to /loom/platform* log groups."
+      ]))
+    ])
+    error_message = "The instance role may write logs (logs:CreateLogStream, logs:PutLogEvents) to /loom/platform* log groups."
   }
 
   assert {
@@ -183,30 +204,54 @@ run "instance_role_grants_are_scoped" {
     error_message = "cloudwatch: only PutMetricData, in a statement with Condition StringEquals cloudwatch:namespace = Loom/Platform; got ${jsonencode([for s in jsondecode(aws_iam_role_policy.instance.policy).Statement : s if anytrue([for a in flatten([s.Action]) : startswith(a, "cloudwatch:")])])}."
   }
 
-  # Each service's actions only on its resources.
+  # Exact allowlist: every (action, resource) pair the policy grants is one of these
+  # (§5.2, plus the tolerances in this file's header). The lease prefix may be written
+  # from the bucket's arn or from its name.
   assert {
     condition = alltrue(flatten([
       for s in jsondecode(aws_iam_role_policy.instance.policy).Statement : [
         for a in flatten([s.Action]) : [
           for r in flatten([s.Resource]) :
-          startswith(a, "logs:") ? startswith(r, "arn:aws:logs:us-east-1:123456789012:log-group:/loom/platform") :
-          startswith(a, "secretsmanager:") ? (startswith(r, "arn:aws:secretsmanager:us-east-1:123456789012:secret:loom/platform/") || r == "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-mock-AbCdEf") :
-          startswith(a, "ssm:") ? (a == "ssm:GetParameter" && r == "arn:aws:ssm:us-east-1:123456789012:parameter/loom/platform/site") :
-          startswith(a, "ecr:") ? (
-            a == "ecr:GetAuthorizationToken" ? r == "*" : (
-              contains(["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"], a)
-              && startswith(r, "arn:aws:ecr:us-east-1:123456789012:repository/loom/")
-            )
+          a == "secretsmanager:GetSecretValue" ? (
+            startswith(r, "arn:aws:secretsmanager:us-east-1:123456789012:secret:loom/platform/")
+            || r == "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-mock-AbCdEf"
           ) :
-          startswith(a, "s3:") ? (
-            contains(["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], a) && r != "*" && !startswith(r, "arn:aws:s3:::*")
+          contains(["secretsmanager:PutSecretValue", "secretsmanager:DescribeSecret"], a) ? (
+            startswith(r, "arn:aws:secretsmanager:us-east-1:123456789012:secret:loom/platform/")
           ) :
-          startswith(a, "cloudwatch:") ? true :
+          contains(["logs:CreateLogStream", "logs:PutLogEvents", "logs:CreateLogGroup", "logs:DescribeLogStreams"], a) ? (
+            startswith(r, "arn:aws:logs:us-east-1:123456789012:log-group:/loom/platform")
+          ) :
+          a == "ecr:GetAuthorizationToken" ? r == "*" :
+          contains(["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"], a) ? (
+            startswith(r, "arn:aws:ecr:us-east-1:123456789012:repository/loom/")
+          ) :
+          a == "s3:PutObject" ? contains([
+            "${aws_s3_bucket.leases.arn}/serving/leases/*",
+            "arn:aws:s3:::${aws_s3_bucket.leases.bucket}/serving/leases/*",
+          ], r) :
+          a == "s3:GetObject" ? (
+            contains([
+              "${aws_s3_bucket.leases.arn}/serving/leases/*",
+              "arn:aws:s3:::${aws_s3_bucket.leases.bucket}/serving/leases/*",
+            ], r)
+            || can(regex("^arn:aws:s3:::[^/*?]+/([^*?]+/)?releases/\\*$", r))
+          ) :
+          a == "cloudwatch:PutMetricData" ? true :
+          contains(["ssm:GetParameter", "ssm:GetParameters"], a) ? r == "arn:aws:ssm:us-east-1:123456789012:parameter/loom/platform/site" :
           false
         ]
       ]
     ]))
-    error_message = "Instance policy, by service: logs only on /loom/platform*; secretsmanager only on loom/platform/* and the RDS master secret; ssm only GetParameter on /loom/platform/site; ECR pull only (GetAuthorizationToken on *, the rest on repository/loom/*); S3 object read/write only, never on every bucket; no other service. Got ${aws_iam_role_policy.instance.policy}."
+    error_message = "Instance policy allowlist: secretsmanager:GetSecretValue on loom/platform/* and the RDS master secret (PutSecretValue/DescribeSecret on loom/platform/* only); logs:CreateLogStream/PutLogEvents (CreateLogGroup/DescribeLogStreams) on /loom/platform* only; ECR pull only (GetAuthorizationToken on *; BatchGetImage, GetDownloadUrlForLayer, BatchCheckLayerAvailability on repository/loom/*); s3:GetObject/PutObject on the lease bucket's serving/leases/* (s3:GetObject also on .../releases/*); cloudwatch:PutMetricData; ssm:GetParameter(s) on /loom/platform/site; nothing else. Got ${aws_iam_role_policy.instance.policy}."
+  }
+
+  assert {
+    condition = alltrue([
+      for a in flatten([for s in jsondecode(aws_iam_role_policy.instance.policy).Statement : flatten([s.Action])]) :
+      !can(regex("(?i):(Delete|Put[A-Za-z]*Policy|Attach|Detach|PassRole|Create(Role|User|Policy|AccessKey|Secret)|Update|Restore|Tag|Untag|Rotate|Cancel)", a))
+    ])
+    error_message = "No Delete*, Put*Policy, IAM, tagging or other administrative action in the instance policy; got ${aws_iam_role_policy.instance.policy}."
   }
 }
 
@@ -286,27 +331,88 @@ run "github_oidc_role_can_push_images" {
   }
 
   assert {
-    condition = alltrue(flatten([
+    condition = anytrue(flatten([
       for s in jsondecode(aws_iam_role_policy.github_images.policy).Statement : [
         for a in flatten([s.Action]) : [
           for r in flatten([s.Resource]) :
-          !startswith(a, "ecr:") || (a == "ecr:GetAuthorizationToken" ? r == "*" : startswith(r, "arn:aws:ecr:us-east-1:123456789012:repository/loom/"))
+          s.Effect == "Allow" && a == "ecr:GetAuthorizationToken" && r == "*"
         ]
       ]
     ]))
-    error_message = "ECR actions of the OIDC role apply to the Loom repositories only (GetAuthorizationToken on *)."
+    error_message = "The OIDC role may ecr:GetAuthorizationToken (resource *), which docker login to ECR needs."
   }
 
   assert {
     condition = alltrue([
-      for a in flatten([for s in jsondecode(aws_iam_role_policy.github_images.policy).Statement : flatten([s.Action])]) :
-      !strcontains(a, "*")
-      && !can(regex("^ecr:(Delete|BatchDelete|Set|Create|Tag|Untag|PutLifecyclePolicy|PutImageTagMutability|PutImageScanningConfiguration|PutRegistry|PutReplication)", a))
-      && !startswith(a, "ssm:")
-      && !startswith(a, "secretsmanager:")
-      && !startswith(a, "iam:")
+      for s in jsondecode(aws_iam_role_policy.github_images.policy).Statement :
+      s.Effect == "Allow" && !can(s.NotAction) && !can(s.NotResource)
     ])
-    error_message = "The OIDC role pushes images only: no wildcard, no repository administration or deletion, no SSM, secrets or IAM."
+    error_message = "OIDC policy statements are plain Allow statements (no NotAction/NotResource)."
+  }
+
+  # Allowlist ("ECR push only", §5.2): every (action, resource) pair is an ECR push action
+  # on repository/loom/*, GetAuthorizationToken on *, or the release manifest upload
+  # (tolerated, see the header).
+  assert {
+    condition = alltrue(flatten([
+      for s in jsondecode(aws_iam_role_policy.github_images.policy).Statement : [
+        for a in flatten([s.Action]) : [
+          for r in flatten([s.Resource]) :
+          a == "ecr:GetAuthorizationToken" ? r == "*" :
+          contains([
+            "ecr:PutImage",
+            "ecr:InitiateLayerUpload",
+            "ecr:UploadLayerPart",
+            "ecr:CompleteLayerUpload",
+            "ecr:BatchCheckLayerAvailability",
+            "ecr:BatchGetImage",
+          ], a) ? startswith(r, "arn:aws:ecr:us-east-1:123456789012:repository/loom/") :
+          a == "s3:PutObject" ? can(regex("^arn:aws:s3:::[^/*?]+/([^*?]+/)?releases/\\*$", r)) :
+          false
+        ]
+      ]
+    ]))
+    error_message = "The OIDC role may only push images: ecr:GetAuthorizationToken on *; PutImage, InitiateLayerUpload, UploadLayerPart, CompleteLayerUpload, BatchCheckLayerAvailability (BatchGetImage) on repository/loom/*; s3:PutObject only on an object resource ending /releases/*; no other action. Got ${aws_iam_role_policy.github_images.policy}."
+  }
+}
+
+run "trust_policies_and_instance_profile" {
+  command = plan
+
+  assert {
+    condition = (
+      length(jsondecode(aws_iam_role.instance.assume_role_policy).Statement) >= 1
+      && alltrue([
+        for s in jsondecode(aws_iam_role.instance.assume_role_policy).Statement :
+        s.Effect == "Allow"
+        && toset(flatten([s.Action])) == toset(["sts:AssumeRole"])
+        && toset(keys(s.Principal)) == toset(["Service"])
+        && toset(flatten([s.Principal.Service])) == toset(["ec2.amazonaws.com"])
+      ])
+    )
+    error_message = "The instance role trusts ec2.amazonaws.com only (sts:AssumeRole); got ${aws_iam_role.instance.assume_role_policy}."
+  }
+
+  assert {
+    condition = (
+      length(jsondecode(aws_iam_role.serving_reaper.assume_role_policy).Statement) >= 1
+      && alltrue([
+        for s in jsondecode(aws_iam_role.serving_reaper.assume_role_policy).Statement :
+        s.Effect == "Allow"
+        && toset(flatten([s.Action])) == toset(["sts:AssumeRole"])
+        && toset(keys(s.Principal)) == toset(["Service"])
+        && toset(flatten([s.Principal.Service])) == toset(["lambda.amazonaws.com"])
+      ])
+    )
+    error_message = "The serving reaper role trusts lambda.amazonaws.com only (sts:AssumeRole); got ${aws_iam_role.serving_reaper.assume_role_policy}."
+  }
+
+  assert {
+    condition = (
+      contains([aws_iam_instance_profile.instance.name, aws_iam_instance_profile.instance.id], aws_instance.platform.iam_instance_profile)
+      && contains([aws_iam_role.instance.name, aws_iam_role.instance.id], aws_iam_instance_profile.instance.role)
+    )
+    error_message = "aws_instance.platform uses aws_iam_instance_profile.instance, whose role is aws_iam_role.instance."
   }
 }
 

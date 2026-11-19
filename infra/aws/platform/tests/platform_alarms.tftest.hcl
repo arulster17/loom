@@ -131,7 +131,7 @@ run "p1_serving_reaper" {
       aws_cloudwatch_metric_alarm.p1a.namespace == "AWS/Lambda"
       && aws_cloudwatch_metric_alarm.p1a.metric_name == "Errors"
       && aws_cloudwatch_metric_alarm.p1a.statistic == "Sum"
-      && lookup(coalesce(aws_cloudwatch_metric_alarm.p1a.dimensions, {}), "FunctionName", "") == aws_lambda_function.serving_reaper.function_name
+      && contains([aws_lambda_function.serving_reaper.function_name, aws_lambda_function.serving_reaper.id], lookup(coalesce(aws_cloudwatch_metric_alarm.p1a.dimensions, {}), "FunctionName", ""))
     )
     error_message = "P1a reads AWS/Lambda Errors, Sum, for FunctionName = the serving reaper."
   }
@@ -156,7 +156,7 @@ run "p1_serving_reaper" {
       aws_cloudwatch_metric_alarm.p1b.namespace == "AWS/Lambda"
       && aws_cloudwatch_metric_alarm.p1b.metric_name == "Invocations"
       && aws_cloudwatch_metric_alarm.p1b.statistic == "Sum"
-      && lookup(coalesce(aws_cloudwatch_metric_alarm.p1b.dimensions, {}), "FunctionName", "") == aws_lambda_function.serving_reaper.function_name
+      && contains([aws_lambda_function.serving_reaper.function_name, aws_lambda_function.serving_reaper.id], lookup(coalesce(aws_cloudwatch_metric_alarm.p1b.dimensions, {}), "FunctionName", ""))
     )
     error_message = "P1b reads AWS/Lambda Invocations, Sum, for FunctionName = the serving reaper."
   }

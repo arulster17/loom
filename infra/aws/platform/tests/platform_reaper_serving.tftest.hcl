@@ -9,6 +9,11 @@
 #   aws_s3_bucket.leases                                     the lease bucket (§5.2 s3)
 #   aws_secretsmanager_secret.platform["serving-runpod-key"] (see platform_secrets)
 # Environment variable names are the ones bench/src/loom_bench/providers/runpod_reaper_lambda.py reads.
+# The schedule's on/off is read from the rule's `state` ("ENABLED"/"DISABLED"; aws
+# provider 6.x has no `is_enabled`).
+#
+# Note for the implementer: if the Lambda is packaged with data "archive_file", its
+# output_path must be gitignored (the zip is built on every plan and test run).
 
 mock_provider "aws" {
   source          = "./tests/mocks/aws"
@@ -56,7 +61,7 @@ run "serving_reaper_disabled_by_default" {
   }
 
   assert {
-    condition     = try(aws_lambda_function.serving_reaper.environment[0].variables["LOOM_RUNPOD_REAPER_LEASE_BUCKET"], "") == aws_s3_bucket.leases.bucket
+    condition     = contains([aws_s3_bucket.leases.bucket, aws_s3_bucket.leases.id], try(aws_lambda_function.serving_reaper.environment[0].variables["LOOM_RUNPOD_REAPER_LEASE_BUCKET"], ""))
     error_message = "LOOM_RUNPOD_REAPER_LEASE_BUCKET is the lease bucket's name."
   }
 
@@ -79,10 +84,7 @@ run "serving_reaper_disabled_by_default" {
   }
 
   assert {
-    condition = (
-      aws_cloudwatch_event_rule.serving_reaper.state == "DISABLED"
-      || (aws_cloudwatch_event_rule.serving_reaper.state == null && aws_cloudwatch_event_rule.serving_reaper.is_enabled == false)
-    )
+    condition     = aws_cloudwatch_event_rule.serving_reaper.state == "DISABLED"
     error_message = "With serving_reaper_enabled = false (the default) the schedule is disabled."
   }
 }
@@ -95,10 +97,7 @@ run "serving_reaper_enabled_when_true" {
   }
 
   assert {
-    condition = (
-      aws_cloudwatch_event_rule.serving_reaper.state == "ENABLED"
-      || (aws_cloudwatch_event_rule.serving_reaper.state == null && aws_cloudwatch_event_rule.serving_reaper.is_enabled != false)
-    )
+    condition     = aws_cloudwatch_event_rule.serving_reaper.state == "ENABLED"
     error_message = "With serving_reaper_enabled = true the schedule is enabled."
   }
 

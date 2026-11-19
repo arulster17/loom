@@ -10,8 +10,18 @@
 #                                    { name, type, records } (records: list of strings);
 #                                    names fully qualified, a trailing dot allowed
 #   aws_sesv2_email_identity.domain  the domain identity (Easy DKIM, configuration set)
+#   aws_sesv2_email_identity_mail_from_attributes.domain
+#                                    the custom MAIL FROM subdomain (the MX record's name)
 # TXT values may be written with or without surrounding quotes. Mocked values: Elastic IP
 # 203.0.113.10, DKIM tokens mocktokena/b/c, region us-east-1.
+#
+# Notes for the implementer:
+# - Easy DKIM: write an (empty) `dkim_signing_attributes {}` block on the identity. The
+#   mock fills `dkim_signing_attributes.tokens` only when the block is in the
+#   configuration; without it the CNAME assertions fail.
+# - Use static `for_each` keys for the records (e.g. "apex-a", "dkim-0", ...), never keys
+#   built from the Elastic IP or the DKIM tokens: those values are known at plan time only
+#   under the mocks, and a real `terraform plan` refuses unknown for_each keys.
 
 mock_provider "aws" {
   source          = "./tests/mocks/aws"
@@ -97,6 +107,17 @@ run "records_as_output_without_a_zone" {
       if upper(mx.type) == "MX"
     ])
     error_message = "An SPF TXT record (v=spf1 include:amazonses.com) on the MAIL FROM subdomain."
+  }
+
+  assert {
+    condition = (
+      aws_sesv2_email_identity_mail_from_attributes.domain.email_identity == aws_sesv2_email_identity.domain.email_identity
+      && toset([
+        for r in output.dns_records : trimsuffix(lower(r.name), ".")
+        if upper(r.type) == "MX"
+      ]) == toset([trimsuffix(lower(aws_sesv2_email_identity_mail_from_attributes.domain.mail_from_domain), ".")])
+    )
+    error_message = "The SES identity has a custom MAIL FROM domain (aws_sesv2_email_identity_mail_from_attributes) equal to the MX record's name."
   }
 
   assert {

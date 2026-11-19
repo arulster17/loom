@@ -14,6 +14,11 @@
 #   data.aws_region.current           the stack's region (§8.5)
 # Which provider made H3 is told by its mocked ARN: alarms made through aws.us_east_1 end
 # in ":alarm:mock-made-by-us-east-1-alias" (tests/mocks/aws_us_east_1).
+#
+# Note for the implementer: put the region precondition (lifecycle { precondition }) on
+# aws_route53_health_check.hooks and nowhere else. `plan_fails_outside_us_east_1` expects
+# exactly that one failure; a second region guard (a check block, a precondition on
+# another resource or output, a variable validation) is an unexpected failure there.
 
 mock_provider "aws" {
   source          = "./tests/mocks/aws"

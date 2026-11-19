@@ -105,6 +105,7 @@ run "only_the_instance_role_reads_the_site_parameter" {
     error_message = "The instance role may ssm:GetParameter on the site parameter."
   }
 
+  # An Allow statement without Action (NotAction) fails here: s.Action does not exist.
   assert {
     condition = alltrue([
       for p in [
@@ -113,10 +114,10 @@ run "only_the_instance_role_reads_the_site_parameter" {
         aws_iam_user_policy.ses_smtp.policy,
       ] :
       alltrue([
-        for a in flatten([for s in jsondecode(p).Statement : flatten([s.Action])]) :
-        !startswith(lower(a), "ssm:") && a != "*"
+        for a in flatten([for s in jsondecode(p).Statement : flatten([s.Action]) if s.Effect == "Allow"]) :
+        !startswith(lower(a), "ssm:") && !can(regex("^[^:]*[*?]", a))
       ])
     ])
-    error_message = "No other role or user of the stack may read SSM parameters (serving reaper, OIDC role, SES SMTP user)."
+    error_message = "No other role or user of the stack may read SSM parameters (serving reaper, OIDC role, SES SMTP user): no ssm: action and no wildcard service prefix (*, *:*)."
   }
 }

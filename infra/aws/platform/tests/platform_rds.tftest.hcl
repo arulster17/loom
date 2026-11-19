@@ -103,7 +103,7 @@ run "rds_parameter_group_forces_ssl_and_keepalives" {
   command = plan
 
   assert {
-    condition     = aws_db_instance.platform.parameter_group_name == aws_db_parameter_group.platform.name
+    condition     = contains([aws_db_parameter_group.platform.name, aws_db_parameter_group.platform.id], aws_db_instance.platform.parameter_group_name)
     error_message = "The instance uses aws_db_parameter_group.platform."
   }
 
