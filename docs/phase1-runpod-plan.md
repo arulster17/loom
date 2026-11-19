@@ -432,7 +432,7 @@ of the M2 acceptance found the manager blind to requests on a ready model (billi
 the usage stream before the manager reads it); the gateway now stamps
 `loom:pool:<model>:last_request` in `settle.lua` instead (spec §11 "Fixed after CI").
 The branch review found no M2 blockers; its M3 prerequisites are P1-P4 below. Before M3
-starts, the review follow-ups below are being fixed ([m3-review-fixes-spec.md](m3-review-fixes-spec.md)).
+started, the review follow-ups below due in M3 were fixed ([m3-review-fixes-spec.md](m3-review-fixes-spec.md); merged into `main`, PRs #12-#14).
 
 **M3 status (2026-11-18): started** on branch `phase1-m3` to
 [phase1-m3-spec.md](phase1-m3-spec.md), approved by the user on 2026-11-18 with the
