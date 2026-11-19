@@ -14,6 +14,7 @@ import hmac
 import time
 
 DEFAULT_TOLERANCE_S = 300
+MAX_TIMESTAMP = 2**53  # a `t` beyond this is no unix time: a malformed header
 
 
 class SignatureError(Exception):
@@ -73,10 +74,21 @@ def verify(
         raise SignatureError("no timestamp in Stripe-Signature")
     if not candidates:
         raise SignatureError("no v1 signature in Stripe-Signature")
+    if abs(timestamp) > MAX_TIMESTAMP:
+        raise SignatureError("bad timestamp")
     expected = compute(payload, secret, timestamp)
+    matched = False
+    malformed = False
+    for c in candidates:
+        try:
+            matched = hmac.compare_digest(expected, c) or matched
+        except TypeError:  # a non-ASCII v1: compare_digest takes ASCII str only
+            malformed = True
+    if malformed and not matched:
+        raise SignatureError("bad v1 signature")
     current = time.time() if now is None else now
     fresh = abs(current - timestamp) <= tolerance_s
-    if not any(hmac.compare_digest(expected, c) for c in candidates):
+    if not matched:
         if fresh:
             raise SignatureMismatch("signature does not match")
         raise SignatureError("signature does not match")

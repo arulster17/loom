@@ -246,7 +246,7 @@ async def _store_error(
         return Outcome("duplicate")
     if row[0] == 1:
         metrics.HANDLER_FAILURES.labels("retry" if retry else "webhook").inc()
-    return Outcome("unapplied", reason=text, stored_after_error=True)
+    return Outcome("unapplied", stored_after_error=True)
 
 
 async def handle_event(

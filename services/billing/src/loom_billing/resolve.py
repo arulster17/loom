@@ -29,7 +29,6 @@ LIST_COLUMNS = (
     "id",
     "type",
     "received_at",
-    "processed_at",
     "result",
     "last_error",
     "error_count",

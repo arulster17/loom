@@ -52,7 +52,7 @@ then resent.
   applied the event by the next minute and nothing else is needed. Any other error is a
   handler bug on that payload shape: see "Poison event".
 - **S5** (retry job stopped): Postgres is down, or the job fails every minute. Check
-  `docker compose logs billing | grep stripe.retry_run_ended`.
+  `docker compose -p <project> logs billing | grep stripe.retry_run_ended`.
 - **S1a / S1b** (stuck events): see below.
 
 ## Stuck events: list, resolve, never hand-adjust
@@ -66,7 +66,9 @@ the reason in `details`). **It posts nothing, ever**: no credit, no clawback. On
 no retry or redelivery applies the event, with one exception (the reopen sweep, below). It
 is refused (exit 2, nothing changed) for a non-admin, an unknown or already processed
 event, a clawback whose PaymentIntent is not a non-empty string, and a clawback whose
-payment is already credited.
+payment is already credited. If the event row is locked (the webhook or the retry job is
+working on it) or the database is slow, `resolve` prints `busy, retry: ...` to stderr and
+exits **75**, nothing changed: run it again in a minute.
 
 Which case is which:
 

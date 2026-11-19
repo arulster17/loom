@@ -19,8 +19,10 @@ import logging
 import os
 import sys
 
+import psycopg
 import uvicorn
 from prometheus_client import start_http_server
+from psycopg_pool import PoolTimeout
 
 from loom_billing.api import create_app
 from loom_billing.logs import configure_logging
@@ -32,6 +34,8 @@ from loom_platform.db import RoleCheckFailed, open_pool, role_gate
 from loom_platform.settings import enforce_environment, redis_policy_problems
 
 log = logging.getLogger("loom_billing")
+
+BUSY_EXIT = 75  # `stripe-event resolve`: lock or pool timeout, nothing changed, retry (EX_TEMPFAIL)
 
 COMMANDS = (
     "all",
@@ -119,6 +123,14 @@ async def _stripe_event(settings: BillingSettings, args: argparse.Namespace) -> 
         except ResolveRefused as e:
             print(f"refused: {e.reason}", file=sys.stderr)
             return 2
+        except (psycopg.Error, PoolTimeout) as e:
+            # The row lock, the statement or the pool timed out: the transaction rolled back.
+            print(
+                f"busy, retry: could not resolve {args.event_id} ({type(e).__name__}); "
+                "nothing changed",
+                file=sys.stderr,
+            )
+            return BUSY_EXIT
         print(f"resolved {args.event_id}: nothing was posted")
         return 0
     finally:
