@@ -509,6 +509,7 @@ decisions (D) in it are the M3 spec's.
 | LM8 | Decide the public API key prefix and header names (`loom_sk_`, `X-Loom-*`, `LOOM_API_KEY` in the playground snippet): a contracts change with a transition for issued keys (§6.11) | Paying customers write these names into their code; changing them later breaks their integrations | M3 keeps the `loom` wire names; testers are few and known |
 | LM9 | Secrets as files only (no secret in a container's environment) | `loom-deploy` puts the secrets that have no `*_FILE` form in env files (§6.12), and Docker keeps a container's environment in its on-disk configuration under `/var/lib/docker`, outside the tmpfs: it outlives a reboot and anyone with root or the docker socket can read it | Accepted for M3 (user, 2026-11-19): test-mode keys only, and only the operator reaches the box |
 | LM10 | Boot-time apply (a systemd unit that runs `loom-deploy apply` for the current release at boot) | A reboot or an EC2 recover (H2) empties the tmpfs `/run/loom`, so the services come back without their secret files and stay down until the operator runs `apply` (§6.3): customers would wait for a human | The operator is the only user; H1 and H3 page, and the runbook step (§6.3) brings the stack back |
+| LM11 | Review the trivy acceptances (open egress, customer-managed keys, flow logs): the 13 findings `.github/terraform/trivyignore.yaml` accepts, each with its reason in `infra/aws/platform/README.md` | Live mode holds customers' data and money: open egress lets a compromised container send data anywhere, AWS-managed keys cannot be scoped or revoked apart from the account, and without VPC flow logs or bucket access logs an incident leaves no network or access record | Accepted for M3 (user, 2026-11-19): test-mode data only, one operator, one account |
 
 Considered and **not** required for live mode: the 6 s deadline with its cancelled task (an
 answer Stripe stopped waiting for and a 503 are the same failed delivery to Stripe, and L1
@@ -516,6 +517,15 @@ makes a late COMMIT safe); the 3-consecutive-stops rule (the error store's own f
 the stop signal); the `IMMEDIATE`/`DEFERRED` pair (`loom_post_transaction` checks before
 it inserts); `DuplicatePurchase` (the L3 index with the 500 path suffices, and LM4 would
 treat the race as transient anyway).
+
+### M4 prerequisites from M3 (2026-11-19)
+
+Accepted for M3 by the user and required before real pods serve customers in M4. The
+section numbers are the M3 spec's.
+
+| # | Prerequisite | Why M3 does without it |
+|---|---|---|
+| M4-1 | Zero-downtime pod CA rollover (§7): the pods' client-trust bundle holds the old and the new CA during a rollover (a pod setting the manager passes at bootstrap and re-key); `loom-deploy` renders the gateway's and the pods' bundles from `pod-ca` and `pod-ca-next`; a `pod-ca-next` secret container in §5.2 with the instance role's read (§5.6) | In M3 a pod trusts only the CA that signed it, so after the CA switch requests can fail for up to about a minute (`LOOM_GATEWAY_CERT_CHECK_S`), until the gateway loads its client certificate from the new CA; the runbook says so and B20 records the window. The M3 box runs mock pods for one operator |
 
 ## 14. Risks
 
