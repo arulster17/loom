@@ -1,8 +1,10 @@
 """Shared fakes for the M3 deploy tests (`loom-deploy apply` and `acceptance`, A13, A15).
 
 Not a test module (no `test_` prefix): imported by `test_devstack_m3_deploy_apply.py`,
-`test_devstack_m3_deploy_acceptance.py` and `test_devstack_m3_prodstack.py`, which pytest
-loads with their own directory on `sys.path`.
+`test_devstack_m3_deploy_acceptance.py`, `test_devstack_m3_prodstack.py`,
+`test_devstack_m3_deploy_secrets.py` (the `aws` option parser) and
+`test_devstack_m3_fakes.py` (the fakes' own checks), which pytest loads with their own
+directory on `sys.path`.
 
 `Box` is a scratch `LOOM_DEPLOY_ROOT` (under `/dev/shm`, a tmpfs, as §6.12 asks) plus a
 directory of fake tools put first on `PATH`:
@@ -27,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -155,7 +158,8 @@ SECRET_FIELDS = {
 
 def secret_values(store: dict[str, str | None]) -> list[str]:
     """Every secret value in a store, with the forms it may be rendered in (a private key's
-    base64 lines, a password percent-encoded)."""
+    base64 lines, a password percent-encoded). A value may be stored bare or as a JSON
+    object: its secret fields, or its only field (`{"value": ...}`), are the secrets."""
     out: list[str] = []
     for value in store.values():
         if not value:
@@ -165,9 +169,9 @@ def secret_values(store: dict[str, str | None]) -> list[str]:
         except ValueError:
             doc = value
         if isinstance(doc, dict):
-            vals = [str(v) for k, v in doc.items() if k in SECRET_FIELDS and v]
-        else:
-            vals = [str(doc)]
+            vals = [str(v) for k, v in doc.items() if v and (k in SECRET_FIELDS or len(doc) == 1)]
+        else:  # bare (or a JSON string or number: both its text and the decoded value)
+            vals = sorted({value, str(doc)})
         for v in vals:
             if "PRIVATE KEY" in v:
                 out += [ln for ln in v.splitlines() if len(ln) >= 40]
@@ -187,6 +191,97 @@ def field(store: dict[str, str | None], name: str, key: str) -> str:
 
 # ---------------------------------------------------------------------------- the fakes
 
+# AWS CLI options that never take a value (global and per-command switches). Any other
+# `--name` followed by a word that is not an option takes that word as its value.
+AWS_BOOL_FLAGS = frozenset(
+    {
+        "--no-cli-pager",
+        "--cli-auto-prompt",
+        "--no-cli-auto-prompt",
+        "--no-paginate",
+        "--no-sign-request",
+        "--no-verify-ssl",
+        "--debug",
+        "--quiet",
+        "--no-progress",
+        "--only-show-errors",
+        "--with-decryption",
+        "--no-with-decryption",
+        "--recursive",
+        "--dryrun",
+        "--dry-run",
+        "--no-dry-run",
+        "--no-guess-mime-type",
+        "--follow-symlinks",
+        "--no-follow-symlinks",
+        "--force",
+        "--force-overwrite-replica-secret",
+        "--no-force-overwrite-replica-secret",
+        "--generate-cli-skeleton",
+        "--version",
+    }
+)
+
+# `docker compose` options that take a value: the global ones, and those of `up`, `run`
+# and `ps`. Shared by the fake docker, the wrapper around the real one and the readers below.
+COMPOSE_VALUED = frozenset(
+    {"-p", "--project-name", "-f", "--file", "--env-file", "--profile",
+     "--project-directory", "--ansi", "--progress", "--parallel"}
+)  # fmt: skip
+UP_VALUED = frozenset(
+    {"--timeout", "-t", "--scale", "--pull", "--wait-timeout", "--exit-code-from"}
+)
+RUN_VALUED = frozenset(
+    {"-e", "--env", "--name", "--entrypoint", "-u", "--user", "-w", "--workdir", "-v",
+     "--volume", "-l", "--label", "-p", "--publish", "--pull", "--cap-add", "--cap-drop"}
+)  # fmt: skip
+PS_VALUED = frozenset({"--format", "--filter", "--status"})
+
+
+def parse_aws_argv(argv: list[str]) -> tuple[dict[str, Any], list[str]]:
+    """An `aws` command line's options (`--name value`, `--name=value`, a switch as True)
+    and its positional words (service, operation, then e.g. `s3 cp`'s paths)."""
+    opts: dict[str, Any] = {}
+    pos: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--") and len(a) > 2:
+            if "=" in a:
+                k, v = a[2:].split("=", 1)
+                opts[k] = v
+            elif a in AWS_BOOL_FLAGS:
+                opts[a[2:]] = True
+            elif i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                opts[a[2:]] = argv[i + 1]
+                i += 1
+            else:
+                opts[a[2:]] = True
+        else:
+            pos.append(a)
+        i += 1
+    return opts, pos
+
+
+def aws_op(argv: list[str]) -> list[str]:
+    """An `aws` call's service and operation (`["ecr", "get-login-password"]`), wherever its
+    options stand (`aws --no-cli-pager --region x ecr get-login-password`)."""
+    return parse_aws_argv(argv)[1][:2]
+
+
+# The parser above, as source for the fake `aws` scripts (which run with `python -IS`).
+AWS_PARSER_SRC = (
+    "from typing import Any\n"
+    f"AWS_BOOL_FLAGS = frozenset({sorted(AWS_BOOL_FLAGS)!r})\n" + inspect.getsource(parse_aws_argv)
+)
+
+_DOCKER_SETS = (
+    f"COMPOSE_VALUED = frozenset({sorted(COMPOSE_VALUED)!r})\n"
+    f"UP_VALUED = frozenset({sorted(UP_VALUED)!r})\n"
+    f"RUN_VALUED = frozenset({sorted(RUN_VALUED)!r})\n"
+    f"PS_VALUED = frozenset({sorted(PS_VALUED)!r})\n"
+)
+
 _LOG = r"""
 def log(tool, argv, **extra):
     rec = {"tool": tool, "argv": argv}
@@ -205,22 +300,11 @@ import json, os, re, shutil, sys
 D = __DIR__
 """
     + _LOG
+    + AWS_PARSER_SRC
     + r"""
 argv = sys.argv[1:]
 log("aws", argv)
-opts, pos, i = {}, [], 0
-while i < len(argv):
-    a = argv[i]
-    if a.startswith("--"):
-        if "=" in a:
-            k, v = a[2:].split("=", 1); opts[k] = v
-        elif i + 1 < len(argv) and not argv[i + 1].startswith("--"):
-            opts[a[2:]] = argv[i + 1]; i += 1
-        else:
-            opts[a[2:]] = True
-    else:
-        pos.append(a)
-    i += 1
+opts, pos = parse_aws_argv(argv)
 svc, op = (pos + ["", ""])[:2]
 rest = pos[2:]
 
@@ -365,18 +449,17 @@ import json, os, sys
 D = __DIR__
 """
     + _LOG
+    + _DOCKER_SETS
     + r"""
 argv = sys.argv[1:]
 cfg = json.load(open(os.path.join(D, "docker.json")))
+# Where and with which compose variables it ran: a compose project and files may be given
+# as `-p`/`-f` or as COMPOSE_PROJECT_NAME/COMPOSE_FILE, with `-f` relative to the cwd.
+CTX = {"cwd": os.getcwd(), "env": {k: os.environ[k] for k in
+       ("COMPOSE_PROJECT_NAME", "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR") if k in os.environ}}
 
 def save():
     json.dump(cfg, open(os.path.join(D, "docker.json"), "w"))
-
-COMPOSE_VALUED = {"-p", "--project-name", "-f", "--file", "--env-file", "--profile",
-                  "--project-directory", "--ansi", "--progress", "--parallel"}
-RUN_VALUED = {"-e", "--env", "--name", "--entrypoint", "-u", "--user", "-w", "--workdir",
-              "-v", "--volume", "-l", "--label", "-p", "--publish", "--pull", "--cap-add",
-              "--cap-drop"}
 
 def positional(words, valued):
     out, i = [], 0
@@ -398,10 +481,10 @@ def health(svc):
 if argv[:1] == ["login"]:
     data = sys.stdin.read()
     token = open(os.path.join(D, "ecr-token")).read().strip()
-    log("docker", argv, stdin_is_token=(data.strip() == token))
+    log("docker", argv, stdin_is_token=(data.strip() == token), **CTX)
     print("Login Succeeded"); sys.exit(0)
 
-log("docker", argv)
+log("docker", argv, **CTX)
 
 if argv[:1] == ["compose"]:
     words = argv[1:]
@@ -425,11 +508,11 @@ if argv[:1] == ["compose"]:
             os.chmod(p, 0o600)
         sys.exit(int(cfg.get("run_exit", {}).get(svc, 0)))
     if sub == "up":
-        for svc in positional(rest, {"--timeout", "-t", "--scale", "--pull", "--wait-timeout"}):
+        for svc in positional(rest, UP_VALUED):
             cfg.setdefault("started", {})[svc] = cfg.get("started", {}).get(svc, 0) + 1
         save(); sys.exit(0)
     if sub == "ps":
-        for svc in positional(rest, {"--format", "--filter", "--status"}):
+        for svc in positional(rest, PS_VALUED):
             print(f"cid-{svc}")
         sys.exit(0)
     sys.exit(0)
@@ -472,10 +555,9 @@ D = __DIR__
 REAL = __REAL__
 """
     + _LOG
+    + _DOCKER_SETS
     + r"""
 argv = sys.argv[1:]
-COMPOSE_VALUED = {"-p", "--project-name", "-f", "--file", "--env-file", "--profile",
-                  "--project-directory", "--ansi", "--progress", "--parallel"}
 if argv[:1] == ["login"]:
     sys.stdin.read()
     log("docker", argv, faked=True)
@@ -655,6 +737,16 @@ class Box:
             "LOOM_DEPLOY_ROOT": str(self.root),
             "LOOM_DEPLOY_HEALTH_TIMEOUT_S": "20",
         }
+        # Which daemon a real docker talks to (A15's wrapper); the fake ignores them.
+        for k in (
+            "DOCKER_HOST",
+            "DOCKER_CONTEXT",
+            "DOCKER_CONFIG",
+            "DOCKER_TLS_VERIFY",
+            "DOCKER_CERT_PATH",
+        ):
+            if os.environ.get(k):
+                env[k] = os.environ[k]
         for k, v in over.items():
             if v is None:
                 env.pop(k, None)
@@ -799,17 +891,30 @@ def owner_of(path: Path, recorded: list[tuple[str, Path, bool]]) -> str | None:
 
 def compose_calls(timeline: list[dict[str, Any]]) -> list[tuple[int, list[str], str, list[str]]]:
     """(timeline index, global options, subcommand, the rest) of each `docker compose`."""
-    valued = {"-p", "--project-name", "-f", "--file", "--env-file", "--profile",
-              "--project-directory", "--ansi", "--progress", "--parallel"}  # fmt: skip
     out = []
     for n, r in enumerate(timeline):
         if r["tool"] != "docker" or r["argv"][:1] != ["compose"]:
             continue
         words, i = r["argv"][1:], 0
         while i < len(words) and words[i].startswith("-"):
-            i += 2 if ("=" not in words[i] and words[i] in valued) else 1
+            i += 2 if ("=" not in words[i] and words[i] in COMPOSE_VALUED) else 1
         out.append((n, words[:i], words[i] if i < len(words) else "", words[i + 1 :]))
     return out
+
+
+def compose_target(record: dict[str, Any], global_opts: list[str]) -> tuple[str | None, list[Path]]:
+    """The compose project and files a recorded `docker compose` call used, however they
+    were passed: `-p`/`--project-name` or COMPOSE_PROJECT_NAME; `-f`/`--file` (absolute or
+    relative to the call's cwd) or COMPOSE_FILE (split on COMPOSE_PATH_SEPARATOR, else `:`)."""
+    env: dict[str, str] = record.get("env") or {}
+    cwd = Path(record.get("cwd") or "/")
+    projects = option_values(global_opts, "-p", "--project-name")
+    project = projects[-1] if projects else env.get("COMPOSE_PROJECT_NAME")
+    names = option_values(global_opts, "-f", "--file")
+    if not names and env.get("COMPOSE_FILE"):
+        names = env["COMPOSE_FILE"].split(env.get("COMPOSE_PATH_SEPARATOR") or ":")
+    files = [Path(os.path.normpath(cwd / f)) for f in names if f]
+    return project, files
 
 
 def option_values(words: list[str], *names: str) -> list[str]:
@@ -844,19 +949,17 @@ def ups(timeline: list[dict[str, Any]]) -> list[tuple[int, str]]:
     out = []
     for n, _, sub, rest in compose_calls(timeline):
         if sub == "up":
-            for svc in non_options(rest, {"--timeout", "-t", "--scale", "--pull"}):
+            for svc in non_options(rest, set(UP_VALUED)):
                 out.append((n, svc))
     return out
 
 
 def runs(timeline: list[dict[str, Any]]) -> list[tuple[int, str, list[str]]]:
     """(timeline index, service, argv after `run`) of each `docker compose run`."""
-    valued = {"-e", "--env", "--name", "--entrypoint", "-u", "--user", "-w", "--workdir",
-              "-v", "--volume", "-l", "--label", "-p", "--publish", "--pull"}  # fmt: skip
     out = []
     for n, _, sub, rest in compose_calls(timeline):
         if sub == "run":
-            names = non_options(rest, valued)
+            names = non_options(rest, set(RUN_VALUED))
             out.append((n, names[0] if names else "", rest))
     return out
 

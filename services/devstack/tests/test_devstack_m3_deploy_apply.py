@@ -31,6 +31,7 @@ import datetime as dt
 import hashlib
 import importlib
 import json
+import os
 import re
 import time
 import urllib.parse
@@ -48,8 +49,10 @@ from devstack_m3_kit import (
     UIDS,
     VOLUMES,
     Box,
+    aws_op,
     chowns,
     compose_calls,
+    compose_target,
     deploy_root_base,
     ecr_images,
     field,
@@ -161,18 +164,21 @@ def test_the_bundle_is_extracted_and_compose_runs_from_it(applied: Applied) -> N
     assert compose.is_file(), f"the bundle is not extracted to {rel}"
     assert compose.read_bytes() == (ROOT / "deploy" / "compose.prod.yml").read_bytes()
     assert (rel / "Caddyfile").is_file(), "the bundle's Caddyfile is not extracted beside it"
-    calls = compose_calls(box.timeline())
+    tl = box.timeline()
+    calls = compose_calls(tl)
     assert calls, "loom-deploy ran no `docker compose`"
-    for _, opts, sub, _ in calls:
-        files = option_values(opts, "-f", "--file")
-        assert files == [str(compose), str(applied.override)], (
-            f"compose {sub}: -f {files}, not the release's file then LOOM_DEPLOY_COMPOSE_OVERRIDE"
+    # §6.12 fixes the project and the files, not how they are passed: `-p` or
+    # COMPOSE_PROJECT_NAME; `-f` (absolute or relative to the cwd) or COMPOSE_FILE.
+    for n, opts, sub, _ in calls:
+        project, files = compose_target(tl[n], opts)
+        assert files == [compose, applied.override], (
+            f"compose {sub}: files {files}, not the release's file then "
+            "LOOM_DEPLOY_COMPOSE_OVERRIDE"
         )
-        assert option_values(opts, "--env-file") == [str(box.run_loom / "compose.env")], opts
-        assert option_values(opts, "-p", "--project-name") == ["loom"], (
-            f"compose {sub}: project {option_values(opts, '-p', '--project-name')}, not the "
-            "default `loom`"
-        )
+        cwd = Path(tl[n].get("cwd") or "/")
+        env_files = [Path(os.path.normpath(cwd / f)) for f in option_values(opts, "--env-file")]
+        assert env_files == [box.run_loom / "compose.env"], opts
+        assert project == "loom", f"compose {sub}: project {project!r}, not the default `loom`"
 
 
 def test_compose_env_holds_the_root_and_the_image_variables(applied: Applied) -> None:
@@ -372,7 +378,7 @@ def test_every_aws_call_names_the_region(applied: Applied) -> None:
 
 def test_ecr_login_takes_the_password_on_stdin(applied: Applied) -> None:
     box = applied.need()
-    assert any(a[:2] == ["ecr", "get-login-password"] for a in box.calls("aws"))
+    assert any(aws_op(a) == ["ecr", "get-login-password"] for a in box.calls("aws"))
     logins = [r for r in box.timeline() if r["tool"] == "docker" and r["argv"][:1] == ["login"]]
     assert logins, "no docker login"
     for r in logins:
@@ -402,7 +408,9 @@ def test_the_steps_run_in_order(applied: Applied) -> None:
     )
     read = first(
         tl,
-        lambda r: r["tool"] == "aws" and r["argv"][:2] == ["secretsmanager", "get-secret-value"],
+        lambda r: (
+            r["tool"] == "aws" and aws_op(r["argv"]) == ["secretsmanager", "get-secret-value"]
+        ),
         "secret read",
     )
     render = first(

@@ -45,6 +45,7 @@ from typing import Any
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import ExtensionOID
+from devstack_m3_kit import AWS_PARSER_SRC
 
 ROOT = Path(__file__).resolve().parents[3]
 SRC = ROOT / "services" / "devstack" / "src"
@@ -72,25 +73,19 @@ GENERATED = (
 )
 USERS = ("stripe", "ses-smtp", "serving-runpod-key")
 
-FAKE_AWS = r"""#!__PYTHON__ -IS
+# The option parser (`parse_aws_argv`, which knows the AWS CLI's switches such as
+# `--no-cli-pager`) is the kit's, shared with the other fake `aws`.
+FAKE_AWS = (
+    r"""#!__PYTHON__ -IS
 import json, os, re, sys
 D = __DIR__  # fixed here, so a caller that passes aws a bare environment still works
+"""
+    + AWS_PARSER_SRC
+    + r"""
 argv = sys.argv[1:]
 with open(os.path.join(D, "calls.jsonl"), "a") as f:
     f.write(json.dumps(argv) + "\n")
-opts, pos, i = {}, [], 0
-while i < len(argv):
-    a = argv[i]
-    if a.startswith("--"):
-        if "=" in a:
-            k, v = a[2:].split("=", 1); opts[k] = v
-        elif i + 1 < len(argv) and not argv[i + 1].startswith("--"):
-            opts[a[2:]] = argv[i + 1]; i += 1
-        else:
-            opts[a[2:]] = True
-    else:
-        pos.append(a)
-    i += 1
+opts, pos = parse_aws_argv(argv)
 svc, op = (pos + ["", ""])[:2]
 
 def load(v):
@@ -174,6 +169,7 @@ if svc == "sts":
          "UserId": "AROAEXAMPLE:i-0"})
 print("{}")
 """
+)
 
 # Recording shims for the other tools `loom-deploy` may call: each logs its argv to
 # `<tool>.jsonl`; `openssl` then runs the real one (stdin and stdout pass through), `docker`

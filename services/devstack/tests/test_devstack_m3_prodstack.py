@@ -70,9 +70,11 @@ from devstack_m3_kit import (
     PROD,
     ROOT,
     Box,
+    aws_op,
     deploy_root_base,
     read_env_file,
     rmtree,
+    secret_values,
     site,
 )
 
@@ -94,6 +96,9 @@ BUILDS = {  # manifest key -> (Dockerfile, build context), both from the reposit
     "caddy": ("deploy/caddy/Dockerfile", "deploy/caddy"),
 }
 THIRD_PARTY = ("redis", "prometheus", "grafana")
+# The secret containers `secrets init` fills (§6.12, §5.2).
+GENERATED = ("internal-token", "app-db-password", "auth", "redis", "pod-ca", "poolmgr-client",
+             "grafana")  # fmt: skip
 PG_IMAGE = "postgres:16"
 BUNDLE_IN_CONTAINER = "/etc/loom-test/ca-bundle.pem"
 
@@ -124,6 +129,7 @@ class Stack:
     ca_bundle: Path | None = None
     caddy_root: Path | None = None
     apply_proc: Any = None
+    base: Path | None = None  # the /dev/shm scratch root, set as soon as it exists
     notes: list[str] = field(default_factory=list)
 
     def need(self) -> Box:
@@ -397,6 +403,8 @@ def third_party_images(doc: dict[str, Any]) -> dict[str, str]:
 
 
 def deploy_env(st: Stack) -> dict[str, str | None]:
+    # `Box.env` forwards DOCKER_HOST, DOCKER_CONTEXT (and the TLS variables) from the
+    # test's environment, so the wrapper's real docker talks to the test's daemon.
     return {
         "LOOM_DEPLOY_PROJECT": PROJECT,
         "LOOM_DEPLOY_COMPOSE_OVERRIDE": str(st.override),
@@ -428,6 +436,7 @@ def set_up(st: Stack) -> None:
         st.sha = secrets.token_hex(20)
     build_images()
     base = deploy_root_base()
+    st.base = base
     master_pw = "own" + secrets.token_urlsafe(24)
     box = Box(
         base,
@@ -479,21 +488,26 @@ def set_up(st: Stack) -> None:
 
 
 def tear_down(st: Stack) -> None:
-    box = st.box
-    if box is None or shutil.which("docker") is None:
-        return  # nothing was started
+    """Remove project `loom-m3prod` and the scratch root, from whatever point set-up
+    reached (it may have been interrupted anywhere, e.g. by the timeout)."""
+    box, base = st.box, st.base
+    if shutil.which("docker") is None:
+        if base is not None:
+            rmtree(base)
+        return
     files: list[str] = []
-    if st.override is not None:
+    if box is not None and st.override is not None:
         rel = box.var_lib / "releases" / st.sha / "compose.prod.yml"
         if rel.is_file() and (box.run_loom / "compose.env").is_file():
             env_file = str(box.run_loom / "compose.env")
             files = ["-f", str(rel), "-f", str(st.override), "--env-file", env_file]
-    sh(
-        "docker", "compose", "-p", PROJECT, *files,
-        "--profile", "acceptance", "--profile", "migrate",
-        "down", "-v", "--remove-orphans", "--timeout", "20",
-        timeout=600, check=False, cwd=str(box.work),
-    )  # fmt: skip
+    if box is not None:  # (the label sweep below covers the rest)
+        sh(
+            "docker", "compose", "-p", PROJECT, *files,
+            "--profile", "acceptance", "--profile", "migrate",
+            "down", "-v", "--remove-orphans", "--timeout", "20",
+            timeout=600, check=False, cwd=str(box.work),
+        )  # fmt: skip
     label = f"label=com.docker.compose.project={PROJECT}"
     for kind, ls in (
         ("container", ["docker", "ps", "-aq", "--filter", label]),
@@ -504,28 +518,32 @@ def tear_down(st: Stack) -> None:
         if ids:
             rm = ["docker", "rm", "-f"] if kind == "container" else ["docker", kind, "rm"]
             sh(*rm, *ids, check=False, timeout=120)
-    rmtree(box.base)
-    if box.base.exists():  # files a root container wrote
+    if base is None:
+        return
+    rmtree(base)
+    if base.exists():  # files a root container wrote
         sh(
-                "docker", "run", "--rm", "--entrypoint", "rm", "-v", f"{box.base}:/x",
+                "docker", "run", "--rm", "--entrypoint", "rm", "-v", f"{base}:/x",
                 tag("migrate"), "-rf", "/x/root", "/x/state", "/x/pg",
                 check=False, timeout=120,
             )  # fmt: skip
-        rmtree(box.base)
+        rmtree(base)
 
 
 @pytest.fixture(scope="module")
 def stack() -> Iterator[Stack]:
     st = Stack()
+    # One try/finally around set-up and the tests: an interruption anywhere in set-up
+    # (pytest-timeout's Failed, KeyboardInterrupt: BaseExceptions) still tears down.
     try:
-        set_up(st)
-    except Exception as e:  # recorded: each test fails with it (a failure, not an error)
-        st.error = (
-            f"{type(e).__name__}: {e}"
-            if isinstance(e, AssertionError)
-            else (traceback.format_exc()[-4000:])
-        )
-    try:
+        try:
+            set_up(st)
+        except Exception as e:  # recorded: each test fails with it (a failure, not an error)
+            st.error = (
+                f"{type(e).__name__}: {e}"
+                if isinstance(e, AssertionError)
+                else (traceback.format_exc()[-4000:])
+            )
         yield st
     finally:
         tear_down(st)
@@ -579,7 +597,12 @@ def test_a15_the_deploy_log_shows_the_p4_order(stack: Stack) -> None:
         assert s in steps, f"no {s} record"
     ups = [r["service"] for r in mine if r["step"] == "update" and r["status"] == "start"]
     assert ups == list(ORDER), ups
-    assert [c for c in box.calls("docker") if c[:1] == ["login"]], "no (faked) docker login"
+    # The manifest names local tags and docker.io images only: no image is in ECR, so no
+    # `docker login` and no `aws ecr get-login-password` (§6.12 "ECR").
+    logins = [c for c in box.calls("docker") if c[:1] == ["login"]]
+    assert not logins, f"docker login without an ECR image: {logins}"
+    ecr = [c for c in box.calls("aws") if aws_op(c) == ["ecr", "get-login-password"]]
+    assert not ecr, f"ECR login password fetched without an ECR image: {ecr}"
 
 
 ROUTED_404 = [
@@ -694,10 +717,14 @@ def test_a15_m3_0_b_d_pass_in_the_acceptance_service(stack: Stack) -> None:
 
 
 def test_a13_no_generated_secret_on_a_command_line(stack: Stack) -> None:
-    """The real run's argv (aws, docker, chown) holds none of the values init made."""
+    """The real run's argv (aws, docker, chown) holds none of the values init made, each
+    unwrapped from the JSON object it may be stored in."""
     box = stack.need()
     store = box.load_store()
     argv = box.all_argv()
-    for name in ("internal-token", "app-db-password"):
-        v = store.get(name)
-        assert v and v not in argv, f"{name} on a command line"
+    for name in GENERATED:
+        assert store.get(name), f"secrets init left {name} without a value"
+        values = secret_values({name: store[name]})
+        assert values, f"no secret value found in {name}"
+        for v in values:
+            assert v not in argv, f"a value of {name} is on a command line"

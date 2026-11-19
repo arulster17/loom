@@ -24,7 +24,9 @@ from typing import Any
 import pytest
 from devstack_m3_kit import (
     Box,
+    aws_op,
     compose_calls,
+    compose_target,
     deploy_root_base,
     ecr_images,
     mount_fstype,
@@ -117,8 +119,8 @@ def test_all_pass_exits_0(box: Box) -> None:
     for opt, value in want.items():
         assert option_values(after, opt) == [value], f"{opt}: {option_values(after, opt)}"
     assert option_values(after, "--only") == ["m3-0,m3-i,m3-p"], "the options after -- are lost"
-    for _, opts, _, _ in compose_calls(tl):
-        assert option_values(opts, "-p", "--project-name") == ["loom-unit"], opts
+    for i, opts, _, _ in compose_calls(tl):  # `-p` or COMPOSE_PROJECT_NAME (§6.12)
+        assert compose_target(tl[i], opts)[0] == "loom-unit", (opts, tl[i].get("env"))
 
 
 def test_every_canary_is_looked_up_in_cloudwatch_and_the_file_deleted(box: Box) -> None:
@@ -129,7 +131,7 @@ def test_every_canary_is_looked_up_in_cloudwatch_and_the_file_deleted(box: Box) 
     logs = [
         r["argv"]
         for r in box.timeline()[n:]
-        if r["tool"] == "aws" and r["argv"][:2] == ["logs", "filter-log-events"]
+        if r["tool"] == "aws" and aws_op(r["argv"]) == ["logs", "filter-log-events"]
     ]
     assert logs, "no aws logs filter-log-events"
     for argv in logs:
