@@ -434,6 +434,15 @@ the usage stream before the manager reads it); the gateway now stamps
 The branch review found no M2 blockers; its M3 prerequisites are P1-P4 below. Before M3
 starts, the review follow-ups below are being fixed ([m3-review-fixes-spec.md](m3-review-fixes-spec.md)).
 
+**M3 status (2026-11-18): started** on branch `phase1-m3` to
+[phase1-m3-spec.md](phase1-m3-spec.md), approved by the user on 2026-11-18 with the
+decisions of its §15. Stage A (free: code, tests, runbooks, Terraform up to `terraform
+plan`) is under way; Stage B (`terraform apply`, DNS, deploy, the live acceptance,
+teardown) needs the user's separate yes with its cap ($25 over a 14-day window; a $75 a
+month AWS budget). The spec's estimate of the running cost is about $63 a month (its §14).
+P1-P4 below are M3 work items. What Stripe live mode needs on top of M3 is listed under
+"Live-mode prerequisites" below.
+
 ### Follow-ups from the M1 pre-merge review (2026-11-15)
 
 A third review of the M1 code before it merged into `main` found no M1 blockers. These
@@ -481,6 +490,30 @@ manager run against the real RunPod account.
 | P2 | §5 spend guard, §11 (refusal signal) | A create refused at the monthly cap writes no `serving_spend_alerts` row: only an error log line and `loom_poolmgr_creates_total{result="spend_cap"}`. The model stays `unavailable` until an admin `reset` | Alert on any increase of that counter (and on the pool `reason` `spend_cap` lasting more than 5 minutes) through whatever M3 uses to scrape port 9102 |
 | P3 | §5 certificates, §11 (CA near expiry) | The manager refuses to start once the pod CA is within `server_cert_renew_before_s` (2 days) of expiry, and only logs an error while running; nothing warns earlier | Expose the CA's expiry (a gauge such as `loom_poolmgr_ca_expiry_seconds`, or a scheduled check of the certificate in Secrets Manager) and alarm 30 days ahead; write `docs/runbook-pod-ca.md`: issue the new CA, have the gateway trust old and new during the rollover, restart the manager, let it re-key every pod, then drop the old CA |
 | P4 | §11 "Fixed after CI" (`last_request` stamps) | The manager's only signal that a ready model is in use, besides requests in flight at a tick, is the stamp the new `settle.lua` writes. A gateway still on the old script writes none, so a manager deployed first would drain models in use | Deploy the gateways before or together with the manager, never the manager alone first; say so in the M3 deploy runbook |
+
+### Live-mode prerequisites (from the M3 spec, 2026-11-18)
+
+Phase 1 stays in Stripe test mode. Everything below is required before live mode. Copied
+from [phase1-m3-spec.md](phase1-m3-spec.md) §8.13; the section numbers, traces (T) and
+decisions (D) in it are the M3 spec's.
+
+| # | Prerequisite | Why live mode needs it | Why test mode does not |
+|---|---|---|---|
+| LM1 | An Events-API sync (or an equivalent) of deliveries Stripe gave up on (D15, §8.12) | A missed delivery is a real customer's payment, refund or dispute; while it waits for the operator, a customer is short of credit or keeps credit they were refunded, and the failures H3 cannot see (endpoint disabled in Stripe, certificate) and events past the resend limit lose money | The operator is the only payer; a missed event costs a delay, and the alarms and the runbook resend cover it |
+| LM2 | A Loom-only live account, or foreign-event handling again (cut with D4) | Events of other products on a shared account would arrive as stuck clawbacks and checkouts for an admin to resolve by hand | The sandbox is Loom's alone (D4) |
+| LM3 | Payload sanitising, or a store for the raw body, so every signed event can be stored (removed in round 18) | Live payloads carry customer-entered text (names, addresses, custom fields) that may hold characters `jsonb` refuses; such an event gets 503 on every attempt and is lost when Stripe gives up (§8.10) | Payloads come only from the operator's own test payments |
+| LM4 | Telling transient failures from handler failures: a lock or statement timeout, deadlock or lost connection answered 503 without `last_error` and without S4 (the SQLSTATE classification and failure identity removed in round 18, or a simpler equivalent) | At live volume transient lock waits happen; each would raise a false S4 and S2c, and S4 would stop meaning "a handler bug" | A few deliveries a day; a false S4 is rare and the runbook covers it (§8.10) |
+| LM5 | A re-run policy for a backlog: back-off for failing events and an order that neither starves old events nor delays new ones (the back-off and the step tiers removed in round 18) | A live backlog of stuck events grows; re-running all of them every minute costs a transaction each, and past 500 the oldest are never re-run (T21) | The backlog is the operator's own test events, resolved by hand |
+| LM6 | Disputes and refunds: a won dispute reinstated automatically (D5) with the won-then-refunded case (T18) handled, and a refund that later fails (`charge.refund.updated`) handled | Real money moves both ways; the hand adjustments of §8.10 do not scale and are easy to miss | Test disputes and refunds are the operator's own, adjusted by hand |
+| LM7 | Lift the live-mode refusals deliberately (`sk_live_`/`rk_live_`, `livemode: true` -> 400) in a reviewed change, with a restricted live key (Checkout Sessions write, plus Events read for LM1) and a live endpoint and secret | Billing refuses live keys and live events today (§8.1) | Not used |
+| LM8 | Decide the public API key prefix and header names (`loom_sk_`, `X-Loom-*`, `LOOM_API_KEY` in the playground snippet): a contracts change with a transition for issued keys (§6.11) | Paying customers write these names into their code; changing them later breaks their integrations | M3 keeps the `loom` wire names; testers are few and known |
+
+Considered and **not** required for live mode: the 6 s deadline with its cancelled task (an
+answer Stripe stopped waiting for and a 503 are the same failed delivery to Stripe, and L1
+makes a late COMMIT safe); the 3-consecutive-stops rule (the error store's own failure is
+the stop signal); the `IMMEDIATE`/`DEFERRED` pair (`loom_post_transaction` checks before
+it inserts); `DuplicatePurchase` (the L3 index with the 500 path suffices, and LM4 would
+treat the race as transient anyway).
 
 ## 14. Risks
 
