@@ -55,13 +55,22 @@ def resolve_api():
     return ep("resolve_event", RESOLVE), ep("ResolveRefused", RESOLVE)
 
 
-async def audit_rows(pool, evt_id: str) -> list[tuple]:
+def reason_token() -> str:
+    """A reason no other test writes: in the shared session database a test finds its
+    own audit rows by it (§8.6 puts the reason in `details`; the row's target columns
+    are not specified)."""
+    return f"m3s reason {uuid.uuid4().hex}"
+
+
+async def audit_rows(pool, reason: str | None = None) -> list[tuple]:
+    """`admin_audit_log` rows: every row (a scratch database: all of them are the
+    test's own), or those whose `details` carry `reason` (the session database)."""
+    query = "SELECT actor_user_id, action, details FROM admin_audit_log"
     async with pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(
-            "SELECT actor_user_id, action, target_type, details FROM admin_audit_log "
-            "WHERE target_id = %s ORDER BY id",
-            (evt_id,),
-        )
+        if reason is None:
+            await cur.execute(query + " ORDER BY id")
+        else:
+            await cur.execute(query + " WHERE details::text LIKE %s ORDER BY id", (f"%{reason}%",))
         return await cur.fetchall()
 
 
@@ -122,11 +131,12 @@ async def test_a31_refusals_change_nothing(pool, case):
     s = m3s_settings()
     evt, email = await _refusal_case(case, pool, s)
     before = await event_row(pool, evt)
+    reason = reason_token()
     with pytest.raises(refused) as caught:
-        await resolve_event(pool, evt, admin_email=email, reason="test refusal", settings=s)
+        await resolve_event(pool, evt, admin_email=email, reason=reason, settings=s)
     assert str(caught.value)  # the reason the CLI prints
     assert await event_row(pool, evt) == before
-    assert await audit_rows(pool, evt) == []
+    assert await audit_rows(pool, reason) == []
     assert await ledger_count(pool, evt) == (1 if case == "processed_event" else 0)
 
 
@@ -141,21 +151,21 @@ async def test_a31_resolving_a_credit_event_posts_nothing_and_is_audited(pool):
     ev = checkout_event(uuid.uuid4(), 1000)  # an operator's own test: unknown org
     assert (await process_event(pool, ev, settings=s)).result == "unapplied"
     t = now()
-    out = await resolve_event(
-        pool, ev["id"], admin_email=admin, reason="operator test payment", settings=s, now=t
-    )
+    reason = reason_token()
+    out = await resolve_event(pool, ev["id"], admin_email=admin, reason=reason, settings=s, now=t)
     assert out.result == "resolved_by_admin"
     row = await event_row(pool, ev["id"])
     assert row is not None and row["processed_at"] == t and row["result"] == "resolved_by_admin"
-    audit = await audit_rows(pool, ev["id"])
+    audit = await audit_rows(pool, reason)
     assert len(audit) == 1
-    actor, action, _target_type, details = audit[0]
+    actor, action, details = audit[0]
     assert actor == admin_id and action == "stripe_event.resolve"
-    assert "operator test payment" in json.dumps(details)
+    assert reason in json.dumps(details)
     assert await ledger_count(pool, ev["id"]) == 0
+    again = reason_token()
     with pytest.raises(refused):  # once resolved, it is processed
-        await resolve_event(pool, ev["id"], admin_email=admin, reason="again", settings=s)
-    assert len(await audit_rows(pool, ev["id"])) == 1
+        await resolve_event(pool, ev["id"], admin_email=admin, reason=again, settings=s)
+    assert await audit_rows(pool, again) == []
 
 
 async def test_a31_resolving_a_clawback_without_payment_takes_nothing(pool):
@@ -165,12 +175,13 @@ async def test_a31_resolving_a_clawback_without_payment_takes_nothing(pool):
     _, admin = await make_admin(pool)
     ev = dispute_event(rid("pi_test"), 500)
     assert (await process_event(pool, ev, settings=s)).result == "unapplied"
-    out = await resolve_event(pool, ev["id"], admin_email=admin, reason="foreign", settings=s)
+    reason = reason_token()
+    out = await resolve_event(pool, ev["id"], admin_email=admin, reason=reason, settings=s)
     assert out.result == "resolved_by_admin"
     row = await event_row(pool, ev["id"])
     assert row is not None and row["processed_at"] is not None
     assert await ledger_count(pool, ev["id"]) == 0
-    assert len(await audit_rows(pool, ev["id"])) == 1
+    assert len(await audit_rows(pool, reason)) == 1
 
 
 async def test_a31_list_events_shows_unapplied_with_their_errors(scratch_pool, scratch_url):
@@ -261,21 +272,27 @@ async def test_a31_t24_reopened_clawback_that_fails_is_unapplied_and_stale_again
     )
     await cure(scratch_url, purchase["id"])
     await retry_unapplied(scratch_pool, settings=s, now=t + MINUTE)  # credits the purchase
+    assert await purchases(scratch_pool, org) == [1000 * M]
     await poison(scratch_url, refund["id"])  # its handling now fails
-    t_reopen = t + 2 * MINUTE
+    t_reopen = t + 2 * MINUTE  # 18 minutes after the refund's received_at (t0)
+
+    # One run (§8.3): the sweep reopens it (clearing stale_reported_at), the re-run fails
+    # and stores the error, and stale marking marks it again at once: staleness counts
+    # from received_at, long past.
+    base = sample(STALE_TOTAL, type="charge.refunded")
     await retry_unapplied(scratch_pool, settings=s, now=t_reopen)
     row = await event_row(scratch_pool, refund["id"])
     assert row is not None and row["processed_at"] is None and row["result"] == "unapplied"
-    assert row["last_error"]
-    assert row["stale_reported_at"] is None  # cleared by the sweep
+    assert row["last_error"] and "m3s poison" in row["last_error"]
+    assert row["stale_reported_at"] == t_reopen  # cleared by the sweep, marked by this run
+    assert sample(STALE_TOTAL, type="charge.refunded") == base + 1
     assert await refunds(scratch_pool, org) == []
 
-    base = sample(STALE_TOTAL, type="charge.refunded")
-    await retry_unapplied(scratch_pool, settings=s, now=t_reopen + dt.timedelta(minutes=16))
-    # Stale counts from received_at: it was received long before; marked again now.
-    assert sample(STALE_TOTAL, type="charge.refunded") == base + 1
+    await retry_unapplied(scratch_pool, settings=s, now=t_reopen + MINUTE)
+    assert sample(STALE_TOTAL, type="charge.refunded") == base + 1  # once
     row = await event_row(scratch_pool, refund["id"])
-    assert row is not None and row["stale_reported_at"] is not None
+    assert row is not None and row["stale_reported_at"] == t_reopen
+    assert row["processed_at"] is None and await refunds(scratch_pool, org) == []
 
 
 async def test_a31_sweep_skips_a_held_row_and_takes_it_next_run(scratch_pool, scratch_url):
@@ -358,7 +375,7 @@ async def test_a31_race_purchase_takes_the_clawback_first_resolve_refuses(
         with pytest.raises(refused):
             await res
     assert await refunds(scratch_pool, org) == [-400 * M]
-    assert await audit_rows(scratch_pool, refund["id"]) == []
+    assert await audit_rows(scratch_pool) == []  # the scratch database's: none at all
 
 
 async def test_a31_race_resolve_commits_first_purchase_skips_sweep_applies(
@@ -377,7 +394,7 @@ async def test_a31_race_resolve_commits_first_purchase_skips_sweep_applies(
     pi = rid("pi_test")
     refund = charge_event(pi, 400, 1000)
     await process_event(scratch_pool, refund, settings=s)
-    await gate(scratch_url, "admin_audit_log", refund["id"], key=91_002)
+    await gate(scratch_url, "admin_audit_log", "*", key=91_002)  # the resolve's audit row
     async with holder(scratch_url) as h:
         await h.run("SELECT pg_advisory_xact_lock(91002)")
         res = asyncio.create_task(
@@ -435,9 +452,5 @@ async def test_a31_race_resolve_waits_for_retry_holding_the_row(
     assert row is not None and row["processed_at"] is not None
     want = "credited" if r_outcome == "applied" else "resolved_by_admin"
     assert row["result"] == want
-    n_audit = int(
-        await scalar(
-            scratch_pool, "SELECT count(*) FROM admin_audit_log WHERE target_id = %s", ev["id"]
-        )
-    )
+    n_audit = int(await scalar(scratch_pool, "SELECT count(*) FROM admin_audit_log"))
     assert n_audit == (0 if r_outcome == "applied" else 1)

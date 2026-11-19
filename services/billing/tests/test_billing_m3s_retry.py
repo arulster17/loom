@@ -135,6 +135,45 @@ async def test_a33_reruns_newest_first_up_to_the_limit(scratch_pool):
     assert rerun == [False, False, False, True, True]
 
 
+# ------------------------------------------------------------------ a stored bad event
+
+
+async def test_a33_stored_row_failing_the_shape_check_is_skipped_without_an_error_store(
+    scratch_pool,
+):
+    """§8.11: a stored row that fails the shape check (`BadEvent`; only a test can store
+    one, here with `livemode: true`) is skipped by R with no error store; the run goes on
+    and finishes, and the row goes stale for an admin to resolve."""
+    retry_unapplied = ep("retry_unapplied")
+    s = m3s_settings()
+    t0 = now()
+    org, pi = await credited_payment(scratch_pool, s, t0)
+    bad = checkout_event(uuid.uuid4(), 1000)
+    bad["livemode"] = True
+    await store_raw(scratch_pool, bad, received_at=t0 + dt.timedelta(seconds=2))  # newest
+    raced = charge_event(pi, 300, 1000)
+    await store_raw(scratch_pool, raced, received_at=t0)  # re-run after the bad one
+    retry_s4 = sample(HANDLER_FAILURES, path="retry")
+    before = gauge(RETRY_LAST_SUCCESS)
+
+    assert await retry_unapplied(scratch_pool, settings=s, now=t0 + MINUTE) == 1
+    assert gauge(RETRY_LAST_SUCCESS) != before  # the run finished
+    assert await refunds(scratch_pool, org) == [-300 * M]  # the run went past it
+    row = await event_row(scratch_pool, bad["id"])
+    assert row is not None and row["processed_at"] is None
+    assert row["last_error"] is None and row["error_count"] == 0  # no error store
+    assert row["last_error_at"] is None
+    assert sample(HANDLER_FAILURES, path="retry") == retry_s4
+
+    stale = sample(STALE_TOTAL, type="checkout.session.completed")
+    t_stale = t0 + 16 * MINUTE
+    await retry_unapplied(scratch_pool, settings=s, now=t_stale)
+    row = await event_row(scratch_pool, bad["id"])
+    assert row is not None and row["processed_at"] is None and row["error_count"] == 0
+    assert row["stale_reported_at"] == t_stale
+    assert sample(STALE_TOTAL, type="checkout.session.completed") == stale + 1
+
+
 # ------------------------------------------------------------------ StoreFailed ends the run
 
 

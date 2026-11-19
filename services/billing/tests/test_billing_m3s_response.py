@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 import time
 import urllib.parse
 from collections.abc import Mapping
@@ -18,6 +21,7 @@ from billing_fixtures import STUB, STUB_WEBHOOK_SECRET
 from billing_m3s_kit import (
     CREDITED_MICROS,
     HANDLER_FAILURES,
+    STALE_TOTAL,
     TOKEN,
     WEBHOOK_ERRORS,
     WEBHOOKS,
@@ -31,10 +35,9 @@ from billing_m3s_kit import (
     error_code,
     event_row,
     gate,
-    install_faults,
     ledger_count,
-    m3s_scratch_fixtures,
     m3s_settings,
+    m3s_shared_faults_fixtures,
     make_org,
     poison,
     purchases,
@@ -51,7 +54,7 @@ from loom_billing.stripe_stub import create_stub_app
 from loom_platform.ledger import org_balance
 
 pytestmark = [pytest.mark.postgres, pytest.mark.redis]
-m3s_template, scratch_url, scratch_pool = m3s_scratch_fixtures()
+faults_url, faults_pool = m3s_shared_faults_fixtures()  # tests of their own rows only
 
 M = 10_000
 SIG_RESULTS = ("bad_signature", "signature_mismatch", "stale_timestamp")
@@ -163,56 +166,54 @@ async def test_a22_bad_events_are_refused_before_any_transaction(pg_url, redis_c
 
 
 async def test_a22_handler_failure_answers_500_with_the_event_stored(
-    scratch_pool, scratch_url, redis_client
+    faults_pool, faults_url, redis_client
 ):
     ep("process_event")
-    await install_faults(scratch_url)
-    org = await make_org(scratch_pool)
+    org = await make_org(faults_pool)
     ev = checkout_event(org, 900)
-    await poison(scratch_url, ev["id"])
-    async with billing_client(m3s_settings(), scratch_pool, redis_client) as c:
+    await poison(faults_url, ev["id"])
+    async with billing_client(m3s_settings(), faults_pool, redis_client) as c:
         errs = sample(WEBHOOK_ERRORS, status="500")
         s4 = sample(HANDLER_FAILURES, path="webhook")
         r = await deliver(c, ev)
     assert r.status_code == 500 and error_code(r) == "internal_error", r.text
     assert sample(WEBHOOK_ERRORS, status="500") == errs + 1
     assert sample(HANDLER_FAILURES, path="webhook") == s4 + 1
-    row = await event_row(scratch_pool, ev["id"])
+    row = await event_row(faults_pool, ev["id"])
     assert row is not None and row["processed_at"] is None and row["result"] == "unapplied"
     assert row["last_error"] and "m3s poison" in row["last_error"]
     assert row["error_count"] == 1
-    assert await purchases(scratch_pool, org) == []
+    assert await purchases(faults_pool, org) == []
 
 
 async def test_a22_failure_at_commit_takes_the_500_path_and_counts_nothing(
-    scratch_pool, scratch_url, redis_client
+    faults_pool, faults_url, redis_client
 ):
     """A deferred check raising at COMMIT (a scratch-database trigger): rolled back,
     stored with `last_error`, 500; the outcome metrics are counted only after a COMMIT
     that succeeded (A34)."""
     ep("process_event")
-    await install_faults(scratch_url)
-    org = await make_org(scratch_pool)
+    org = await make_org(faults_pool)
     ev = checkout_event(org, 2100)
     key = f"stripe:{ev['id']}"
-    await gate(scratch_url, "ledger_transactions", key, fail=True, sqlstate="23514")
-    async with billing_client(m3s_settings(), scratch_pool, redis_client) as c:
+    await gate(faults_url, "ledger_transactions", key, fail=True, sqlstate="23514")
+    async with billing_client(m3s_settings(), faults_pool, redis_client) as c:
         credited, micros = sample(WEBHOOKS, result="credited"), sample(CREDITED_MICROS)
         r = await deliver(c, ev)
         assert r.status_code == 500 and error_code(r) == "internal_error", r.text
         assert sample(WEBHOOKS, result="credited") == credited
         assert sample(CREDITED_MICROS) == micros
-        row = await event_row(scratch_pool, ev["id"])
+        row = await event_row(faults_pool, ev["id"])
         assert row is not None and row["processed_at"] is None and row["error_count"] == 1
         assert row["last_error"] and "m3s deferred check failed" in row["last_error"]
-        assert await ledger_count(scratch_pool, ev["id"]) == 0
+        assert await ledger_count(faults_pool, ev["id"]) == 0
 
-        await ungate(scratch_url, "ledger_transactions", key)
+        await ungate(faults_url, "ledger_transactions", key)
         r = await deliver(c, ev)  # Stripe's retry
         assert r.status_code == 200 and r.json()["result"] == "credited"
         assert sample(WEBHOOKS, result="credited") == credited + 1
         assert sample(CREDITED_MICROS) == micros + 2100 * M
-    assert await ledger_count(scratch_pool, ev["id"]) == 1
+    assert await ledger_count(faults_pool, ev["id"]) == 1
 
 
 # ------------------------------------------------------------------ T14: frozen Redis
@@ -439,3 +440,64 @@ def test_a32_stripe_settings_defaults_and_environment(monkeypatch):
     assert s.stripe_lock_timeout_ms == 700  # type: ignore[attr-defined]
     assert s.stripe_statement_timeout_ms == 900  # type: ignore[attr-defined]
     assert s.stripe_stale_after_s == 60  # type: ignore[attr-defined]
+
+
+# ------------------------------------------------------------------ S1a / S4 label init
+
+SUBSCRIBED_TYPES = (
+    "checkout.session.completed",
+    "checkout.session.async_payment_succeeded",
+    "checkout.session.async_payment_failed",
+    "charge.refunded",
+    "charge.dispute.created",
+)
+INITIALISED = (
+    (STALE_TOTAL, "type", (*SUBSCRIBED_TYPES, "other")),  # §8.6
+    (HANDLER_FAILURES, "path", ("webhook", "retry", "pending_clawback")),  # §8.11
+)
+# A fresh interpreter (its own registry, nothing counted yet): import billing's modules and
+# create the API app, without touching Postgres or Redis; print every sample of interest
+# (null when the series does not exist).
+LABELS_SCRIPT = r"""
+import json, sys
+import redis.asyncio as aioredis
+from prometheus_client import REGISTRY
+from psycopg_pool import AsyncConnectionPool
+from loom_billing.settings import BillingSettings
+import loom_billing.webhooks
+import loom_billing.worker
+from loom_billing.api import create_app
+
+settings = BillingSettings(**json.loads(sys.argv[1]))
+create_app(
+    settings,
+    pool=AsyncConnectionPool("postgresql://loom@127.0.0.1:1/loom", open=False),
+    redis=aioredis.Redis(host="127.0.0.1", port=1),
+)
+out = {}
+for name, key, values in json.loads(sys.argv[2]):
+    for value in values:
+        out[f"{name}{{{key}={value}}}"] = REGISTRY.get_sample_value(name, {key: value})
+print(json.dumps(out))
+"""
+
+
+def test_a24_stale_and_handler_failure_labels_exist_at_zero_from_the_start():
+    """S1a's `type` and S4's `path` values are all initialised at 0 (§8.6, §8.11), so an
+    alarm on an increase sees the first one: each series exists (not merely reads as 0)
+    in a fresh process once billing is imported and its app created."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LOOM_")}
+    settings = {**STUB, "billing_internal_token": TOKEN}
+    done = subprocess.run(
+        [sys.executable, "-c", LABELS_SCRIPT, json.dumps(settings), json.dumps(INITIALISED)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr[-3000:]
+    samples = json.loads(done.stdout.strip().splitlines()[-1])
+    absent = [k for k, v in samples.items() if v is None]
+    assert absent == [], f"series missing (absent, not 0): {absent}"
+    assert {k: v for k, v in samples.items() if v != 0.0} == {}

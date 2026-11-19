@@ -59,7 +59,8 @@ def assert_stored_error(row: dict | None, *, count: int = 1) -> None:
 
 
 async def unreachable_pool(url: str) -> AsyncConnectionPool:
-    pool = AsyncConnectionPool(url, min_size=1, max_size=2, open=False)
+    # A pool wait the code does not bound itself ends after the pool's own `timeout`.
+    pool = AsyncConnectionPool(url, min_size=1, max_size=2, open=False, timeout=5)
     await pool.open(wait=False)
     return pool
 
@@ -138,7 +139,9 @@ async def test_a19_retry_job_with_postgres_down_ends_its_run_without_success(pg_
             await down.close()
     assert n == 0
     assert gauge(RETRY_LAST_SUCCESS) == before  # S5: no success recorded
-    assert elapsed < 10, elapsed
+    # The run ends at its first statement (the sweep): one pool wait, however long the
+    # pool's own timeout is (the spec does not bound R's wait by the webhook's setting).
+    assert elapsed <= 35, elapsed
 
 
 # ------------------------------------------------------------------ A19: lock waits
@@ -244,7 +247,8 @@ async def test_a19_several_lock_waits_in_one_delivery_500_then_r_applies(
     while it waits, the second is not (each wait has its own `lock_timeout`)."""
     process_event = ep("process_event")
     retry_unapplied = ep("retry_unapplied")
-    s = m3s_settings()
+    # Long enough that the first wait outlives the barrier and the release under load.
+    s = m3s_settings(stripe_lock_timeout_ms=2000)
     org = await make_org(scratch_pool)
     pi = rid("pi_test")
     e2 = charge_event(pi, 200, 1000)
@@ -381,12 +385,17 @@ async def test_a20_t9c_commit_landed_result_lost_guard_answers_duplicate(
         await p.open(wait=True)
         try:
             async with billing_client(s, p, redis_client) as c:
+                errs = {st: sample(WEBHOOK_ERRORS, status=st) for st in ("500", "503")}
+                s4 = sample(HANDLER_FAILURES, path="webhook")
                 proxy.arm_commit(landed=True)
                 r = await deliver(c, ev)
         finally:
             await p.close()
     assert proxy.fired.is_set()
     assert r.status_code == 200 and r.json()["result"] == "duplicate", r.text
+    # The guard's duplicate (§8.3): no S2c, no S4.
+    assert {st: sample(WEBHOOK_ERRORS, status=st) for st in ("500", "503")} == errs
+    assert sample(HANDLER_FAILURES, path="webhook") == s4
     assert await ledger_count(pool, ev["id"]) == 1
     row = await event_row(pool, ev["id"])
     assert row is not None and row["result"] == "credited" and row["last_error"] is None

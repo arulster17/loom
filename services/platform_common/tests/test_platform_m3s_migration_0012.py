@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import json
 import secrets
+import time
 import uuid
 from collections.abc import Iterator
 
@@ -44,24 +45,36 @@ from loom_platform.testing import create_org
 pytestmark = pytest.mark.postgres
 
 INDEX = "ledger_transactions_purchase_external_ref"
-# column -> (accepted data types, nullable)
-NEW_COLUMNS: dict[str, tuple[tuple[str, ...], str]] = {
-    "result": (("text",), "YES"),
-    "last_error": (("text",), "YES"),
-    "last_error_at": (("timestamp with time zone",), "YES"),
-    "stale_reported_at": (("timestamp with time zone",), "YES"),
+# column -> accepted data types; each new column is nullable or defaulted (§8.4), so the
+# running M1 code's inserts keep working.
+NEW_COLUMNS: dict[str, tuple[str, ...]] = {
+    "result": ("text",),
+    "last_error": ("text",),
+    "last_error_at": ("timestamp with time zone",),
+    "stale_reported_at": ("timestamp with time zone",),
 }
 COUNT_TYPES = ("integer", "bigint", "smallint")
 
 
 @contextlib.contextmanager
-def scratch_database(pg_url: str) -> Iterator[str]:
-    """An empty database next to the session's, dropped afterwards."""
+def scratch_database(pg_url: str, template: str | None = None) -> Iterator[str]:
+    """A database next to the session's (empty, or a clone of `template`), dropped
+    afterwards."""
     name = f"loom_m3s_0012_{uuid.uuid4().hex[:12]}"
     info = psycopg.conninfo.conninfo_to_dict(pg_url)
     admin = psycopg.conninfo.make_conninfo("", **{**info, "dbname": "postgres"})
+    create = sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name))
+    if template is not None:
+        create = sql.SQL("{} TEMPLATE {}").format(create, sql.Identifier(template))
     with psycopg.connect(admin, autocommit=True) as conn:
-        conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+        for attempt in range(50):
+            try:
+                conn.execute(create)
+                break
+            except errors.ObjectInUse:  # another clone being made from it
+                if attempt == 49:
+                    raise
+                time.sleep(0.1)
     try:
         yield psycopg.conninfo.make_conninfo("", **{**info, "dbname": name})
     finally:
@@ -96,9 +109,11 @@ def index_info(url: str, name: str) -> tuple[str, bool, str | None, str] | None:
 
 def check_schema(url: str) -> None:
     have = columns(url, "stripe_events")
-    for col, (types, nullable) in NEW_COLUMNS.items():
+    for col, types in NEW_COLUMNS.items():
         assert col in have, f"stripe_events.{col} missing"
-        assert have[col][0] in types and have[col][1] == nullable, (col, have[col])
+        dtype, nullable, default = have[col]
+        assert dtype in types, (col, have[col])
+        assert nullable == "YES" or default is not None, (col, "neither nullable nor defaulted")
     assert "error_count" in have, "stripe_events.error_count missing"
     dtype, _, default = have["error_count"]
     assert dtype in COUNT_TYPES, dtype
@@ -130,21 +145,28 @@ def test_a21_0012_is_registered() -> None:
     assert 12 in versions
 
 
-def test_a21_applies_on_a_fresh_database(pg_url: str) -> None:
-    with scratch_database(pg_url) as url:
-        done = upgrade(url)
-        assert 12 in [m.version for m in done]
-        check_schema(url)
-        assert upgrade(url) == []
+def test_a21_applies_on_a_fresh_database(app_db) -> None:
+    """The module's fresh database (`loom-migrate` on an empty one, the grants tests'
+    too: one full migration serves both)."""
+    owner, _ = app_db
+    with psycopg.connect(owner) as conn:
+        versions = {r[0] for r in conn.execute("SELECT version FROM schema_migrations")}
+    assert 12 in versions
+    check_schema(owner)
+    assert upgrade(owner) == []
 
 
-def _at_0011(url: str, monkeypatch: pytest.MonkeyPatch) -> list[migrate.Migration]:
+@pytest.fixture(scope="module")
+def at_0011(pg_url: str) -> Iterator[str]:
+    """Name of a database migrated up to 0011, once per module; each test works on a
+    clone of it (`scratch_database(pg_url, at_0011)`), never on it."""
     every = load_migrations()
     assert [m.version for m in every][:11] == list(range(1, 12))
-    with monkeypatch.context() as m:
-        m.setattr(migrate, "load_migrations", lambda: every[:11])
-        assert [mig.version for mig in upgrade(url)] == list(range(1, 12))
-    return every
+    with scratch_database(pg_url) as url:
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(migrate, "load_migrations", lambda: every[:11])
+            assert [mig.version for mig in upgrade(url)] == list(range(1, 12))
+        yield str(psycopg.conninfo.conninfo_to_dict(url)["dbname"])
 
 
 def _purchase(conn: psycopg.Connection, org: uuid.UUID, ref: str | None, key: str) -> None:
@@ -156,47 +178,56 @@ def _purchase(conn: psycopg.Connection, org: uuid.UUID, ref: str | None, key: st
     )
 
 
-def test_a21_applies_on_a_database_at_0011_and_keeps_m1_rows(
-    pg_url: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    with scratch_database(pg_url) as url:
-        every = _at_0011(url, monkeypatch)
+# M1's columns of stripe_events (0011), in a fixed order.
+M1_ROWS = "SELECT id, type, payload, received_at, processed_at FROM stripe_events ORDER BY id"
+
+
+def test_a21_applies_on_a_database_at_0011_and_keeps_m1_rows(pg_url: str, at_0011: str) -> None:
+    with scratch_database(pg_url, at_0011) as url:
+        every = load_migrations()
         assert "result" not in columns(url, "stripe_events")
-        evt = f"evt_test_{secrets.token_hex(8)}"
+        unapplied = f"evt_test_{secrets.token_hex(8)}"
+        processed = f"evt_test_{secrets.token_hex(8)}"
         with psycopg.connect(url) as conn:
             org = conn.execute(
                 "INSERT INTO orgs (name, status) VALUES ('before 0012', 'active') RETURNING id"
             ).fetchone()[0]  # type: ignore[index]
             conn.execute(
                 "INSERT INTO stripe_events (id, type, payload) VALUES (%s, %s, %s)",
-                (evt, "charge.refunded", json.dumps({"id": evt})),
+                (unapplied, "charge.refunded", json.dumps({"id": unapplied})),
             )
-            _purchase(conn, org, "cs_test_before_0012", f"stripe:{evt}_p")
+            conn.execute(
+                "INSERT INTO stripe_events (id, type, payload, processed_at) "
+                "VALUES (%s, %s, %s, now())",
+                (processed, "checkout.session.completed", json.dumps({"id": processed})),
+            )
+            _purchase(conn, org, "cs_test_before_0012", f"stripe:{processed}")
             conn.commit()
+            m1_rows = conn.execute(M1_ROWS).fetchall()
         done = [m.version for m in upgrade(url)]
         assert done[:1] == [12]
         assert done == [m.version for m in every if m.version >= 12]
         check_schema(url)
         with psycopg.connect(url) as conn:
-            row = conn.execute(
-                "SELECT processed_at, result, last_error, last_error_at, error_count, "
-                "stale_reported_at FROM stripe_events WHERE id = %s",
-                (evt,),
-            ).fetchone()
-            assert row == (None, None, None, None, 0, None)
+            # M1's rows are otherwise unchanged: the unapplied one still unprocessed, the
+            # processed one still processed; the new counter starts at its default, 0.
+            after = conn.execute(M1_ROWS).fetchall()
+            assert after == m1_rows
+            counts = conn.execute("SELECT id, error_count FROM stripe_events").fetchall()
+            assert {r[1] for r in counts} == {0}, counts
+            assert {r[0] for r in after if r[4] is None} == {unapplied}
             # The running M1 code's insert keeps working (new columns nullable/defaulted).
             conn.execute(
                 "INSERT INTO stripe_events (id, type, payload) VALUES (%s, %s, %s)",
-                (evt + "_m1", "charge.refunded", json.dumps({"id": evt})),
+                (unapplied + "_m1", "charge.refunded", json.dumps({"id": unapplied})),
             )
             conn.commit()
 
 
 def test_a21_refuses_a_database_holding_two_purchases_of_one_session(
-    pg_url: str, monkeypatch: pytest.MonkeyPatch
+    pg_url: str, at_0011: str
 ) -> None:
-    with scratch_database(pg_url) as url:
-        _at_0011(url, monkeypatch)
+    with scratch_database(pg_url, at_0011) as url:
         with psycopg.connect(url) as conn:
             org = conn.execute(
                 "INSERT INTO orgs (name, status) VALUES ('dup', 'active') RETURNING id"

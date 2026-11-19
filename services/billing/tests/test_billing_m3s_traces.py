@@ -32,6 +32,7 @@ from billing_m3s_kit import (
     sample,
     wait_task_or_blocked,
 )
+from psycopg_pool import AsyncConnectionPool
 
 from loom_platform.ledger import PROMO_EXPENSE, Entry, org_balance, org_credit_account
 from loom_platform.ledger import post_transaction as post
@@ -87,7 +88,9 @@ async def test_a16_t2_same_event_two_workers_second_waits_then_duplicate(pool, p
 async def test_a16_t2_first_worker_fails_second_applies(pool, pg_url):
     """W1 fails (a lock timeout) while W2 waits on its uncommitted row: W2's insert then
     proceeds and W2 applies the event; W1's second transaction finds it processed
-    (`duplicate`), or times out on W2's row (503 path, StoreFailed). One purchase."""
+    (`duplicate`), times out on W2's row (503 path, StoreFailed), or stores it unapplied
+    before W2 takes it (500 path; W2 then applies the stored row). Whatever the order:
+    one purchase, credited once."""
     process_event = ep("process_event")
     store_failed = ep("StoreFailed")
     s1 = m3s_settings(stripe_lock_timeout_ms=1500)
@@ -105,12 +108,16 @@ async def test_a16_t2_first_worker_fails_second_applies(pool, pg_url):
         await h.rollback()
         o2 = await w2
         try:
-            o1 = (await w1).result
+            first = await w1
+            o1 = "stored" if getattr(first, "stored_after_error", False) else first.result
         except store_failed:
             o1 = "store_failed"
     assert o2.result == "credited"
-    assert o1 in ("duplicate", "store_failed")
+    assert o1 in ("duplicate", "store_failed", "stored"), o1
+    if o1 == "stored":
+        assert first.result == "unapplied"
     assert await purchases(pool, org) == [1100 * M]
+    assert await ledger_count(pool, ev["id"]) == 1
     row = await event_row(pool, ev["id"])
     assert row is not None and row["processed_at"] is not None and row["result"] == "credited"
 
@@ -279,6 +286,7 @@ async def test_a17_t4_refund_before_purchase_applied_in_its_commit(pool):
     assert row is not None and row["processed_at"] is None
     assert row["result"] == "unapplied" and row["last_error"] is None and row["error_count"] == 0
 
+    late, credited = sample(WEBHOOKS, result="late_refunded"), sample(WEBHOOKS, result="credited")
     assert (
         await process_event(pool, checkout_event(org, 2000, payment_intent=pi), settings=s)
     ).result == "credited"
@@ -287,15 +295,23 @@ async def test_a17_t4_refund_before_purchase_applied_in_its_commit(pool):
     row = await event_row(pool, refund["id"])
     assert row is not None and row["processed_at"] is not None
     assert row["result"] == "refunded"  # its own outcome (§8.11), not the purchase's
+    # The metric keeps M1's `late_<result>` label for it (§8.11), counted once.
+    assert sample(WEBHOOKS, result="late_refunded") == late + 1
+    assert sample(WEBHOOKS, result="credited") == credited + 1
 
 
 # ------------------------------------------------------------------ A18: T7
 
 
-async def test_a18_t7a_replay_ten_minutes_later_is_refused_before_postgres(pool, redis_client):
+async def test_a18_t7a_replay_ten_minutes_later_is_refused_before_postgres(
+    pool, pg_url, redis_client
+):
+    """Refused on the signature alone: the app's pool is never opened (any use of it
+    would fail, and the answer would be 503), so a 400 proves Postgres was not reached."""
     org = await make_org(pool)
     ev = checkout_event(org, 800)
-    async with billing_client(m3s_settings(), pool, redis_client) as client:
+    unopened = AsyncConnectionPool(pg_url, open=False)
+    async with billing_client(m3s_settings(), unopened, redis_client) as client:
         before = sample(WEBHOOKS, result="stale_timestamp")
         r = await deliver(client, ev, timestamp=int(time.time()) - 600)
         assert r.status_code == 400 and r.json()["error"]["code"] == "bad_signature"

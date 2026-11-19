@@ -13,10 +13,13 @@ elsewhere with `PYTHONPATH=services/billing/tests`). It offers:
   `refunds`, `ledger_count`, `store_raw` (insert an event row directly, "as a racing
   delivery stored it"), `make_org`, `make_admin`.
 - Metrics: `sample(name, **labels)` reads the process registry.
-- Isolation (§16): `m3s_template` (session: a database migrated once, dropped at the end)
-  and `scratch_url` (function: a clone of it, dropped at teardown, also on failure),
-  `scratch_pool` (a pool on the clone). A test module binds them with
-  `m3s_template, scratch_url, scratch_pool = m3s_scratch_fixtures()`.
+- Isolation (§16): `m3s_template` (a database migrated once per pytest process, i.e. per
+  session or xdist worker, however many modules bind the fixture; dropped once at the
+  end, also on failure) and `scratch_url` (function: a clone of it, dropped at teardown,
+  also on failure), `scratch_pool` (a pool on the clone). A test module binds them with
+  `m3s_template, scratch_url, scratch_pool = m3s_scratch_fixtures()`. Tests that only
+  touch their own rows and never run R may share one clone per module with the fault
+  triggers installed: `faults_url, faults_pool = m3s_shared_faults_fixtures()`.
 - Concurrency without sleeps: `Holder` (a transaction on its own connection, held until
   released) and `wait_blocked_by` (polls `pg_blocking_pids` until a backend waits on the
   holder).
@@ -80,8 +83,12 @@ def ep(name: str, module: str = "loom_billing.webhooks") -> Any:
 
 # ------------------------------------------------------------------ settings
 
-# Scaled-down Stripe timeouts (§8.3: 3000 ms / 5000 ms / 5 s by default).
-LOCK_TIMEOUT_MS = 2000
+# Scaled-down Stripe timeouts (§8.3: 3000 ms / 5000 ms / 5 s by default), short enough
+# for the flake-check budget, long enough that an uncontended statement or pool wait never
+# hits them under CPU load. A test that needs a lock held through a barrier passes a longer
+# `stripe_lock_timeout_ms`. The pool wait stays a whole number of seconds: the spec does
+# not say whether the setting takes fractions.
+LOCK_TIMEOUT_MS = 1000
 STATEMENT_TIMEOUT_MS = 4000
 DB_TIMEOUT_S = 1
 
@@ -370,30 +377,56 @@ def _drop(pg_url: str, name: str) -> None:
         )
 
 
-@pytest.fixture(scope="session")
-def m3s_template(pg_url: str) -> Iterator[str]:
-    """Name of a database migrated once per session, the template of `scratch_url`."""
-    name = f"loom_m3s_tpl_{uuid.uuid4().hex[:12]}"
-    with psycopg.connect(_admin(pg_url), autocommit=True) as conn:
-        conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
-    try:
-        upgrade(_url_with(pg_url, dbname=name))
-        yield name
-    finally:
+# One template per pytest process (a session, or one xdist worker), keyed by the server's
+# admin URL. pytest registers a session-scoped fixture once per module that binds it, so
+# the fixture itself would build one template per module; this cache makes every binding
+# share the first one, and the drop is registered once, with the config's cleanups (they
+# run at the end of the session, xdist workers included, also after a failure).
+_TEMPLATES: dict[str, str] = {}
+_TEMPLATES_LOCK = threading.Lock()
+
+
+def _drop_template(pg_url: str, name: str) -> None:
+    with contextlib.suppress(psycopg.OperationalError):  # server already gone
         _drop(pg_url, name)
 
 
-@pytest.fixture
-def scratch_url(pg_url: str, m3s_template: str) -> Iterator[str]:
-    """A fresh, migrated database of this test's own (a clone of the template; no
-    migrations run), dropped at teardown."""
+def m3s_template_name(pg_url: str, config: pytest.Config) -> str:
+    """The process's migrated template database, built on first use."""
+    key = _admin(pg_url)
+    with _TEMPLATES_LOCK:
+        name = _TEMPLATES.get(key)
+        if name is not None:
+            return name
+        name = f"loom_m3s_tpl_{uuid.uuid4().hex[:12]}"
+        with psycopg.connect(key, autocommit=True) as conn:
+            conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+        config.add_cleanup(lambda: _drop_template(pg_url, name))
+        try:
+            upgrade(_url_with(pg_url, dbname=name))
+        except BaseException:
+            _drop_template(pg_url, name)
+            raise
+        _TEMPLATES[key] = name
+        return name
+
+
+@pytest.fixture(scope="session")
+def m3s_template(pg_url: str, request: pytest.FixtureRequest) -> str:
+    """Name of the database migrated once per process, the template of `scratch_url`."""
+    return m3s_template_name(pg_url, request.config)
+
+
+@contextlib.contextmanager
+def _clone(pg_url: str, template: str) -> Iterator[str]:
+    """A clone of `template` (no migrations run), dropped afterwards, also on failure."""
     name = f"loom_m3s_{uuid.uuid4().hex[:12]}"
     with psycopg.connect(_admin(pg_url), autocommit=True) as conn:
         for attempt in range(50):
             try:
                 conn.execute(
                     sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(
-                        sql.Identifier(name), sql.Identifier(m3s_template)
+                        sql.Identifier(name), sql.Identifier(template)
                     )
                 )
                 break
@@ -405,6 +438,14 @@ def scratch_url(pg_url: str, m3s_template: str) -> Iterator[str]:
         yield _url_with(pg_url, dbname=name)
     finally:
         _drop(pg_url, name)
+
+
+@pytest.fixture
+def scratch_url(pg_url: str, m3s_template: str) -> Iterator[str]:
+    """A fresh, migrated database of this test's own (a clone of the template; no
+    migrations run), dropped at teardown."""
+    with _clone(pg_url, m3s_template) as url:
+        yield url
 
 
 @pytest.fixture
@@ -422,6 +463,36 @@ def m3s_scratch_fixtures() -> tuple[Any, Any, Any]:
     m3s_template, scratch_url, scratch_pool = m3s_scratch_fixtures()
     """
     return m3s_template, scratch_url, scratch_pool
+
+
+@pytest.fixture(scope="module")
+def faults_url(pg_url: str, request: pytest.FixtureRequest) -> Iterator[str]:
+    """One clone per module (per xdist worker) with the fault triggers installed, shared
+    by the module's tests that write and assert only on their own rows (random ids;
+    poison and gate entries are keyed by them) and never run `retry_unapplied` (which
+    re-runs every unapplied row) or read a database-wide count. pytest-repeat's copies
+    share it too, which such tests allow (§16)."""
+    with _clone(pg_url, m3s_template_name(pg_url, request.config)) as url:
+        with psycopg.connect(url, autocommit=True) as conn:
+            conn.execute(FAULTS_SQL)  # type: ignore[arg-type]
+        yield url
+
+
+@pytest.fixture
+async def faults_pool(faults_url: str) -> AsyncIterator[AsyncConnectionPool]:
+    p = await open_pool(faults_url, min_size=1, max_size=8)
+    try:
+        yield p
+    finally:
+        await p.close()
+
+
+def m3s_shared_faults_fixtures() -> tuple[Any, Any]:
+    """The shared fault-database fixtures, for a test module to bind by name:
+
+    faults_url, faults_pool = m3s_shared_faults_fixtures()
+    """
+    return faults_url, faults_pool
 
 
 # ------------------------------------------------------------------ holders and barriers
@@ -516,7 +587,8 @@ CREATE TABLE m3s_poison (
     id       text PRIMARY KEY,
     hard     boolean NOT NULL DEFAULT false,
     sqlstate text NOT NULL DEFAULT 'P0001',
-    sleep_s  float8
+    sleep_s  float8,
+    message  text
 );
 CREATE FUNCTION m3s_poison_fn() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE p m3s_poison;
@@ -526,7 +598,8 @@ BEGIN
         IF p.sleep_s IS NOT NULL THEN
             PERFORM pg_sleep(p.sleep_s);
         END IF;
-        RAISE EXCEPTION 'm3s poison: %', NEW.id USING ERRCODE = p.sqlstate;
+        RAISE EXCEPTION '%', coalesce(p.message, 'm3s poison: ' || NEW.id)
+            USING ERRCODE = p.sqlstate;
     END IF;
     RETURN NEW;
 END $$;
@@ -545,7 +618,8 @@ CREATE FUNCTION m3s_gate_fn() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE g m3s_gate;
 BEGIN
     SELECT * INTO g FROM m3s_gate
-    WHERE tbl = TG_TABLE_NAME AND id = to_jsonb(NEW) ->> TG_ARGV[0];
+    WHERE tbl = TG_TABLE_NAME AND (id = '*' OR id = to_jsonb(NEW) ->> TG_ARGV[0])
+    ORDER BY id = '*' LIMIT 1;
     IF FOUND THEN
         IF g.action = 'wait' THEN
             PERFORM pg_advisory_xact_lock(g.key);
@@ -579,15 +653,19 @@ async def poison(
     hard: bool = False,
     sqlstate: str = "P0001",
     sleep_s: float | None = None,
+    message: str | None = None,
 ) -> None:
     """Make writes of this event's row raise: those that leave `last_error` NULL (every
-    attempt that would record an outcome: a handler bug), or all of them (`hard`)."""
+    attempt that would record an outcome: a handler bug), or all of them (`hard`). The
+    error's message is `m3s poison: <event id>`, or `message`."""
     async with await psycopg.AsyncConnection.connect(url, autocommit=True) as conn:
         await conn.execute(
-            "INSERT INTO m3s_poison (id, hard, sqlstate, sleep_s) VALUES (%s, %s, %s, %s) "
+            "INSERT INTO m3s_poison (id, hard, sqlstate, sleep_s, message) "
+            "VALUES (%s, %s, %s, %s, %s) "
             "ON CONFLICT (id) DO UPDATE SET hard = EXCLUDED.hard, "
-            "sqlstate = EXCLUDED.sqlstate, sleep_s = EXCLUDED.sleep_s",
-            (evt_id, hard, sqlstate, sleep_s),
+            "sqlstate = EXCLUDED.sqlstate, sleep_s = EXCLUDED.sleep_s, "
+            "message = EXCLUDED.message",
+            (evt_id, hard, sqlstate, sleep_s, message),
         )
 
 
@@ -607,7 +685,9 @@ async def gate(
     sqlstate: str = "P0001",
 ) -> None:
     """A commit-time check on one row of `table` (by its id column): `fail` raises
-    `sqlstate` at COMMIT; otherwise the COMMIT waits on advisory lock `key`."""
+    `sqlstate` at COMMIT; otherwise the COMMIT waits on advisory lock `key`. `row_id`
+    `"*"` matches every row of `table` (e.g. any `admin_audit_log` row: in a scratch
+    database every row is the test's own)."""
     async with await psycopg.AsyncConnection.connect(url, autocommit=True) as conn:
         await conn.execute(
             "INSERT INTO m3s_gate (tbl, id, action, key, sqlstate) VALUES (%s, %s, %s, %s, %s)",
@@ -674,8 +754,9 @@ class FaultProxy:
       either dropped before it reaches the server (`landed=False`: the transaction rolls
       back) or forwarded and its result never returned (`landed=True`); that connection
       is then cut and, with `then_refuse`, every other one too and new ones refused;
-    - `arm_kill_after(pattern)`: once a statement matching `pattern` was forwarded, the
-      connection is cut at its next statement (e.g. inside a savepoint);
+    - `arm_kill_after(pattern, once_seen=...)`: once a statement matching `pattern` was
+      forwarded (after one matching `once_seen`, if given), the connection is cut at its
+      next statement (e.g. inside a savepoint);
     - `statements()`: the SQL of every simple query and Parse sent through it.
 
     The proxy answers SSL/GSSAPI requests with "no", so its URL needs no `sslmode`."""
@@ -691,6 +772,7 @@ class FaultProxy:
         self._refusing = False
         self._commit_arm: tuple[bool, bool] | None = None
         self._after_arm: re.Pattern[str] | None = None
+        self._after_gate: re.Pattern[str] | None = None
         self.fired = threading.Event()
         self._closed = False
 
@@ -723,9 +805,14 @@ class FaultProxy:
             self._commit_arm = (landed, then_refuse)
         self.fired.clear()
 
-    def arm_kill_after(self, pattern: str) -> None:
+    def arm_kill_after(self, pattern: str, *, once_seen: str | None = None) -> None:
+        """Cut the connection at the statement after the next one matching `pattern`;
+        with `once_seen`, only a `pattern` statement sent after one matching `once_seen`
+        counts (e.g. the first SAVEPOINT after a given query)."""
+        flags = re.IGNORECASE | re.DOTALL
         with self._lock:
-            self._after_arm = re.compile(pattern, re.IGNORECASE)
+            self._after_arm = re.compile(pattern, flags)
+            self._after_gate = None if once_seen is None else re.compile(once_seen, flags)
         self.fired.clear()
 
     def statements(self) -> list[str]:
@@ -815,7 +902,10 @@ class FaultProxy:
                             fire_kill = True
                         else:
                             fire_kill = False
-                        if self._after_arm is not None and self._after_arm.search(text):
+                        if self._after_gate is not None:
+                            if self._after_gate.search(text):
+                                self._after_gate = None
+                        elif self._after_arm is not None and self._after_arm.search(text):
                             self._after_arm = None
                             c.kill_next_statement = True
                         if self._commit_arm is not None and _COMMIT.match(text):
