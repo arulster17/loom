@@ -11,8 +11,10 @@ the manager issues the gateway's certificate from the new CA on start.
 Driven through `loom-poolmgr run` (`poolmgr_m3_kit.PoolmgrRun`): the file name inside the
 directory is the manager's choice, so the tests find the one file holding a key and a
 certificate. "Renamed into place" is observed as a new inode on each write (an in-place
-rewrite keeps the inode, and a reader could see it half written). The 24 h schedule runs
-on the manager's injected clock (`FakeClock`), as the rest of the manager's timing does.
+rewrite keeps the inode, and a reader could see it half written). The 24 h schedule and
+the certificate's 7-day validity run on the manager's injected clock (`clock=`, a
+`FakeClock` in the 24 h test), as the rest of the manager's timing does; the tests at
+start use the default clock (real time).
 """
 
 from __future__ import annotations
@@ -27,10 +29,13 @@ from poolmgr_fakes import FakeClock
 from poolmgr_m3_kit import (
     DAY_S,
     PoolmgrRun,
+    assert_pem_unchanged,
     check_gateway_cert,
     combined_pem,
     gateway_pems,
+    pem_identity,
     poolmgr_run_fixture,  # noqa: F401
+    wait_for_new_pem,
     write_ca,
 )
 
@@ -138,8 +143,11 @@ def test_reissued_every_24_hours_and_renamed_into_place(
     poolmgr_run: PoolmgrRun,
     pg_url: str,  # noqa: F811
 ) -> None:
-    """On the manager's clock: issued at start; the same file 12 h later; a new
-    certificate (a new inode) after 24 h, and again after 48 h."""
+    """On the manager's injected clock (a `FakeClock`): issued at start; the same file
+    12 h later; a new certificate (a new inode) after 24 h, and again after 48 h, each
+    valid 7 days from the clock's time of the rotation. After each clock move the test
+    polls the file (real time): up to 10 s for a due rotation, and for 1 s that nothing
+    changes when none is due."""
     h = poolmgr_run
     h.live(pg_url)
     h.clock = FakeClock()
@@ -156,15 +164,23 @@ def test_reissued_every_24_hours_and_renamed_into_place(
         first = check_gateway_cert(path, run.ca.ca.cert)
         seen.append((first.serial_number, path.stat().st_ino, clock()))
 
+        identity = pem_identity(run.cert_dir)
+        assert identity is not None
         await run.advance_to(start + DAY_S / 2)
+        await assert_pem_unchanged(run.cert_dir, identity, for_s=1.0)
         path = the_file(run.cert_dir)
         assert check_gateway_cert(path, run.ca.ca.cert).serial_number == first.serial_number, (
             "re-issued 12 h after the start"
         )
 
         for n in (1, 2):
+            identity = pem_identity(run.cert_dir)
+            assert identity is not None
             await run.advance_to(start + n * DAY_S + 60 * n)
-            path = the_file(run.cert_dir)
+            try:
+                path = await wait_for_new_pem(run.cert_dir, identity)
+            except AssertionError as e:
+                raise AssertionError(f"not re-issued {n * 24} h after the start: {e}") from e
             cert = check_gateway_cert(path, run.ca.ca.cert)
             seen.append((cert.serial_number, path.stat().st_ino, clock()))
             assert cert.serial_number != seen[-2][0], f"not re-issued {n * 24} h after the start"

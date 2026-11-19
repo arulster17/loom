@@ -12,10 +12,17 @@ Checked at two levels: the settings' production checks (`production_problems(con
 which `loom-poolmgr run` turns into its exit-2 refusal), and `loom-poolmgr run` itself
 (a refusal is exit 2 with no manager built; a start reaches the real manager and serves
 the gauge on the metrics endpoint), through `poolmgr_m3_kit.PoolmgrRun`.
+
+The refusals are expected from the manager's `PoolmgrSettings.production_problems` (the
+settings check §16 names as a mutation target): the settings-level tests call it
+directly, and a refusal by `run` must be the one it reports, not another start-up check
+(the runpod case accepts any proxy bundle file, so the bundle's sha check cannot be what
+refuses it).
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 
@@ -29,6 +36,7 @@ from poolmgr_m3_kit import (
 
 from loom_platform.serving import ServingConfig, load_serving
 from loom_platform.testing import pg_url  # noqa: F401
+from loom_poolmgr.bootstrap import ProxyBundle
 from loom_poolmgr.manager import PoolManager
 from loom_poolmgr.settings import PoolmgrSettings
 
@@ -80,6 +88,18 @@ def everything_runpod_needs(h: PoolmgrRun) -> None:
     h.mp.setenv("RUNPOD_API_KEY", "rk-m3-test")
 
 
+def any_bundle_matches_the_lock(h: PoolmgrRun) -> None:
+    """The proxy bundle's sha check (against `config/serving-artifacts.lock`, a bundle
+    only the network build makes) accepts whatever file `LOOM_POOLMGR_PROXY_BUNDLE`
+    names: wherever `run` checks the bundle, it passes, so a refusal is another rule's."""
+
+    def load(cls: type[ProxyBundle], path: Path, sha256: str) -> ProxyBundle:
+        data = Path(path).read_bytes()
+        return cls(data, hashlib.sha256(data).hexdigest())
+
+    h.mp.setattr(ProxyBundle, "load", classmethod(load))
+
+
 def refused_for(h: PoolmgrRun, var: str, value: str) -> bool:
     """`var=value` is refused: when the settings load (naming `var`), or as a production
     problem naming it."""
@@ -115,8 +135,9 @@ def test_without_the_flag_local_stays_dev_only(poolmgr_run: PoolmgrRun, flag: st
 
 
 def test_flag_is_refused_with_runpod(poolmgr_run: PoolmgrRun) -> None:
-    """A runpod setup with everything it needs passes without the flag; the same setup
-    with the flag is refused, naming the mock backend (M4 removes the flag)."""
+    """A runpod setup with everything it needs passes `production_problems` without the
+    flag; the same setup with the flag is refused there, naming the mock backend (M4
+    removes the flag)."""
     poolmgr_run.prod()
     everything_runpod_needs(poolmgr_run)
     assert problems(poolmgr_run, "runpod") == []
@@ -206,7 +227,10 @@ def test_run_is_refused_outside_dev(
     poolmgr_run: PoolmgrRun, case: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Exit 2 before any manager is built: `provider: local` without the flag, the flag
-    with `provider: runpod`, or the flag with a public `LOOM_POOLMGR_ALLOW_CIDRS`."""
+    with `provider: runpod`, or the flag with a public `LOOM_POOLMGR_ALLOW_CIDRS`; the
+    refusals `production_problems` reports (a bad `ALLOW_CIDRS` may instead be refused
+    when the settings load). The runpod setup is complete (its proxy bundle passes the
+    sha check), so only the mock-backend rule can refuse it, and the refusal names it."""
     h = poolmgr_run
     h.prod()
     if case == "no_flag":
@@ -214,6 +238,7 @@ def test_run_is_refused_outside_dev(
     elif case == "runpod":
         h.mp.setenv(FLAG, "true")
         everything_runpod_needs(h)
+        any_bundle_matches_the_lock(h)
         h.mp.setenv("LOOM_POOLMGR_SERVING_YAML", str(serving_file(h.tmp / "s", provider="runpod")))
     else:
         h.mp.setenv(FLAG, "true")

@@ -103,6 +103,25 @@ def assert_follows(metrics: PoolmgrMetrics, pool: PoolState) -> None:
     assert got == want, f"pool {pool.state}/{pool.reason}: gauges {got}"
 
 
+async def follows_after_next_tick(
+    env: FakeServing,
+    manager: PoolManager,
+    metrics: PoolmgrMetrics,
+    *models: str,
+    wake: str | None = None,
+) -> None:
+    """One more tick (1 s on, `wake` woken first), then the gauges of each of `models`
+    say what its pool hash says. The gauge is rewritten each tick: a hash written by the
+    previous tick's work after that tick's rewrite shows from this tick on. The tick
+    changes no reason (the states it follows are held: cold, in backoff, at the cap,
+    warming or ready)."""
+    if wake is not None:
+        await env.wake(wake)
+    await tick(manager, env.clock, advance=1)
+    for model in models:
+        assert_follows(metrics, await env.pool(model))
+
+
 def ca_seconds_left(env: FakeServing) -> float:
     return env.pki.ca.cert.not_valid_after_utc.timestamp() - env.clock()
 
@@ -114,9 +133,10 @@ def test_at_start_the_gauges_exist_and_alarm_counters_are_zero(
     poolmgr_run: PoolmgrRun,
     pg_url: str,  # noqa: F811
 ) -> None:
-    """`loom-poolmgr run`, before anything happened: `ca_expiry_seconds` is the CA's time
-    left, every `creates_total{model,result}` is 0 and the cold model's `pool_reason` is
-    0 for every reason."""
+    """`loom-poolmgr run`, before anything happened (scraped after the first tick, nothing
+    woken): `ca_expiry_seconds` is the CA's time left, every `creates_total{model,result}`
+    is 0 and the cold model's `pool_reason` is 0 for every reason. The model is the one
+    the manager was built with (`PoolmgrRun.model`)."""
     h = poolmgr_run
     ca = write_ca(h.tmp / "ca40", days=40)
     h.set_ca(ca)
@@ -125,6 +145,9 @@ def test_at_start_the_gauges_exist_and_alarm_counters_are_zero(
     seen: dict[str, object] = {}
 
     async def scenario(manager: PoolManager, run: PoolmgrRun) -> None:
+        # After the first tick: where the per-model series are created is the
+        # implementation's choice (before or in the first tick).
+        await run.wait_tick(0)
         seen["metrics"] = await run.scrape()
         seen["at"] = time.time()
 
@@ -162,13 +185,14 @@ async def test_ca_expiry_matches_not_after_at_start_and_each_tick(
     assert got is not None, "loom_poolmgr_ca_expiry_seconds not set at start"
     assert abs(got - ca_seconds_left(env)) <= 2, (got, ca_seconds_left(env))
     assert abs(got - 40 * 86400) <= 600, got
-    for advance in (3600, 86400, 5 * 86400):
+    for advance in (3600, 86400, 10 * 86400):
         await tick(manager, env.clock, advance=advance)
         got = value(metrics, "loom_poolmgr_ca_expiry_seconds")
         assert got is not None
         assert abs(got - ca_seconds_left(env)) <= 2, (advance, got, ca_seconds_left(env))
-    # Below alarm P3's 30 days now (40 - 6 days and an hour).
-    assert got < 30 * 86400
+    # Below alarm P3's 30 days now: 40 days - (1 h + 1 day + 10 days) = 28 days 23 h, and
+    # still far above the CA refusal at `server_cert_renew_before_s` (2 days).
+    assert 2 * 86400 < got < 30 * 86400, got / 86400
 
 
 # ------------------------------------------------------------------ pool reason
@@ -181,9 +205,9 @@ def no_stock(env: FakeServing) -> None:
 async def test_pool_reason_follows_the_pool_hash_each_tick(
     env: FakeServing, model_keys: list[str]
 ) -> None:
-    """cold (no reason) -> `no_capacity` -> warming -> ready: on every tick the gauges of
-    the model are 1 for the hash's reason and 0 for the rest; a servable model missing
-    from the serving file is `not_configured`."""
+    """cold (no reason) -> `no_capacity` -> warming -> ready: in each state the gauges of
+    the model are 1 for the hash's reason and 0 for the rest once a tick has run on it; a
+    servable model missing from the serving file is `not_configured`."""
     model = unique_model_id()
     missing = unique_model_id("llama")
     model_keys += [model, missing]
@@ -192,35 +216,38 @@ async def test_pool_reason_follows_the_pool_hash_each_tick(
     await manager.start()
     await tick(manager, env.clock, advance=1)
     assert (await env.pool(model)).state == "cold"
-    assert_follows(metrics, await env.pool(model))
-    assert_follows(metrics, await env.pool(missing))
     assert (await env.pool(missing)).reason == "not_configured"
+    await follows_after_next_tick(env, manager, metrics, model, missing)
 
     no_stock(env)
-    for _ in range(3):
+    for _ in range(3):  # the first attempt finds no capacity, the others are in its backoff
         await env.wake(model)
         await tick(manager, env.clock, advance=1)
-        assert_follows(metrics, await env.pool(model))
+    assert (await env.pool(model)).reason == "no_capacity"
+    await follows_after_next_tick(env, manager, metrics, model, wake=model)
     assert (await env.pool(model)).reason == "no_capacity"
 
     env.runpod.stock = None  # stock everywhere again
     await env.wake(model)
     await tick(manager, env.clock, advance=15)  # past the 10 s backoff
     seen = {(await env.pool(model)).state}
-    assert_follows(metrics, await env.pool(model))
+    assert (await env.pool(model)).reason != "no_capacity"
+    await follows_after_next_tick(env, manager, metrics, model)
     await bring_up(env, manager, model)
     pool = await env.pool(model)
     seen.add(pool.state)
     assert pool.state == "ready", seen
-    assert_follows(metrics, pool)
-    assert_follows(metrics, await env.pool(missing))
+    await follows_after_next_tick(env, manager, metrics, model, missing)
+    assert (await env.pool(model)).state == "ready"
 
 
 async def test_spend_cap_reason_gauge_is_set_and_cleared(
     env: FakeServing, model_keys: list[str]
 ) -> None:
     """P2b's series: `pool_reason{reason="spend_cap"}` is 1 while the model is held at
-    the cap and back to 0 once a reset lets it create again."""
+    the cap and back to 0 once a reset lets it create again (each checked after one more
+    tick: the gauge is rewritten each tick). The reset time the manager keeps in Redis
+    (`loom:poolmgr:reset:<model>`) is deleted with the model's keys (`model_keys`)."""
     env.clock.now = MID_NOVEMBER.timestamp()
     model = unique_model_id()
     model_keys.append(model)
@@ -244,10 +271,10 @@ async def test_spend_cap_reason_gauge_is_set_and_cleared(
     await manager.start()
     await env.wake(model)
     await tick(manager, env.clock, advance=5)
-    pool = await env.pool(model)
-    assert pool.reason == "spend_cap"
+    assert (await env.pool(model)).reason == "spend_cap"
+    await follows_after_next_tick(env, manager, metrics, model)
+    assert (await env.pool(model)).reason == "spend_cap"
     assert value(metrics, "loom_poolmgr_pool_reason", model=model, reason="spend_cap") == 1.0
-    assert_follows(metrics, pool)
 
     await delete_pod_rows(env.database_url, other)
     await env.admin({"op": "reset", "model": model})
@@ -255,5 +282,6 @@ async def test_spend_cap_reason_gauge_is_set_and_cleared(
     await tick(manager, env.clock, advance=5)
     pool = await env.pool(model)
     assert pool.reason != "spend_cap", pool
+    await follows_after_next_tick(env, manager, metrics, model)
+    assert (await env.pool(model)).reason != "spend_cap"
     assert value(metrics, "loom_poolmgr_pool_reason", model=model, reason="spend_cap") == 0.0
-    assert_follows(metrics, pool)

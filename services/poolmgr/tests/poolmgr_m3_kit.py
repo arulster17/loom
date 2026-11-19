@@ -11,7 +11,16 @@ apart from the others sharing the Postgres and Redis servers:
   non-compose password and `rediss://`, which no test server has: the URLs the settings
   check are placeholders, and the manager is handed the real ones);
 - its admin queue is a key of its own;
+- its metrics endpoint binds a port the OS picks (`serve_metrics()`; the port is read
+  back from the server, so no other process can take it in between);
 - optionally its clock is a `FakeClock` (`clock`/`sleep`, the manager's injected time).
+  Everything the manager times by its injected clock follows it, including the gateway
+  certificate's 24 h schedule and its 7-day validity (issued "now" on that clock).
+
+Per-model metric series (`creates_total{model,...}`, `pool_reason{model,...}`) are read
+for the kit's model id (`PoolmgrRun.model`), the one model the manager is handed: their
+initialisation must follow the manager's model set (the models it was built with), not a
+list read elsewhere. Scrapes that expect them wait for the first tick (`wait_tick(0)`).
 
 Everything else is the real `run` path: the settings and their production checks, the
 serving file, the CA files, `LOOM_POOLMGR_GATEWAY_CERT_DIR`, the metrics endpoint
@@ -33,7 +42,6 @@ import dataclasses
 import datetime as dt
 import os
 import re
-import socket
 import ssl
 import time
 import uuid
@@ -72,16 +80,13 @@ CREATE_RESULTS = ("ok", "no_capacity", "price_too_high", "spend_cap", "error")
 PROD_DATABASE_URL = "postgresql+psycopg://loom_app:m3-test-not-a-dev-password@127.0.0.1:9/loom"
 PROD_REDIS_URL = "rediss://:m3-test-secret@127.0.0.1:9/0"
 EGRESS = "203.0.113.10/32"  # the box's Elastic IP in deploy/serving.m3.yaml (a stand-in)
+# A non-zero `LOOM_POOLMGR_METRICS_PORT` (0 turns the endpoint off); never bound.
+METRICS_PORT_PLACEHOLDER = 9
+# How long a gateway-certificate check waits for the manager's write (real time).
+FILE_WAIT_S = 10.0
 
 
 # ------------------------------------------------------------------ files
-
-
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        port: int = s.getsockname()[1]
-        return port
 
 
 def serving_file(
@@ -108,11 +113,14 @@ class CaFiles:
     client_key: Path
 
 
-def write_ca(directory: Path, *, days: int = 365, now: float | None = None) -> CaFiles:
-    """A pod CA valid `days` from `now` plus the manager's client certificate, as the
-    files `LOOM_POOLMGR_CA_CERT/_KEY` and `LOOM_POOLMGR_CLIENT_CERT/_KEY` name."""
+def write_ca(
+    directory: Path, *, days: int = 365, now: float | None = None, cn: str = "Loom m3 test CA"
+) -> CaFiles:
+    """A pod CA (common name `cn`) valid `days` from `now` plus the manager's client
+    certificate, as the files `LOOM_POOLMGR_CA_CERT/_KEY` and
+    `LOOM_POOLMGR_CLIENT_CERT/_KEY` name."""
     directory.mkdir(parents=True, exist_ok=True)
-    ca = CertificateAuthority.generate("Loom m3 test CA", days=days, now=now)
+    ca = CertificateAuthority.generate(cn, days=days, now=now)
     (directory / "ca.crt").write_bytes(ca.cert_pem())
     (directory / "ca.key").write_bytes(IssuedCert(ca.cert, ca.key).key_pem())
     write_issued(directory, POOLMGR_CN, ca.issue_client(now=now))
@@ -146,6 +154,44 @@ def gateway_pems(directory: Path) -> list[Path]:
         if b"PRIVATE KEY-----" in data and b"BEGIN CERTIFICATE-----" in data:
             out.append(p)
     return out
+
+
+def pem_identity(directory: Path) -> tuple[int, int] | None:
+    """(inode, certificate serial) of the one gateway PEM in `directory`, None when there
+    is not exactly one or it does not parse (yet)."""
+    found = gateway_pems(directory)
+    if len(found) != 1:
+        return None
+    try:
+        return found[0].stat().st_ino, pem_cert(found[0]).serial_number
+    except (OSError, ValueError):
+        return None
+
+
+async def wait_for_new_pem(
+    directory: Path, old: tuple[int, int], *, timeout_s: float = FILE_WAIT_S
+) -> Path:
+    """Poll (real time, up to `timeout_s`) until the gateway PEM in `directory` is no
+    longer `old` (its inode or its certificate's serial changed); the file."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        now = pem_identity(directory)
+        if now is not None and now != old:
+            return gateway_pems(directory)[0]
+        if time.monotonic() > deadline:
+            raise AssertionError(
+                f"the gateway certificate in {directory} was not replaced within {timeout_s} s"
+            )
+        await asyncio.sleep(0.05)
+
+
+async def assert_pem_unchanged(directory: Path, old: tuple[int, int], *, for_s: float) -> None:
+    """For `for_s` (real time) the gateway PEM in `directory` stays `old`."""
+    deadline = time.monotonic() + for_s
+    while time.monotonic() < deadline:
+        now = pem_identity(directory)
+        assert now == old, f"the gateway certificate changed: {old} -> {now}"
+        await asyncio.sleep(0.05)
 
 
 def pem_cert(path: Path) -> x509.Certificate:
@@ -246,9 +292,12 @@ class PoolmgrRun:
         monkeypatch.setattr(cli, "role_gate", gate)
         real_start = poolmgr_metrics.start_http_server
 
-        def start_http_server(*a: Any, **kw: Any) -> Any:
-            served = real_start(*a, **kw)
+        def start_http_server(port: int, *a: Any, **kw: Any) -> Any:
+            # Whatever port the settings name, bind one the OS picks and record it.
+            served = real_start(0, *a, **kw)
             self._http_servers.append(served)
+            server = served[0] if isinstance(served, tuple) else served
+            self.metrics_port = int(server.server_port)
             return served
 
         monkeypatch.setattr(poolmgr_metrics, "start_http_server", start_http_server)
@@ -275,10 +324,11 @@ class PoolmgrRun:
         self.mp.setenv("LOOM_POOLMGR_CLIENT_CERT", str(ca.client_cert))
         self.mp.setenv("LOOM_POOLMGR_CLIENT_KEY", str(ca.client_key))
 
-    def serve_metrics(self) -> int:
-        self.metrics_port = free_port()
-        self.mp.setenv("LOOM_POOLMGR_METRICS_PORT", str(self.metrics_port))
-        return self.metrics_port
+    def serve_metrics(self) -> None:
+        """Turn the metrics endpoint on. The port in the setting only switches it on (0
+        is off): the wrapped `start_http_server` binds port 0 and `scrape()` uses the
+        port the server got."""
+        self.mp.setenv("LOOM_POOLMGR_METRICS_PORT", str(METRICS_PORT_PLACEHOLDER))
 
     def live(self, pg_url: str) -> None:
         """Let `run` really start: the test's database (emptied of serving rows, as the
@@ -308,7 +358,7 @@ class PoolmgrRun:
         return 0
 
     async def scrape(self) -> str:
-        assert self.metrics_port, "serve_metrics() first"
+        assert self.metrics_port, "no metrics endpoint started (serve_metrics() first)"
         async with httpx.AsyncClient(trust_env=False, timeout=10) as c:
             r = await c.get(f"http://127.0.0.1:{self.metrics_port}/metrics")
         r.raise_for_status()
@@ -328,13 +378,13 @@ class PoolmgrRun:
             await asyncio.sleep(0.05)
 
     async def advance_to(self, at: float) -> None:
-        """Move the fake clock to `at` and wait for the tick that wakes."""
+        """Move the fake clock to `at` and wait for the tick that wakes. What the tick
+        starts (a write, a spawned task) may still be running: wait for its effect with
+        `wait_for_new_pem` / `assert_pem_unchanged`."""
         assert self.clock is not None
         before = await self.ticks()
         self.clock.set(at)
         await self.wait_tick(before)
-        # Let what the tick started (a write, a spawned task) finish.
-        await asyncio.sleep(0.2)
 
     def cleanup(self) -> None:
         for served in self._http_servers:
@@ -348,12 +398,7 @@ class PoolmgrRun:
         if self.redis_url is not None:
             client = sync_redis.Redis.from_url(self.redis_url, socket_timeout=5)
             try:
-                client.delete(
-                    pool_key(self.model),
-                    wake_key(self.model),
-                    f"{pool_key(self.model)}:last_request",
-                    self.admin_queue,
-                )
+                client.delete(*model_redis_keys(self.model), self.admin_queue)
             finally:
                 client.close()
 
@@ -421,15 +466,26 @@ def poolmgr_run_fixture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iter
         h.cleanup()
 
 
+def model_redis_keys(model: str) -> tuple[str, ...]:
+    """The Redis keys a manager writes for `model`."""
+    return (
+        pool_key(model),
+        wake_key(model),
+        f"{pool_key(model)}:last_request",
+        f"loom:poolmgr:reset:{model}",
+    )
+
+
 def utc(epoch: float) -> dt.datetime:
     return dt.datetime.fromtimestamp(epoch, dt.UTC)
 
 
 @pytest.fixture(name="model_keys")
 async def model_keys_fixture(redis_client: Any) -> AsyncIterator[list[str]]:
-    """Model ids whose pool hash and wake key the test leaves in Redis: deleted after."""
+    """Model ids whose pool hash, wake key and reset time (`loom:poolmgr:reset:<model>`,
+    contracts §11) the test leaves in Redis: deleted after."""
     models: list[str] = []
     yield models
-    keys = [k for m in models for k in (pool_key(m), wake_key(m), f"{pool_key(m)}:last_request")]
+    keys = [k for m in models for k in model_redis_keys(m)]
     if keys:
         await redis_client.delete(*keys)

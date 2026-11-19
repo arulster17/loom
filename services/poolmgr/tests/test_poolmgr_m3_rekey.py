@@ -3,7 +3,7 @@
 already uses near expiry).
 
 The command runs as from a shell (`cli.main` in a thread, its own event loop) against
-the test's Redis, while a manager on the fakes of `poolmgr_fakes` runs with the default
+the test's database and Redis, while a manager on the fakes of `poolmgr_fakes` runs with the default
 admin queue: whatever way the command reaches the running manager, it does through the
 same Redis. Tests that use the default queue share the xdist group
 `poolmgr-default-admin-queue` (as the existing `local-capacity` tests do).
@@ -51,7 +51,10 @@ def cli_exit(*argv: str) -> int | str | None:
     return 0
 
 
-def cli_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, config: ServingConfig) -> None:
+def cli_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, config: ServingConfig, database_url: str
+) -> None:
+    """The command's environment: dev, this test's serving file, database and Redis."""
     for var in list(os.environ):
         if var.startswith("LOOM_POOLMGR_") or var == "LOOM_SERVING_YAML":
             monkeypatch.delenv(var, raising=False)
@@ -59,6 +62,7 @@ def cli_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, config: ServingConf
     path.write_text(yaml.safe_dump(config.model_dump(mode="json")))
     monkeypatch.setenv("LOOM_POOLMGR_SERVING_YAML", str(path))
     monkeypatch.setenv("LOOM_ENV", "dev")
+    monkeypatch.setenv("LOOM_DATABASE_URL", database_url)
     monkeypatch.setenv("LOOM_REDIS_URL", os.environ.get(REDIS_ENV) or DEFAULT_REDIS)
 
 
@@ -105,7 +109,7 @@ async def test_rekey_reissues_every_ready_pods_certificate(
     try:
         manager, config, pods = await two_ready_models(env, model_keys)
         before = {m: await serial(env, m) for m in pods}
-        cli_env(monkeypatch, tmp_path, config)
+        cli_env(monkeypatch, tmp_path, config, env.database_url)
         code = await asyncio.to_thread(cli_exit, "rekey")
         assert code in (0, None), f"loom-poolmgr rekey exited {code}"
         await rekey_ticks(env, manager, pods)
@@ -129,7 +133,7 @@ async def test_rekey_model_reissues_only_that_models_pods(
         manager, config, pods = await two_ready_models(env, model_keys)
         a, b = list(pods)
         before = {m: await serial(env, m) for m in pods}
-        cli_env(monkeypatch, tmp_path, config)
+        cli_env(monkeypatch, tmp_path, config, env.database_url)
         code = await asyncio.to_thread(cli_exit, "rekey", "--model", a)
         assert code in (0, None), f"loom-poolmgr rekey --model exited {code}"
         await rekey_ticks(env, manager, {a: pods[a]})
