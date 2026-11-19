@@ -35,10 +35,11 @@ mock_provider "aws" {
 }
 
 variables {
-  domain     = "example.test"
-  brand_name = "Example Brand"
-  ops_email  = "ops@example.test"
-  budget_usd = 75
+  domain          = "example.test"
+  brand_name      = "Example Brand"
+  ops_email       = "ops@example.test"
+  budget_usd      = 75
+  releases_bucket = "loom-test-releases"
 }
 
 run "records_as_output_without_a_zone" {

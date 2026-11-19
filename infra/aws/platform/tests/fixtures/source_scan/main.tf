@@ -20,9 +20,11 @@ locals {
   ebs_volume_blocks = regexall(format(local.block_re, "resource", "\"aws_ebs_volume\"\\s+\"[^\"]+\""), local.all)
 
   variable_blocks = {
-    for v in ["domain", "brand_name"] :
+    for v in ["domain", "brand_name", "releases_bucket"] :
     v => regexall(format(local.block_re, "variable", "\"${v}\""), local.all)
   }
+
+  s3_versioning_blocks = regexall(format(local.block_re, "resource", "\"aws_s3_bucket_versioning\"\\s+\"[^\"]+\""), local.all)
 
   healthcheck_tf = lookup(local.files, "healthcheck.tf", "")
 }
@@ -47,14 +49,23 @@ output "ebs_volumes_prevent_destroy" {
   value = [for b in local.ebs_volume_blocks : length(regexall("(?m)^\\s*prevent_destroy\\s*=\\s*true\\s*$", b)) > 0]
 }
 
-# For each of domain and brand_name: how many `variable` blocks declare it, and whether
-# any of them sets `default`.
+# For each of domain, brand_name and releases_bucket: how many `variable` blocks declare
+# it, and whether any of them sets `default`.
 output "variable_declared" {
   value = { for v, blocks in local.variable_blocks : v => length(blocks) }
 }
 
 output "variable_has_default" {
   value = { for v, blocks in local.variable_blocks : v => anytrue([for b in blocks : length(regexall("(^|[\\s{])default\\s*=", b)) > 0]) }
+}
+
+# The `aws_s3_bucket.<name>` resources that an `aws_s3_bucket_versioning` block naming
+# "Enabled" anywhere refers to (conservative: a conditional status counts as enabled).
+output "s3_versioning_enabled_buckets" {
+  value = distinct(flatten([
+    for b in local.s3_versioning_blocks :
+    length(regexall("\"Enabled\"", b)) > 0 ? flatten(regexall("aws_s3_bucket\\.([A-Za-z0-9_]+)", b)) : []
+  ]))
 }
 
 output "healthcheck_tf_declares_health_check" {

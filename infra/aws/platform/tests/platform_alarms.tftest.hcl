@@ -30,10 +30,11 @@ mock_provider "aws" {
 }
 
 variables {
-  domain     = "example.test"
-  brand_name = "Example Brand"
-  ops_email  = "ops@example.test"
-  budget_usd = 75
+  domain          = "example.test"
+  brand_name      = "Example Brand"
+  ops_email       = "ops@example.test"
+  budget_usd      = 75
+  releases_bucket = "loom-test-releases"
 }
 
 run "topic_and_every_alarm_notifies_it" {
@@ -457,6 +458,40 @@ run "s_stripe" {
       && aws_cloudwatch_metric_alarm.s5.treat_missing_data == "breaching"
     )
     error_message = "S5 reads Loom/Platform loom_billing_stripe_retry_last_success_seconds, missing data breaching."
+  }
+
+  # S5's shape (§5.3, §6.13): metric math `EPOCH(m) - m` > 300 over one 60-s period, `m`
+  # the gauge's Maximum. The gauge's query may have any id; the expression names it
+  # (spaces ignored) and is the query whose data the alarm returns.
+  assert {
+    condition = (
+      length([
+        for q in aws_cloudwatch_metric_alarm.s5.metric_query : q
+        if try(q.metric[0].metric_name, "") == "loom_billing_stripe_retry_last_success_seconds"
+        && try(q.metric[0].namespace, "") == "Loom/Platform"
+        && try(q.metric[0].stat, "") == "Maximum"
+        && try(q.metric[0].period, 0) == 60
+      ]) == 1
+      && anytrue(flatten([
+        for m in aws_cloudwatch_metric_alarm.s5.metric_query : [
+          for e in aws_cloudwatch_metric_alarm.s5.metric_query :
+          can(regex("EPOCH\\(${m.id}\\)-${m.id}($|[^A-Za-z0-9_])", replace(e.expression == null ? "" : e.expression, " ", "")))
+          && e.return_data == true
+        ] if try(m.metric[0].metric_name, "") == "loom_billing_stripe_retry_last_success_seconds"
+      ]))
+    )
+    error_message = "S5 is metric math: a query reading the gauge's Maximum (Loom/Platform, period 60) with some id m, and the returned expression EPOCH(m) - m; got ${jsonencode(aws_cloudwatch_metric_alarm.s5.metric_query)}."
+  }
+
+  assert {
+    condition = (
+      aws_cloudwatch_metric_alarm.s5.comparison_operator == "GreaterThanThreshold"
+      && aws_cloudwatch_metric_alarm.s5.threshold == 300
+      && aws_cloudwatch_metric_alarm.s5.evaluation_periods == 1
+      && coalesce(aws_cloudwatch_metric_alarm.s5.datapoints_to_alarm, aws_cloudwatch_metric_alarm.s5.evaluation_periods) == 1
+      && (aws_cloudwatch_metric_alarm.s5.metric_name == null || aws_cloudwatch_metric_alarm.s5.metric_name == "")
+    )
+    error_message = "S5: EPOCH(m) - m > 300 over one period (GreaterThanThreshold, threshold 300, evaluation_periods 1), metric math only (no metric_name)."
   }
 }
 

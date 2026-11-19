@@ -22,10 +22,11 @@ mock_provider "aws" {
 }
 
 variables {
-  domain     = "example.test"
-  brand_name = "Example Brand"
-  ops_email  = "ops@example.test"
-  budget_usd = 75
+  domain          = "example.test"
+  brand_name      = "Example Brand"
+  ops_email       = "ops@example.test"
+  budget_usd      = 75
+  releases_bucket = "loom-test-releases"
 }
 
 # Distinct ids for the two groups, so "from the instance's group" can be told apart.

@@ -22,10 +22,11 @@ mock_provider "aws" {
 }
 
 variables {
-  domain     = "example.test"
-  brand_name = "Example Brand"
-  ops_email  = "ops@example.test"
-  budget_usd = 75
+  domain          = "example.test"
+  brand_name      = "Example Brand"
+  ops_email       = "ops@example.test"
+  budget_usd      = 75
+  releases_bucket = "loom-test-releases"
 }
 
 # Distinct role ARNs (the mock gives every role the same one).
@@ -51,9 +52,9 @@ run "every_secret_of_5_2_exists" {
   assert {
     condition = length(setsubtract(toset([
       "stripe", "auth", "internal-token", "app-db-password", "redis", "pod-ca",
-      "poolmgr-client", "ses-smtp", "serving-runpod-key",
+      "poolmgr-client", "ses-smtp", "grafana", "serving-runpod-key",
     ]), toset(keys(aws_secretsmanager_secret.platform)))) == 0
-    error_message = "Missing secrets (keys of aws_secretsmanager_secret.platform): ${jsonencode(setsubtract(toset(["stripe", "auth", "internal-token", "app-db-password", "redis", "pod-ca", "poolmgr-client", "ses-smtp", "serving-runpod-key"]), toset(keys(aws_secretsmanager_secret.platform))))}."
+    error_message = "Missing secrets (keys of aws_secretsmanager_secret.platform): ${jsonencode(setsubtract(toset(["stripe", "auth", "internal-token", "app-db-password", "redis", "pod-ca", "poolmgr-client", "ses-smtp", "grafana", "serving-runpod-key"]), toset(keys(aws_secretsmanager_secret.platform))))}."
   }
 
   assert {

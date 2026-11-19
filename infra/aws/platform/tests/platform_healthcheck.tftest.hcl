@@ -32,10 +32,11 @@ mock_provider "aws" {
 }
 
 variables {
-  domain     = "example.test"
-  brand_name = "Example Brand"
-  ops_email  = "ops@example.test"
-  budget_usd = 75
+  domain          = "example.test"
+  brand_name      = "Example Brand"
+  ops_email       = "ops@example.test"
+  budget_usd      = 75
+  releases_bucket = "loom-test-releases"
 }
 
 run "health_check_without_a_zone" {
