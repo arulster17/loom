@@ -20,7 +20,12 @@
       ".github/workflows/ci.yml",
       "apps/web/vitest.config.ts",
       "apps/web/package.json",
-      "scripts/flaky_report.py"
+      "scripts/flaky_report.py",
+      "services/billing/src/loom_billing/stripe_stub.py",
+      "services/devstack/src/loom_devstack/m3_acceptance.py",
+      "infra/aws/platform/tests/**",
+      ".github/terraform/**",
+      "docs/phase1-m3-spec.md"
     ],
     "testWriters": [
       "agent-setup:test-writer"
@@ -35,5 +40,9 @@
   "retro": {
     "path": ".claude/agent-retros.md",
     "minAgents": 2
+  },
+  "holdout": {
+    "path": ".holdout",
+    "command": "R=$PWD; W=.claude/worktrees/m3-cp-stripe; if [ -d \"$W\" ]; then cd \"$W\"; fi; LOOM_TEST_DATABASE_URL=postgresql+psycopg://loom:loom@localhost:5432/loom LOOM_TEST_REDIS_URL=redis://localhost:6379/15 PYTHONPATH=services/billing/tests uv run --frozen pytest -q -n auto -p no:cacheprovider -c \"$R/pytest.ini\" \"$R/.holdout\""
   }
 }
