@@ -643,7 +643,8 @@ def fetch_release(site: dict[str, Any], sha: str, work: Path, paths: Paths) -> d
             if hasattr(tarfile, "data_filter"):  # 3.12, and the 3.9.17+ / 3.10.12+ backports
                 tar.extractall(target, filter="data")
             else:  # an older 3.9: the same rule by hand, regular files and directories only
-                for member in tar.getmembers():
+                members = tar.getmembers()
+                for member in members:
                     parts = Path(member.name).parts
                     if (
                         member.name.startswith("/")
@@ -651,7 +652,12 @@ def fetch_release(site: dict[str, Any], sha: str, work: Path, paths: Paths) -> d
                         or not (member.isfile() or member.isdir())
                     ):
                         raise DeployError(f"the bundle holds an unsafe member {member.name!r}")
-                tar.extractall(target)
+                    member.mode &= ~0o7000  # no setuid, setgid or sticky bit (the data filter)
+                    # never apply the archive's owner: tarfile chowns only when running as
+                    # root, so blank it to root (the running user), as the data filter does
+                    member.uid = member.gid = 0
+                    member.uname = member.gname = ""
+                tar.extractall(target, members=members)
     except DeployError:
         raise
     except (tarfile.TarError, OSError) as e:

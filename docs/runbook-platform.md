@@ -142,26 +142,27 @@ aws ssm get-command-invocation --region $AWS_REGION --instance-id $INSTANCE --co
    ```
 3. **SES SMTP**: two steps, because only your own (operator) credentials may call IAM; the
    instance role has no `iam:` action.
-   a. On your laptop, create the access key for the IAM user `loom-ses-smtp` and keep the
-      JSON in your clipboard or a file only long enough for step b (it is the only time
-      the secret is shown):
+   a. Get `loom-deploy.py` onto your laptop (any Python 3.9 or later; it uses only the
+      standard library):
 
       ```sh
-      aws iam create-access-key --user-name loom-ses-smtp
+      aws s3 cp s3://$BUCKET/releases/$SHA/loom-deploy.py ./loom-deploy.py
       ```
 
-   b. In an **interactive** session on the box, run the derivation and paste the key JSON
-      at the cursor, then press Ctrl-D (it is read from stdin: not a command-line argument,
-      not in the shell history, and Run Command has no stdin and keeps its parameters):
+   b. On your laptop, pipe the new access key for the IAM user `loom-ses-smtp` straight
+      into the derivation, so the secret is never printed, pasted, put in a file or in
+      the clipboard (it is read from stdin, not a command-line argument):
 
       ```sh
-      aws ssm start-session --region $AWS_REGION --target $INSTANCE
-      # on the box:
-      sudo python3.12 -S /var/lib/loom/loom-deploy.py ses-smtp-password
+      AWS_REGION=$AWS_REGION aws iam create-access-key --user-name loom-ses-smtp \
+        | python3 -S loom-deploy.py ses-smtp-password
       ```
 
-   The access key secret is never printed or stored by `loom-deploy`; clear your clipboard
-   or delete the file, and delete the key's old versions after a rotation.
+   Why on the laptop: `ses-smtp-password` needs only the `aws` CLI, Python 3.9+ and
+   `secretsmanager:PutSecretValue` on `loom/platform/ses-smtp` with your credentials (the
+   secret's policy denies only `GetSecretValue` to you); it never reads the box's paths.
+   `loom-deploy` prints neither the access key secret nor the derived password. After a
+   rotation, delete the IAM user's old access key.
 4. Check (B4): each of the nine containers `describe-secret` shows a version. The user's
    principal cannot read them: only the instance role can.
 
@@ -200,11 +201,18 @@ loom_deploy_remote() {  # usage: loom_deploy_remote <loom-deploy arguments...>, 
   id=$(aws ssm send-command --region $AWS_REGION --instance-ids $INSTANCE \
     --document-name AWS-RunShellScript --comment "loom-deploy $1" --timeout-seconds 60 \
     --parameters "executionTimeout=[\"600\"],commands=[\"aws s3 cp s3://$BUCKET/releases/$SHA/loom-deploy.py /var/lib/loom/loom-deploy.py\",\"python3.12 -S /var/lib/loom/loom-deploy.py $*\"]" \
-    --query Command.CommandId --output text)
+    --query Command.CommandId --output text) || return 1
+  case $id in ""|None) echo "send-command returned no command id" >&2; return 1;; esac
+  n=0
   while :; do
     st=$(aws ssm get-command-invocation --region $AWS_REGION --command-id $id \
       --instance-id $INSTANCE --query Status --output text 2>/dev/null) || st=Pending
     case $st in Pending|InProgress|Delayed) sleep 5;; *) break;; esac
+    n=$((n + 1))
+    if [ $n -ge 130 ]; then  # about 11 minutes: past the 600 s execution timeout
+      echo "command $id still $st after $n polls; check it with get-command-invocation" >&2
+      return 1
+    fi
   done
   aws ssm get-command-invocation --region $AWS_REGION --command-id $id --instance-id $INSTANCE \
     --query '[Status,StandardOutputContent,StandardErrorContent]' --output text

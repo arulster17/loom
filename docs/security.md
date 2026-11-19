@@ -305,8 +305,10 @@ mock; no RunPod credential is on the box.
   log; secrets go to `aws` and `docker login` on stdin. The secret files exist only on the
   tmpfs. Secrets that reach a container as environment variables (the env files'
   settings) are different: Docker keeps them in the container's configuration on the root
-  disk (`/var/lib/docker/containers/<id>/`, readable by root only), and they stay there
-  while the container exists (user decision LM9). A reboot empties `/run/loom`, but the
+  disk (`/var/lib/docker/containers/<id>/`, readable by root or by anyone who can use the
+  docker socket: `docker inspect` prints them), and they stay there while the container
+  exists (user decision LM9). The `acceptance` container mounts `/var/run/docker.sock`
+  while it runs, so it can read them too for that time. A reboot empties `/run/loom`, but the
   Docker daemon restarts containers that have a restart policy: the web app and Caddy come
   back (with their env-held settings, without their rendered files) and the services that
   need a secret file fail to start until `loom-deploy apply` re-renders `/run/loom`.
