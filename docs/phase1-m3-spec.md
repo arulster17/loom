@@ -1385,7 +1385,7 @@ checkpoint.
 
 | Wave | Who (model) | Branch / worktree | Owns |
 |---|---|---|---|
-| 0 (sequential) | Orchestrator | `phase1-m3` (from `main`), main checkout | This spec; `docs/phase1-contracts.md` (§11 changes); the CI job for Terraform and the `terraform` pin in `.github/workflows/ci.yml` (protected: done while unlocked, before the lock, user approves the diff) |
+| 0 (sequential) | Orchestrator | `phase1-m3` (from `main`), main checkout | This spec; `docs/phase1-contracts.md` (§11 changes); the CI job for Terraform and the `terraform` pin in `.github/workflows/ci.yml`, with its config in `.github/terraform/`, and the CI job `m3-prod-stack` for A15 (protected: done while unlocked, before the lock, user approves the diff) |
 | 1 tests | 4 test writers (Opus), one per area, + 1 holdout writer (Opus) | in each worktree below | Tests only (§13 A-items): `infra/aws/platform/tests/*.tftest.hcl`; `services/devstack/tests/test_devstack_m3_*.py` (deploy, compose, metric-name cross-check A9); `services/billing/tests/test_billing_m3s_*.py`, `services/platform_common/tests/test_platform_m3s_*.py` (migration 0012, the L3 index through `post_transaction`, the grants test) and the stub (`stripe_stub.py`); `services/poolmgr/tests/test_poolmgr_m3_*.py`, `services/gateway/tests/test_gateway_m3_cert_*.py`; `loom_devstack/m3_acceptance.py`, `services/devstack/tests/test_devstack_m3_brand.py` and new `apps/web/src/**/*.test.ts` files (A35, A36) (by the deploy-area writer). Holdout: the Stripe traces T1-T10 a second time, independently, for `.holdout` |
 | 1 review | 4 fresh test reviewers (Opus) | | One per area; loop until approved |
 | Lock | **User** (`/agent-setup lock`, typed in the terminal) | | After the worktrees exist on their branches |
@@ -1408,7 +1408,9 @@ and A33 that run the job with a moved `now` use a **function-scoped** scratch da
 (`CREATE DATABASE ... TEMPLATE`, the template migrated once per session, so each clone
 costs no migrations; the pattern of
 `services/platform_common/tests/test_platform_migration_0010.py`; a module-scoped one is
-shared by pytest-repeat's copies) or reset the Stripe tables at test start, or assert only on their own rows, and stay correct under
+shared by pytest-repeat's copies); tests of those items that keep the real `now` and
+build no backlog may instead reset the Stripe tables at test start, or assert only on
+their own rows. All stay correct under
 flake-check's `--count 2`. R has no age window and re-runs every unapplied row newest
 first, so in the shared database it also re-runs other tests' leftovers; a test that needs
 its own rows inside R's 500 uses the scratch database. New M3 tests use random dispute, session and PaymentIntent ids
