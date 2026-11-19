@@ -94,9 +94,11 @@ async def test_a16_t2_first_worker_fails_second_applies(pool, pg_url):
     process_event = ep("process_event")
     store_failed = ep("StoreFailed")
     # W1's lock wait is the window in which W2 must start and queue behind W1's row:
-    # 3 s leaves room under CPU load (flake-check), still below the 4 s statement timeout.
+    # 3 s leaves room under CPU load (flake-check). W1: lock 3 s < the kit's 4 s statement
+    # timeout, so W1 fails on the lock. W2 waits on W1's row for that ~3 s window plus
+    # W1's rollback, so its statement timeout (15 s) sits well above the wait.
     s1 = m3s_settings(stripe_lock_timeout_ms=3000)
-    s2 = m3s_settings(stripe_lock_timeout_ms=10_000)
+    s2 = m3s_settings(stripe_lock_timeout_ms=10_000, stripe_statement_timeout_ms=15_000)
     org = await make_org(pool)
     ev = checkout_event(org, 1100)
     async with holder(pg_url) as h:
