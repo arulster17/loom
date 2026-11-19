@@ -4,8 +4,9 @@ Runs in the one-shot compose service `acceptance` on the production network (`lo
 acceptance` starts it through SSM, §6.12): the web app, the gateway and the Stripe webhook
 are reached **through the public URLs** (real DNS, real TLS), Postgres, Redis and the
 containers from inside, as `loom-m1-acceptance` does (its helpers are reused). The
-container has no AWS credentials: m3-i's CloudWatch scan and m3-p's refusal run on the
-host, in `loom-deploy acceptance`.
+container has no AWS credentials: m3-p's refusal runs on the host, in `loom-deploy
+acceptance`; m3-i's CloudWatch half is B26's, run by hand with the operator's credentials
+(no Loom role may read logs, §5.6).
 
     loom-m3-acceptance --domain <domain> --release <sha> --admin-email <ops_email> \
         --webhook-secret-file /run/loom/secrets/acceptance/webhook_secret
@@ -38,9 +39,8 @@ m3-h  exposure (external): only 80/443 answer; api. serves /v1/* only; hooks. on
       /stripe/webhook and GET /stripe/health; /internal, /health, /metrics unreachable;
       80 redirects; HSTS; a valid certificate for the three names; the sign-in page's
       title and heading show the product name
-m3-i  no prompt, completion or API key in any container's logs; the canaries go to
-      `--canaries-file` (default /var/lib/loom/acceptance/canaries.json, 0600, a JSON array
-      of strings) for the host's CloudWatch scan
+m3-i  no prompt, completion or API key in any container's logs (the containers' logs only;
+      no canaries file is written: the CloudWatch log group is B26's, by hand)
 m3-p  P4: in the deploy log (JSON Lines, §6.12), from the release's last apply/start
       record, update/gateway/ok comes before update/poolmgr/start (the refusal of `apply
       --only poolmgr` with another release is checked on the host)
@@ -95,7 +95,7 @@ TITLES = {
     "m3-g": "Stripe test mode: pay, one purchase, duplicate, stale t, resend, refunds",
     "m3-s": "Missed delivery while billing is stopped, then resent: one purchase",
     "m3-h": "Exposure from the internet: routes, ports, redirect, HSTS, certificate, name",
-    "m3-i": "No prompt, completion or key in container logs (CloudWatch: on the host)",
+    "m3-i": "No prompt, completion or key in container logs (CloudWatch: B26, by hand)",
     "m3-p": "P4: the deploy log shows the gateway healthy before poolmgr was updated",
     "m3-x": "Containers cannot reach the instance metadata service",
 }
@@ -121,18 +121,6 @@ def tls_verify() -> ssl.SSLContext | bool:
     httpx's default (certifi)."""
     cafile = os.environ.get("SSL_CERT_FILE")
     return ssl.create_default_context(cafile=cafile) if cafile else True
-
-
-def write_canaries(path: Path, canaries: set[str]) -> None:
-    """The strings that must never reach a log, for the host's CloudWatch scan: a JSON
-    array, mode 0600 (they include API keys)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-        os.write(fd, json.dumps(sorted(canaries)).encode())
-    finally:
-        os.close(fd)
 
 
 def own_project() -> str | None:
@@ -439,15 +427,10 @@ class M3Acceptance(m1.Acceptance):
     # -- m3-i
 
     def item_m3_i(self, res: ItemResult) -> None:
-        """The containers' logs (M1's item i); the canaries are written for the host's
-        CloudWatch scan whether or not a log held one (§6.12)."""
-        path = Path(self.args.canaries_file)
-        try:
-            self.item_i(res)
-        finally:
-            write_canaries(path, self.report.canaries)
-            res.numbers["canaries_file"] = str(path)
-        res.notes.append("the CloudWatch log group is scanned on the host (loom-deploy acceptance)")
+        """The containers' logs only (M1's item i). No canaries file is written: nothing
+        on the box reads one; the CloudWatch log group is B26's (§6.12, §10)."""
+        self.item_i(res)
+        res.notes.append("the CloudWatch log group is B26's (by hand, the operator's credentials)")
 
     # -- m3-p
 
@@ -670,11 +653,6 @@ def parser() -> argparse.ArgumentParser:
         "--deploy-log",
         default="/var/lib/loom/deploy.log",
         help="loom-deploy's JSON Lines log, read by m3-p (default: %(default)s)",
-    )
-    p.add_argument(
-        "--canaries-file",
-        default=str(ACCEPTANCE_DIR / "canaries.json"),
-        help="m3-i writes the canaries here for the host's CloudWatch scan (default: %(default)s)",
     )
     p.add_argument("--manual-timeout-s", type=float, default=900)
     p.add_argument("--alarm-wait-s", type=float, default=660)

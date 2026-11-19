@@ -11,9 +11,8 @@ directory of fake tools put first on `PATH`:
 
 - `aws`: the site parameter (`ssm get-parameter`), the releases bucket (`s3 cp`, `s3api
   get-object`), Secrets Manager (`get-secret-value`, `describe-secret`,
-  `list-secret-version-ids`, `put-secret-value`), `ecr get-login-password`, `logs
-  filter-log-events` (an event for each configured "hit" the filter pattern holds) and `sts
-  get-caller-identity`;
+  `list-secret-version-ids`, `put-secret-value`), `ecr get-login-password` and `sts
+  get-caller-identity` (no `logs` operation: nothing in `loom-deploy` reads logs, §5.6);
 - `chown`: records its argv and changes nothing (the test is not root);
 - `docker`: either a fake (`fake_docker=True`: answers `login`, `compose pull`, `compose run
   --rm <svc>`, `compose up -d --no-deps <svc>`, `compose ps -q <svc>` and `inspect` as
@@ -419,14 +418,6 @@ if svc == "secretsmanager":
 if svc == "ecr" and op == "get-login-password":
     print(open(os.path.join(D, "ecr-token")).read()); sys.exit(0)
 
-if svc == "logs" and op == "filter-log-events":
-    hits_file = os.path.join(D, "log-hits.json")
-    hits = json.load(open(hits_file)) if os.path.exists(hits_file) else []
-    pattern = str(opts.get("filter-pattern", ""))
-    events = [{"logStreamName": "gateway/abc", "timestamp": 1, "message": "... " + h + " ...",
-               "eventId": str(n)} for n, h in enumerate(hits) if h and h in pattern]
-    print(json.dumps({"events": events, "searchedLogStreams": []})); sys.exit(0)
-
 if svc == "sts":
     out({"Account": "123456789012", "Arn": "arn:aws:sts::123456789012:assumed-role/x/i-0",
          "UserId": "AROAEXAMPLE:i-0"})
@@ -502,13 +493,6 @@ if argv[:1] == ["compose"]:
     if sub == "run":
         names = positional(rest, RUN_VALUED)
         svc = names[0] if names else ""
-        if svc == "acceptance" and cfg.get("canaries") is not None:
-            d = os.path.join(cfg["root"], "var", "lib", "loom", "acceptance")
-            os.makedirs(d, exist_ok=True)
-            p = os.path.join(d, "canaries.json")
-            with open(p, "w") as f:
-                json.dump(cfg["canaries"], f)
-            os.chmod(p, 0o600)
         sys.exit(int(cfg.get("run_exit", {}).get(svc, 0)))
     if sub == "up":
         for svc in positional(rest, UP_VALUED):
@@ -680,9 +664,6 @@ class Box:
     def load_docker(self) -> dict[str, Any]:
         data: dict[str, Any] = json.loads((self.state / "docker.json").read_text())
         return data
-
-    def set_log_hits(self, hits: list[str]) -> None:
-        (self.state / "log-hits.json").write_text(json.dumps(hits))
 
     # -- the release
 

@@ -662,8 +662,22 @@ def test_a37_the_public_routes_answer_through_caddy(stack: Stack) -> None:
     hook = caddy_get(stack, f"hooks.{DOMAIN}", "/stripe/webhook", "POST", content=b"{}",
                      headers={"Content-Type": "application/json"})  # fmt: skip
     assert hook.status_code == 400, f"unsigned POST /stripe/webhook: {hook.status_code}"
+    # The public model list needs no key (contracts §"Public model list"): 200, OpenAI's
+    # list shape with Loom's fields.
     models = caddy_get(stack, f"api.{DOMAIN}", "/v1/models")
-    assert models.status_code == 401, f"api. GET /v1/models without a key: {models.status_code}"
+    assert models.status_code == 200, (
+        f"api. GET /v1/models without a key: {models.status_code} {models.text[:200]}"
+    )
+    body = models.json()
+    assert body.get("object") == "list" and isinstance(body.get("data"), list), body
+    for m in body["data"]:
+        assert isinstance(m.get("id"), str) and m["id"] and m.get("object") == "model", m
+        assert isinstance(m.get("pricing"), dict) and isinstance(m.get("availability"), dict), m
+        assert m["availability"].get("state") in ("ready", "warming", "cold", "unavailable"), m
+    # A keyed route through the same host refuses a request without a key.
+    prompt = {"model": "qwen3-8b", "messages": [{"role": "user", "content": "x"}]}
+    chat = caddy_get(stack, f"api.{DOMAIN}", "/v1/chat/completions", "POST", json=prompt)
+    assert chat.status_code == 401, f"api. POST /v1/chat/completions, no key: {chat.status_code}"
     for host in (DOMAIN, f"api.{DOMAIN}", f"hooks.{DOMAIN}"):
         with httpx.Client(timeout=30, trust_env=False, follow_redirects=False) as http:
             r = http.get(f"http://127.0.0.1:{stack.ports[80]}/", headers={"Host": host})

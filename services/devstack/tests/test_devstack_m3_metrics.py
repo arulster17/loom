@@ -83,6 +83,12 @@ SERIES: dict[str, tuple[str, str, set[str], dict[str, tuple[str, ...]]]] = {
     "loom_billing_stripe_retry_last_success_seconds": ("billing", "gauge", set(), {}),
 }
 COUNTERS = sorted(n for n, (_, kind, _, _) in SERIES.items() if kind == "counter")
+# Unlabelled gauges with no sample until their value exists (user decision 1.4,
+# 2026-11-19): §5.3 initialises counters only, and G3 treats missing data as breaching, so
+# the client-certificate expiry has no sample before a certificate loads. Its family is
+# still described from process start (HELP and TYPE in the exposition, the registry names
+# it); only the sample is not required on a bare `GatewayMetrics()`.
+SAMPLED_ONCE_LOADED = {"loom_gateway_client_cert_expiry_seconds"}
 
 
 # ---------------------------------------------------------------- alarms.tf
@@ -362,5 +368,12 @@ def test_the_owning_service_exports_it_with_its_labels(metric: str) -> None:
             assert re.search(sample, text, re.M), (
                 f'{metric}{{{label}="{value}"}} is not initialised at process start'
             )
-    if not labels:
+    if metric in SAMPLED_ONCE_LOADED:
+        assert re.search(rf"^# HELP {re.escape(metric)} ", text, re.M), (
+            f"{owner} does not describe {metric} (no HELP line)"
+        )
+        assert any(metric in names for names in reg._collector_to_names.values()), (
+            f"{metric}: no collector in the registry names it"
+        )
+    elif not labels:
         assert re.search(rf"^{re.escape(metric)} ", text, re.M), f"{metric} has no sample"

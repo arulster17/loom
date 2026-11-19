@@ -1,17 +1,17 @@
-"""m3-i in the acceptance container (M3 spec §10 m3-i, §6.12): it scans only the
-containers' logs and writes the canaries it planted to `--canaries-file` (default
-`/var/lib/loom/acceptance/canaries.json`, mode 0600, a JSON array of strings) for the
-host's CloudWatch scan. It calls no `aws` (the container has no AWS credentials, §4).
+"""m3-i in the acceptance container (M3 spec §10 m3-i, §6.12, user 2026-11-19): it scans
+the containers' logs only and writes **no** canaries file (nothing on the box reads one;
+the CloudWatch half is B26's, run by hand with the operator's credentials). It calls no
+`aws` (the container has no AWS credentials, §4).
 
 A fake `docker` on PATH answers M1's item i (`ps -aq`, `logs`, `inspect -f {{.Name}}`);
-a recording `aws` fails the test if it is called.
+a recording `aws` fails the test if it is called. The acceptance directory is pointed
+into the test's tmp directory (and the cwd too), so a file written there is seen.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import stat
 import sys
 from pathlib import Path
 
@@ -58,13 +58,22 @@ def tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         )
         p.chmod(0o755)
     monkeypatch.setenv("PATH", f"{b}:{os.environ.get('PATH', '/usr/bin:/bin')}")
+    (tmp_path / "acc").mkdir()
+    monkeypatch.setattr(m3, "ACCEPTANCE_DIR", tmp_path / "acc")
+    monkeypatch.chdir(tmp_path)
     return tmp_path
 
 
+def files(tmp: Path) -> set[str]:
+    """Every file under `tmp` but the recording `aws`'s own (checked on its own)."""
+    return {str(p.relative_to(tmp)) for p in tmp.rglob("*") if p.is_file()} - {"aws-called"}
+
+
+BOX_CANARIES = Path("/var/lib/loom/acceptance/canaries.json")
+
+
 def acceptance(tmp: Path) -> m3.M3Acceptance:
-    args = m3.parser().parse_args(
-        ["--domain", "example.test", "--canaries-file", str(tmp / "acc" / "canaries.json")]
-    )
+    args = m3.parser().parse_args(["--domain", "example.test"])
     acc = object.__new__(m3.M3Acceptance)
     acc.stack = Stack(
         web="https://example.test",
@@ -82,24 +91,35 @@ def acceptance(tmp: Path) -> m3.M3Acceptance:
     return acc
 
 
-def test_m3_i_writes_the_canaries_0600_and_calls_no_aws(tools: Path) -> None:
+def test_m3_i_scans_the_logs_writes_no_canaries_file_and_calls_no_aws(tools: Path) -> None:
+    before, on_box = files(tools), BOX_CANARIES.exists()
     res = ItemResult("m3-i", "logs")
     acceptance(tools).item_m3_i(res)
-    path = tools / "acc" / "canaries.json"
-    assert path.is_file(), "m3-i wrote no canaries file"
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600, oct(path.stat().st_mode)
-    data = json.loads(path.read_text())
-    assert isinstance(data, list) and set(data) == CANARIES, data
-    assert not (tools / "aws-called").exists(), "m3-i called aws in the container"
     assert res.numbers.get("hits") == {}, res.numbers
+    assert not (tools / "aws-called").exists(), "m3-i called aws in the container"
+    assert files(tools) == before, f"m3-i wrote files: {sorted(files(tools) - before)}"
+    assert BOX_CANARIES.exists() == on_box, f"m3-i wrote {BOX_CANARIES}"
 
 
-def test_a_canary_in_a_container_log_fails_and_the_file_is_still_written(tools: Path) -> None:
+@pytest.mark.parametrize("container", ["gateway", "billing"])
+def test_a_canary_in_a_container_log_fails_m3_i_and_no_file_is_written(
+    tools: Path, container: str
+) -> None:
     logs = tools / "logs.json"
     leaked = sorted(CANARIES)[0]
-    logs.write_text(json.dumps({"gateway": f"prompt {leaked} leaked\n"}))
+    logs.write_text(
+        json.dumps({"gateway": "ok\n", "billing": "ok\n", container: f"x {leaked} x\n"})
+    )
+    before = files(tools)
     with pytest.raises(AcceptanceError):
         acceptance(tools).item_m3_i(ItemResult("m3-i", "logs"))
-    path = tools / "acc" / "canaries.json"
-    assert set(json.loads(path.read_text())) == CANARIES
-    assert not (tools / "aws-called").exists()
+    assert not (tools / "aws-called").exists(), "m3-i called aws in the container"
+    assert files(tools) == before, f"m3-i wrote files: {sorted(files(tools) - before)}"
+
+
+def test_a_key_in_a_container_log_fails_m3_i(tools: Path) -> None:
+    """Keys are canaries too (§10 m3-i: no API key in any container's logs)."""
+    key = next(c for c in CANARIES if c.startswith("loom_sk_"))
+    (tools / "logs.json").write_text(json.dumps({"gateway": f"auth {key}\n"}))
+    with pytest.raises(AcceptanceError):
+        acceptance(tools).item_m3_i(ItemResult("m3-i", "logs"))
