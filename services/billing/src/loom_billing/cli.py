@@ -7,6 +7,7 @@
 | `api` | webhook + internal API only | 8090, metrics 9101 |
 | `stripe-stub` | local Stripe stand-in (never with real keys) | 12111 |
 | `batch-once` / `reconcile-once` / `partitions-once` | one run of that job (ops) | |
+| `stripe-event list|resolve` | stuck Stripe events (ops, spec §8.6) | |
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ from prometheus_client import start_http_server
 
 from loom_billing.api import create_app
 from loom_billing.logs import configure_logging
-from loom_billing.settings import BillingSettings
+from loom_billing.resolve import ResolveRefused, list_events, resolve_event
+from loom_billing.settings import BillingSettings, billing_conninfo
 from loom_billing.stripe_stub import create_stub_app
 from loom_billing.worker import Worker, redis_from_settings, run_worker
 from loom_platform.db import RoleCheckFailed, open_pool, role_gate
@@ -48,7 +50,7 @@ def _server(app: object, host: str, port: int) -> uvicorn.Server:
 
 
 async def _all(settings: BillingSettings) -> None:
-    pool = await open_pool(settings.database_url, max_size=10)
+    pool = await open_pool(billing_conninfo(settings.database_url), max_size=10)
     redis = redis_from_settings(settings)
     try:
         app = create_app(settings, pool=pool, redis=redis)
@@ -62,7 +64,7 @@ async def _all(settings: BillingSettings) -> None:
 
 
 async def _once(settings: BillingSettings, job: str) -> None:
-    pool = await open_pool(settings.database_url, max_size=2)
+    pool = await open_pool(billing_conninfo(settings.database_url), max_size=2)
     redis = redis_from_settings(settings)
     try:
         w = Worker(settings, pool, redis)
@@ -76,7 +78,70 @@ async def _once(settings: BillingSettings, job: str) -> None:
         await redis.aclose()
 
 
+def _stripe_event_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="loom-billing stripe-event",
+        description="Stuck Stripe events (docs/phase1-m3-spec.md §8.6): list them, or resolve one "
+        "by hand (audited; posts nothing).",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+    ls = sub.add_parser("list", help="stored events, newest first")
+    ls.add_argument("--unapplied", action="store_true", help="only events not applied")
+    rs = sub.add_parser("resolve", help="close a stuck event (posts nothing)")
+    rs.add_argument("event_id")
+    rs.add_argument("--admin-email", required=True, help="an existing user with role admin")
+    rs.add_argument("--reason", required=True, help="written to the audit log")
+    return parser
+
+
+async def _stripe_event(settings: BillingSettings, args: argparse.Namespace) -> int:
+    pool = await open_pool(billing_conninfo(settings.database_url), max_size=2)
+    try:
+        if args.action == "list":
+            for e in await list_events(pool, unapplied=args.unapplied):
+                stale = (
+                    f" stale {e['stale_reported_at']:%Y-%m-%d %H:%M}"
+                    if e["stale_reported_at"]
+                    else ""
+                )
+                err = f" errors={e['error_count']} {e['last_error']}" if e["last_error"] else ""
+                when = f"{e['received_at']:%Y-%m-%d %H:%M:%S}"
+                print(f"{e['id']}  {e['type']}  {when}  {e['result']}{stale}{err}")
+            return 0
+        try:
+            await resolve_event(
+                pool,
+                args.event_id,
+                admin_email=args.admin_email,
+                reason=args.reason,
+                settings=settings,
+            )
+        except ResolveRefused as e:
+            print(f"refused: {e.reason}", file=sys.stderr)
+            return 2
+        print(f"resolved {args.event_id}: nothing was posted")
+        return 0
+    finally:
+        await pool.close()
+
+
+def _stripe_event_main(argv: list[str]) -> int:
+    args = _stripe_event_parser().parse_args(argv)
+    configure_logging(os.environ.get("LOOM_LOG_LEVEL", "INFO"))
+    settings = BillingSettings()
+    enforce_environment(
+        settings, "loom-billing stripe-event", settings.production_problems(serves_api=False)
+    )
+    try:
+        code = asyncio.run(_stripe_event(settings, args))
+    except RoleCheckFailed:
+        return 2
+    return 2 if role_gate.failed else code
+
+
 def main(argv: list[str] | None = None) -> int:
+    if (argv if argv is not None else sys.argv[1:])[:1] == ["stripe-event"]:
+        return _stripe_event_main(list((argv if argv is not None else sys.argv[1:])[1:]))
     parser = argparse.ArgumentParser(prog="loom-billing", description=__doc__)
     parser.add_argument("command", nargs="?", default="all", choices=COMMANDS)
     args = parser.parse_args(argv)

@@ -102,6 +102,18 @@ class BillingSettings(PlatformSettings):
     # Content-Length or while streaming, before buffering more. Stripe events are a few KB.
     billing_max_body_bytes: PositiveInt = 262_144
 
+    # The Stripe webhook's Postgres part (spec §8.3): the pool wait of each transaction
+    # (a delivery, its second transaction, one retry attempt, resolve) and, inside each,
+    # `SET LOCAL lock_timeout` / `statement_timeout`. There is no overall deadline.
+    stripe_webhook_db_timeout_s: PositiveInt = 5
+    stripe_lock_timeout_ms: PositiveInt = 3000
+    stripe_statement_timeout_ms: PositiveInt = 5000
+    # An event unapplied this long since `received_at` is marked stale, once (S1a).
+    stripe_stale_after_s: PositiveInt = 900
+    # The product name (LOOM_BRAND_NAME): the Checkout line item is `<name> credits`,
+    # `API credits` when unset. Billing's worker never needs it.
+    brand_name: str | None = None
+
     # Local stub. Billing calls the stub at stripe_stub_url; the browser opens checkout
     # pages at stripe_stub_public_url; the stub posts webhooks to stripe_stub_webhook_url.
     stripe_stub_url: str = "http://localhost:12111"
@@ -112,6 +124,15 @@ class BillingSettings(PlatformSettings):
     stripe_stub_webhook_secret_file: Path | None = None
     stripe_stub_host: str = "0.0.0.0"
     stripe_stub_port: PositiveInt = 12111
+
+    @field_validator("brand_name", mode="before")
+    @classmethod
+    def _blank_name_is_unset(cls, v: object) -> object:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return v.strip() or None
+        return v
 
     @field_validator(
         "stripe_secret_key", "stripe_webhook_secret", "stripe_stub_webhook_secret", mode="before"
@@ -218,3 +239,25 @@ class BillingSettings(PlatformSettings):
 @lru_cache(maxsize=1)
 def get_billing_settings() -> BillingSettings:
     return BillingSettings()
+
+
+# Billing's own libpq keepalives (spec §8.3): a connection blackholed by an RDS failover
+# fails in seconds (idle 10 s + 2 probes 5 s apart; `tcp_user_timeout` in milliseconds)
+# instead of the kernel's ~15 minutes. Merged into billing's conninfo only;
+# `loom_platform.db` is unchanged.
+CONNINFO_KEEPALIVES = {
+    "keepalives": "1",
+    "keepalives_idle": "10",
+    "keepalives_interval": "5",
+    "keepalives_count": "2",
+    "tcp_user_timeout": "10000",
+}
+
+
+def billing_conninfo(database_url: str) -> str:
+    """`database_url` (URL or keyword form) as a keyword conninfo with the keepalives."""
+    from psycopg.conninfo import make_conninfo
+
+    from loom_platform.db import libpq_url
+
+    return make_conninfo(libpq_url(database_url), **CONNINFO_KEEPALIVES)

@@ -7,7 +7,7 @@
 | reconcile (credit, drift, notifications) | each minute at :35 |
 | partition upkeep | at start, then every LOOM_PARTITION_INTERVAL_S (a day) |
 | loom_credit_changed listener | continuously |
-| unapplied Stripe events re-run (webhooks.retry_unapplied) | each minute at :50 |
+| Stripe retry (webhooks.retry_unapplied) | once at start, then each minute at :50 |
 
 A failing job is logged and counted (`loom_billing_job_errors_total{job}`) and retried
 at its next tick; the consumer backs off up to 30 s while Postgres or Redis is down.
@@ -29,7 +29,7 @@ from loom_billing.consumer import UsageConsumer
 from loom_billing.notify import AutoRecharge, Notifier
 from loom_billing.partitions import ensure_partitions
 from loom_billing.reconcile import CreditListener, Reconciler
-from loom_billing.settings import BillingSettings
+from loom_billing.settings import BillingSettings, billing_conninfo
 from loom_billing.webhooks import retry_unapplied
 from loom_platform.db import open_pool
 from loom_platform.limiter import Limiter
@@ -124,7 +124,7 @@ class Worker:
         await self.reconciler.run()
 
     async def stripe_retry(self) -> None:
-        await retry_unapplied(self.pool)
+        await retry_unapplied(self.pool, settings=self.settings)
 
     async def run(self) -> None:
         s = self.settings
@@ -142,10 +142,11 @@ class Worker:
             tg.create_task(every("partitions", s.partition_interval_s, self.partitions))
             retry = every("stripe_retry", s.reconcile_interval_s, self.stripe_retry, offset_s=50)
             tg.create_task(retry)
+            tg.create_task(self.stripe_retry())  # once at start: S5 must not fire on a deploy
 
 
 async def run_worker(settings: BillingSettings) -> None:
-    pool = await open_pool(settings.database_url, max_size=8)
+    pool = await open_pool(billing_conninfo(settings.database_url), max_size=8)
     redis = redis_from_settings(settings)
     try:
         await Worker(settings, pool, redis).run()

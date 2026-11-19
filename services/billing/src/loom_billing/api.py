@@ -2,8 +2,15 @@
 
 - `POST /stripe/webhook`: Stripe (or the stub) delivers events. Signature verified on
   the raw body (`Stripe-Signature`, tolerance `LOOM_STRIPE_WEBHOOK_TOLERANCE_S`), then
-  `webhooks.handle_event` in one transaction. 400 on a bad signature or body; 200 once
-  stored (including replays); 500 if Postgres fails, so Stripe retries.
+  `webhooks.process_event` (spec §8.3). 413 over the body limit; 400 `bad_signature` (the
+  metric result says why: `bad_signature`, `signature_mismatch`, `stale_timestamp`) or
+  400 `bad_event`; 200 only after COMMIT returned (applied, stored unapplied, or a
+  duplicate); 500 `internal_error` when the Postgres part failed but the event was stored
+  with its error; 503 `service_unavailable` when nothing could be stored. Stripe retries
+  any non-2xx.
+- `GET /stripe/health`: 200 `{"listener":"stripe_webhook","status":"ok"}`, no
+  authentication and no Postgres, Redis or Stripe call: the Route 53 health check's target
+  (spec §8.5).
 - `POST /internal/checkout-sessions`: the web app asks for a Checkout session to add
   credit. Not public: `Authorization: Bearer $LOOM_BILLING_INTERNAL_TOKEN`, a shared
   secret between web and billing (the web app has already authenticated the user and
@@ -18,6 +25,7 @@ Errors use the OpenAI shape from `loom_platform.errors`.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -34,10 +42,10 @@ from redis.asyncio import Redis
 
 from loom_billing import metrics
 from loom_billing.logs import fields
-from loom_billing.settings import MICROS_PER_CENT, BillingSettings
+from loom_billing.settings import MICROS_PER_CENT, BillingSettings, billing_conninfo
 from loom_billing.stripe_api import StripeClient, StripeError, Transport, urllib_transport
-from loom_billing.stripe_sig import SignatureError, verify
-from loom_billing.webhooks import BadEvent, handle_event
+from loom_billing.stripe_sig import SignatureError, SignatureMismatch, StaleTimestamp, verify
+from loom_billing.webhooks import BadEvent, StoreFailed, process_event
 from loom_platform.db import open_pool
 from loom_platform.errors import ApiError
 from loom_platform.ledger import org_credit_state
@@ -74,7 +82,7 @@ def create_app(
         if shared:
             yield
             return
-        app.state.pool = await open_pool(settings.database_url, max_size=5)
+        app.state.pool = await open_pool(billing_conninfo(settings.database_url), max_size=5)
         app.state.redis = Redis.from_url(
             settings.redis_url,
             socket_timeout=settings.redis_read_timeout_s,
@@ -94,7 +102,7 @@ def create_app(
         app.state.redis = redis
         app.state.limiter = Limiter(redis, usage_stream=settings.usage_stream)
     base, key = settings.stripe_api()
-    stripe = StripeClient(base, key, transport=stripe_transport)
+    stripe = StripeClient(base, key, transport=stripe_transport, brand_name=settings.brand_name)
     secret = settings.webhook_secret()
 
     @app.exception_handler(ApiError)
@@ -132,20 +140,42 @@ def create_app(
                 tolerance_s=settings.stripe_webhook_tolerance_s,
             )
         except SignatureError as e:
-            metrics.WEBHOOKS.labels("bad_signature").inc()
-            log.warning("stripe.bad_signature", extra=fields(reason=str(e)))
+            # The metric result says why (alarms S2a, S2b); the answer is always the same.
+            result = (
+                "signature_mismatch"
+                if isinstance(e, SignatureMismatch)
+                else "stale_timestamp"
+                if isinstance(e, StaleTimestamp)
+                else "bad_signature"
+            )
+            metrics.WEBHOOKS.labels(result).inc()
+            log.warning("stripe.bad_signature", extra=fields(result=result, reason=str(e)))
             raise _error(400, "bad_signature", "Invalid Stripe signature.") from None
         try:
             event = json.loads(payload)
-            async with request.app.state.pool.connection() as conn, conn.transaction():
-                outcome = await handle_event(conn, event)
-        except (ValueError, BadEvent) as e:
+            # The shape check (BadEvent) comes first inside, before any transaction.
+            outcome = await process_event(request.app.state.pool, event, settings=settings)
+        except StoreFailed as e:
+            metrics.WEBHOOK_ERRORS.labels("503").inc()
+            log.error("stripe.webhook_unavailable", extra=fields(reason=str(e)))
+            raise _error(
+                503, "service_unavailable", "Could not store the event; retry.", "server_error"
+            ) from None
+        except (ValueError, BadEvent, RecursionError) as e:
             metrics.WEBHOOKS.labels("bad_event").inc()
             log.warning("stripe.bad_event", extra=fields(reason=str(e)))
             raise _error(400, "bad_event", "Unreadable or refused event.") from None
+        if outcome.stored_after_error:
+            metrics.WEBHOOK_ERRORS.labels("500").inc()
+            raise _error(500, "internal_error", "The event could not be applied.", "server_error")
         if outcome.result in ("credited", "refunded") and outcome.org_id is not None:
-            await _refresh_credit(request, outcome.org_id)
+            await _refresh_credit_soon(request, outcome.org_id)
         return JSONResponse({"received": True, "result": outcome.result})
+
+    @app.get("/stripe/health")
+    async def stripe_health() -> JSONResponse:
+        # Route 53's health check (spec §8.5): the listener answers, nothing else is looked at.
+        return JSONResponse({"listener": "stripe_webhook", "status": "ok"})
 
     @app.post("/internal/checkout-sessions")
     async def checkout(
@@ -217,6 +247,20 @@ async def read_body(request: Request, limit: int) -> bytes:
         if len(body) > limit:
             raise _error(413, "request_too_large", f"Body over {limit} bytes.")
     return bytes(body)
+
+
+# The credit refresh after COMMIT is awaited for at most this long, then left to finish in
+# the background (a frozen Redis delays the answer by at most this; the loom_credit_changed
+# listener and the minute's reconcile cover a refresh that fails). Not a setting.
+REFRESH_WAIT_S = 2.0
+_BACKGROUND: set[asyncio.Task[None]] = set()
+
+
+async def _refresh_credit_soon(request: Request, org_id: uuid.UUID) -> None:
+    task = asyncio.create_task(_refresh_credit(request, org_id))
+    _BACKGROUND.add(task)
+    task.add_done_callback(_BACKGROUND.discard)
+    await asyncio.wait({task}, timeout=REFRESH_WAIT_S)  # never cancels the task
 
 
 async def _refresh_credit(request: Request, org_id: uuid.UUID) -> None:

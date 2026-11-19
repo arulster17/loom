@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,6 +28,9 @@ Transport = Callable[[str, str, Mapping[str, str], bytes | None], Awaitable[tupl
 
 TIMEOUT_S = 20.0
 PURPOSE = "loom_credits"
+# An unpaid session stops being payable after this long (Stripe accepts 30 min at least).
+SESSION_TTL_S = 3600
+DEFAULT_PRODUCT = "API credits"
 
 
 async def urllib_transport(
@@ -81,13 +85,20 @@ def form_encode(params: Mapping[str, Any]) -> bytes:
 
 class StripeClient:
     def __init__(
-        self, api_base: str, secret_key: str, *, transport: Transport = urllib_transport
+        self,
+        api_base: str,
+        secret_key: str,
+        *,
+        transport: Transport = urllib_transport,
+        brand_name: str | None = None,
     ) -> None:
         if "_live_" in secret_key:
             raise ValueError("refusing a live Stripe key")
         self.api_base = api_base.rstrip("/")
         self.secret_key = secret_key
         self.transport = transport
+        # The line item's product name: `<name> credits` (LOOM_BRAND_NAME), else a neutral one.
+        self.product_name = f"{brand_name} credits" if brand_name else DEFAULT_PRODUCT
 
     async def create_checkout_session(
         self,
@@ -110,6 +121,9 @@ class StripeClient:
             "client_reference_id": str(org_id),
             "customer_email": customer_email,
             "metadata": meta,
+            "expires_at": int(time.time()) + SESSION_TTL_S,
+            # The customer always pays in USD (a non-USD session would be stored unapplied).
+            "adaptive_pricing": {"enabled": False},
             "payment_intent_data": {"metadata": meta},
             "line_items": [
                 {
@@ -117,7 +131,7 @@ class StripeClient:
                     "price_data": {
                         "currency": "usd",
                         "unit_amount": cents,
-                        "product_data": {"name": "Loom credits"},
+                        "product_data": {"name": self.product_name},
                     },
                 }
             ],

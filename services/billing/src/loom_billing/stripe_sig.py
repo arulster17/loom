@@ -20,6 +20,16 @@ class SignatureError(Exception):
     pass
 
 
+class StaleTimestamp(SignatureError):
+    """The HMAC is valid but `t` is outside the tolerance: a replay, or the box's clock
+    is off (a genuine retry carries a fresh signature)."""
+
+
+class SignatureMismatch(SignatureError):
+    """A well-formed header (`t` and at least one `v1`) with `t` within the tolerance, but
+    no `v1` matches: the secret on the box is not the endpoint's (or a forgery)."""
+
+
 def compute(payload: bytes, secret: str, timestamp: int) -> str:
     signed = str(timestamp).encode() + b"." + payload
     return hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
@@ -40,7 +50,10 @@ def verify(
     now: float | None = None,
 ) -> int:
     """Raise SignatureError unless `header` signs `payload` with `secret` within the
-    tolerance. Returns the signed timestamp."""
+    tolerance. Returns the signed timestamp. The subclasses say why: `StaleTimestamp`
+    (valid HMAC, `t` outside the tolerance) and `SignatureMismatch` (no `v1` matches while
+    `t` is current); anything else (a missing or malformed header, or no match with a
+    stale `t`) is a plain `SignatureError`."""
     if not header:
         raise SignatureError("missing Stripe-Signature header")
     timestamp: int | None = None
@@ -61,9 +74,12 @@ def verify(
     if not candidates:
         raise SignatureError("no v1 signature in Stripe-Signature")
     expected = compute(payload, secret, timestamp)
-    if not any(hmac.compare_digest(expected, c) for c in candidates):
-        raise SignatureError("signature does not match")
     current = time.time() if now is None else now
-    if abs(current - timestamp) > tolerance_s:
-        raise SignatureError("timestamp outside the tolerance window")
+    fresh = abs(current - timestamp) <= tolerance_s
+    if not any(hmac.compare_digest(expected, c) for c in candidates):
+        if fresh:
+            raise SignatureMismatch("signature does not match")
+        raise SignatureError("signature does not match")
+    if not fresh:
+        raise StaleTimestamp("timestamp outside the tolerance window")
     return timestamp
