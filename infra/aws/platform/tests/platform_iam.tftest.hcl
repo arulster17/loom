@@ -221,9 +221,13 @@ run "instance_role_grants_of_5_2" {
         contains(flatten([s.Action]), "secretsmanager:*")
         || contains(flatten([s.Action]), "secretsmanager:GetSecretValue")
       )
-      && contains(flatten([s.Resource]), aws_secretsmanager_secret.platform["serving-runpod-key"].arn)
+      && anytrue([
+        for r in flatten([s.Resource]) :
+        r == aws_secretsmanager_secret.platform["serving-runpod-key"].arn
+        || length(regexall("^arn:aws:secretsmanager:us-east-1:123456789012:secret:loom/platform/serving-runpod-key(-\\*|-\\?{6}|\\*)$", r)) > 0
+      ])
     ])
-    error_message = "The instance policy has a Deny of secretsmanager:* (or of actions including secretsmanager:GetSecretValue) on the serving-runpod-key secret's ARN, with no condition (§5.6); got ${aws_iam_role_policy.instance.policy}."
+    error_message = "The instance policy has a Deny of secretsmanager:* (or of actions including secretsmanager:GetSecretValue) on the serving-runpod-key secret, by its ARN or a wildcard name pattern (arn:aws:secretsmanager:us-east-1:123456789012:secret:loom/platform/serving-runpod-key-*, -??????, or *), with no condition (§5.6); got ${aws_iam_role_policy.instance.policy}."
   }
 
   assert {
