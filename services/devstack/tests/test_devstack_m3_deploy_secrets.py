@@ -7,7 +7,9 @@ Secrets Manager: the secret containers of §5.2 (`loom/platform/<name>`), each w
 without a value; it answers `get-secret-value` (ResourceNotFoundException for a container
 with no value, as AWS does), `describe-secret`, `list-secret-version-ids` and
 `put-secret-value` (`--secret-string` inline, or `file://...` such as
-`file:///dev/stdin`), and logs every call's argv.
+`file:///dev/stdin`), and logs every call's argv. Recording shims for `openssl` (which then
+runs the real one) and `docker` (which fails) are on PATH too, and their argv is scanned
+like `aws`'s. `loom-deploy` runs in a scratch working directory.
 
 `secrets init` generates the values Loom makes (internal-token, app-db-password,
 `auth.auth_secret`, the Redis password, CA and server certificate with SAN `redis`, the
@@ -31,6 +33,7 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -57,8 +60,8 @@ CONTAINERS = (
 GENERATED = ("internal-token", "app-db-password", "auth", "redis", "pod-ca", "poolmgr-client")
 USERS = ("stripe", "ses-smtp", "serving-runpod-key")
 
-FAKE_AWS = r"""#!__PYTHON__
-import json, os, re, sys, shutil
+FAKE_AWS = r"""#!__PYTHON__ -IS
+import json, os, re, sys
 D = os.environ["FAKE_AWS_DIR"]
 argv = sys.argv[1:]
 with open(os.path.join(D, "calls.jsonl"), "a") as f:
@@ -96,8 +99,16 @@ def fail(code, msg):
     sys.exit(254)
 
 def name_of(sid):
-    m = re.search(r"loom/platform/([a-z0-9-]+?)(-[A-Za-z0-9]{6})?$", sid)
-    return m.group(1) if m else sid
+    # A name (`loom/platform/poolmgr-client`) is taken as is; only a full ARN carries
+    # Secrets Manager's 6-character suffix (`...:secret:loom/platform/pod-ca-AbCdEf`).
+    m = re.search(r"loom/platform/([A-Za-z0-9-]+)$", sid)
+    if not m:
+        return sid
+    name = m.group(1)
+    if name in store or not sid.startswith("arn:"):
+        return name
+    s = re.fullmatch(r"(.+)-[A-Za-z0-9]{6}", name)
+    return s.group(1) if s else name
 
 if svc == "secretsmanager":
     sid = str(opts.get("secret-id", ""))
@@ -142,6 +153,22 @@ if svc == "sts":
 print("{}")
 """
 
+# Recording shims for the other tools `loom-deploy` may call: each logs its argv to
+# `<tool>.jsonl`; `openssl` then runs the real one (stdin and stdout pass through), `docker`
+# fails loudly (neither subcommand here needs it, and no test makes a real docker call).
+SHIM = r"""#!__PYTHON__ -IS
+import json, os, sys
+D = __DIR__  # fixed here, so a caller that passes openssl a bare environment is logged too
+with open(os.path.join(D, "__TOOL__.jsonl"), "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+REAL = __REAL__
+if REAL is None:
+    sys.stderr.write("fake __TOOL__: this test runs no real __TOOL__\n")
+    sys.exit(97)
+os.execv(REAL, [REAL, *sys.argv[1:]])
+"""
+SHIMS = ("openssl", "docker")
+
 
 class FakeAws:
     def __init__(self, root: Path, preset: dict[str, str | None] | None = None) -> None:
@@ -155,6 +182,26 @@ class FakeAws:
         aws = self.bin / "aws"
         aws.write_text(FAKE_AWS.replace("__PYTHON__", sys.executable))
         aws.chmod(0o755)
+        for tool in SHIMS:
+            real = shutil.which(tool) if tool == "openssl" else None  # the test's own PATH
+            shim = self.bin / tool
+            shim.write_text(
+                SHIM.replace("__PYTHON__", sys.executable)
+                .replace("__TOOL__", tool)
+                .replace("__DIR__", repr(str(self.dir)))
+                .replace("__REAL__", repr(real))
+            )
+            shim.chmod(0o755)
+
+    def tool_calls(self, tool: str) -> list[list[str]]:
+        p = self.dir / f"{tool}.jsonl"
+        return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+
+    def all_argv(self) -> str:
+        """Every recorded command line: aws's, openssl's and docker's."""
+        calls = [["aws", *c] for c in self.calls()]
+        calls += [[t, *c] for t in SHIMS for c in self.tool_calls(t)]
+        return "\n".join(" ".join(c) for c in calls)
 
     @property
     def store(self) -> dict[str, str | None]:
@@ -173,9 +220,9 @@ class FakeAws:
 def run_deploy(
     tmp: Path, fake: FakeAws, *args: str, stdin: str | None = None
 ) -> subprocess.CompletedProcess[str]:
-    home, tmpdir = tmp / "home", tmp / "tmp"
-    home.mkdir(exist_ok=True)
-    tmpdir.mkdir(exist_ok=True)
+    home, tmpdir, work = tmp / "home", tmp / "tmp", tmp / "work"
+    for d in (home, tmpdir, work):
+        d.mkdir(exist_ok=True)
     env = {
         "PATH": f"{fake.bin}:/usr/bin:/bin",
         "PYTHONPATH": str(SRC),
@@ -188,6 +235,7 @@ def run_deploy(
     return subprocess.run(
         [sys.executable, "-S", "-m", "loom_devstack.deploy", *args],
         env=env,
+        cwd=work,
         input=stdin if stdin is not None else "",
         capture_output=True,
         text=True,
@@ -213,18 +261,18 @@ def secret_strings(value: str) -> list[str]:
 
 
 def assert_nowhere(secrets: list[str], fake: FakeAws, proc: Any, tmp: Path) -> None:
-    argv = "\n".join(" ".join(c) for c in fake.calls())
+    argv = fake.all_argv()
     output = proc.stdout + proc.stderr
     left = [
         p.read_text(errors="replace")
-        for d in (tmp / "home", tmp / "tmp")
+        for d in (tmp / "home", tmp / "tmp", tmp / "work")
         for p in d.rglob("*")
         if p.is_file()
     ]
     for s in secrets:
-        assert s not in argv, "a secret value is on an aws command line"
+        assert s not in argv, "a secret value is on a command line (aws, openssl or docker)"
         assert s not in output, "loom-deploy printed a secret value"
-        assert not any(s in t for t in left), "a secret value was left in a file (HOME/TMPDIR)"
+        assert not any(s in t for t in left), "a secret value was left in a file (HOME/TMPDIR/cwd)"
 
 
 def field(value: str | None, key: str) -> str:
@@ -318,9 +366,13 @@ def test_init_never_overwrites_a_secret_that_has_a_value(tmp_path: Path) -> None
     fake = FakeAws(tmp_path, preset)
     proc = run_deploy(tmp_path, fake, "secrets", "init")
     assert "No module named" not in proc.stderr, proc.stderr
+    # Either reading of "refuses to overwrite" passes: skip the set secrets and generate the
+    # rest, or stop at the first set one with a non-zero exit that names it.
     asked = " ".join(" ".join(c) for c in fake.calls())
-    for name in preset:
-        assert f"loom/platform/{name}" in asked, f"init never looked at {name}"
+    looked = [n for n in preset if f"loom/platform/{n}" in asked]
+    said = proc.stdout + proc.stderr
+    refused = proc.returncode != 0 and any(n in said for n in preset)
+    assert looked or refused, "init neither looked up a set secret nor refused naming one"
     puts = fake.puts()
     for name, value in preset.items():
         assert name not in puts, f"init wrote {name}, which had a value"

@@ -130,9 +130,12 @@ def test_it_imports_and_runs_with_no_site_packages(tmp_path: Path) -> None:
     assert MODULE.is_file(), f"{MODULE.relative_to(ROOT)} does not exist"
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": str(SRC)}
     env["HOME"] = str(tmp_path)
+    # Only the modules the import itself loads count: `__main__`, `builtins` and whatever
+    # the interpreter loaded at start are in the snapshot taken before it.
     probe = (
-        "import sys, loom_devstack.deploy as d; "
-        "bad = sorted(m for m in sys.modules if m.split('.')[0] not in sys.stdlib_module_names"
+        "import sys; before = set(sys.modules); import loom_devstack.deploy as d; "
+        "bad = sorted(m for m in set(sys.modules) - before"
+        " if m.split('.')[0] not in sys.stdlib_module_names"
         " and m.split('.')[0] != 'loom_devstack'); print(bad); assert not bad, bad"
     )
     r = subprocess.run(

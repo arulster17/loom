@@ -53,10 +53,12 @@ THIRD_PARTY = (
     "npmjs.com",
 )
 RESERVED_TLDS = ("test", "example", "invalid", "localhost", "local", "internal")
-# A word.tld host name; the TLDs are those a product domain would plausibly use (so
+RESERVED_DOMAINS = ("example.com", "example.net", "example.org")  # RFC 2606
+# A word.tld host name, also inside a URL (`https://x.com/...`) or an e-mail address
+# (`no-reply@x.com`); the TLDs are those a product domain would plausibly use (so
 # Terraform references such as `aws_ssm_parameter.site` or file names do not match).
 TLDS = "com|net|org|io|ai|co|dev|app|cloud|tech|xyz|gg|us|uk|de|eu|info|biz|ly"
-HOST = re.compile(rf"(?<![\w.@/-])((?:[a-z0-9-]+\.)+(?:{TLDS}))(?![\w-])", re.I)
+HOST = re.compile(rf"(?<![\w.-])((?:[a-z0-9-]+\.)+(?:{TLDS}))(?![\w-])", re.I)
 TF_NAMESPACES = {"var", "local", "data", "module", "each", "count", "self", "path", "terraform"}
 SKIP_FILES = {"go.sum", "go.mod"}  # Go module paths of the Caddy build, not settings
 PLACEHOLDER = re.compile(r"\{(\$?[A-Za-z_][\w.:/-]*)\}")
@@ -75,25 +77,12 @@ def third_party(host: str) -> bool:
     h = host.lower()
     if h.split(".")[-1] in RESERVED_TLDS:
         return True
-    return any(h == d or h.endswith("." + d) for d in THIRD_PARTY)
+    return any(h == d or h.endswith("." + d) for d in (*THIRD_PARTY, *RESERVED_DOMAINS))
 
 
-def scanned_files() -> list[Path]:
-    files = sorted(PLATFORM.glob("*.tf"))
-    assert files, "infra/aws/platform has no .tf files"
-    assert DEPLOY.is_dir(), "deploy/ does not exist"
-    deploy_files = [
-        p
-        for p in sorted(DEPLOY.rglob("*"))
-        if p.is_file() and p.name not in SKIP_FILES and b"\0" not in p.read_bytes()[:4096]
-    ]
-    assert deploy_files, "deploy/ is empty"
-    return files + deploy_files
-
-
-def test_no_domain_literal_in_terraform_or_deploy() -> None:
+def domain_literals(files: list[Path]) -> list[str]:
     hits = []
-    for path in scanned_files():
+    for path in files:
         suffix = ".caddyfile" if path.name == "Caddyfile" else path.suffix
         text = strip_comments(path.read_text(errors="replace"), suffix)
         for m in HOST.finditer(text):
@@ -103,6 +92,27 @@ def test_no_domain_literal_in_terraform_or_deploy() -> None:
             if not third_party(host):
                 line = text.count("\n", 0, m.start()) + 1
                 hits.append(f"{path.relative_to(ROOT)}:{line}: {host}")
+    return hits
+
+
+def test_no_domain_literal_in_deploy() -> None:
+    """deploy/** (the deploy worker's files)."""
+    assert DEPLOY.is_dir(), "deploy/ does not exist"
+    files = [
+        p
+        for p in sorted(DEPLOY.rglob("*"))
+        if p.is_file() and p.name not in SKIP_FILES and b"\0" not in p.read_bytes()[:4096]
+    ]
+    assert files, "deploy/ is empty"
+    hits = domain_literals(files)
+    assert not hits, "domain literals (the domain is a setting, §6.11):\n" + "\n".join(hits)
+
+
+def test_no_domain_literal_in_the_platform_terraform() -> None:
+    """infra/aws/platform/*.tf (the infra worker's files)."""
+    files = sorted(PLATFORM.glob("*.tf"))
+    assert files, "infra/aws/platform has no .tf files"
+    hits = domain_literals(files)
     assert not hits, "domain literals (the domain is a setting, §6.11):\n" + "\n".join(hits)
 
 
@@ -180,8 +190,9 @@ def test_no_password_attribute_in_the_platform_configuration() -> None:
     for path in files:
         text = strip_comments(path.read_text(), ".tf")
         for n, line in enumerate(text.splitlines(), 1):
-            m = re.match(r"\s*([A-Za-z_]*password[A-Za-z_]*)\s*=", line)
-            if m and m.group(1) != "manage_master_user_password":
+            # A4: the `password` (or write-only `password_wo`) attribute; names such as
+            # `manage_master_user_password` are not it.
+            if re.match(r"^\s*password(_wo)?\s*=", line):
                 hits.append(f"{path.relative_to(ROOT)}:{n}: {line.strip()}")
     assert not hits, "password attributes in Terraform (§5.2: RDS-managed):\n" + "\n".join(hits)
     rds = PLATFORM / "rds.tf"

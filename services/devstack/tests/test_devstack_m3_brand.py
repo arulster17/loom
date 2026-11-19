@@ -96,20 +96,29 @@ def docstring_nodes(tree: ast.AST) -> set[int]:
     return ids
 
 
-def test_no_product_name_in_billing_and_platform_strings() -> None:
-    hits = []
-    for path in PY_FILES:
-        tree = ast.parse(path.read_text(), filename=str(path))
-        skip = docstring_nodes(tree)
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Constant)
-                and isinstance(node.value, str)
-                and id(node) not in skip
-                and NAME.search(without_header_names(node.value))
-            ):
-                hits.append(f"{path.relative_to(ROOT)}:{node.lineno}: {node.value[:120]!r}")
-    assert not hits, "user-facing `Loom` in billing / platform strings:\n" + "\n".join(hits)
+def python_hits(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    skip = docstring_nodes(tree)
+    return [
+        f"{path.relative_to(ROOT)}:{node.lineno}: {node.value[:120]!r}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in skip
+        and NAME.search(without_header_names(node.value))
+    ]
+
+
+def test_no_product_name_in_platform_errors() -> None:
+    """`loom_platform/errors.py` (the deploy worker's, §6.11)."""
+    hits = python_hits(PY_FILES[1])
+    assert not hits, "user-facing `Loom` in loom_platform/errors.py:\n" + "\n".join(hits)
+
+
+def test_no_product_name_in_billing_stripe_api() -> None:
+    """`loom_billing/stripe_api.py` (the Stripe worker's, §6.11)."""
+    hits = python_hits(PY_FILES[0])
+    assert not hits, "user-facing `Loom` in loom_billing/stripe_api.py:\n" + "\n".join(hits)
 
 
 def test_the_scan_sees_jsx_text_and_skips_comments_and_headers() -> None:

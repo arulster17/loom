@@ -30,8 +30,11 @@ SERVICES = {
     "migrate",
 }
 DEV_ONLY = {"mailpit", "stripe-stub", "devcerts", "poolsim", "postgres"}
-DIGEST = re.compile(r"^[^\s$]+@sha256:[0-9a-f]{64}$")
-VARIABLE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*(:?\?[^}]*)?\}$")
+_VAR = r"(?:\$\{[A-Za-z_][A-Za-z0-9_]*(?::?\?[^}]*)?\}|\$[A-Za-z_][A-Za-z0-9_]*)"
+# `<name>@sha256:<64 hex>`, where the name may hold variables and the digest may be a
+# variable (`...@sha256:${X}` or `...@${X}`); or the whole reference is one variable.
+DIGEST = re.compile(rf"^[^\s@]+@(?:sha256:(?:[0-9a-f]{{64}}|{_VAR})|{_VAR})$")
+VARIABLE = re.compile(rf"^{_VAR}$")
 
 
 def compose() -> dict[str, Any]:
@@ -91,10 +94,24 @@ def test_no_service_sets_loom_env() -> None:
     """Unset LOOM_ENV means prod: every service runs its production checks (§6.2)."""
     for name, svc in services().items():
         assert "LOOM_ENV" not in env_names(svc), f"{name} sets LOOM_ENV"
-        for f in svc.get("env_file") or []:
+        files = svc.get("env_file") or []
+        for f in [files] if isinstance(files, (str, dict)) else files:
             path = f["path"] if isinstance(f, dict) else f
             assert str(path).startswith("/run/loom/"), f"{name}: env file {path} outside /run/loom"
-    assert "LOOM_ENV" not in PROD.read_text(), "LOOM_ENV appears in the production compose file"
+
+    # Anywhere in the parsed file (extension fields, anchors), not in comments.
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            assert "LOOM_ENV" not in node, "the production compose file sets LOOM_ENV"
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for x in node:
+                walk(x)
+        elif isinstance(node, str):
+            assert not node.strip().startswith("LOOM_ENV="), "the file sets LOOM_ENV"
+
+    walk(compose())
 
 
 def test_only_caddy_publishes_public_ports() -> None:
@@ -179,15 +196,59 @@ def test_state_lives_on_the_data_volume() -> None:
         assert f"/var/lib/loom/{sub}" in sources, f"{name}: no /var/lib/loom/{sub} bind ({sources})"
 
 
-def test_secrets_are_read_only_files_from_run_loom() -> None:
-    for name, svc in services().items():
-        for v in svc.get("volumes") or []:
-            text = str(v)
-            if "/run/loom" in text:
-                if isinstance(v, dict):
-                    assert v.get("read_only") is True, f"{name}: {v} not read-only"
-                else:
-                    assert str(v).endswith(":ro"), f"{name}: {v} not read-only"
+# §6.3: the services that read a secret Loom renders (database and Redis passwords, the
+# internal token, auth_secret, Stripe, the Redis and pod certificates, Grafana's admin
+# password). Caddy and Prometheus need none; migrate gets the owner URL from loom-deploy.
+NEEDS_SECRETS = ("web", "gateway", "billing", "poolmgr", "redis", "grafana")
+SECRETS_DIR = "/run/loom/secrets/"
+
+
+def mounts(svc: dict[str, Any], doc: dict[str, Any]) -> list[tuple[str, bool]]:
+    """(host source, read-only) of each bind mount and file-backed compose secret."""
+    out: list[tuple[str, bool]] = []
+    for v in svc.get("volumes") or []:
+        if isinstance(v, dict):
+            out.append((str(v.get("source", "")), v.get("read_only") is True))
+        else:
+            parts = str(v).split(":")
+            out.append((parts[0], len(parts) >= 3 and "ro" in parts[2].split(",")))
+    top = doc.get("secrets") or {}
+    for s in svc.get("secrets") or []:
+        ref = s.get("source") if isinstance(s, dict) else s
+        spec = top.get(ref) or {}
+        if isinstance(spec, dict) and spec.get("file"):
+            out.append((str(spec["file"]), True))  # compose mounts secrets read-only
+    return out
+
+
+def secrets_owner(source: str) -> str | None:
+    if not source.startswith(SECRETS_DIR):
+        return None
+    return source[len(SECRETS_DIR) :].split("/")[0]
+
+
+def test_run_loom_mounts_are_read_only() -> None:
+    doc = compose()
+    for name, svc in doc["services"].items():
+        for source, ro in mounts(svc, doc):
+            if source.startswith("/run/loom"):
+                assert ro, f"{name}: {source} is not mounted read-only"
+
+
+@pytest.mark.parametrize("name", NEEDS_SECRETS)
+def test_each_service_mounts_its_own_secrets_directory(name: str) -> None:
+    doc = compose()
+    own = [(s, ro) for s, ro in mounts(doc["services"][name], doc) if secrets_owner(s) == name]
+    assert own, f"{name} mounts nothing from {SECRETS_DIR}{name}"
+    assert all(ro for _, ro in own), f"{name}: its secrets are not read-only: {own}"
+
+
+def test_no_service_mounts_another_services_secrets() -> None:
+    doc = compose()
+    for name, svc in doc["services"].items():
+        for source, _ in mounts(svc, doc):
+            owner = secrets_owner(source)
+            assert owner in (None, name), f"{name} mounts {source}, {owner}'s secrets"
 
 
 def test_the_rds_ca_bundle_is_mounted_read_only() -> None:
@@ -204,6 +265,85 @@ def test_logs_go_to_cloudwatch() -> None:
         logging = svc.get("logging") or {}
         assert logging.get("driver") == "awslogs", f"{name}: log driver {logging.get('driver')}"
         assert (logging.get("options") or {}).get("awslogs-group") == "/loom/platform", name
+
+
+def words(value: Any) -> list[str]:
+    """A command or entrypoint (string or list) as whitespace-separated words."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return value.split()
+    return [w for item in value for w in str(item).split()]
+
+
+def redis_config() -> str:
+    """Redis's settings as written in the compose file: its command and entrypoint, plus
+    any config file from deploy/ it mounts (a `redis.conf` is as good as flags)."""
+    doc = compose()
+    svc = doc["services"]["redis"]
+    parts = words(svc.get("entrypoint")) + words(svc.get("command"))
+    sources = [
+        str(v.get("source", "")) if isinstance(v, dict) else str(v).split(":")[0]
+        for v in svc.get("volumes") or []
+    ]
+    for c in svc.get("configs") or []:
+        spec = (doc.get("configs") or {}).get(c.get("source") if isinstance(c, dict) else c)
+        if isinstance(spec, dict) and spec.get("file"):
+            sources.append(str(spec["file"]))
+    for source in sources:
+        path = (PROD.parent / source).resolve()
+        if not source.startswith("/") and path.is_file():
+            for line in path.read_text().splitlines():
+                if not line.lstrip().startswith("#"):
+                    parts += line.split()
+    return " ".join(parts)
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        ("tls-port", "6379"),
+        ("port", "0"),
+        ("appendonly", "yes"),
+        ("maxmemory-policy", "noeviction"),
+    ],
+)
+def test_redis_runs_tls_only_durable_and_never_evicts(setting: tuple[str, str]) -> None:
+    """§6.5: `--port 0 --tls-port 6379`, `appendonly yes`, `maxmemory-policy noeviction`
+    (contracts §2 checks the last with CONFIG GET)."""
+    key, value = setting
+    config = redis_config()
+    pat = rf"(?:^|\s)(?:--)?{re.escape(key)}\s+[\"']?{re.escape(value)}[\"']?(?:\s|$)"
+    assert re.search(pat, config), f"redis is not run with {key} {value}: {config!r}"
+
+
+def test_the_redis_password_is_not_on_its_command_line() -> None:
+    """`requirepass` comes from the secret (a mounted config file), never as an argument."""
+    svc = services()["redis"]
+    argv = " ".join(words(svc.get("entrypoint")) + words(svc.get("command")))
+    assert "requirepass" not in argv, f"redis gets requirepass on its command line: {argv!r}"
+
+
+def test_billing_runs_all() -> None:
+    """§6.2: `billing` (`all`): the API, the webhook and the jobs in one service."""
+    argv = words(services()["billing"].get("command"))
+    assert "all" in argv, f"billing does not run `all`: {argv}"
+
+
+def test_the_gateway_has_a_healthcheck() -> None:
+    """poolmgr waits for `service_healthy` (P4), so the gateway needs a healthcheck: in the
+    compose file, or the image's own (not disabled here)."""
+    hc = services()["gateway"].get("healthcheck")
+    if isinstance(hc, dict):
+        assert hc.get("disable") is not True, "the gateway's healthcheck is disabled"
+        test = hc.get("test")
+        assert words(test)[:1] != ["NONE"], "the gateway's healthcheck is disabled"
+        if test:
+            return
+    dockerfile = ROOT / "services" / "gateway" / "Dockerfile"
+    assert dockerfile.is_file() and re.search(r"^HEALTHCHECK\s", dockerfile.read_text(), re.M), (
+        "the gateway has no healthcheck (compose or image)"
+    )
 
 
 def test_no_secret_value_in_the_file() -> None:

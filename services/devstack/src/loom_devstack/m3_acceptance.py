@@ -420,18 +420,14 @@ class M3Acceptance(m1.Acceptance):
 
     def item_m3_p(self, res: ItemResult) -> None:
         log = Path(self.args.deploy_log)
-        check(log.is_file(), f"no deploy log at {log}")
+        check(log.is_file(), f"no deploy log at {log} (--deploy-log)")
         lines = log.read_text().splitlines()
-        gw = next((i for i, x in enumerate(lines) if re.search(r"gateway\b.*\bhealthy", x)), None)
-        update = re.compile(r"\b(up|updat\w*|start\w*)\b.*\bpoolmgr")
-        pm = next((i for i, x in enumerate(lines) if update.search(x)), None)
-        check(
-            gw is not None and pm is not None,
-            "the deploy log names no gateway health or poolmgr update",
-        )
-        assert gw is not None and pm is not None
-        check(gw < pm, f"poolmgr updated (line {pm + 1}) before the gateway was healthy ({gw + 1})")
-        res.numbers["deploy_log_lines"] = {"gateway_healthy": gw + 1, "poolmgr_update": pm + 1}
+        gw, pm, gh = p4_log_order(lines, self.args.release)
+        res.numbers["deploy_log_lines"] = {
+            "gateway_update": gw + 1,
+            "gateway_healthy": gh + 1,
+            "poolmgr_update": pm + 1,
+        }
         if not self.args.p4_release:
             raise AcceptanceError("--p4-release (a release newer than the gateway's) not given")
         poolmgr = m1.container(self.stack, "poolmgr")
@@ -534,6 +530,63 @@ class M3Acceptance(m1.Acceptance):
         nums["routes_checked"] = len(expect) + 2
 
 
+_HEALTHY = re.compile(r"\bhealthy\b", re.I)
+_NOT_HEALTHY = re.compile(r"\b(unhealthy|not|wait\w*|until)\b", re.I)
+_UPDATE = re.compile(r"\b(up|updat\w*|start\w*|recreat\w*)\b", re.I)
+
+
+def p4_log_order(lines: list[str], release: str | None) -> tuple[int, int, int]:
+    """(gateway update, poolmgr update, gateway healthy) line indexes of the release's
+    apply, checking P4: the pool manager is updated only after a record that the gateway
+    the same apply updated is healthy.
+
+    The log's format is not fixed by the spec (an assumption: one line per step naming the
+    service, as `loom-deploy` prints them). The release's apply starts at the last line
+    naming the release with `apply` (else its first mention); a plan line (naming `plan`,
+    or both services) is not a step. The poolmgr update is the first after that start, the
+    gateway update the last before it, and a gateway-healthy record must lie between."""
+    start = 0
+    if release:
+        sha = release[:7]
+        named = [i for i, x in enumerate(lines) if sha in x]
+        check(bool(named), f"the deploy log never names release {sha}")
+        applies = [i for i in named if re.search(r"\bapply\b", lines[i], re.I)]
+        start = applies[-1] if applies else named[0]
+
+    def step(i: int, svc: str) -> bool:
+        x = lines[i]
+        if re.search(r"\bplan\b", x, re.I) or ("gateway" in x and "poolmgr" in x):
+            return False
+        return bool(re.search(rf"\b{svc}\b", x))
+
+    def updates(i: int, svc: str) -> bool:
+        return step(i, svc) and bool(_UPDATE.search(lines[i])) and not _HEALTHY.search(lines[i])
+
+    pm = next((i for i in range(start, len(lines)) if updates(i, "poolmgr")), None)
+    check(pm is not None, "the deploy log shows no poolmgr update for the release")
+    assert pm is not None
+    gw = next((i for i in range(pm - 1, start - 1, -1) if updates(i, "gateway")), None)
+    check(gw is not None, f"no gateway update before the poolmgr update (line {pm + 1})")
+    assert gw is not None
+    gh = next(
+        (
+            i
+            for i in range(gw, pm)
+            if step(i, "gateway")
+            and _HEALTHY.search(lines[i])
+            and not _NOT_HEALTHY.search(lines[i])
+        ),
+        None,
+    )
+    check(
+        gh is not None,
+        f"poolmgr updated (line {pm + 1}) with no record that the gateway updated at line "
+        f"{gw + 1} was healthy",
+    )
+    assert gh is not None
+    return gw, pm, gh
+
+
 def run(acc: M3Acceptance, items: list[str], report: Report) -> None:
     order = [i for i in (*BOX_ITEMS, *EXTERNAL_ITEMS) if i in items]
     try:
@@ -582,7 +635,12 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--gateway-metrics", default="http://gateway:9100/metrics")
     p.add_argument("--billing-metrics", default="http://billing:9101/metrics")
     p.add_argument("--webhook-secret-file", help="the endpoint's signing secret (m3-g)")
-    p.add_argument("--deploy-log", default="/var/lib/loom/deploy.log")
+    p.add_argument(
+        "--deploy-log",
+        default="/var/lib/loom/deploy.log",
+        help="loom-deploy's log, read by m3-p (the default path is an assumption: the spec "
+        "does not fix where loom-deploy logs)",
+    )
     p.add_argument("--deploy-cmd", default="loom-deploy")
     p.add_argument("--p4-release", help="a release with a newer poolmgr than the gateway's")
     p.add_argument("--log-group", default="/loom/platform")
