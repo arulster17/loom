@@ -1,0 +1,5 @@
+# Copy to backend.hcl (gitignored), then: terraform init -backend-config=backend.hcl
+# The bucket is the `state_bucket` output of infra/aws/state.
+bucket = "REPLACE-with-the-state-bucket-name"
+key    = "loom/platform/terraform.tfstate"
+region = "us-east-1"
