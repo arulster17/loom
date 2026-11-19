@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { signInWithGoogle } from "@/app/actions";
 import { auth, googleEnabled } from "@/auth";
 import { btnSecondary } from "@/components/ui";
+import { brandName } from "@/lib/brand";
 
 import { EmailForm } from "./email-form";
 
@@ -13,7 +14,7 @@ const ERRORS: Record<string, string> = {
   Verification: "That sign-in link has expired or was already used. Ask for a new one.",
   OAuthAccountNotLinked: "That email already signs in another way. Use the email link.",
   AccessDenied: "Sign-in was refused.",
-  Configuration: "Sign-in is not configured correctly. Tell the Loom team.",
+  Configuration: "Sign-in is not configured correctly. Tell an administrator.",
 };
 
 export default async function SignInPage(props: PageProps<"/signin">) {
@@ -23,7 +24,7 @@ export default async function SignInPage(props: PageProps<"/signin">) {
 
   return (
     <main className="mx-auto flex min-h-screen max-w-sm flex-col justify-center px-6">
-      <h1 className="text-2xl font-semibold tracking-tight">Loom</h1>
+      <h1 className="text-2xl font-semibold tracking-tight">{brandName() ?? "Sign in"}</h1>
       <p className="mt-1 text-sm text-zinc-600">
         Sign in or create an account. New accounts are reviewed by a person before they can make API calls; approved
         accounts start with $5 of free credit.

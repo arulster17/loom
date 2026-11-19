@@ -1,12 +1,20 @@
 import type { Metadata } from "next";
 import { connection } from "next/server";
 
+import { brandName } from "@/lib/brand";
+
 import "./globals.css";
 
-export const metadata: Metadata = {
-  title: { default: "Loom", template: "%s · Loom" },
-  description: "Open-model inference with published benchmarks and per-request costs.",
-};
+// The title carries the product name (LOOM_BRAND_NAME, M3 spec §6.11), read for each
+// request; without it a page shows only its own title.
+export async function generateMetadata(): Promise<Metadata> {
+  await connection();
+  const brand = brandName();
+  return {
+    title: brand ? { default: brand, template: `%s · ${brand}` } : { default: "Open-model inference", template: "%s" },
+    description: "Open-model inference with published benchmarks and per-request costs.",
+  };
+}
 
 export default async function RootLayout({ children }: LayoutProps<"/">) {
   // Every page renders per request, so its scripts carry that request's CSP nonce

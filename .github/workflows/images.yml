@@ -1,0 +1,141 @@
+# Builds the Loom images (arm64: the box is a Graviton instance), pushes them to ECR by
+# digest and uploads the release manifest and the deploy bundle to the releases bucket
+# (docs/phase1-m3-spec.md §6.1, §6.12, §15 D1).
+#
+# Manual dispatch only, on a commit of `main`: the AWS role trusts the GitHub environment
+# `platform-images` (deployment branches: main only, set in the repository's settings, see
+# docs/runbook-platform.md) and no other workflow names that environment. Repository
+# variables (not secrets; nothing here is a credential):
+#   LOOM_IMAGES_ROLE_ARN    the OIDC role `infra/aws/platform` creates (ECR push, S3 put)
+#   LOOM_RELEASES_BUCKET    the releases bucket (Terraform's `releases_bucket` output)
+# No third-party action is used besides the pinned checkout: the OIDC exchange is the
+# documented STS call, so no unpinned code ever holds the role's credentials.
+name: images
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: images
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  AWS_DEFAULT_REGION: us-east-1
+
+jobs:
+  images:
+    runs-on: ubuntu-24.04-arm
+    environment: platform-images
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Check the pinned RDS CA bundle
+        run: cd deploy && sha256sum --check global-bundle.pem.sha256
+
+      - name: AWS credentials (OIDC, short-lived)
+        env:
+          ROLE_ARN: ${{ vars.LOOM_IMAGES_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          test -n "$ROLE_ARN" || { echo "repository variable LOOM_IMAGES_ROLE_ARN is not set"; exit 1; }
+          jwt=$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          echo "::add-mask::$jwt"
+          creds=$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" \
+            --role-session-name "loom-images-$GITHUB_RUN_ID" --web-identity-token "$jwt" \
+            --duration-seconds 3600 --query Credentials --output json)
+          key=$(jq -r .AccessKeyId <<<"$creds")
+          secret=$(jq -r .SecretAccessKey <<<"$creds")
+          session=$(jq -r .SessionToken <<<"$creds")
+          echo "::add-mask::$secret"
+          echo "::add-mask::$session"
+          {
+            echo "AWS_ACCESS_KEY_ID=$key"
+            echo "AWS_SECRET_ACCESS_KEY=$secret"
+            echo "AWS_SESSION_TOKEN=$session"
+          } >> "$GITHUB_ENV"
+
+      - name: Log in to ECR
+        run: |
+          set -euo pipefail
+          account=$(aws sts get-caller-identity --query Account --output text)
+          registry="$account.dkr.ecr.$AWS_REGION.amazonaws.com"
+          echo "REGISTRY=$registry" >> "$GITHUB_ENV"
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
+
+      - name: Build and push the images
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # <repository> <Dockerfile> <build context>. Tags are the git sha (immutable);
+          # an image already pushed for this commit is reused, not rebuilt.
+          build() {
+            repo=$1; dockerfile=$2; context=$3
+            image="$REGISTRY/loom/$repo"
+            if aws ecr describe-images --repository-name "loom/$repo" \
+                 --image-ids "imageTag=$GITHUB_SHA" >/dev/null 2>&1; then
+              digest=$(aws ecr describe-images --repository-name "loom/$repo" \
+                --image-ids "imageTag=$GITHUB_SHA" --query 'imageDetails[0].imageDigest' --output text)
+            else
+              docker buildx build --platform linux/arm64 --provenance=false \
+                --file "$dockerfile" --tag "$image:$GITHUB_SHA" \
+                --metadata-file "out/$repo.meta.json" --push "$context"
+              digest=$(jq -r '."containerimage.digest"' "out/$repo.meta.json")
+            fi
+            test -n "$digest" && test "$digest" != null
+            echo "$repo=$image@$digest" >> out/images.txt
+          }
+          : > out/images.txt
+          build gateway services/gateway/Dockerfile .
+          build billing services/billing/Dockerfile .
+          build web apps/web/Dockerfile .
+          build poolmgr services/poolmgr/Dockerfile .
+          build devstack services/devstack/Dockerfile .
+          build caddy deploy/caddy/Dockerfile deploy/caddy
+          cat out/images.txt
+
+      - name: Release manifest and bundle
+        env:
+          RELEASES_BUCKET: ${{ vars.LOOM_RELEASES_BUCKET }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASES_BUCKET" || { echo "repository variable LOOM_RELEASES_BUCKET is not set"; exit 1; }
+          sha=$GITHUB_SHA
+          ref() { grep "^$1=" out/images.txt | cut -d= -f2-; }
+          # A third-party image exactly as compose.prod.yml pins it (the first `image:` of its service).
+          pinned() {
+            awk -v svc="  $1:" '$0 == svc {on=1; next} on && /^  [a-z]/ {on=0} on && $1 == "image:" {print $2; exit}' \
+              deploy/compose.prod.yml
+          }
+          # The bundle: the deploy/ directory's files at the archive's root.
+          (cd deploy && find . -type f -printf '%P\n' | sort \
+            | tar --no-recursion --mtime=@0 --owner=0 --group=0 --numeric-owner -czf ../out/deploy.tar.gz -T -)
+          tar -tzf out/deploy.tar.gz | grep -qx compose.prod.yml
+          migrations=$(find services/platform_common/src/loom_platform/migrations -name '*.sql' | wc -l)
+          jq -n \
+            --arg sha "$sha" \
+            --arg gateway "$(ref gateway)" --arg billing "$(ref billing)" --arg web "$(ref web)" \
+            --arg poolmgr "$(ref poolmgr)" --arg devstack "$(ref devstack)" --arg caddy "$(ref caddy)" \
+            --arg redis "$(pinned redis)" --arg prometheus "$(pinned prometheus)" --arg grafana "$(pinned grafana)" \
+            --argjson migrations "$migrations" \
+            --arg compose_sha "$(sha256sum deploy/compose.prod.yml | cut -d' ' -f1)" \
+            --arg bundle_sha "$(sha256sum out/deploy.tar.gz | cut -d' ' -f1)" \
+            '{sha: $sha,
+              images: {gateway: $gateway, billing: $billing, web: $web, poolmgr: $poolmgr,
+                       migrate: $devstack, caddy: $caddy,
+                       redis: $redis, prometheus: $prometheus, grafana: $grafana},
+              migrations: $migrations,
+              compose: {path: "releases/\($sha)/compose.prod.yml", sha256: $compose_sha},
+              bundle: {path: "releases/\($sha)/deploy.tar.gz", sha256: $bundle_sha}}' \
+            > out/manifest.json
+          cat out/manifest.json
+          # The files first, the manifest last: a manifest names only files that exist.
+          aws s3 cp deploy/compose.prod.yml "s3://$RELEASES_BUCKET/releases/$sha/compose.prod.yml"
+          aws s3 cp out/deploy.tar.gz "s3://$RELEASES_BUCKET/releases/$sha/deploy.tar.gz"
+          aws s3 cp services/devstack/src/loom_devstack/deploy.py "s3://$RELEASES_BUCKET/releases/$sha/loom-deploy.py"
+          aws s3 cp out/manifest.json "s3://$RELEASES_BUCKET/releases/$sha.json"

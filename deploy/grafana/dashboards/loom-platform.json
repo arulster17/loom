@@ -1,0 +1,85 @@
+{
+  "uid": "loom-platform",
+  "title": "Loom platform",
+  "tags": ["loom"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Requests by HTTP status (per second)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "loom-prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{status}}",
+        "expr": "sum by (status) (rate(loom_gateway_requests_total[5m]))" } ]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "API errors by code (per second)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "loom-prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{code}}",
+        "expr": "sum by (code) (rate(loom_gateway_errors_total[5m]))" } ]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Gateway overhead before dispatch, p50 and p99",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "loom-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "p50",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(loom_gateway_overhead_seconds_bucket{phase=\"pre_dispatch\"}[5m])))" },
+        { "refId": "B", "legendFormat": "p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(loom_gateway_overhead_seconds_bucket{phase=\"pre_dispatch\"}[5m])))" }
+      ]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Settle spool depth and failures",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "loom-prometheus" },
+      "targets": [
+        { "refId": "A", "legendFormat": "spool depth", "expr": "loom_gateway_settle_spool_depth" },
+        { "refId": "B", "legendFormat": "settle failures (per minute)",
+          "expr": "60 * rate(loom_gateway_settle_failures_total[5m])" }
+      ]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Stripe webhook outcomes (per minute)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "loom-prometheus" },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{result}}",
+          "expr": "60 * sum by (result) (rate(loom_billing_stripe_webhooks_total[15m]))" },
+        { "refId": "B", "legendFormat": "5xx {{status}}",
+          "expr": "60 * sum by (status) (rate(loom_billing_stripe_webhook_errors_total[15m]))" },
+        { "refId": "C", "legendFormat": "handler failure {{path}}",
+          "expr": "60 * sum by (path) (rate(loom_billing_stripe_handler_failures_total[15m]))" }
+      ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Serving pods by model and state",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "loom-prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{model}} {{state}}",
+        "expr": "loom_poolmgr_pods" } ]
+    },
+    {
+      "id": 7, "type": "stat", "title": "Pod CA and gateway client certificate, days left",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "loom-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "d", "decimals": 1 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "pod CA", "expr": "loom_poolmgr_ca_expiry_seconds / 86400" },
+        { "refId": "B", "legendFormat": "gateway client certificate",
+          "expr": "loom_gateway_client_cert_expiry_seconds / 86400" }
+      ]
+    },
+    {
+      "id": 8, "type": "stat", "title": "Scrape targets up",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "loom-prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{job}}", "expr": "up" } ]
+    }
+  ]
+}

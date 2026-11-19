@@ -1,0 +1,93 @@
+# Loom's public routes (docs/phase1-m3-spec.md §6.7, §8.5, A37). Mounted from the release
+# bundle at /etc/caddy/Caddyfile; the image does not carry it.
+#
+# Settings, rendered by loom-deploy into env/caddy.env (§6.11, §6.12):
+#   LOOM_DOMAIN      the domain: three sites, <domain>, api.<domain>, hooks.<domain>
+#   LOOM_CADDY_TLS   the argument of each site's `tls` directive: the ops email on the box
+#                    (Let's Encrypt contact), `internal` in the local production stack (A15)
+#   LOOM_ACME_CA     optional; the ACME directory. Unset: Let's Encrypt production. The
+#                    first issuance sets it to the staging directory (runbook-platform.md).
+#
+# No domain is written here. Caddy trusts no proxy (its default), so X-Forwarded-For holds
+# only the client's address, which is what the web app's sign-in limit reads (contracts §2).
+
+{
+	# The per-client limit of the api. site (caddy-ratelimit, pinned in deploy/caddy/go.mod).
+	order rate_limit before basicauth
+
+	acme_ca {$LOOM_ACME_CA:https://acme-v02.api.letsencrypt.org/directory}
+}
+
+(common) {
+	# TLS 1.2 and up, certificates on the data volume (/data).
+	tls {$LOOM_CADDY_TLS} {
+		protocols tls1.2 tls1.3
+	}
+	header Strict-Transport-Security "max-age=31536000"
+}
+
+# Dashboard, playground, admin, sign-in.
+{$LOOM_DOMAIN} {
+	import common
+	reverse_proxy web:3000
+}
+
+# The public API: /v1/* only. Streams are not buffered; no read or write timeout is set,
+# so none is shorter than the gateway's 600 s request timeout; a request that cannot
+# connect while the gateway restarts waits up to 15 s instead of failing.
+api.{$LOOM_DOMAIN} {
+	import common
+
+	@v1 path /v1/*
+	handle @v1 {
+		# 1 MiB + 1 KiB (the gateway's own limit is 1 MiB).
+		request_body {
+			max_size 1049600
+		}
+		# 600 requests a minute per client address, in front of the gateway (§15 D2).
+		rate_limit {
+			zone api_per_client {
+				key {remote_host}
+				events 600
+				window 1m
+			}
+		}
+		reverse_proxy gateway:8080 {
+			flush_interval -1
+			lb_try_duration 15s
+			lb_try_interval 250ms
+		}
+	}
+	handle {
+		respond 404
+	}
+}
+
+# Stripe's endpoint and its health check, nothing else: billing's /internal/* and /health
+# are never routed. The body passes through byte for byte (the signature covers it): no
+# request encoding or rewriting.
+hooks.{$LOOM_DOMAIN} {
+	import common
+
+	@webhook {
+		method POST
+		path /stripe/webhook
+	}
+	@health {
+		method GET
+		path /stripe/health
+	}
+	handle @webhook {
+		# Billing's own limit (256 KiB).
+		request_body {
+			max_size 256KiB
+		}
+		reverse_proxy billing:8090
+	}
+	handle @health {
+		reverse_proxy billing:8090
+	}
+	handle {
+		respond 404
+	}
+}

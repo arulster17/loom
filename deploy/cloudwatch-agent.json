@@ -1,0 +1,102 @@
+{
+  "agent": {
+    "metrics_collection_interval": 60,
+    "run_as_user": "root"
+  },
+  "metrics": {
+    "namespace": "Loom/Platform",
+    "append_dimensions": {},
+    "metrics_collected": {
+      "disk": {
+        "measurement": ["used_percent"],
+        "resources": ["/", "/var/lib/loom"],
+        "metrics_collection_interval": 60
+      },
+      "mem": {
+        "measurement": ["mem_used_percent"],
+        "metrics_collection_interval": 60
+      }
+    }
+  },
+  "logs": {
+    "metrics_collected": {
+      "prometheus": {
+        "prometheus_config_path": "/opt/aws/amazon-cloudwatch-agent/etc/loom-prometheus.yml",
+        "log_group_name": "/loom/platform/prometheus",
+        "emf_processor": {
+          "metric_namespace": "Loom/Platform",
+          "metric_unit": {},
+          "metric_declaration": [
+            {
+              "source_labels": ["job"],
+              "label_matcher": "^(gateway|billing|poolmgr)$",
+              "dimensions": [["job"]],
+              "metric_selectors": ["^up$"]
+            },
+            {
+              "source_labels": ["job"],
+              "label_matcher": "^poolmgr$",
+              "dimensions": [["result"], ["model", "result"]],
+              "metric_selectors": ["^loom_poolmgr_creates_total$"]
+            },
+            {
+              "source_labels": ["job"],
+              "label_matcher": "^poolmgr$",
+              "dimensions": [["reason"], ["model", "reason"]],
+              "metric_selectors": ["^loom_poolmgr_pool_reason$"]
+            },
+            {
+              "source_labels": ["job"],
+              "label_matcher": "^poolmgr$",
+              "dimensions": [[]],
+              "metric_selectors": ["^loom_poolmgr_ca_expiry_seconds$"]
+            },
+            {
+              "source_labels": ["job"],
+              "label_matcher": "^gateway$",
+              "dimensions": [[]],
+              "metric_selectors": [
+                "^loom_gateway_settle_spool_depth$",
+                "^loom_gateway_settle_failures_total$",
+                "^loom_gateway_client_cert_expiry_seconds$"
+              ]
+            },
+            {
+              "source_labels": ["job"],
+              "label_matcher": "^billing$",
+              "dimensions": [["type"]],
+              "metric_selectors": ["^loom_billing_stripe_unapplied_stale_total$"]
+            },
+            {
+              "source_labels": ["job"],
+              "label_matcher": "^billing$",
+              "dimensions": [[]],
+              "metric_selectors": [
+                "^loom_billing_stripe_unapplied_stale_events$",
+                "^loom_billing_stripe_retry_last_success_seconds$"
+              ]
+            },
+            {
+              "source_labels": ["job"],
+              "label_matcher": "^billing$",
+              "dimensions": [["result"]],
+              "metric_selectors": ["^loom_billing_stripe_webhooks_total$"]
+            },
+            {
+              "source_labels": ["job"],
+              "label_matcher": "^billing$",
+              "dimensions": [["status"]],
+              "metric_selectors": ["^loom_billing_stripe_webhook_errors_total$"]
+            },
+            {
+              "source_labels": ["job"],
+              "label_matcher": "^billing$",
+              "dimensions": [["path"]],
+              "metric_selectors": ["^loom_billing_stripe_handler_failures_total$"]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

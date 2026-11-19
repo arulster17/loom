@@ -17,7 +17,7 @@ export default async function KeysPage() {
   return (
     <>
       <PageHeader title="API keys">
-        Keys authenticate your API calls. Loom stores only a hash, so a key is shown once, when you create it. A spend
+        Keys authenticate your API calls. Only a hash of each key is stored, so a key is shown once, when you create it. A spend
         limit stops a key once it has spent that much in total.
       </PageHeader>
       <Card title="Create a key">

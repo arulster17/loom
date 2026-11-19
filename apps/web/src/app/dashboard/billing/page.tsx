@@ -15,7 +15,7 @@ const KIND_LABEL = {
   purchase: "Credit purchase",
   promo: "Free credit",
   refund: "Refund",
-  adjustment: "Adjustment by Loom",
+  adjustment: "Adjustment by an admin",
 } as const;
 
 export default async function BillingPage(props: PageProps<"/dashboard/billing">) {
@@ -28,7 +28,7 @@ export default async function BillingPage(props: PageProps<"/dashboard/billing">
   return (
     <>
       <PageHeader title="Billing">
-        Loom is prepaid: you add credit, and each request is charged from it at the listed per-token price.
+        Credit is prepaid: you add credit, and each request is charged from it at the listed per-token price.
       </PageHeader>
       {checkout === "success" && landed ? (
         <div className="mb-6">
@@ -62,7 +62,7 @@ export default async function BillingPage(props: PageProps<"/dashboard/billing">
         <Card title="Add credit">
           {manage ? null : <p className="mb-3 text-sm text-zinc-600">Only org owners and admins can buy credit.</p>}
           <AddCreditForm disabled={!manage} />
-          <p className="mt-3 text-xs text-zinc-500">You pay on a Stripe checkout page; Loom never sees your card.</p>
+          <p className="mt-3 text-xs text-zinc-500">You pay on a Stripe checkout page; your card details never reach this site.</p>
         </Card>
       </div>
       <Card title="Auto-recharge" className="mt-6">

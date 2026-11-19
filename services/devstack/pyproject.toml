@@ -24,6 +24,8 @@ loom-mockpod = "loom_devstack.mockpod:main"
 loom-loadtest = "loom_devstack.loadtest:main"
 loom-m1-acceptance = "loom_devstack.acceptance:main"
 loom-m2-acceptance = "loom_devstack.m2_acceptance:main"
+loom-m3-acceptance = "loom_devstack.m3_acceptance:main"
+loom-deploy = "loom_devstack.deploy:main"
 
 [build-system]
 requires = ["hatchling>=1.25"]

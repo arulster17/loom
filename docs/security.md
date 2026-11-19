@@ -275,6 +275,57 @@ specs and provenance in full: keep credentials out of experiment files. The wait
 has a honeypot field and stays disabled until a backend is configured
 ([site.md](site.md#waitlist-endpoint)).
 
+## Phase 1 control plane (M3)
+
+The production stack on one EC2 box and RDS (design: [phase1-m3-spec.md](phase1-m3-spec.md)
+§4-§6; operation: [runbook-platform.md](runbook-platform.md)). The backend is still the
+mock; no RunPod credential is on the box.
+
+- **Exposure.** Only 80 and 443 are open (security group), both to Caddy. Caddy routes
+  three host names: the apex to the web app, `api.<domain>` to the gateway's `/v1/*` only,
+  `hooks.<domain>` to billing's `POST /stripe/webhook` and `GET /stripe/health` only;
+  anything else is a 404. `/internal/*`, `/health`, `/metrics`, Prometheus, Grafana, Redis
+  and Postgres are not reachable from outside; the metrics ports, Prometheus and Grafana
+  are bound to `127.0.0.1` and reached with SSM port forwarding. There is no SSH and no key
+  pair: the operator uses SSM. HTTP redirects to HTTPS; HSTS for a year on all three
+  names; TLS 1.2 and up. The per-client request limit (600 a minute) is Caddy's, in front
+  of the gateway; Caddy trusts no proxy, so `X-Forwarded-For` holds only the client's
+  address.
+- **IMDS.** IMDSv2 is required with a hop limit of 1, so containers cannot reach the
+  instance role's credentials (checked by m3-x). Only host processes use the role:
+  `loom-deploy`, the Docker daemon's `awslogs` driver, the CloudWatch and SSM agents.
+  Containers get no AWS credentials at all; the acceptance container has the Docker socket
+  (it is the only service that does) and none for AWS.
+- **Secrets as files.** Secrets live in Secrets Manager and reach a container only as
+  files `loom-deploy` renders at each deploy under `/run/loom` (a tmpfs, checked before
+  anything is written; `0400` files in `0500` directories owned by the container's uid,
+  mounted read-only into the one service that needs them) and as env files for settings
+  that have no `*_FILE` form (`0400`, owned by root, read by compose, never mounted).
+  Nothing secret is on a command line, in a compose file, in the release manifest or in a
+  log; secrets go to `aws` and `docker login` on stdin. A reboot empties `/run/loom`, so a
+  restarted box serves nothing until `loom-deploy apply` re-renders them (fail closed).
+  The instance role cannot read the serving RunPod key (explicit deny); `loom-deploy`
+  never names it.
+- **Database.** Every service connects to RDS as the runtime login `loom_app` (not a
+  superuser, owns no table) with `sslmode=verify-full` and the pinned RDS CA bundle;
+  `loom-deploy` refuses to render any other URL. Only the one-shot `migrate` container has
+  the RDS master user `loom_owner` (whose password is RDS-managed and never in Terraform
+  state). RDS forces TLS and is reachable from the instance's security group only.
+- **Redis.** TLS only (no plaintext port) with a password and a CA that `loom-deploy
+  secrets init` generated; `appendonly yes`, `noeviction`; not published.
+- **Pod PKI.** The pod CA (2 years) and the pool manager's client certificate are secrets
+  of the poolmgr container only; the gateway holds the CA's certificate (never its key)
+  and a client certificate the pool manager rotates daily (7-day validity).
+- **Images and releases.** Images are built by one manual workflow on `main`, pushed to ECR
+  through a short-lived OIDC role (ECR push and S3 put only; trusted for one GitHub
+  environment), referenced only by digest, and recorded in a release manifest whose sha256
+  checks `loom-deploy` makes before it runs anything. Third-party images are pinned by
+  digest in the compose file. The Caddy build pins Caddy and its rate-limit module in
+  `go.mod`/`go.sum`.
+- **Logs.** The `awslogs` driver ships container logs to `/loom/platform` (30 days). No
+  prompt, completion or API key is logged (m3-i scans the containers' logs and, on the
+  host, CloudWatch).
+
 ## Phase 1 requirements (future, not built)
 
 From the build spec, to apply when the platform is built:
