@@ -1,9 +1,20 @@
 """`deploy/compose.prod.yml`, the production stack on the box (M3 spec §6.2, A14).
 
-Parsed, not run (A15 runs it). Images are referenced only by digest: a literal
-`<name>@sha256:<64 hex>` (third-party images such as Redis), or a variable `loom-deploy`
-fills from the release manifest (the Loom images, built per commit, §6.1) with no default
-tag.
+Parsed, not run (A15 runs it). §6.12 fixes the rest of its interface:
+
+- images by digest: the Loom images only as `${LOOM_IMAGE_<NAME>:?...}` (filled from the
+  release manifest through `compose.env`; `migrate` and `acceptance` both the devstack
+  image), the third-party ones (Redis, Prometheus, Grafana) as a literal
+  `<name>@sha256:<64 hex>`;
+- bind-mount sources on the box as `${LOOM_DEPLOY_ROOT:-}/run/loom/...` and
+  `${LOOM_DEPLOY_ROOT:-}/var/lib/loom/...` (the prefix is empty on the box; tests set a
+  scratch root), and each service's env file `${LOOM_DEPLOY_ROOT:-}/run/loom/env/<svc>.env`;
+- `acceptance` (profile `acceptance`): the devstack image, the docker socket (the only
+  service that mounts it), `deploy.log` read-only, `/var/lib/loom/acceptance` read-write,
+  no AWS credentials;
+- the Caddyfile comes from the bundle (mounted at `/etc/caddy/Caddyfile`, not baked into
+  the image), and the Caddy image is built from `deploy/caddy/` (its `go.mod`/`go.sum` pin
+  the rate-limit module).
 """
 
 from __future__ import annotations
@@ -17,6 +28,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 PROD = ROOT / "deploy" / "compose.prod.yml"
+ROOT_VAR = "${LOOM_DEPLOY_ROOT:-}"
 
 SERVICES = {
     "caddy",
@@ -28,7 +40,20 @@ SERVICES = {
     "prometheus",
     "grafana",
     "migrate",
+    "acceptance",
 }
+ONE_SHOT = {"migrate": "migrate", "acceptance": "acceptance"}  # service -> its profile
+LOOM_IMAGES = {
+    "gateway": "GATEWAY",
+    "billing": "BILLING",
+    "web": "WEB",
+    "poolmgr": "POOLMGR",
+    "migrate": "DEVSTACK",
+    "acceptance": "DEVSTACK",
+    "caddy": "CADDY",
+}
+THIRD_PARTY = ("redis", "prometheus", "grafana")
+ENV_SERVICES = ("caddy", "web", "gateway", "billing", "poolmgr", "migrate", "acceptance")
 DEV_ONLY = {"mailpit", "stripe-stub", "devcerts", "poolsim", "postgres"}
 _VAR = r"(?:\$\{[A-Za-z_][A-Za-z0-9_]*(?::?\?[^}]*)?\}|\$[A-Za-z_][A-Za-z0-9_]*)"
 # `<name>@sha256:<64 hex>`, where the name may hold variables and the digest may be a
@@ -46,6 +71,16 @@ def compose() -> dict[str, Any]:
 
 def services() -> dict[str, dict[str, Any]]:
     return compose()["services"]
+
+
+def split_volume(spec: str) -> list[str]:
+    """A short-syntax volume split on `:`, the `${LOOM_DEPLOY_ROOT:-}` prefix kept whole."""
+    return [p.replace("\0", ROOT_VAR) for p in spec.replace(ROOT_VAR, "\0").split(":")]
+
+
+def host_path(source: str) -> str:
+    """A bind source or env file as the path on the box (the prefix is empty there)."""
+    return source.removeprefix(ROOT_VAR)
 
 
 def env_names(svc: dict[str, Any]) -> set[str]:
@@ -83,10 +118,11 @@ def test_the_services_are_the_production_set() -> None:
     assert not names & DEV_ONLY
 
 
-def test_migrate_runs_only_in_its_profile() -> None:
-    assert services()["migrate"].get("profiles") == ["migrate"]
+def test_the_one_shot_services_run_only_in_their_profiles() -> None:
+    for name, profile in ONE_SHOT.items():
+        assert services()[name].get("profiles") == [profile], f"{name} profiles"
     for name, svc in services().items():
-        if name != "migrate":
+        if name not in ONE_SHOT:
             assert not svc.get("profiles"), f"{name} is in a profile: it would not start"
 
 
@@ -128,7 +164,7 @@ def test_no_service_sets_loom_env() -> None:
     for name, svc in services().items():
         assert "LOOM_ENV" not in env_names(svc), f"{name} sets LOOM_ENV"
         for path in env_files(svc):
-            if path.startswith("/run/loom/"):
+            if host_path(path).startswith("/run/loom/"):
                 continue
             local = (PROD.parent / path).resolve()
             if path.startswith("/") or not local.is_file():
@@ -178,19 +214,28 @@ def test_metrics_prometheus_and_grafana_only_on_loopback() -> None:
     for name, port in want.items():
         assert ("127.0.0.1", port) in port_specs(svcs[name]), f"{name} metrics {port}"
     assert ("127.0.0.1", 3001) in port_specs(svcs["grafana"]), "grafana on 127.0.0.1:3001"
-    for name in ("web", "redis", "migrate"):
+    for name in ("web", "redis", "migrate", "acceptance"):
         assert not port_specs(svcs[name]), f"{name} publishes a port"
 
 
 @pytest.mark.parametrize("name", sorted(SERVICES))
 def test_images_by_digest(name: str) -> None:
+    """§6.12: a Loom image is exactly `${LOOM_IMAGE_<NAME>:?<message>}` (compose fails when
+    compose.env does not set it); a third-party one a literal `name@sha256:<64 hex>`."""
     svc = services()[name]
     assert "build" not in svc, f"{name} builds on the box"
     image = str(svc.get("image", ""))
-    assert DIGEST.match(image) or VARIABLE.match(image), (
-        f"{name}: image {image!r} is neither name@sha256:<digest> nor a required variable"
-    )
-    assert ":-" not in image, f"{name}: image variable with a default ({image})"
+    if name in LOOM_IMAGES:
+        var = LOOM_IMAGES[name]
+        assert re.fullmatch(rf"\$\{{LOOM_IMAGE_{var}:\?[^}}]*\}}", image), (
+            f"{name}: image {image!r} is not ${{LOOM_IMAGE_{var}:?...}}"
+        )
+    else:
+        assert name in THIRD_PARTY
+        assert re.fullmatch(r"[^\s@$]+@sha256:[0-9a-f]{64}", image), (
+            f"{name}: image {image!r} is not a literal name@sha256:<digest>"
+        )
+    assert DIGEST.match(image) or VARIABLE.match(image)
 
 
 def test_gateway_stops_gracefully_and_everything_restarts() -> None:
@@ -198,7 +243,7 @@ def test_gateway_stops_gracefully_and_everything_restarts() -> None:
     grace = str(svcs["gateway"].get("stop_grace_period"))
     assert grace in ("30s", "30"), f"gateway stop_grace_period {grace}"
     for name, svc in svcs.items():
-        if name == "migrate":
+        if name in ONE_SHOT:
             continue
         assert svc.get("restart") == "unless-stopped", f"{name} restart {svc.get('restart')}"
 
@@ -214,6 +259,7 @@ def test_poolmgr_starts_after_a_healthy_gateway() -> None:
 
 
 def bind_sources(svc: dict[str, Any]) -> list[tuple[str, str]]:
+    """(source as written, target) of each volume; named volumes as `volume:<name>`."""
     out = []
     for v in svc.get("volumes") or []:
         if isinstance(v, dict):
@@ -222,8 +268,8 @@ def bind_sources(svc: dict[str, Any]) -> list[tuple[str, str]]:
             elif v.get("type") == "volume":
                 out.append((f"volume:{v.get('source')}", str(v["target"])))
         else:
-            src, _, rest = str(v).partition(":")
-            out.append((src, rest.split(":")[0]))
+            parts = split_volume(str(v))
+            out.append((parts[0], parts[1] if len(parts) > 1 else parts[0]))
     return out
 
 
@@ -237,32 +283,47 @@ def test_state_lives_on_the_data_volume() -> None:
         "prometheus": "prometheus",
     }.items():
         sources = [s for s, _ in bind_sources(svcs[name])]
-        assert f"/var/lib/loom/{sub}" in sources, f"{name}: no /var/lib/loom/{sub} bind ({sources})"
+        want = f"{ROOT_VAR}/var/lib/loom/{sub}"
+        assert want in sources, f"{name}: no {want} bind ({sources})"
 
 
 # §6.3: the services that read a secret Loom renders (database and Redis passwords, the
 # internal token, auth_secret, Stripe, the Redis and pod certificates, Grafana's admin
-# password). Caddy and Prometheus need none; migrate gets the owner URL from loom-deploy.
-NEEDS_SECRETS = ("web", "gateway", "billing", "poolmgr", "redis", "grafana")
+# password; the acceptance's Redis CA and webhook secret, §6.12). Caddy and Prometheus
+# need none; migrate gets the owner URL from its env file.
+NEEDS_SECRETS = ("web", "gateway", "billing", "poolmgr", "redis", "grafana", "acceptance")
 SECRETS_DIR = "/run/loom/secrets/"
 
 
 def mounts(svc: dict[str, Any], doc: dict[str, Any]) -> list[tuple[str, bool]]:
-    """(host source, read-only) of each bind mount and file-backed compose secret."""
+    """(host source on the box, read-only) of each bind mount and file-backed compose
+    secret; the `${LOOM_DEPLOY_ROOT:-}` prefix is dropped (it is empty on the box)."""
     out: list[tuple[str, bool]] = []
     for v in svc.get("volumes") or []:
         if isinstance(v, dict):
-            out.append((str(v.get("source", "")), v.get("read_only") is True))
+            out.append((host_path(str(v.get("source", ""))), v.get("read_only") is True))
         else:
-            parts = str(v).split(":")
-            out.append((parts[0], len(parts) >= 3 and "ro" in parts[2].split(",")))
+            parts = split_volume(str(v))
+            out.append((host_path(parts[0]), len(parts) >= 3 and "ro" in parts[2].split(",")))
     top = doc.get("secrets") or {}
     for s in svc.get("secrets") or []:
         ref = s.get("source") if isinstance(s, dict) else s
         spec = top.get(ref) or {}
         if isinstance(spec, dict) and spec.get("file"):
-            out.append((str(spec["file"]), True))  # compose mounts secrets read-only
+            out.append((host_path(str(spec["file"])), True))  # compose mounts secrets ro
     return out
+
+
+def raw_sources(svc: dict[str, Any], doc: dict[str, Any]) -> list[str]:
+    """Every host path a service names as written: bind sources, file-backed secrets and
+    env files."""
+    out = [s for s, _ in bind_sources(svc) if not s.startswith("volume:")]
+    top = doc.get("secrets") or {}
+    for s in svc.get("secrets") or []:
+        spec = top.get(s.get("source") if isinstance(s, dict) else s) or {}
+        if isinstance(spec, dict) and spec.get("file"):
+            out.append(str(spec["file"]))
+    return out + env_files(svc)
 
 
 def secrets_owner(source: str) -> str | None:
@@ -271,12 +332,46 @@ def secrets_owner(source: str) -> str | None:
     return source[len(SECRETS_DIR) :].split("/")[0]
 
 
+def test_box_paths_carry_the_deploy_root_prefix() -> None:
+    """§6.12: a source under /run/loom or /var/lib/loom is written
+    `${LOOM_DEPLOY_ROOT:-}/...`, so a test can move the whole box under a scratch root."""
+    doc = compose()
+    seen = 0
+    for name, svc in doc["services"].items():
+        for raw in raw_sources(svc, doc):
+            path = host_path(raw)
+            if path.startswith(("/run/loom", "/var/lib/loom")):
+                seen += 1
+                assert raw.startswith(ROOT_VAR + "/"), f"{name}: {raw} lacks {ROOT_VAR}"
+    assert seen, "no source under /run/loom or /var/lib/loom: the check would be vacuous"
+
+
 def test_run_loom_mounts_are_read_only() -> None:
     doc = compose()
+    checked: set[str] = set()
     for name, svc in doc["services"].items():
         for source, ro in mounts(svc, doc):
             if source.startswith("/run/loom"):
+                checked.add(name)
                 assert ro, f"{name}: {source} is not mounted read-only"
+    missing = set(NEEDS_SECRETS) - checked
+    assert not missing, f"no /run/loom mount found for {sorted(missing)}: nothing was checked"
+
+
+def test_each_service_reads_its_own_env_file() -> None:
+    """§6.12: `env_file` `${LOOM_DEPLOY_ROOT:-}/run/loom/env/<svc>.env`, never mounted."""
+    doc = compose()
+    for name in ENV_SERVICES:
+        want = f"{ROOT_VAR}/run/loom/env/{name}.env"
+        assert want in env_files(doc["services"][name]), (
+            f"{name}: env_file {env_files(doc['services'][name])}, not {want}"
+        )
+    for name, svc in doc["services"].items():
+        for path in env_files(svc):
+            if host_path(path).startswith("/run/loom/env/"):
+                assert host_path(path) == f"/run/loom/env/{name}.env", f"{name} reads {path}"
+        for source, _ in mounts(svc, doc):
+            assert not source.startswith("/run/loom/env"), f"{name} mounts {source}"
 
 
 @pytest.mark.parametrize("name", NEEDS_SECRETS)
@@ -297,11 +392,79 @@ def test_no_service_mounts_another_services_secrets() -> None:
 
 def test_the_rds_ca_bundle_is_mounted_read_only() -> None:
     svcs = services()
-    for name in ("gateway", "billing", "web", "poolmgr", "migrate"):
+    for name in ("gateway", "billing", "web", "poolmgr", "migrate", "acceptance"):
         mounts = [str(v) for v in svcs[name].get("volumes") or []]
         hit = [m for m in mounts if "/etc/loom/rds-ca.pem" in m]
         assert hit, f"{name} does not mount the RDS CA at /etc/loom/rds-ca.pem"
         assert all(m.endswith(":ro") or "'read_only': True" in m for m in hit), hit
+
+
+DOCKER_SOCKET = ("/var/run/docker.sock", "/run/docker.sock")
+
+
+def volume_specs(svc: dict[str, Any]) -> list[tuple[str, str, bool]]:
+    """(host source on the box, target, read-only) of each volume entry."""
+    out = []
+    for v in svc.get("volumes") or []:
+        if isinstance(v, dict):
+            src = host_path(str(v.get("source", "")))
+            out.append((src, str(v.get("target", "")), v.get("read_only") is True))
+        else:
+            parts = split_volume(str(v))
+            ro = len(parts) >= 3 and "ro" in parts[2].split(",")
+            out.append((host_path(parts[0]), parts[1] if len(parts) > 1 else parts[0], ro))
+    return out
+
+
+def test_only_the_acceptance_service_mounts_the_docker_socket() -> None:
+    for name, svc in services().items():
+        socket = [
+            (s, t) for s, t, _ in volume_specs(svc) if s in DOCKER_SOCKET or t in DOCKER_SOCKET
+        ]
+        if name == "acceptance":
+            assert socket, "acceptance does not mount the docker socket"
+        else:
+            assert not socket, f"{name} mounts the docker socket {socket}"
+
+
+def test_the_acceptance_service() -> None:
+    """§6.12: the deploy log read-only, its own directory read-write, no AWS credentials."""
+    svc = services()["acceptance"]
+    vols = {t: (s, ro) for s, t, ro in volume_specs(svc)}
+    log = vols.get("/var/lib/loom/deploy.log")
+    assert log == ("/var/lib/loom/deploy.log", True), f"deploy.log mount {log}"
+    acc = vols.get("/var/lib/loom/acceptance")
+    assert acc == ("/var/lib/loom/acceptance", False), f"/var/lib/loom/acceptance mount {acc}"
+    aws_env = [n for n in env_names(svc) if n.startswith("AWS_")]
+    assert not aws_env, f"acceptance gets AWS settings {aws_env}"
+    assert not any(".aws" in s or ".aws" in t for s, t, _ in volume_specs(svc)), (
+        "acceptance mounts AWS credentials"
+    )
+
+
+def test_the_caddyfile_comes_from_the_bundle() -> None:
+    """§6.12: compose mounts the bundle's Caddyfile (beside compose.prod.yml) at
+    /etc/caddy/Caddyfile, read-only; the image does not carry it."""
+    hits = [
+        (s, ro) for s, t, ro in volume_specs(services()["caddy"]) if t == "/etc/caddy/Caddyfile"
+    ]
+    assert len(hits) == 1, f"caddy mounts at /etc/caddy/Caddyfile: {hits}"
+    source, ro = hits[0]
+    assert not source.startswith(("/", "$", "~")), f"the Caddyfile {source} is not the bundle's"
+    assert (PROD.parent / source).resolve() == (PROD.parent / "Caddyfile").resolve(), source
+    assert ro, "the Caddyfile is not mounted read-only"
+
+
+def test_the_caddy_image_is_built_from_deploy_caddy() -> None:
+    """§6.7, §6.12: `deploy/caddy/Dockerfile`, build context `deploy/caddy/`, whose
+    `go.mod` and `go.sum` pin the rate-limit module by version."""
+    d = ROOT / "deploy" / "caddy"
+    for f in ("Dockerfile", "go.mod", "go.sum"):
+        assert (d / f).is_file(), f"deploy/caddy/{f} does not exist"
+    gomod = (d / "go.mod").read_text()
+    pin = re.search(r"^\s*(?:require\s+)?(\S*ratelimit\S*)\s+(v\d\S*)", gomod, re.M | re.I)
+    assert pin, "deploy/caddy/go.mod does not pin a rate-limit module by version"
+    assert pin.group(1) in (d / "go.sum").read_text(), "go.sum does not hold the module"
 
 
 def test_logs_go_to_cloudwatch() -> None:

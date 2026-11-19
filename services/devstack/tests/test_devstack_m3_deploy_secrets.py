@@ -15,8 +15,9 @@ working directory.
 
 `secrets init` generates the values Loom makes (internal-token, app-db-password,
 `auth.auth_secret`, the Redis password, CA and server certificate with SAN `redis`, the
-pod CA valid 2 years, the manager's client certificate) and never overwrites a secret
-that has a value; it writes none of the user's (stripe, ses-smtp, serving-runpod-key).
+pod CA valid 2 years, the manager's client certificate, `grafana.admin_password`, §6.12)
+and never overwrites a secret that has a value; it writes none of the user's (stripe,
+ses-smtp) and no `aws` call it makes names `serving-runpod-key` (§6.3, §5.6).
 Nothing secret is on a command line or in its output, and no file with a secret is left
 behind (its HOME and TMPDIR are scanned).
 
@@ -57,9 +58,18 @@ CONTAINERS = (
     "pod-ca",
     "poolmgr-client",
     "ses-smtp",
+    "grafana",
     "serving-runpod-key",
 )
-GENERATED = ("internal-token", "app-db-password", "auth", "redis", "pod-ca", "poolmgr-client")
+GENERATED = (
+    "internal-token",
+    "app-db-password",
+    "auth",
+    "redis",
+    "pod-ca",
+    "poolmgr-client",
+    "grafana",
+)
 USERS = ("stripe", "ses-smtp", "serving-runpod-key")
 
 FAKE_AWS = r"""#!__PYTHON__ -IS
@@ -346,9 +356,11 @@ def test_init_generates_the_values_loom_makes(tmp_path: Path) -> None:
     token, dbpw = single(store["internal-token"]), single(store["app-db-password"])
     auth_secret = field(store["auth"], "auth_secret")
     redis_pw = field(store["redis"], "password")
-    for v in (token, dbpw, auth_secret, redis_pw):
+    grafana_pw = field(store["grafana"], "admin_password")
+    generated_pws = (token, dbpw, auth_secret, redis_pw, grafana_pw)
+    for v in generated_pws:
         assert len(v) >= 24, "a generated secret shorter than 24 characters"
-    assert len({token, dbpw, auth_secret, redis_pw}) == 4, "two generated secrets are equal"
+    assert len(set(generated_pws)) == 5, "two generated secrets are equal"
 
     redis_ca = cert(field(store["redis"], "ca_crt"))
     redis_crt = cert(field(store["redis"], "server_crt"))
@@ -368,6 +380,13 @@ def test_init_generates_the_values_loom_makes(tmp_path: Path) -> None:
 
     generated = [v for n in GENERATED if (v := store[n])]
     assert_nowhere([s for v in generated for s in secret_strings(v)], fake, proc, tmp_path)
+    assert_never_names_the_serving_key(fake)
+
+
+def assert_never_names_the_serving_key(fake: FakeAws) -> None:
+    """§6.3, §5.6: the instance role is denied `serving-runpod-key`; no call names it."""
+    named = [c for c in fake.calls() if "serving-runpod-key" in " ".join(c)]
+    assert not named, f"an aws call names serving-runpod-key: {named}"
 
 
 def test_init_never_overwrites_a_secret_that_has_a_value(tmp_path: Path) -> None:
@@ -402,6 +421,7 @@ def test_init_twice_changes_nothing_the_second_time(tmp_path: Path) -> None:
     run_deploy(tmp_path, fake, "secrets", "init")
     assert fake.store == before, "a second init changed a secret"
     assert len(fake.puts()) == n_puts, "a second init wrote a secret"
+    assert_never_names_the_serving_key(fake)
 
 
 # ---------------------------------------------------------------- SES SMTP password

@@ -9,14 +9,14 @@ fixes its name and arguments; the shapes below are this test's reading (defined 
 
     current  the running release's manifest (a dict, as `releases/<sha>.json`, §6.1), or
              None before the first deploy
-    target   the manifest of the release to apply: {"sha": ..., "images": {<service>:
-             "<repository>@sha256:<digest>", ...}, "migrations": n, "compose": {...}}
+    target   the manifest of the release to apply (§6.12): {"sha": ..., "images":
+             {<service>: "<repository>@sha256:<digest>", ...}, "migrations": n,
+             "compose": {"path", "sha256"}, "bundle": {"path", "sha256"}}
     only     None (every service) or a collection of service names (`apply --only`)
     returns  a list of steps, each a tuple (action, *args); a service update (`up -d
              --no-deps <svc>`, then wait healthy) is ("up", "<svc>"), the migration
              ("migrate",)
-    refusal  P4: an exception (not a programming error such as TypeError) whose message
-             names the gateway
+    refusal  P4: `loom_devstack.deploy.Refused` (§6.12) whose message names the gateway
 
 Order (§6.6 step 4): `redis` only if its image changed, then billing, gateway, poolmgr,
 web, caddy, prometheus, grafana; the other services are updated on every apply, because
@@ -67,6 +67,7 @@ def manifest(sha: str, images: dict[str, str] | None = None) -> dict[str, Any]:
         "images": imgs,
         "migrations": 12,
         "compose": {"path": f"releases/{sha}/compose.prod.yml", "sha256": digest(sha, "compose")},
+        "bundle": {"path": f"releases/{sha}/deploy.tar.gz", "sha256": digest(sha, "bundle")},
     }
 
 
@@ -91,12 +92,11 @@ def assert_migrate_first(steps: list[tuple[Any, ...]]) -> None:
 
 
 def assert_refused(call: Any) -> None:
+    refused = deploy().Refused
     with pytest.raises(Exception) as caught:
         call()
     err = caught.value
-    assert not isinstance(err, (TypeError, KeyError, AttributeError, NameError, ImportError)), (
-        f"a programming error, not a refusal: {err!r}"
-    )
+    assert isinstance(err, refused), f"not a deploy.Refused: {err!r}"
     assert "gateway" in str(err).lower(), f"the refusal does not name the gateway: {err}"
 
 
@@ -150,7 +150,7 @@ def test_it_imports_and_runs_with_no_site_packages(tmp_path: Path) -> None:
         timeout=60,
     )
     assert h.returncode == 0, h.stdout + h.stderr
-    for sub in ("secrets", "ses-smtp-password", "apply", "status", "rollback"):
+    for sub in ("secrets", "ses-smtp-password", "apply", "status", "rollback", "acceptance"):
         assert sub in h.stdout, f"`loom-deploy --help` does not list `{sub}`:\n{h.stdout}"
     a = subprocess.run(
         [sys.executable, "-S", "-m", "loom_devstack.deploy", "apply", "--help"],
@@ -161,6 +161,15 @@ def test_it_imports_and_runs_with_no_site_packages(tmp_path: Path) -> None:
     )
     assert a.returncode == 0, a.stdout + a.stderr
     assert "--release" in a.stdout and "--only" in a.stdout, a.stdout
+    c = subprocess.run(
+        [sys.executable, "-S", "-m", "loom_devstack.deploy", "acceptance", "--help"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert c.returncode == 0, c.stdout + c.stderr
+    assert "--p4-release" in c.stdout, c.stdout
 
 
 def test_loom_deploy_is_the_console_script_of_the_module() -> None:

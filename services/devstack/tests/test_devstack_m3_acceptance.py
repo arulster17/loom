@@ -63,6 +63,39 @@ def test_items_outside_the_mode_are_refused(argv: list[str]) -> None:
     assert exit_.value.code == 2
 
 
+def test_the_options_loom_deploy_passes_are_taken() -> None:
+    """§6.12: `loom-deploy acceptance` runs `loom-m3-acceptance --domain --release --json
+    --deploy-log --admin-email --webhook-secret-file`; the container calls neither
+    loom-deploy nor aws, so their options are gone."""
+    argv = [
+        "--domain",
+        "example.test",
+        "--release",
+        "a" * 40,
+        "--json",
+        "/var/lib/loom/acceptance/report.json",
+        "--deploy-log",
+        "/var/lib/loom/deploy.log",
+        "--admin-email",
+        "ops@example.test",
+        "--webhook-secret-file",
+        "/run/loom/secrets/acceptance/webhook_secret",
+    ]
+    args = m3.parser().parse_args(argv)
+    assert args.admin_email == "ops@example.test"
+    assert args.webhook_secret_file == "/run/loom/secrets/acceptance/webhook_secret"
+    options = {o for a in m3.parser()._actions for o in a.option_strings}
+    for gone in ("--deploy-cmd", "--p4-release", "--log-group"):
+        assert gone not in options, f"{gone} is still an option"
+
+
+def test_the_report_and_the_canaries_default_to_the_acceptance_directory() -> None:
+    args = m3.parser().parse_args(["--domain", "example.test"])
+    assert str(args.json) == "/var/lib/loom/acceptance/report.json"
+    assert str(args.canaries_file) == "/var/lib/loom/acceptance/canaries.json"
+    assert args.deploy_log == "/var/lib/loom/deploy.log"
+
+
 def test_the_console_script_is_installed(monkeypatch: pytest.MonkeyPatch) -> None:
     found = [ep for ep in entry_points(group="console_scripts") if ep.name == SCRIPT]
     assert found, f"no `{SCRIPT}` console script is installed (project.scripts)"

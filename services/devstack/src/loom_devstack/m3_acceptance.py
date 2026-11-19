@@ -1,12 +1,18 @@
 """M3 acceptance on the box (docs/phase1-m3-spec.md §10, B10-B19).
 
-Runs in a one-shot container on the production compose network (`loom-deploy
-acceptance` starts it through SSM): the web app, the gateway and the Stripe webhook are
-reached **through the public URLs** (real DNS, real TLS), Postgres, Redis and the
-containers from inside, as `loom-m1-acceptance` does (its helpers are reused).
+Runs in the one-shot compose service `acceptance` on the production network (`loom-deploy
+acceptance` starts it through SSM, §6.12): the web app, the gateway and the Stripe webhook
+are reached **through the public URLs** (real DNS, real TLS), Postgres, Redis and the
+containers from inside, as `loom-m1-acceptance` does (its helpers are reused). The
+container has no AWS credentials: m3-i's CloudWatch scan and m3-p's refusal run on the
+host, in `loom-deploy acceptance`.
 
-    loom-m3-acceptance --domain <domain> --json /var/lib/loom/m3-acceptance.json
+    loom-m3-acceptance --domain <domain> --release <sha> --admin-email <ops_email> \
+        --webhook-secret-file /run/loom/secrets/acceptance/webhook_secret
     loom-m3-acceptance --external --domain <domain> --brand-name <name>   # operator's machine
+
+The report goes to `--json` (default `/var/lib/loom/acceptance/report.json`). TLS: the
+certifi bundle, or `SSL_CERT_FILE` when set (A15 trusts Caddy's internal root with it).
 
 Sign-in: test users are signed in by inserting an Auth.js database session and sending
 its cookie; the admin is granted with contracts §4's SQL. The acceptance's users
@@ -32,9 +38,12 @@ m3-h  exposure (external): only 80/443 answer; api. serves /v1/* only; hooks. on
       /stripe/webhook and GET /stripe/health; /internal, /health, /metrics unreachable;
       80 redirects; HSTS; a valid certificate for the three names; the sign-in page's
       title and heading show the product name
-m3-i  no prompt, completion or API key in any container's logs or the CloudWatch log group
-m3-p  P4: the deploy log shows the gateway healthy before the pool manager was updated;
-      `loom-deploy apply --only poolmgr` with a newer pool manager is refused
+m3-i  no prompt, completion or API key in any container's logs; the canaries go to
+      `--canaries-file` (default /var/lib/loom/acceptance/canaries.json, 0600, a JSON array
+      of strings) for the host's CloudWatch scan
+m3-p  P4: in the deploy log (JSON Lines, §6.12), from the release's last apply/start
+      record, update/gateway/ok comes before update/poolmgr/start (the refusal of `apply
+      --only poolmgr` with another release is checked on the host)
 m3-x  containers cannot reach the instance metadata service (IMDS hop limit 1)
 
 Manual steps wait (polling) up to `--manual-timeout-s`; the JSON report says which steps
@@ -86,8 +95,8 @@ TITLES = {
     "m3-g": "Stripe test mode: pay, one purchase, duplicate, stale t, resend, refunds",
     "m3-s": "Missed delivery while billing is stopped, then resent: one purchase",
     "m3-h": "Exposure from the internet: routes, ports, redirect, HSTS, certificate, name",
-    "m3-i": "No prompt, completion or key in container logs or CloudWatch",
-    "m3-p": "P4: gateway healthy before poolmgr; --only poolmgr newer is refused",
+    "m3-i": "No prompt, completion or key in container logs (CloudWatch: on the host)",
+    "m3-p": "P4: the deploy log shows the gateway healthy before poolmgr was updated",
     "m3-x": "Containers cannot reach the instance metadata service",
 }
 MANUAL = {
@@ -104,6 +113,47 @@ MANUAL = {
 }
 CLOSED_PORTS = (22, 3000, 3001, 5432, 6379, 8080, 8090, 9090, 9100, 9101, 9102)
 SESSION_COOKIES = ("__Secure-authjs.session-token", "authjs.session-token")
+ACCEPTANCE_DIR = Path("/var/lib/loom/acceptance")
+
+
+def tls_verify() -> ssl.SSLContext | bool:
+    """`SSL_CERT_FILE` when set (clients built with `trust_env=False` ignore it), else
+    httpx's default (certifi)."""
+    cafile = os.environ.get("SSL_CERT_FILE")
+    return ssl.create_default_context(cafile=cafile) if cafile else True
+
+
+def write_canaries(path: Path, canaries: set[str]) -> None:
+    """The strings that must never reach a log, for the host's CloudWatch scan: a JSON
+    array, mode 0600 (they include API keys)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, json.dumps(sorted(canaries)).encode())
+    finally:
+        os.close(fd)
+
+
+def own_project() -> str | None:
+    """The compose project of the container this runs in (its compose label), if any."""
+    try:
+        r = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                "-f",
+                '{{index .Config.Labels "com.docker.compose.project"}}',
+                socket.gethostname(),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    name = r.stdout.strip()
+    return name if r.returncode == 0 and name and name != "<no value>" else None
 
 
 def public_stack(args: argparse.Namespace) -> Stack:
@@ -229,7 +279,7 @@ class M3Acceptance(m1.Acceptance):
 
         def timings(url: str, n: int = 200) -> list[float]:
             out = []
-            with httpx.Client(timeout=30, trust_env=False) as http:
+            with httpx.Client(timeout=30, trust_env=False, verify=tls_verify()) as http:
                 http.get(url, headers=hdr)
                 for _ in range(n):
                     t0 = time.perf_counter()
@@ -389,39 +439,15 @@ class M3Acceptance(m1.Acceptance):
     # -- m3-i
 
     def item_m3_i(self, res: ItemResult) -> None:
-        self.item_i(res)
-        group = self.args.log_group
+        """The containers' logs (M1's item i); the canaries are written for the host's
+        CloudWatch scan whether or not a log held one (§6.12)."""
+        path = Path(self.args.canaries_file)
         try:
-            hits = []
-            for c in sorted(self.report.canaries):
-                out = subprocess.run(
-                    [
-                        "aws",
-                        "logs",
-                        "filter-log-events",
-                        "--log-group-name",
-                        group,
-                        "--filter-pattern",
-                        json.dumps(c),
-                        "--max-items",
-                        "1",
-                        "--output",
-                        "json",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-                check(out.returncode == 0, f"aws logs: {out.stderr[-300:]}")
-                if json.loads(out.stdout or "{}").get("events"):
-                    hits.append(c[:24])
-        except (OSError, AcceptanceError) as e:
-            raise AcceptanceError(
-                f"CloudWatch {group} not scanned ({e}); run m3-i where the aws CLI has the"
-                " instance role (loom-deploy acceptance)"
-            ) from e
-        res.numbers["cloudwatch_hits"] = hits
-        check(not hits, f"canaries in CloudWatch {group}: {hits}")
+            self.item_i(res)
+        finally:
+            write_canaries(path, self.report.canaries)
+            res.numbers["canaries_file"] = str(path)
+        res.notes.append("the CloudWatch log group is scanned on the host (loom-deploy acceptance)")
 
     # -- m3-p
 
@@ -434,30 +460,13 @@ class M3Acceptance(m1.Acceptance):
         log = Path(self.args.deploy_log)
         check(log.is_file(), f"no deploy log at {log} (--deploy-log)")
         lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
-        gw, pm, gh = p4_log_order(lines, self.args.release)
+        start, gw_ok, pm_start = p4_log_order(lines, self.args.release)
         res.numbers["deploy_log_lines"] = {
-            "gateway_update": gw + 1,
-            "gateway_healthy": gh + 1,
-            "poolmgr_update": pm + 1,
+            "apply_start": start + 1,
+            "gateway_ok": gw_ok + 1,
+            "poolmgr_start": pm_start + 1,
         }
-        if not self.args.p4_release:
-            raise AcceptanceError("--p4-release (a release newer than the gateway's) not given")
-        poolmgr = m1.container(self.stack, "poolmgr")
-        started = docker("inspect", "-f", "{{.State.StartedAt}}", poolmgr).strip()
-        cmd = [*self.args.deploy_cmd.split(), "apply", "--only", "poolmgr"]
-        r = subprocess.run(
-            [*cmd, "--release", self.args.p4_release],
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        check(r.returncode != 0, "apply --only poolmgr with a newer release was not refused")
-        check("gateway" in (r.stdout + r.stderr).lower(), "the refusal does not name the gateway")
-        check(
-            docker("inspect", "-f", "{{.State.StartedAt}}", poolmgr).strip() == started,
-            "poolmgr was restarted by the refused apply",
-        )
-        res.numbers["only_poolmgr_exit"] = r.returncode
+        res.notes.append("the refusal of apply --only poolmgr is checked on the host")
 
     # -- m3-x
 
@@ -543,88 +552,49 @@ class M3Acceptance(m1.Acceptance):
         nums["routes_checked"] = len(expect) + 2
 
 
-_HEALTHY = re.compile(r"\bhealthy\b")
-# A record that the service is not (yet) healthy: `unhealthy`, `not healthy`, `healthy:
-# false`, or a failure on the line.
-_NOT_HEALTHY = re.compile(
-    r"\bunhealthy\b"
-    r"|\b(?:not|never|no longer|isn t|wasn t|failed to become)(?:\s+\w+){0,2}?\s+healthy\b"
-    r"|\bhealthy\s+(?:false|no|0)\b"
-    r"|\b(?:failed|failure|error|timed out)\b"
-)
-# A pending wait (`waiting for gateway to be healthy`, `wait_healthy`, `until healthy`):
-# not a result. Removed before looking for `healthy`, so `waited 4.1 s: healthy` and a
-# JSON record `"event": "wait_healthy", "result": "healthy"` still count.
-_PENDING = re.compile(r"\b(?:wait|waits|waiting|awaiting|until)\b(?:\s+\w+){0,6}?\s+healthy\b")
-_UPDATE = re.compile(r"\b(?:up|updat\w*|start\w*|recreat\w*|restart\w*)\b")
-_APPLY = re.compile(r"\bappl(?:y|ying)\b")
-# A line that closes an apply rather than starting it (`apply abc1234: done`).
-_CLOSING = re.compile(
-    r"\b(?:done|finished|complete\w*|succeeded|success\w*|ok|failed|failure|recorded|"
-    r"end|ended|took|refused|aborted)\b"
-)
-
-
-def _words(line: str) -> str:
-    """A log line as lower-case words: `_`, `-`, punctuation and JSON syntax are spaces,
-    so `"service": "gateway"`, `gateway_healthy` and `loom-gateway-1` name the gateway."""
-    return re.sub(r"[\W_]+", " ", line.lower()).strip()
+def _record(line: str) -> dict[str, Any] | None:
+    """A deploy-log line as its JSON object, or None (a blank or malformed line)."""
+    try:
+        rec = json.loads(line)
+    except ValueError:
+        return None
+    return rec if isinstance(rec, dict) else None
 
 
 def p4_log_order(lines: list[str], release: str | None) -> tuple[int, int, int]:
-    """(gateway update, poolmgr update, gateway healthy) line indexes of the release's
-    apply, checking P4: the pool manager is updated only after a record that the gateway
-    the same apply updated is healthy.
-
-    The log's format is not fixed by the spec (an assumption: one line per step naming the
-    service, as `loom-deploy` prints them, as plain text or JSON-ish records; words joined
-    by `_` or `-` count as words). The release is required. Its apply starts at the last
-    line naming the release with `apply`/`applying` that does not close an apply (`done`,
-    `failed`, `recorded`, ...), else at the release's first mention. A plan line (naming
-    `plan`, or both services) is not a step. The poolmgr update is the first after that
-    start, the gateway update the last before it, and a record that the gateway is healthy
-    must lie between: a line naming the gateway and `healthy` (timings such as `waited
-    4.1 s` included) that is not a negative (`unhealthy`, `not healthy`, a failure) or only
-    a pending wait (`waiting for gateway to be healthy`)."""
+    """(apply start, gateway ok, poolmgr start) line indexes of the release's last apply in
+    the deploy log (§6.12: JSON Lines `{"ts", "release", "step", "status", "service",
+    "only", "detail"}`), checking P4: from the release's last `apply`/`start` record,
+    `update`/`gateway`/`ok` comes before `update`/`poolmgr`/`start`. Only that release's
+    records count; lines that are not JSON objects are skipped."""
     check(bool(release), "the release is required to read its apply from the deploy log")
     assert release
-    sha = release[:7].lower()
-    words = [_words(x) for x in lines]
-    named = [i for i, x in enumerate(lines) if sha in x.lower()]
-    check(bool(named), f"the deploy log never names release {sha}")
-    starts = [i for i in named if _APPLY.search(words[i]) and not _CLOSING.search(words[i])]
-    start = starts[-1] if starts else named[0]
+    sha = release.lower()
+    recs = [(i, r) for i, x in enumerate(lines) if (r := _record(x)) is not None]
+    mine = [(i, r) for i, r in recs if str(r.get("release", "")).lower() == sha]
 
-    def step(i: int, svc: str) -> bool:
-        x = words[i]
-        if re.search(r"\bplan\b", x) or (
-            re.search(r"\bgateway\b", x) and re.search(r"\bpoolmgr\b", x)
-        ):
-            return False
-        return bool(re.search(rf"\b{svc}\b", x))
+    def at(i: int, r: dict[str, Any], step: str, status: str, svc: str | None = None) -> bool:
+        return (
+            r.get("step") == step
+            and r.get("status") == status
+            and (svc is None or r.get("service") == svc)
+        )
 
-    def healthy(i: int) -> bool:
-        x = words[i]
-        return not _NOT_HEALTHY.search(x) and bool(_HEALTHY.search(_PENDING.sub(" ", x)))
-
-    def updates(i: int, svc: str) -> bool:
-        # `poolmgr: up -d, then wait healthy` is an update: only a healthy result is not.
-        return step(i, svc) and bool(_UPDATE.search(words[i])) and not healthy(i)
-
-    pm = next((i for i in range(start, len(lines)) if updates(i, "poolmgr")), None)
-    check(pm is not None, f"the deploy log shows no poolmgr update after line {start + 1}")
+    starts = [i for i, r in mine if at(i, r, "apply", "start")]
+    check(bool(starts), f"the deploy log has no apply/start record of release {sha[:7]}")
+    start = starts[-1]
+    after = [(i, r) for i, r in mine if i > start]
+    pm = next((i for i, r in after if at(i, r, "update", "start", "poolmgr")), None)
+    check(pm is not None, f"release {sha[:7]}: no update/poolmgr/start after line {start + 1}")
     assert pm is not None
-    gw = next((i for i in range(pm - 1, start - 1, -1) if updates(i, "gateway")), None)
-    check(gw is not None, f"no gateway update before the poolmgr update (line {pm + 1})")
-    assert gw is not None
-    gh = next((i for i in range(gw, pm) if step(i, "gateway") and healthy(i)), None)
+    gw = next((i for i, r in after if i < pm and at(i, r, "update", "ok", "gateway")), None)
     check(
-        gh is not None,
-        f"poolmgr updated (line {pm + 1}) with no record that the gateway updated at line "
-        f"{gw + 1} was healthy",
+        gw is not None,
+        f"release {sha[:7]}: poolmgr updated (line {pm + 1}) before an update/gateway/ok "
+        "record: the gateway was not healthy first",
     )
-    assert gh is not None
-    return gw, pm, gh
+    assert gw is not None
+    return start, gw, pm
 
 
 def run(acc: M3Acceptance, items: list[str], report: Report) -> None:
@@ -665,29 +635,47 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--brand-name", default=env("LOOM_BRAND_NAME"), help="the product name (m3-h)")
     p.add_argument("--external", action="store_true", help="only what the internet sees (m3-h)")
     p.add_argument("--only", help=f"comma-separated items, e.g. m3-0,m3-b (of {', '.join(ITEMS)})")
-    p.add_argument("--json", type=Path, help="write the report here")
+    p.add_argument(
+        "--json",
+        type=Path,
+        default=ACCEPTANCE_DIR / "report.json",
+        help="write the report here (default: %(default)s)",
+    )
     p.add_argument(
         "--release",
         default=env("LOOM_RELEASE"),
         help="the release sha: for the report, and required by m3-p (it reads that apply)",
     )
-    p.add_argument("--project", default=env("COMPOSE_PROJECT_NAME") or "loom")
-    p.add_argument("--database-url", dest="database_url")
-    p.add_argument("--redis-url", dest="redis_url")
-    p.add_argument("--admin-email", dest="admin_email")
+    p.add_argument(
+        "--project",
+        default=env("COMPOSE_PROJECT_NAME"),
+        help="the compose project (default: this container's own, else loom)",
+    )
+    p.add_argument("--database-url", dest="database_url", help="else LOOM_ACCEPT_DATABASE_URL")
+    p.add_argument("--redis-url", dest="redis_url", help="else LOOM_ACCEPT_REDIS_URL")
+    p.add_argument(
+        "--admin-email",
+        dest="admin_email",
+        help="the admin the run signs in (loom-deploy passes the site's ops_email)",
+    )
     p.add_argument("--gateway-internal", default="http://gateway:8080")
     p.add_argument("--gateway-metrics", default="http://gateway:9100/metrics")
     p.add_argument("--billing-metrics", default="http://billing:9101/metrics")
-    p.add_argument("--webhook-secret-file", help="the endpoint's signing secret (m3-g)")
+    p.add_argument(
+        "--webhook-secret-file",
+        help="the Stripe endpoint's signing secret, for m3-g's re-posts "
+        "(loom-deploy passes /run/loom/secrets/acceptance/webhook_secret)",
+    )
     p.add_argument(
         "--deploy-log",
         default="/var/lib/loom/deploy.log",
-        help="loom-deploy's log, read by m3-p (the default path is an assumption: the spec "
-        "does not fix where loom-deploy logs)",
+        help="loom-deploy's JSON Lines log, read by m3-p (default: %(default)s)",
     )
-    p.add_argument("--deploy-cmd", default="loom-deploy")
-    p.add_argument("--p4-release", help="a release with a newer poolmgr than the gateway's")
-    p.add_argument("--log-group", default="/loom/platform")
+    p.add_argument(
+        "--canaries-file",
+        default=str(ACCEPTANCE_DIR / "canaries.json"),
+        help="m3-i writes the canaries here for the host's CloudWatch scan (default: %(default)s)",
+    )
     p.add_argument("--manual-timeout-s", type=float, default=900)
     p.add_argument("--alarm-wait-s", type=float, default=660)
     return p
@@ -702,6 +690,8 @@ def main(argv: list[str] | None = None) -> None:
     unknown = [i for i in items if i not in pool]
     if unknown:
         parser().error(f"not items of this mode: {unknown} (mode items: {', '.join(pool)})")
+    if not args.project:
+        args.project = (None if args.external else own_project()) or "loom"
     stack = public_stack(args)
     report = Report()
     say(f"M3 acceptance ({'external' if args.external else 'box'}) against {stack.web}")
@@ -719,7 +709,11 @@ def main(argv: list[str] | None = None) -> None:
             release=args.release,
             manual={k: v for k, v in MANUAL.items() if k in items},
         )
-        args.json.write_text(json.dumps(doc, indent=2, default=str))
+        try:
+            args.json.parent.mkdir(parents=True, exist_ok=True)
+            args.json.write_text(json.dumps(doc, indent=2, default=str))
+        except OSError as e:  # e.g. --external off the box without --json
+            say(f"report not written to {args.json}: {e}")
     sys.exit(0 if report.passed and report.items else 1)
 
 
