@@ -608,7 +608,8 @@ def p4_log_order(lines: list[str], release: str | None) -> tuple[int, int, int]:
         return not _NOT_HEALTHY.search(x) and bool(_HEALTHY.search(_PENDING.sub(" ", x)))
 
     def updates(i: int, svc: str) -> bool:
-        return step(i, svc) and bool(_UPDATE.search(words[i])) and not _HEALTHY.search(words[i])
+        # `poolmgr: up -d, then wait healthy` is an update: only a healthy result is not.
+        return step(i, svc) and bool(_UPDATE.search(words[i])) and not healthy(i)
 
     pm = next((i for i in range(start, len(lines)) if updates(i, "poolmgr")), None)
     check(pm is not None, f"the deploy log shows no poolmgr update after line {start + 1}")

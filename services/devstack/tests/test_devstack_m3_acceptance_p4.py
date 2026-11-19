@@ -58,6 +58,31 @@ def test_a_healthy_record_with_timings_counts(healthy: str) -> None:
     assert order(text) == (1, 3, 2)
 
 
+UPDATE_THEN_WAIT = [
+    "{svc}: up -d --no-deps {svc}, then wait healthy",  # §6.6 step 4's wording
+    "{svc}: up -d, waiting until healthy",
+    "updating {svc} (wait for healthy)",
+]
+
+
+@pytest.mark.parametrize("update", UPDATE_THEN_WAIT)
+def test_an_update_line_that_names_its_pending_wait_is_an_update(update: str) -> None:
+    gw, pm = update.format(svc="gateway"), update.format(svc="poolmgr")
+    text = f"apply {SHA}: start\n{gw}\ngateway healthy\n{pm}\npoolmgr healthy\n"
+    assert order(text) == (1, 3, 2)
+
+
+@pytest.mark.parametrize("update", UPDATE_THEN_WAIT)
+def test_an_update_line_that_names_its_pending_wait_in_the_wrong_order_is_refused(
+    update: str,
+) -> None:
+    gw, pm = update.format(svc="gateway"), update.format(svc="poolmgr")
+    with pytest.raises(AcceptanceError, match="gateway"):
+        order(f"apply {SHA}: start\n{pm}\n{gw}\ngateway healthy\n")
+    with pytest.raises(AcceptanceError, match="healthy"):
+        order(f"apply {SHA}: start\n{gw}\n{pm}\ngateway healthy\n")
+
+
 def test_a_closing_apply_done_line_does_not_start_the_apply() -> None:
     text = PLAIN + f"2026-11-18T10:01:00Z apply {SHA}: done, recorded as current\n"
     assert order(text) == (5, 7, 6)

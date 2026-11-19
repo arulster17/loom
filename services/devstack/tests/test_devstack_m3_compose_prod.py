@@ -120,22 +120,22 @@ def test_no_service_sets_loom_env() -> None:
 
     Env files: a secret one lives under `/run/loom` (§6.3, A13). One elsewhere must hold
     no secret: a file in the repository (a path relative to deploy/) is read and may not
-    give a value to a `*_PASSWORD`, `*_SECRET`, `*_TOKEN` or `*_KEY` key; an absolute path
-    outside `/run/loom` (written on the box, not in the repository) may not be named like
-    a secret one. Neither may set LOOM_ENV.
+    give a value to a `*_PASSWORD`, `*_SECRET`, `*_TOKEN` or `*_KEY` key; one that is not
+    in the repository (an absolute path outside `/run/loom`, or a relative one written on
+    the box or marked `required: false`) may not be named like a secret one. Neither may
+    set LOOM_ENV.
     """
     for name, svc in services().items():
         assert "LOOM_ENV" not in env_names(svc), f"{name} sets LOOM_ENV"
         for path in env_files(svc):
             if path.startswith("/run/loom/"):
                 continue
-            if path.startswith("/"):
+            local = (PROD.parent / path).resolve()
+            if path.startswith("/") or not local.is_file():
                 assert not re.search(r"(?i)secret|password|token|credential", path), (
                     f"{name}: env file {path} looks secret but is outside /run/loom"
                 )
                 continue
-            local = (PROD.parent / path).resolve()
-            assert local.is_file(), f"{name}: env file {path} is neither in deploy/ nor /run/loom"
             text = local.read_text(encoding="utf-8")
             hits = secret_assignments(text)
             assert not hits, f"{name}: env file {path} outside /run/loom holds secrets {hits}"
@@ -367,7 +367,9 @@ def redis_config() -> str:
         renderers += sorted(DEVSTACK_SRC.glob("*deploy*.py"))
         for path in renderers:
             if b"\0" not in path.read_bytes()[:4096]:
-                parts += uncommented(path.read_text(encoding="utf-8", errors="replace"))
+                text = path.read_text(encoding="utf-8", errors="replace")
+                # A one-line template (`"port 0\ntls-port 6379\n"`) is read line by line.
+                parts += uncommented(text.replace("\\n", "\n"))
     return " ".join(parts)
 
 
