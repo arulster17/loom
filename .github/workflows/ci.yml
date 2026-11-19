@@ -323,3 +323,18 @@ jobs:
           docker run --rm -v "$GITHUB_WORKSPACE:/repo:ro" "$TRIVY_IMAGE" config
           --skip-check-update --skip-dirs '**/.terraform' --exit-code 1
           --ignorefile /repo/.github/terraform/trivyignore.yaml "/repo/$STACK"
+
+  # A15 (docs/phase1-m3-spec.md §13): the production compose stack (deploy/compose.prod.yml
+  # with local images, a TLS Postgres standing in for RDS, a throwaway CA) comes up in
+  # production mode as project loom-m3prod, and M1 acceptance items 0, b and d pass against
+  # it. The acceptance-marked test starts and removes the stack itself. Free: no cloud.
+  m3-prod-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: >-
+          uv run pytest -q -m acceptance --timeout 3000
+          services/devstack/tests/test_devstack_m3_prodstack.py

@@ -1146,7 +1146,9 @@ Deploy
   Postgres with TLS standing in for RDS, a throwaway CA) comes up healthy with every
   service's production checks on; `/internal`, `/metrics` and anything outside the routes
   of §6.7 answer 404 through Caddy (Caddy on an internal CA); M1 acceptance items 0, b, d
-  pass against it. *Acceptance-marked pytest, in the CI acceptance job.*
+  pass against it. *Acceptance-marked pytest in
+  `services/devstack/tests/test_devstack_m3_prodstack.py`, run by its own CI job
+  `m3-prod-stack` (the existing `acceptance` job is unchanged).*
 
 Stripe
 
