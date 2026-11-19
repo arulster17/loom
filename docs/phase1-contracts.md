@@ -829,9 +829,12 @@ callers catching `SignatureError` are unchanged.
   delivery has processed meanwhile (then the answer is 200 `duplicate`). It needs the event's
   row lock, so when the first failure was a lock timeout on that row itself (held by
   `retry_unapplied`, a `resolve` or another delivery, or an uncommitted insert of the same
-  id) it times out too, and the answer is 503 while the holder lives; a lock wait elsewhere (the session's advisory lock, a `stripe_payments` row, a
-  pending clawback's row) gives the 500. Every attempt whose outcome is not `duplicate` or
-  `skipped` writes `result` and clears `last_error` and `error_count`.
+  id) it times out too, and the answer is 503 while the holder lives; a lock wait
+  elsewhere (the session's advisory lock, a `stripe_payments` row, a pending clawback's row)
+  gives the 500. Every attempt whose outcome is not `duplicate` or `skipped` writes `result`
+  and clears `last_error` and `error_count` in the attempt's own transaction (a failed
+  attempt's is rolled back, so the second transaction's values stand), so the next failure
+  counts again.
 - **Timeouts**: inside each transaction `SET LOCAL lock_timeout` =
   `LOOM_STRIPE_LOCK_TIMEOUT_MS` and `statement_timeout` = `LOOM_STRIPE_STATEMENT_TIMEOUT_MS`;
   the pool wait is `LOOM_STRIPE_WEBHOOK_DB_TIMEOUT_S` (§2). There is no overall deadline:
@@ -865,9 +868,10 @@ callers catching `SignatureError` are unchanged.
   LOCKED` (a row a delivery holds is skipped this run); an event that raises is rolled back
   and recorded by the second transaction's statement, and the run **continues** with the
   next event; a stored row that fails the shape check is skipped with no error store;
-  (3) **stale marking**: an event unapplied for `LOOM_STRIPE_STALE_AFTER_S` since
-  `received_at`, with `stale_reported_at` NULL, gets `stale_reported_at` set and is counted
-  once. Any failure outside a per-event attempt, and an attempt whose error store fails
+  (3) **stale marking** (set-based, rows taken `ORDER BY received_at, id FOR UPDATE SKIP
+  LOCKED`, the purchase's lock order, never waiting): an event unapplied for
+  `LOOM_STRIPE_STALE_AFTER_S` since `received_at`, with `stale_reported_at` NULL, gets
+  `stale_reported_at` set and is counted once. Any failure outside a per-event attempt, and an attempt whose error store fails
   too, ends the run there; only a run that finishes step 3 moves its last-success gauge.
 - **Stuck events** (`loom-billing stripe-event list [--unapplied]`, `loom-billing
   stripe-event resolve <event id> --admin-email <email> --reason <text>`): `resolve`, in one
@@ -886,18 +890,32 @@ callers catching `SignatureError` are unchanged.
   answers 200 `{"listener":"stripe_webhook","status":"ok"}` with no authentication and no
   Postgres, Redis or Stripe call, for the Route 53 health check of `hooks.` (alarm H3);
   billing's `GET /health` is unchanged and never routed publicly.
-- **Python entry points** (`loom_billing`, fixed in M3 §8.11): `webhooks.process_event(pool,
-  event, *, retry=False, settings=None, now=None) -> Outcome` owns the Postgres behaviour
-  above (an event its second transaction stores returns `Outcome("unapplied",
-  stored_after_error=True)`, the route's 500; it raises `webhooks.StoreFailed`, the route's
-  503, when the second transaction fails too; with
-  `retry=True` it returns `Outcome("skipped")` for a held row); `webhooks.handle_event(conn,
-  event, *, retry=False, settings=None, now=None)`, the in-transaction core;
-  `webhooks.retry_unapplied(pool, *, limit=500, settings=None, now=None) -> int` (never
-  raises); `resolve.resolve_event(pool, event_id, *, admin_email, reason, settings=None,
-  now=None) -> Outcome` and `resolve.list_events(pool, *, unapplied=False) -> list[dict]`,
-  refusals as `resolve.ResolveRefused(reason)`. The M1 calls `handle_event(conn, event)` and
-  `retry_unapplied(pool)` keep working.
+- **Python entry points** (`loom_billing`; M3 §8.11 is the full text):
+  - `webhooks.process_event(pool, event, *, retry=False, settings=None, now=None) ->
+    Outcome` owns the Postgres behaviour above. It checks the event's shape first
+    (`BadEvent`, before any transaction). Any exception from the Postgres part runs the
+    second transaction: an event it stores returns `Outcome("unapplied",
+    stored_after_error=True)` (the route's 500), an event its guard finds processed returns
+    `Outcome("duplicate")`; if the second transaction fails too it raises
+    `webhooks.StoreFailed` with the original exception as `__cause__` (the route's 503). No
+    exception class or SQLSTATE is inspected. With `retry=True` it takes the row `FOR
+    UPDATE SKIP LOCKED` and returns `Outcome("skipped")` (`.processed` False) when a
+    delivery holds it.
+  - `webhooks.handle_event(conn, event, *, retry=False, settings=None, now=None) ->
+    Outcome`: the in-transaction core, never calls Stripe; called directly it counts no
+    outcome metric.
+  - `webhooks.retry_unapplied(pool, *, limit=500, settings=None, now=None) -> int`: the
+    events this run marked processed (every result except `unapplied`, `skipped` and
+    `duplicate`); it never raises, and shows a failed run only by not moving its
+    last-success gauge.
+  - `resolve.resolve_event(pool, event_id, *, admin_email, reason, settings=None, now=None)
+    -> Outcome` (`result = "resolved_by_admin"`, nothing posted); every refusal raises
+    `resolve.ResolveRefused(reason)` with nothing changed. `resolve.list_events(pool, *,
+    unapplied=False) -> list[dict]`, keys `id`, `type`, `received_at`, `result`,
+    `last_error`, `error_count`, `stale_reported_at`, ordered by `received_at DESC, id`.
+  - `settings` is a `BillingSettings` (`None`: the defaults, M1's behaviour); `now` is one
+    timestamp per call, the injected one or the current time read once. The M1 calls
+    `handle_event(conn, event)` and `retry_unapplied(pool)` keep working.
 
 Billing metrics the alarms read (every counter initialised at 0 for each label value at
 start; M3 §5.3): `loom_billing_stripe_webhooks_total{result}` (S2a `signature_mismatch`,
