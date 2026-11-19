@@ -8,9 +8,10 @@
     loom-deploy acceptance --p4-release <sha> [-- <loom-m3-acceptance options>]
 
 This is one module that uses **only the standard library** (a test enforces it), so it runs
-on the box with the host's Python 3.12 and no packages: `python3 -S loom-deploy.py <command>`
-(the release bundle carries a copy) or `python -S -m loom_devstack.deploy`. It calls the
-`aws` CLI, `docker compose`, `openssl` and `chown`; it imports nothing from its own package.
+on the box with the host's Python 3.12 and no packages: `python3.12 -S loom-deploy.py <command>`
+(the release bundle carries a copy; it also runs on the system Python 3.9) or
+`python -S -m loom_devstack.deploy`. It calls the `aws` CLI, `docker compose`, `openssl`
+and `chown`; it imports nothing from its own package.
 
 Every box path is under `LOOM_DEPLOY_ROOT` (unset on the box): `<root>/run/loom/` (rendered
 secrets and env files; must be a tmpfs) and `<root>/var/lib/loom/` (the release record, the
@@ -145,7 +146,8 @@ def health_timeout() -> float:
 
 
 def now() -> str:
-    return dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
+    # dt.UTC is Python 3.11+; the box's system python3 is 3.9
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")  # noqa: UP017
 
 
 def say(text: str) -> None:
@@ -275,8 +277,17 @@ def validate_site(doc: Any) -> dict[str, Any]:
         if not DOMAIN.match(doc["domain"]):
             problems.append("`domain` is not a plain domain name")
         name = doc["brand_name"]
-        if len(name) > 64 or any(c in name for c in '"<>\\') or any(ord(c) < 32 for c in name):
-            problems.append("`brand_name` is longer than 64 characters or holds a quote, <, >, \\")
+        # The name is the display name of EMAIL_FROM (`<name> <no-reply@<domain>>`), so it
+        # holds none of the characters RFC 5322 treats as special there.
+        if (
+            len(name) > 64
+            or any(c in name for c in '"<>\\,;:@()[]')
+            or any(ord(c) < 32 for c in name)
+        ):
+            problems.append(
+                "`brand_name` is longer than 64 characters or holds a control character or "
+                'one of , ; : @ ( ) [ ] < > " \\'
+            )
         if not EMAIL.match(doc["ops_email"]):
             problems.append("`ops_email` is not an email address")
         if not HOST.match(doc["db_host"]):
@@ -629,7 +640,20 @@ def fetch_release(site: dict[str, Any], sha: str, work: Path, paths: Paths) -> d
     target.mkdir(parents=True, exist_ok=True)
     try:
         with tarfile.open(files["bundle"], "r:gz") as tar:
-            tar.extractall(target, filter="data")
+            if hasattr(tarfile, "data_filter"):  # 3.12, and the 3.9.17+ / 3.10.12+ backports
+                tar.extractall(target, filter="data")
+            else:  # an older 3.9: the same rule by hand, regular files and directories only
+                for member in tar.getmembers():
+                    parts = Path(member.name).parts
+                    if (
+                        member.name.startswith("/")
+                        or ".." in parts
+                        or not (member.isfile() or member.isdir())
+                    ):
+                        raise DeployError(f"the bundle holds an unsafe member {member.name!r}")
+                tar.extractall(target)
+    except DeployError:
+        raise
     except (tarfile.TarError, OSError) as e:
         raise DeployError(f"the bundle does not extract: {e}") from None
     extracted = target / "compose.prod.yml"
@@ -873,8 +897,29 @@ def bootstrap_gateway_cert(paths: Paths, ca_crt: str, ca_key: str) -> None:
     except DeployError as e:
         say(f"warning: no initial gateway client certificate ({e}); the gateway will not start")
         return
-    write_file(path, key + crt, 0o400)
-    chown(f"{UIDS['gateway']}:{UIDS['gateway']}", path)
+    # Its own temp name (never the manager's `.loom-gateway.pem.tmp`), complete and owned
+    # before it is placed, and placed with a hard link, which fails if the manager's file
+    # appeared meanwhile (an existing file is never replaced).
+    uid = UIDS["gateway"]
+    tmp = path.with_name(f".loom-gateway-bootstrap-{os.getpid()}.tmp")
+    with contextlib.suppress(FileNotFoundError):
+        tmp.unlink()
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+    try:
+        try:
+            os.write(fd, (key + crt).encode())
+            try:
+                os.fchown(fd, uid, uid)
+            except PermissionError:  # not root (a test box): the chown tool, as for the rest
+                chown(f"{uid}:{uid}", tmp)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        with contextlib.suppress(FileExistsError):
+            os.link(tmp, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
 
 
 def render(paths: Paths, site: dict[str, Any], manifest: dict[str, Any]) -> set[str]:
@@ -1040,11 +1085,15 @@ def apply_release(sha: str, only: list[str] | None) -> int:
     try:
         check_tmpfs(paths)
         site = validate_site(read_site())
+        if only is not None:
+            # P4 needs only the release's sha, not its manifest: refuse before any fetch,
+            # extract or write (§6.12: a refused apply logs one record and changes nothing).
+            plan_steps(current_view(load_release(paths)), {"sha": sha}, only)
     except Refused as e:
         log.record("apply", "refused", detail=str(e))
         say(f"refused: {e}")
         return 2
-    except DeployError as e:
+    except (DeployError, OSError) as e:
         log.record("apply", "failed", detail=str(e))
         say(f"failed: {e}")
         return 1
@@ -1118,7 +1167,7 @@ def apply_release(sha: str, only: list[str] | None) -> int:
         log.record("record", "start")
         write_release(paths, manifest, previous, names, full=only is None)
         log.record("record", "ok")
-    except DeployError as e:
+    except (DeployError, OSError) as e:  # OSError: render's mkdir/chmod/write, the record
         if step in ("manifest", "render", "pull", "migrate", "record"):
             log.record(step, "failed", detail=str(e))
         log.record("apply", "failed", detail=str(e))

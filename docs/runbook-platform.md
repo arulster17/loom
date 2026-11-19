@@ -89,12 +89,18 @@ line, in a compose file, in the release manifest or in a log. The instance role 
 `serving-runpod-key` (explicit deny); `loom-deploy` never names it.
 
 Run on the box through SSM. `loom-deploy.py` is the module itself, copied into every
-release; the first time, take it from the releases bucket (after section 5's image build):
+release; the first time, take it from the releases bucket (after section 5's image build).
+Run it with `python3.12 -S` (the boot script installs 3.12; the host's `python3` is the
+older system Python). Only the secrets' creation and the Stripe values use Run Command
+here; everything that reads a secret value runs in an interactive session on the box
+(`aws ssm start-session --region $AWS_REGION --target $INSTANCE`, then `sudo -i`), because
+each secret's policy lets only its reader role (the instance role) read it: your own
+principal cannot, by design.
 
 ```sh
 aws ssm send-command --region $AWS_REGION --instance-ids $INSTANCE \
   --document-name AWS-RunShellScript --comment "loom-deploy secrets init" \
-  --parameters 'commands=["aws s3 cp s3://'$BUCKET'/releases/'$SHA'/loom-deploy.py /var/lib/loom/loom-deploy.py","python3 -S /var/lib/loom/loom-deploy.py secrets init"]'
+  --parameters 'commands=["aws s3 cp s3://'$BUCKET'/releases/'$SHA'/loom-deploy.py /var/lib/loom/loom-deploy.py","python3.12 -S /var/lib/loom/loom-deploy.py secrets init"]'
 aws ssm get-command-invocation --region $AWS_REGION --instance-id $INSTANCE --command-id <id>
 ```
 
@@ -112,20 +118,50 @@ aws ssm get-command-invocation --region $AWS_REGION --instance-id $INSTANCE --co
          --secret-string file:///dev/stdin
    ```
 
-   Google: merge `google_id` and `google_secret` into the `auth` JSON the same way (read
-   it with `get-secret-value`, add the keys, put it back).
-3. **SES SMTP**: create an access key for the IAM user `loom-ses-smtp` and derive the SMTP
-   password from it in an **interactive** session (the key is read from stdin; Run Command
-   has no stdin and keeps parameters in its history):
+   Google: merge `google_id` and `google_secret` into the `auth` JSON **on the box**, in an
+   interactive session (the secret's policy denies reading it from your laptop; the
+   instance role may read and put it). The values are typed at the prompt, not put on a
+   command line:
 
    ```sh
    aws ssm start-session --region $AWS_REGION --target $INSTANCE
    # on the box:
-   aws iam create-access-key --user-name loom-ses-smtp | python3 -S /var/lib/loom/loom-deploy.py ses-smtp-password
+   sudo -i
+   python3.12 -S - <<'EOF'
+   import getpass, json, subprocess
+   def aws(*a, **k):
+       return subprocess.run(["aws", "secretsmanager", *a], check=True, text=True, **k)
+   cur = json.loads(aws("get-secret-value", "--secret-id", "loom/platform/auth",
+                        "--query", "SecretString", "--output", "text",
+                        stdout=subprocess.PIPE).stdout)
+   cur["google_id"] = getpass.getpass("google_id: ")
+   cur["google_secret"] = getpass.getpass("google_secret: ")
+   aws("put-secret-value", "--secret-id", "loom/platform/auth",
+       "--secret-string", "file:///dev/stdin", input=json.dumps(cur))
+   EOF
    ```
+3. **SES SMTP**: two steps, because only your own (operator) credentials may call IAM; the
+   instance role has no `iam:` action.
+   a. On your laptop, create the access key for the IAM user `loom-ses-smtp` and keep the
+      JSON in your clipboard or a file only long enough for step b (it is the only time
+      the secret is shown):
 
-   The access key secret is never printed or stored; delete the key's old versions after a
-   rotation.
+      ```sh
+      aws iam create-access-key --user-name loom-ses-smtp
+      ```
+
+   b. In an **interactive** session on the box, run the derivation and paste the key JSON
+      at the cursor, then press Ctrl-D (it is read from stdin: not a command-line argument,
+      not in the shell history, and Run Command has no stdin and keeps its parameters):
+
+      ```sh
+      aws ssm start-session --region $AWS_REGION --target $INSTANCE
+      # on the box:
+      sudo python3.12 -S /var/lib/loom/loom-deploy.py ses-smtp-password
+      ```
+
+   The access key secret is never printed or stored by `loom-deploy`; clear your clipboard
+   or delete the file, and delete the key's old versions after a rotation.
 4. Check (B4): each of the nine containers `describe-secret` shows a version. The user's
    principal cannot read them: only the instance role can.
 
@@ -139,32 +175,54 @@ count, the compose file's and the bundle's sha256), `<sha>/compose.prod.yml`,
 digests only. The Caddy image is built from `deploy/caddy/` (`go.mod`/`go.sum` pin Caddy
 and the rate-limit module).
 
-**Run loom-deploy through SSM.** One wrapper for every subcommand:
+**Run loom-deploy: in an interactive session.** `apply`, `rollback` and `acceptance` take
+minutes, and `acceptance` stops for operator input (m3-g, m3-s). Run Command shows no
+output until the command ends, and `aws ssm wait command-executed` gives up after about
+100 seconds, so none of the three can be driven that way. Open a session and define a
+helper (the commands below that say `loom_deploy` mean this one, in the session):
 
 ```sh
-loom_deploy() {  # usage: loom_deploy <loom-deploy arguments...>
+aws ssm start-session --region $AWS_REGION --target $INSTANCE
+# on the box (the session user is ssm-user; sudo gives the root the secrets and docker need):
+export AWS_REGION=us-east-1 BUCKET=<releases bucket> SHA=<the release's sha>
+sudo aws s3 cp s3://$BUCKET/releases/$SHA/loom-deploy.py /var/lib/loom/loom-deploy.py
+loom_deploy() { sudo env AWS_REGION=$AWS_REGION ${LOOM_DEPLOY_ACME_STAGING:+LOOM_DEPLOY_ACME_STAGING=1} \
+  python3.12 -S /var/lib/loom/loom-deploy.py "$@"; }
+```
+
+A session ends if the connection drops: run `tmux` first if it might (it is not
+installed by default), or re-run `apply` (it is repeatable). For a short subcommand from
+your laptop (`status`, `secrets init`) Run Command works; poll it, with an explicit
+execution timeout:
+
+```sh
+loom_deploy_remote() {  # usage: loom_deploy_remote <loom-deploy arguments...>, short ones only
   id=$(aws ssm send-command --region $AWS_REGION --instance-ids $INSTANCE \
-    --document-name AWS-RunShellScript --comment "loom-deploy $1" \
-    --parameters "commands=[\"aws s3 cp s3://$BUCKET/releases/$SHA/loom-deploy.py /var/lib/loom/loom-deploy.py\",\"python3 -S /var/lib/loom/loom-deploy.py $*\"]" \
+    --document-name AWS-RunShellScript --comment "loom-deploy $1" --timeout-seconds 60 \
+    --parameters "executionTimeout=[\"600\"],commands=[\"aws s3 cp s3://$BUCKET/releases/$SHA/loom-deploy.py /var/lib/loom/loom-deploy.py\",\"python3.12 -S /var/lib/loom/loom-deploy.py $*\"]" \
     --query Command.CommandId --output text)
-  aws ssm wait command-executed --region $AWS_REGION --command-id $id --instance-id $INSTANCE
+  while :; do
+    st=$(aws ssm get-command-invocation --region $AWS_REGION --command-id $id \
+      --instance-id $INSTANCE --query Status --output text 2>/dev/null) || st=Pending
+    case $st in Pending|InProgress|Delayed) sleep 5;; *) break;; esac
+  done
   aws ssm get-command-invocation --region $AWS_REGION --command-id $id --instance-id $INSTANCE \
     --query '[Status,StandardOutputContent,StandardErrorContent]' --output text
 }
 ```
 
 **First issuance (staging certificates).** Let's Encrypt's production CA rate-limits
-failures, so the first deploy gets staging certificates, then production:
+failures, so the first deploy gets staging certificates, then production. In the session:
 
 ```sh
-loom_deploy "apply --release $SHA"   # with LOOM_DEPLOY_ACME_STAGING=1 in the SSM command's environment
+LOOM_DEPLOY_ACME_STAGING=1 loom_deploy apply --release $SHA
 ```
 
-Set `LOOM_DEPLOY_ACME_STAGING=1` on the command (`commands=["LOOM_DEPLOY_ACME_STAGING=1
-python3 -S ..."]`): `apply` then renders `LOOM_ACME_CA` (the staging directory) into
+With that variable `apply` renders `LOOM_ACME_CA` (the staging directory) into
 `env/caddy.env`. Check with `curl -vk https://<domain>/` that the certificate is issued by
 the staging CA (browsers do not trust it). Then apply the same release **without** the
-variable: Caddy requests production certificates (they are kept on the data volume, per CA).
+variable (`loom_deploy apply --release $SHA` in a shell where it is unset): Caddy requests
+production certificates (they are kept on the data volume, per CA).
 
 **`apply` order** (stops at the first failure; every step is a line of
 `/var/lib/loom/deploy.log`, JSON Lines):
@@ -188,9 +246,34 @@ Exit codes: 0 done, 2 refused (the reason on stderr, nothing changed: not on a t
 site parameter lacks a key, the P4 rule), 1 any other failure. Rendered files stay after a
 failed step; the next apply renders them again.
 
-**B6 check.** `loom_deploy status`: every service healthy, no `LOOM_ENV` in any container
-(`docker inspect -f '{{json .Config.Env}}' <id>`), `loom_app` created. From the internet:
-`https://<domain>/signin` shows the product name in its title and heading.
+**CloudWatch agent.** Install its config on the box once, after the first apply (both files
+are in the extracted release bundle), then start it; do it before the B6 check, because
+that check waits for the "OK" mails of alarms that only the agent's series can clear (H1,
+P3, G3, S5). In the session:
+
+```sh
+rel=/var/lib/loom/releases/$SHA
+sudo cp $rel/cloudwatch-prometheus.yml /opt/aws/amazon-cloudwatch-agent/etc/loom-prometheus.yml
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 \
+  -c file:$rel/cloudwatch-agent.json -s
+```
+
+The agent scrapes `127.0.0.1:9100-9102` and sends only the series spec §5.3 names, plus
+disk (one series per `path`, no host or device dimension) and memory, in namespace
+`Loom/Platform` through the log group `/loom/platform/prometheus`.
+
+**B6 check.** `loom_deploy status`: every service healthy, `loom_app` created. No
+`LOOM_ENV` in any container, printing only the variable names (the values are secrets):
+
+```sh
+for c in $(sudo docker ps -q); do
+  sudo docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $c | cut -d= -f1
+done | sort -u | grep -x LOOM_ENV || echo "LOOM_ENV: absent (ok)"
+```
+
+From the internet: `https://<domain>/signin` shows the product name in its title and
+heading. Then, with the agent running, each alarm that began in ALARM (section 2) sends
+its OK mail.
 
 ## 6. The P4 rule, rollback, changing the name or domain
 
@@ -216,7 +299,7 @@ resolved clawback: the reopen sweep would take it twice.
 
 **Changing the name or the domain.** Edit `terraform.tfvars` (`brand_name`, `domain`),
 `terraform apply` (it rewrites the SSM parameter `/loom/platform/site`), then
-`loom_deploy "apply --release $SHA"` with the same release: it re-renders every service's
+`loom_deploy apply --release $SHA` (session helper, section 5) with the same release: it re-renders every service's
 settings and updates every service but Redis. A new domain also needs DNS, the SES
 identity, the Stripe endpoint URL and the Google redirect URI (section 3).
 
@@ -224,50 +307,43 @@ identity, the Stripe endpoint URL and the Google redirect URI (section 3).
 
 A reboot or an auto-recovery (alarm H2) empties `/run/loom`: the services come back
 without their secret files and H1 and H3 fire. The step is
-`loom_deploy "apply --release <current sha>"` for the current release (the `release` in
+`loom_deploy apply --release <current sha>` (in a session, section 5) for the current release (the `release` in
 `/var/lib/loom/release.json`). A same-release apply re-renders everything, recreates a
 Redis that is not healthy and updates every other service. M3 has no boot unit (LM10).
 
-## 8. Alarm test (m3-a) and the CloudWatch agent
+## 8. Alarm test (m3-a)
 
-Install the agent config on the box once, then start it:
-
-```sh
-rel=/var/lib/loom/releases/<sha>      # both files are in the extracted release bundle
-sudo cp $rel/cloudwatch-prometheus.yml /opt/aws/amazon-cloudwatch-agent/etc/loom-prometheus.yml
-sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 \
-  -c file:$rel/cloudwatch-agent.json -s
-```
-
-The agent scrapes
-`127.0.0.1:9100-9102` and sends only the series spec §5.3 names, plus disk and memory, in
-namespace `Loom/Platform` through the log group `/loom/platform/prometheus`.
-
-For each alarm: `aws cloudwatch set-alarm-state --alarm-name <name> --state-value ALARM
+The CloudWatch agent was installed in section 5. For each alarm: `aws cloudwatch set-alarm-state --alarm-name <name> --state-value ALARM
 --state-reason test` and check the mail; the alarm re-evaluates on its own. Every §5.3
 metric, `up` included, must be present in CloudWatch (`aws cloudwatch list-metrics
 --namespace Loom/Platform`). Whether the agent publishes `up` and the empty dimension sets
 is not checked before this step.
 
-**H3 end to end (B25).** With the stack up, stop Caddy (`docker stop` on the box): H3's
+**H3 end to end (B25).** With the stack up, stop Caddy (`sudo docker stop <the caddy container>` in a session): H3's
 ALARM mail arrives (record the minutes); start it: the OK mail arrives.
 
 ## 9. Looking at it
 
 - Grafana (not public): `aws ssm start-session --target $INSTANCE --document-name
   AWS-StartPortForwardingSession --parameters '{"portNumber":["3001"],"localPortNumber":["3001"]}'`,
-  then `http://127.0.0.1:3001`; user `admin`, the password is `loom/platform/grafana`
-  `admin_password`.
+  then `http://127.0.0.1:3001`; user `admin`. The password is `admin_password` in
+  `loom/platform/grafana`, which your own principal cannot read (only the instance role
+  can): read it in an interactive session on the box, not from your laptop:
+  `sudo aws secretsmanager get-secret-value --region $AWS_REGION --secret-id
+  loom/platform/grafana --query SecretString --output text` (a JSON object; take the
+  `admin_password` value, and clear the terminal afterwards).
 - Prometheus the same way on 9090.
 - Logs: CloudWatch log group `/loom/platform` (30 days; the `awslogs` driver). No prompt,
   completion or key ever reaches them (m3-i).
 
 ## 10. M3 acceptance (B10-B19, B26)
 
-On the box, in the one-shot `acceptance` container and the host halves:
+On the box, in the one-shot `acceptance` container and the host halves. Run it in an
+interactive session (section 5's helper) so the output streams and the operator prompts
+of m3-g and m3-s reach you; Run Command cannot do either:
 
 ```sh
-loom_deploy "acceptance --p4-release <any release but the current one>"
+loom_deploy acceptance --p4-release <any release but the current one>
 ```
 
 `loom-deploy acceptance` runs `loom-m3-acceptance` in the compose network through the
@@ -285,12 +361,14 @@ B26 repeats m3-i and m3-p independently with plain `aws` commands (spec §13).
 ## 11. Backups, restore drill, teardown (B21, B22)
 
 RDS: automated backups (7 days) and point-in-time recovery. Data volume: daily EBS
-snapshots, 7 kept. **Teardown:** stop the stack (`docker compose -p loom down` from
-`/var/lib/loom/releases/<sha>/` with `--env-file /run/loom/compose.env`), set
-`db_deletion_protection = false`, `terraform destroy` (RDS takes a final snapshot). The
-data volume and the state bucket have `prevent_destroy`: remove them only with explicit
-steps. Secrets are deleted with the 7-day recovery window. List what remains by the
-`loom:stack` tag (`aws resourcegroupstaggingapi get-resources`).
+snapshots, 7 kept. **Teardown:** follow `infra/aws/platform/README.md`, "Teardown", steps
+0 to 8, in order; a plain `terraform destroy` fails on purpose (data volume, instance
+and database protections, non-empty ECR repositories and buckets). Step 0 is on the box,
+in a session: `sudo docker compose -p "${LOOM_DEPLOY_PROJECT:-loom}" down` and `sudo
+systemctl stop amazon-cloudwatch-agent` (Alarms and the H3 health check then fire; expect
+the mails). RDS takes a final snapshot; secrets are deleted with the 7-day recovery
+window. List what remains by the `loom:stack` tag (`aws resourcegroupstaggingapi
+get-resources`).
 
 ## 12. Facts about this deploy that surprise people
 

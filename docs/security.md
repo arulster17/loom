@@ -302,8 +302,14 @@ mock; no RunPod credential is on the box.
   mounted read-only into the one service that needs them) and as env files for settings
   that have no `*_FILE` form (`0400`, owned by root, read by compose, never mounted).
   Nothing secret is on a command line, in a compose file, in the release manifest or in a
-  log; secrets go to `aws` and `docker login` on stdin. A reboot empties `/run/loom`, so a
-  restarted box serves nothing until `loom-deploy apply` re-renders them (fail closed).
+  log; secrets go to `aws` and `docker login` on stdin. The secret files exist only on the
+  tmpfs. Secrets that reach a container as environment variables (the env files'
+  settings) are different: Docker keeps them in the container's configuration on the root
+  disk (`/var/lib/docker/containers/<id>/`, readable by root only), and they stay there
+  while the container exists (user decision LM9). A reboot empties `/run/loom`, but the
+  Docker daemon restarts containers that have a restart policy: the web app and Caddy come
+  back (with their env-held settings, without their rendered files) and the services that
+  need a secret file fail to start until `loom-deploy apply` re-renders `/run/loom`.
   The instance role cannot read the serving RunPod key (explicit deny); `loom-deploy`
   never names it.
 - **Database.** Every service connects to RDS as the runtime login `loom_app` (not a

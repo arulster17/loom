@@ -1,15 +1,18 @@
 {
   "agent": {
     "metrics_collection_interval": 60,
-    "run_as_user": "root"
+    "run_as_user": "root",
+    "omit_hostname": true
   },
   "metrics": {
     "namespace": "Loom/Platform",
     "append_dimensions": {},
+    "aggregation_dimensions": [["path"]],
     "metrics_collected": {
       "disk": {
         "measurement": ["used_percent"],
         "resources": ["/", "/var/lib/loom"],
+        "drop_device": true,
         "metrics_collection_interval": 60
       },
       "mem": {
@@ -64,7 +67,7 @@
             {
               "source_labels": ["job"],
               "label_matcher": "^billing$",
-              "dimensions": [["type"]],
+              "dimensions": [["type"], []],
               "metric_selectors": ["^loom_billing_stripe_unapplied_stale_total$"]
             },
             {
@@ -85,13 +88,13 @@
             {
               "source_labels": ["job"],
               "label_matcher": "^billing$",
-              "dimensions": [["status"]],
+              "dimensions": [["status"], []],
               "metric_selectors": ["^loom_billing_stripe_webhook_errors_total$"]
             },
             {
               "source_labels": ["job"],
               "label_matcher": "^billing$",
-              "dimensions": [["path"]],
+              "dimensions": [["path"], []],
               "metric_selectors": ["^loom_billing_stripe_handler_failures_total$"]
             }
           ]
