@@ -615,7 +615,9 @@ test name), the manifest and the secrets through a fake `aws` on `PATH`, with a 
 it records and answers 0); runs `loom-deploy secrets init` and `apply` with
 `LOOM_DEPLOY_ROOT` under `/dev/shm`, `LOOM_DEPLOY_PROJECT=loom-m3prod` and an override
 that adds a TLS Postgres standing in for RDS (a throwaway CA mounted at
-`/etc/loom/rds-ca.pem`, `migrate` depending on it), runs every service as the test's uid,
+`/etc/loom/rds-ca.pem`, `migrate` depending on it), runs every service but `acceptance`
+(uid 0, for the docker socket) as the test's uid, sets `logging: json-file` (`awslogs` needs
+AWS credentials),
 moves Caddy's published ports off 80/443, sets `LOOM_CADDY_TLS=internal`, gives Caddy the
 network aliases `example.test`, `api.example.test` and `hooks.example.test`, and lets the
 `acceptance` service trust Caddy's internal root (e.g. `SSL_CERT_FILE`); nothing else. It
