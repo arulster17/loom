@@ -24,6 +24,18 @@ class _ClientCertExpiry(Collector):
     def __init__(self) -> None:
         self.read: Callable[[], float | None] | None = None
 
+    def describe(self) -> Iterator[GaugeMetricFamily]:
+        # Registration records the family's name (no sample), so the registry maps this
+        # collector to it.
+        yield self._family()
+
+    @staticmethod
+    def _family() -> GaugeMetricFamily:
+        return GaugeMetricFamily(
+            "loom_gateway_client_cert_expiry_seconds",
+            "Seconds until the gateway's client certificate (the one in use) expires",
+        )
+
     def collect(self) -> Iterator[GaugeMetricFamily]:
         value = None
         if self.read is not None:
@@ -31,10 +43,7 @@ class _ClientCertExpiry(Collector):
                 value = self.read()
             except Exception:
                 value = None
-        family = GaugeMetricFamily(
-            "loom_gateway_client_cert_expiry_seconds",
-            "Seconds until the gateway's client certificate (the one in use) expires",
-        )
+        family = self._family()
         if value is not None:
             family.add_metric([], value)
         yield family
