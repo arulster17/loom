@@ -99,9 +99,25 @@ class TlsSource:
         self.check_s = s.gateway_cert_check_s
         self._lock = threading.Lock()
         self._sig = self._signature()
-        # (version, context, client certificate's notAfter): replaced as a whole.
-        self.state: tuple[int, ssl.SSLContext, float | None] = (0, *self._build())
+        # (version, context, client certificate's notAfter): replaced as a whole. The
+        # context is None until the files first load: on a fresh box the manager writes
+        # the client certificate only after the gateway is up (P4), so a missing or broken
+        # file at start is not fatal; upstream requests fail (`ReloadingTransport`) and
+        # each `refresh()` check retries.
+        self.state: tuple[int, ssl.SSLContext | None, float | None] = (0, None, None)
+        try:
+            self.state = (0, *self._build())
+        except Exception as e:
+            self._log_load_error(e, "no TLS context yet; upstream requests fail until it loads")
         self._next_check = time.monotonic() + self.check_s
+
+    @staticmethod
+    def _log_load_error(e: Exception, consequence: str) -> None:
+        log.error(
+            "client certificate or pod CA bundle failed to load; %s",
+            consequence,
+            extra={"fields": {"error": f"{type(e).__name__}: {e}"}},
+        )
 
     def _paths(self) -> tuple[str | None, ...]:
         return (self.cert, self.key, self.ca)
@@ -137,17 +153,22 @@ class TlsSource:
                 return
             self._next_check = now + self.check_s
             sig = self._signature()
-            if sig == self._sig:
+            loaded = self.state[1] is not None
+            if sig == self._sig and loaded:
                 return
-            self._sig = sig
+            changed, self._sig = sig != self._sig, sig
             try:
                 ctx, not_after = self._build()
             except Exception as e:
-                log.error(
-                    "client certificate or pod CA bundle failed to load; keeping the old TLS "
-                    "context",
-                    extra={"fields": {"error": f"{type(e).__name__}: {e}"}},
-                )
+                # Once per change of the files; with no context yet the check retries
+                # each time (a file may be completed without its signature changing).
+                if changed:
+                    self._log_load_error(
+                        e,
+                        "keeping the old TLS context"
+                        if loaded
+                        else "no TLS context yet; upstream requests fail until it loads",
+                    )
                 return
             self.state = (self.state[0] + 1, ctx, not_after)
             log.info("reloaded the client certificate and pod CA bundle")
@@ -195,7 +216,7 @@ class _CountedStream(httpx.AsyncByteStream):
 
 
 class _Generation:
-    def __init__(self, version: int, transport: httpx.AsyncHTTPTransport) -> None:
+    def __init__(self, version: int, transport: httpx.AsyncHTTPTransport | None) -> None:
         self.version = version
         self.transport = transport
         self.active = 0
@@ -216,6 +237,8 @@ class ReloadingTransport(httpx.AsyncBaseTransport):
 
     def _generation(self) -> _Generation:
         version, ctx, _ = self._source.state
+        if ctx is None:  # no context has loaded yet: requests fail, see handle_async_request
+            return _Generation(version, None)
         return _Generation(
             version,
             httpx.AsyncHTTPTransport(verify=ctx, http2=True, limits=self._limits, trust_env=False),
@@ -224,6 +247,8 @@ class ReloadingTransport(httpx.AsyncBaseTransport):
     def _close_later(self, gen: _Generation) -> None:
         if gen in self._retired:
             self._retired.remove(gen)
+        if gen.transport is None:
+            return
         task = asyncio.ensure_future(gen.transport.aclose())
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -243,6 +268,13 @@ class ReloadingTransport(httpx.AsyncBaseTransport):
             else:
                 self._retired.append(old)
         gen = self._gen
+        if gen.transport is None:
+            # Not a pod's fault, but the same failure as one that cannot be reached: the
+            # proxy tries the next replica, then answers 502 upstream_lost.
+            raise httpx.ConnectError(
+                "no TLS context: the gateway's client certificate or the pod CA has not loaded",
+                request=request,
+            )
         gen.active += 1
         try:
             response = await gen.transport.handle_async_request(request)
@@ -255,7 +287,8 @@ class ReloadingTransport(httpx.AsyncBaseTransport):
 
     async def aclose(self) -> None:
         for gen in [self._gen, *self._retired]:
-            await gen.transport.aclose()
+            if gen.transport is not None:
+                await gen.transport.aclose()
         self._retired.clear()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)

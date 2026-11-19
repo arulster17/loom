@@ -90,7 +90,7 @@ Admin commands act on the running manager's Postgres and Redis; `drain`, `stop`,
 | `LOOM_POOLMGR_ALLOW_CIDRS` | empty | Dev and `provider: local` only: CIDRs added to the local pods' allowlist |
 | `LOOM_POOLMGR_IDLE_STOP_S` | unset | Dev only: replaces every model's `idle_stop_s` |
 | `LOOM_POOLMGR_MOCK_BACKEND` | unset | Outside dev: `true` permits `provider: local` (not `runpod`) and private (RFC 1918) `LOOM_POOLMGR_ALLOW_CIDRS`, and lifts the SSH key, lease bucket and proxy bundle requirements; the CA and client certificate stay required. Warns at start; exports `loom_poolmgr_mock_backend 1`. M4 removes it |
-| `LOOM_POOLMGR_GATEWAY_CERT_DIR` | none | Where the manager writes the gateway's client certificate (`gateway-client.pem`: key and certificate, mode 0400, renamed into place): at start unless the file holds a current one (loads, issued by this CA, 6 days or more left), then every 24 h; 7-day validity |
+| `LOOM_POOLMGR_GATEWAY_CERT_DIR` | none | Where the manager writes the gateway's client certificate (`loom-gateway.pem`: key and certificate, mode 0400, renamed into place): at start unless the file holds a current one (loads, issued by this CA, 6 days or more left), then every 24 h; 7-day validity |
 | `RUNPOD_API_KEY` | none | `provider: runpod`: the serving account's key |
 
 Outside `LOOM_ENV=dev` it refuses to start without the CA, the client certificate, the
@@ -136,7 +136,7 @@ still requires the CA, its client certificate and `LOOM_POOLMGR_STATE_DIR`.
   the manager's client certificate, so run it where `LOOM_POOLMGR_CLIENT_CERT`/`_KEY` and
   `LOOM_POOLMGR_CA_CERT` are set and the pods are reachable).
 - **The gateway's client certificate** (`clientAuth`, 7 days) is written to
-  `LOOM_POOLMGR_GATEWAY_CERT_DIR/gateway-client.pem`: at start unless the file already holds
+  `LOOM_POOLMGR_GATEWAY_CERT_DIR/loom-gateway.pem`: at start unless the file already holds
   a current one (key and certificate load together, signed by the CA in use, 6 days or more
   left), then every 24 h by the manager's clock. The file is written under a temporary name
   with mode 0400, owned by the directory's owner (so the gateway's uid can read it), and

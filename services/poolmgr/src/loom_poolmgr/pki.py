@@ -29,6 +29,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 ORGANIZATION = "Loom"
 CA_DAYS = 365
+NEW_CA_DAYS = 730  # `new-ca`: as the first CA (`loom-deploy secrets init`)
 CLIENT_DAYS = 30
 POOLMGR_CN = "loom-poolmgr"
 GATEWAY_CN = "loom-gateway"
@@ -235,9 +236,16 @@ class Pki:
 
 def _write(path: Path, data: bytes, mode: int) -> None:
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(data)
-    os.chmod(tmp, mode)
-    tmp.replace(path)
+    tmp.unlink(missing_ok=True)  # a stale one from a crashed run
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, mode)  # the umask may have cleared bits of `mode`
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def write_issued(directory: Path, stem: str, issued: IssuedCert, *, key_mode: int = 0o600) -> None:
@@ -260,7 +268,7 @@ def write_dev_ca(directory: Path, *, now: float | None = None) -> list[str]:
 
 # ---------------------------------------------------------------- the gateway's certificate
 
-GATEWAY_CERT_FILE = "gateway-client.pem"
+GATEWAY_CERT_FILE = "loom-gateway.pem"
 GATEWAY_CERT_DAYS = 7
 # Rotated every 24 h; at start also when less than this is left (spec §7).
 GATEWAY_RENEW_BEFORE_S = 6 * 86400.0
@@ -295,7 +303,7 @@ def write_gateway_cert(
     directory: Path, ca: CertificateAuthority, *, now: float | None = None
 ) -> IssuedCert:
     """Issue the gateway's client certificate (`clientAuth`, 7 days from `now`) into
-    `directory/gateway-client.pem`: key and certificate in one PEM, written under a
+    `directory/loom-gateway.pem`: key and certificate in one PEM, written under a
     temporary name (mode 0400, owned by the directory's owner so the gateway's uid can
     read it) and renamed into place, so a reader never sees a key without its certificate."""
     directory.mkdir(parents=True, exist_ok=True)
@@ -328,8 +336,8 @@ def write_new_ca(directory: Path, *, now: float | None = None) -> list[str]:
     for name in ("ca.crt", "ca.key"):
         if (directory / name).exists():
             raise FileExistsError(f"{directory / name} exists: not overwriting a CA")
-    ca = CertificateAuthority.generate("Loom pod CA", now=now)
+    ca = CertificateAuthority.generate("Loom pod CA", days=NEW_CA_DAYS, now=now)
     _write(directory / "ca.key", IssuedCert(ca.cert, ca.key).key_pem(), 0o600)
     _write(directory / "ca.crt", ca.cert_pem(), 0o644)
-    write_issued(directory, POOLMGR_CN, ca.issue_client(POOLMGR_CN, days=CA_DAYS, now=now))
+    write_issued(directory, POOLMGR_CN, ca.issue_client(POOLMGR_CN, days=NEW_CA_DAYS, now=now))
     return ["ca", POOLMGR_CN]

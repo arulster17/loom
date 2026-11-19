@@ -13,7 +13,7 @@ certificate). Contracts: [phase1-contracts.md](phase1-contracts.md) §2, §9.
 - **The trust bundle** (`LOOM_POD_CA_CERT` in the gateway and the manager's pods): may hold
   several CA certificates; the gateway trusts a pod whose certificate any of them signed.
 - **The gateway's client certificate**: issued by the manager from the CA in use, 7 days,
-  into `LOOM_POOLMGR_GATEWAY_CERT_DIR/gateway-client.pem` (key and certificate in one
+  into `LOOM_POOLMGR_GATEWAY_CERT_DIR/loom-gateway.pem` (key and certificate in one
   file), at start unless the file holds a current one and then every 24 h. The gateway
   checks that file and the CA bundle every `LOOM_GATEWAY_CERT_CHECK_S` (60 s) and uses a
   changed set for new upstream connections; streams already open finish on theirs.
@@ -24,8 +24,8 @@ certificate). Contracts: [phase1-contracts.md](phase1-contracts.md) §2, §9.
 - **P3** `loom_poolmgr_ca_expiry_seconds` below 30 days. Do the rollover below now: it
   takes an afternoon, the refusal at 2 days takes serving down.
   (A manager that refuses to start publishes nothing, so the alarm treats missing data as
-  breaching: a P3 in ALARM with the manager down means look at `docker compose logs
-  poolmgr` first.)
+  breaching: a P3 in ALARM with the manager down means look at `docker logs "$PM"`
+  (`$PM` as in step 3) first.)
 - **G3** `loom_gateway_client_cert_expiry_seconds` below 2 days: the rotation is broken.
   Check, in this order: the manager is running (H1); its log has no `issuing the gateway's
   client certificate failed` (disk full, the directory not writable); the file in the
@@ -67,8 +67,12 @@ runs the manager and the gateway in one compose project, so every step is a depl
    Then re-issue every pod's certificate now instead of waiting for each to near expiry:
 
    ```bash
-   docker compose exec poolmgr loom-poolmgr rekey            # every ready pod
-   docker compose exec poolmgr loom-poolmgr rekey --model qwen3-8b   # or one model
+   # On the box. The compose project is $LOOM_DEPLOY_PROJECT (default loom); the manager's
+   # container is found by its compose labels, so no release sha or compose file is needed.
+   PM=$(docker ps -q -f "label=com.docker.compose.project=${LOOM_DEPLOY_PROJECT:-loom}" \
+        -f label=com.docker.compose.service=poolmgr)
+   docker exec "$PM" loom-poolmgr rekey                   # every ready pod
+   docker exec "$PM" loom-poolmgr rekey --model qwen3-8b  # or one model
    ```
 
    The command queues the re-key; the manager applies it on its next tick (seconds). Pods
@@ -77,7 +81,7 @@ runs the manager and the gateway in one compose project, so every step is a depl
 4. **Check that every pod's certificate chains to the new CA**:
 
    ```bash
-   docker compose exec poolmgr loom-poolmgr status
+   docker exec "$PM" loom-poolmgr status     # $PM as in step 3
    ```
 
    Under each ready pod a line shows `certificate: issued by <CA name>, expires ...
