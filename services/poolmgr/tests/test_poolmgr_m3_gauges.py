@@ -230,7 +230,7 @@ async def test_pool_reason_follows_the_pool_hash_each_tick(
     await follows_after_next_tick(env, manager, metrics, model, wake=model)
     assert (await env.pool(model)).reason == "no_capacity"
 
-    env.runpod.stock = None  # stock everywhere again
+    env.runpod.stock = [["US-TX-3"]]  # a US datacenter has the GPU again
     await env.wake(model)
     await tick(manager, env.clock, advance=15)  # past the 10 s backoff
     seen = {(await env.pool(model)).state}
