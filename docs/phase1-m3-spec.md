@@ -195,6 +195,13 @@ math `RATE()`/`DIFF()`; delta: `Sum`); the implementer checks the agent's docume
 behaviour and a test pins the choice (A9). The P1 alarms keep `actions_enabled =
 var.serving_reaper_enabled`, so a disabled reaper in M3 does not page.
 
+Runbook (`docs/runbook-platform.md`, at B2; round 18 n1): from `terraform apply` until the
+first deploy is healthy (B6), H1 and H3 are in ALARM (nothing is scraped yet and nothing
+answers on `hooks.`), and so are the other alarms whose missing data is breaching and whose
+metric only the running stack publishes (P3, G3, S5): expected; the operator acknowledges
+those emails and checks that each sends its OK email after B6 (one still in ALARM then is a
+real fault).
+
 ### 5.4 Remote state
 
 `infra/aws/state` creates one S3 bucket (versioning, SSE, public access block, TLS-only
@@ -777,7 +784,10 @@ What `resolve` is for (the runbook lists the cases):
   unapplied until then). M3 has no hand credit for a Stripe payment (§8.10).
 - **A clawback with no payment** (a refund of a payment Loom never sold, e.g. one made in
   the dashboard; or of a purchase that is itself still stuck) is resolved; nothing is taken
-  back now, and if its purchase is credited later, the sweep reopens and applies it.
+  back now, and if its purchase is credited later, the sweep reopens and applies it. The
+  runbook says never to make a hand adjustment for a resolved clawback whose payment may
+  still arrive (round 18 n3): once that purchase is credited the sweep reopens the clawback
+  and the handler takes the amount back, so a hand adjustment would take it twice.
 - Other types are already `ignored` (processed) and never stuck.
 
 ### 8.7 Traces
@@ -1401,7 +1411,12 @@ flake-check's `--count 2`. R has no age window and re-runs every unapplied row n
 first, so in the shared database it also re-runs other tests' leftovers; a test that needs
 its own rows inside R's 500 uses the scratch database. New M3 tests use random dispute, session and PaymentIntent ids
 (never fixed ones such as the protected `dp_test_x`), so their second copy in one session
-database does not meet the first copy's events.
+database does not meet the first copy's events. Fake-clock and backlog tests (a moved `now`,
+the 600-row backlogs of A24, T21 and T22) leave no rows in the shared session database
+(round 18 n5), so they run in the scratch database: 500 newer unapplied rows left behind
+would push the row of the protected `test_retry_job_applies_a_clawback_that_raced_its_purchase`
+out of R's 500, and rows stale-marked under a moved `now` would count in other tests'
+stale gauge.
 
 **Constraints from protected tests** (M3 changes none of them; they bind the tests and
 the implementation):
@@ -1875,7 +1890,7 @@ are open.
 | 18.4 | Interface points to guess: the settings' field names, the `result` of a clawback applied by its purchase, `list_events` order, `error_count` after a reopen | minor | read | §8.11 |
 | 18.5 | A24 said any error in a pending-clawback savepoint leaves the purchase committing; A23 and §8.3 say a lost connection fails the delivery | minor | read | A24: an error that leaves the transaction usable |
 | 18.6 | §8 cited round-18 probes with no Appendix A entry | minor | read | This entry |
-| 18.n1-n5 | H1 and H3 alarm from `terraform apply` until the first deploy (the runbook should expect it); S2a and S2b fire on one request anyone can send, and m3-g's old-`t` step fires S2b (17.n3); a hand adjustment for a resolved clawback is taken twice once the sweep reopens it (runbook: never adjust for one); dead pooled connections after an RDS restart can cost one 503 once Postgres is back; §16 should also forbid fake-clock and backlog tests from leaving rows in the shared database (500 newer rows would push the protected raced-clawback test's row out of R's 500) | note | reasoning | Open |
+| 18.n1-n5 | H1 and H3 alarm from `terraform apply` until the first deploy (the runbook should expect it); S2a and S2b fire on one request anyone can send, and m3-g's old-`t` step fires S2b (17.n3); a hand adjustment for a resolved clawback is taken twice once the sweep reopens it (runbook: never adjust for one); dead pooled connections after an RDS restart can cost one 503 once Postgres is back; §16 should also forbid fake-clock and backlog tests from leaving rows in the shared database (500 newer rows would push the protected raced-clawback test's row out of R's 500) | note | reasoning | n1, n3, n5 applied in wave 0 (§5.3 runbook line, §8.6, §16 test isolation); n2, n4 open |
 | 18.u | `data.aws_region` in provider 6.x reads `region` (`name` deprecated); A22's "200 within 3 s" with Redis frozen under flake-check load (17.n2) | unconfirmed | not checkable offline | Attribute named in §8.5; timing open |
 
 **Totals.** 16 rounds before the cut, each a fresh Fable reviewer: 1 blocker (round 7), 26
