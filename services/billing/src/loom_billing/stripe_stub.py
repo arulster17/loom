@@ -18,6 +18,18 @@ account (port 12111, `python -m loom_billing stripe-stub`).
   `amount_refunded`.
 - `POST /stub/disputes`: not a Stripe API (Stripe tests disputes with special cards):
   JSON `{"payment_intent", "amount"?}` delivers `charge.dispute.created`.
+- `POST /stub/control` (M3, docs/phase1-m3-spec.md §8.9): JSON
+  `{"drop_deliveries": bool, "fail_status": int | null}`. While `drop_deliveries` is
+  true the stub sends nothing and reports status 0 (unreachable); while `fail_status` is
+  set it sends nothing and reports that status (a delivery that failed on the way, as
+  Stripe would record it). Either field may be omitted (unchanged); answers the state.
+- `GET /stub/events`: every event the stub made, newest last (`id`, `type`,
+  `last_status`). `POST /stub/events/{id}/resend`: re-posts the stored event with a fresh
+  signature (a new `t`), as Stripe's dashboard resend does; answers
+  `{"event_id", "webhook_status"}` (subject to `/stub/control`).
+
+Sessions carry `expires_at`: the request's (refused unless 30 minutes to 24 hours ahead,
+as Stripe refuses it), else 24 hours after creation (Stripe's default).
 
 State is in memory; restarting the stub forgets sessions. Not a security boundary: it
 exists only for local development and tests.
@@ -79,8 +91,12 @@ def create_stub_app(
     sessions: dict[str, dict[str, Any]] = {}
     events: dict[str, str] = {}  # session id -> event id (stable across re-sends)
     charges: dict[str, dict[str, Any]] = {}  # payment intent -> charge
+    sent: dict[str, dict[str, Any]] = {}  # event id -> {"event", "last_status"}
+    control: dict[str, Any] = {"drop_deliveries": False, "fail_status": None}
     app.state.sessions = sessions
     app.state.charges = charges
+    app.state.events = sent
+    app.state.control = control
     base = public_url.rstrip("/")
 
     def _auth(authorization: str | None) -> JSONResponse | None:
@@ -113,6 +129,16 @@ def create_stub_app(
             return _err(400, "line_items need price_data[unit_amount], price_data[currency]")
         if total < 50:
             return _err(400, "amount_total must be at least 50 cents")
+        created = int(time.time())
+        expires_at = created + 86_400
+        if form.get("expires_at") is not None:
+            try:
+                expires_at = int(form["expires_at"])
+            except (TypeError, ValueError):
+                return _err(400, "expires_at must be a Unix timestamp")
+            # Stripe: between 30 minutes and 24 hours after creation (a minute of slack).
+            if not created + 1800 - 60 <= expires_at <= created + 86_400 + 60:
+                return _err(400, "expires_at must be 30 minutes to 24 hours from now")
         sid = "cs_test_" + secrets.token_hex(12)
         session = {
             "id": sid,
@@ -131,7 +157,8 @@ def create_stub_app(
             "cancel_url": form["cancel_url"],
             "url": f"{base}/checkout/{sid}",
             "livemode": False,
-            "created": int(time.time()),
+            "created": created,
+            "expires_at": expires_at,
         }
         sessions[sid] = session
         log.info("stub.session_created", extra=fields(session_id=sid, amount_cents=total))
@@ -188,18 +215,73 @@ button{{font-size:1rem;padding:.6rem 1.2rem;margin-right:.5rem}}
             "type": typ,
             "data": {"object": obj},
         }
-        body = json.dumps(event).encode()
-        headers = {
-            "Content-Type": "application/json",
-            "Stripe-Signature": sign(body, webhook_secret),
-        }
-        try:
-            status = await deliver(webhook_url, body, headers)
-        except (TimeoutError, OSError) as exc:
-            log.error("stub.webhook_failed", extra=fields(event_id=evt_id, reason=str(exc)))
+        if evt_id in sent:  # a re-send of the same event: the stored object, as Stripe does
+            event = sent[evt_id]["event"]
+        else:  # a snapshot: later changes to the charge or session do not alter it
+            event = json.loads(json.dumps(event))
+            sent[evt_id] = {"event": event, "last_status": None}
+        return await post_event(event)
+
+    async def post_event(event: dict[str, Any]) -> int:
+        """Sign `event` now (a fresh `t`) and post it, unless `/stub/control` drops or
+        fails deliveries."""
+        evt_id, typ = event["id"], event["type"]
+        if control["drop_deliveries"]:
             status = 0
-        log.info("stub.webhook_sent", extra=fields(type=typ, event_id=evt_id, status=status))
+            log.info("stub.webhook_dropped", extra=fields(type=typ, event_id=evt_id))
+        elif control["fail_status"] is not None:
+            status = int(control["fail_status"])
+            log.info("stub.webhook_failed_by_control", extra=fields(event_id=evt_id, status=status))
+        else:
+            body = json.dumps(event).encode()
+            headers = {
+                "Content-Type": "application/json",
+                "Stripe-Signature": sign(body, webhook_secret),
+            }
+            try:
+                status = await deliver(webhook_url, body, headers)
+            except (TimeoutError, OSError) as exc:
+                log.error("stub.webhook_failed", extra=fields(event_id=evt_id, reason=str(exc)))
+                status = 0
+            log.info("stub.webhook_sent", extra=fields(type=typ, event_id=evt_id, status=status))
+        sent.setdefault(evt_id, {"event": event, "last_status": None})["last_status"] = status
         return status
+
+    @app.post("/stub/control")
+    async def set_control(request: Request) -> JSONResponse:
+        try:
+            body = json.loads(await request.body() or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("not an object")
+            drop = body.get("drop_deliveries", control["drop_deliveries"])
+            fail = body.get("fail_status", control["fail_status"])
+            if not isinstance(drop, bool):
+                raise ValueError("drop_deliveries must be a boolean")
+            if fail is not None and (
+                not isinstance(fail, int) or isinstance(fail, bool) or not 100 <= fail <= 599
+            ):
+                raise ValueError("fail_status must be an HTTP status or null")
+        except ValueError as e:
+            return _err(400, f'body: {{"drop_deliveries": bool, "fail_status": int | null}} ({e})')
+        control.update(drop_deliveries=drop, fail_status=fail)
+        return JSONResponse(dict(control))
+
+    @app.get("/stub/events")
+    async def list_events() -> JSONResponse:
+        return JSONResponse(
+            [
+                {"id": k, "type": v["event"]["type"], "last_status": v["last_status"]}
+                for k, v in sent.items()
+            ]
+        )
+
+    @app.post("/stub/events/{evt_id}/resend")
+    async def resend(evt_id: str) -> JSONResponse:
+        stored = sent.get(evt_id)
+        if stored is None:
+            return _err(404, f"No such event: '{evt_id}'")
+        status = await post_event(stored["event"])
+        return JSONResponse({"event_id": evt_id, "webhook_status": status})
 
     def delivery_failed(status: int) -> JSONResponse:
         return _err(502, f"webhook delivery to {webhook_url} failed ({status}); retry", "api_error")
