@@ -111,7 +111,7 @@ run "records_as_output_without_a_zone" {
 
   assert {
     condition = (
-      aws_sesv2_email_identity_mail_from_attributes.domain.email_identity == aws_sesv2_email_identity.domain.email_identity
+      contains([aws_sesv2_email_identity.domain.email_identity, aws_sesv2_email_identity.domain.id], aws_sesv2_email_identity_mail_from_attributes.domain.email_identity)
       && toset([
         for r in output.dns_records : trimsuffix(lower(r.name), ".")
         if upper(r.type) == "MX"

@@ -7,12 +7,16 @@
 # only; serving reaper: Lambda only); the instance profile; the SES SMTP user.
 #
 # Allowlists, beyond the grants §5.2 lists:
-#   instance role  tolerated, not required: secretsmanager:PutSecretValue and
-#                  secretsmanager:DescribeSecret on loom/platform/* (`loom-deploy secrets
-#                  init` and `ses-smtp-password` run on the box, §6.3); logs:CreateLogGroup
-#                  and logs:DescribeLogStreams on /loom/platform*; ecr:BatchCheckLayerAvailability;
-#                  ssm:GetParameters on the site parameter; s3:GetObject on an object
-#                  resource ending /releases/* (the release manifest, §6.1, §6.6 step 1).
+#   instance role  tolerated, not required: secretsmanager:PutSecretValue,
+#                  secretsmanager:DescribeSecret and secretsmanager:ListSecretVersionIds on
+#                  loom/platform/* (`loom-deploy secrets init` and `ses-smtp-password` run
+#                  on the box, §6.3; init may list versions to see whether a secret has a
+#                  value); logs:CreateLogGroup and logs:DescribeLogStreams on /loom/platform*;
+#                  ecr:BatchCheckLayerAvailability; ssm:GetParameters on the site parameter;
+#                  s3:DeleteObject on the lease bucket's serving/leases/* (the pool manager
+#                  deletes lease records it releases; "read/write" in §5.2), the only Delete
+#                  action allowed, and only there; s3:GetObject on an object resource ending
+#                  /releases/* (the release manifest, §6.1, §6.6 step 1).
 #   OIDC role      required: the ECR push actions on repository/loom/* and
 #                  ecr:GetAuthorizationToken on *; tolerated: ecr:BatchGetImage on
 #                  repository/loom/* (AWS's documented push permissions include it) and
@@ -216,7 +220,7 @@ run "instance_role_grants_are_scoped" {
             startswith(r, "arn:aws:secretsmanager:us-east-1:123456789012:secret:loom/platform/")
             || r == "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-mock-AbCdEf"
           ) :
-          contains(["secretsmanager:PutSecretValue", "secretsmanager:DescribeSecret"], a) ? (
+          contains(["secretsmanager:PutSecretValue", "secretsmanager:DescribeSecret", "secretsmanager:ListSecretVersionIds"], a) ? (
             startswith(r, "arn:aws:secretsmanager:us-east-1:123456789012:secret:loom/platform/")
           ) :
           contains(["logs:CreateLogStream", "logs:PutLogEvents", "logs:CreateLogGroup", "logs:DescribeLogStreams"], a) ? (
@@ -226,7 +230,7 @@ run "instance_role_grants_are_scoped" {
           contains(["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"], a) ? (
             startswith(r, "arn:aws:ecr:us-east-1:123456789012:repository/loom/")
           ) :
-          a == "s3:PutObject" ? contains([
+          contains(["s3:PutObject", "s3:DeleteObject"], a) ? contains([
             "${aws_s3_bucket.leases.arn}/serving/leases/*",
             "arn:aws:s3:::${aws_s3_bucket.leases.bucket}/serving/leases/*",
           ], r) :
@@ -243,15 +247,27 @@ run "instance_role_grants_are_scoped" {
         ]
       ]
     ]))
-    error_message = "Instance policy allowlist: secretsmanager:GetSecretValue on loom/platform/* and the RDS master secret (PutSecretValue/DescribeSecret on loom/platform/* only); logs:CreateLogStream/PutLogEvents (CreateLogGroup/DescribeLogStreams) on /loom/platform* only; ECR pull only (GetAuthorizationToken on *; BatchGetImage, GetDownloadUrlForLayer, BatchCheckLayerAvailability on repository/loom/*); s3:GetObject/PutObject on the lease bucket's serving/leases/* (s3:GetObject also on .../releases/*); cloudwatch:PutMetricData; ssm:GetParameter(s) on /loom/platform/site; nothing else. Got ${aws_iam_role_policy.instance.policy}."
+    error_message = "Instance policy allowlist: secretsmanager:GetSecretValue on loom/platform/* and the RDS master secret (PutSecretValue/DescribeSecret/ListSecretVersionIds on loom/platform/* only); logs:CreateLogStream/PutLogEvents (CreateLogGroup/DescribeLogStreams) on /loom/platform* only; ECR pull only (GetAuthorizationToken on *; BatchGetImage, GetDownloadUrlForLayer, BatchCheckLayerAvailability on repository/loom/*); s3:GetObject/PutObject (DeleteObject) on the lease bucket's serving/leases/* (s3:GetObject also on .../releases/*); cloudwatch:PutMetricData; ssm:GetParameter(s) on /loom/platform/site; nothing else. Got ${aws_iam_role_policy.instance.policy}."
   }
 
+  # No destructive or administrative action, per (action, resource) pair. The one
+  # exemption is s3:DeleteObject on the lease prefix (the forms the allowlist accepts).
   assert {
-    condition = alltrue([
-      for a in flatten([for s in jsondecode(aws_iam_role_policy.instance.policy).Statement : flatten([s.Action])]) :
-      !can(regex("(?i):(Delete|Put[A-Za-z]*Policy|Attach|Detach|PassRole|Create(Role|User|Policy|AccessKey|Secret)|Update|Restore|Tag|Untag|Rotate|Cancel)", a))
-    ])
-    error_message = "No Delete*, Put*Policy, IAM, tagging or other administrative action in the instance policy; got ${aws_iam_role_policy.instance.policy}."
+    condition = alltrue(flatten([
+      for s in jsondecode(aws_iam_role_policy.instance.policy).Statement : [
+        for a in flatten([s.Action]) : [
+          for r in flatten([s.Resource]) :
+          (
+            a == "s3:DeleteObject" && contains([
+              "${aws_s3_bucket.leases.arn}/serving/leases/*",
+              "arn:aws:s3:::${aws_s3_bucket.leases.bucket}/serving/leases/*",
+            ], r)
+          )
+          || !can(regex("(?i):(Delete|Put[A-Za-z]*Policy|Attach|Detach|PassRole|Create(Role|User|Policy|AccessKey|Secret)|Update|Restore|Tag|Untag|Rotate|Cancel)", a))
+        ]
+      ]
+    ]))
+    error_message = "No Delete*, Put*Policy, IAM, tagging or other administrative action in the instance policy (s3:DeleteObject only on the lease bucket's serving/leases/*); got ${aws_iam_role_policy.instance.policy}."
   }
 }
 
