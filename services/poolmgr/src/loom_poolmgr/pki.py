@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 import ssl
 import time
 from dataclasses import dataclass
@@ -255,3 +256,80 @@ def write_dev_ca(directory: Path, *, now: float | None = None) -> list[str]:
     for cn in (POOLMGR_CN, GATEWAY_CN):
         write_issued(directory, cn, ca.issue_client(cn, now=now))
     return ["ca", POOLMGR_CN, GATEWAY_CN]
+
+
+# ---------------------------------------------------------------- the gateway's certificate
+
+GATEWAY_CERT_FILE = "gateway-client.pem"
+GATEWAY_CERT_DAYS = 7
+# Rotated every 24 h; at start also when less than this is left (spec §7).
+GATEWAY_RENEW_BEFORE_S = 6 * 86400.0
+GATEWAY_ROTATE_EVERY_S = 86400.0
+
+_PEM_KEY = re.compile(rb"-----BEGIN ([A-Z ]*PRIVATE KEY)-----.*?-----END \1-----", re.S)
+_PEM_CERT = re.compile(rb"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.S)
+_SPKI = (serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+
+
+def gateway_cert_is_current(path: Path, ca: CertificateAuthority, now: float) -> bool:
+    """The file at `path` holds a key and a certificate that load together, issued by
+    `ca` (the signature, not just the name), with at least `GATEWAY_RENEW_BEFORE_S` left
+    on the manager's clock `now`. Anything else (missing, broken, another CA, too old)
+    is not current."""
+    try:
+        data = path.read_bytes()
+        key_match, cert_match = _PEM_KEY.search(data), _PEM_CERT.search(data)
+        if key_match is None or cert_match is None:
+            return False
+        key = serialization.load_pem_private_key(key_match.group(0), password=None)
+        cert = x509.load_pem_x509_certificate(cert_match.group(0))
+        if key.public_key().public_bytes(*_SPKI) != cert.public_key().public_bytes(*_SPKI):
+            return False
+        cert.verify_directly_issued_by(ca.cert)
+        return cert.not_valid_after_utc.timestamp() - now >= GATEWAY_RENEW_BEFORE_S
+    except Exception:
+        return False
+
+
+def write_gateway_cert(
+    directory: Path, ca: CertificateAuthority, *, now: float | None = None
+) -> IssuedCert:
+    """Issue the gateway's client certificate (`clientAuth`, 7 days from `now`) into
+    `directory/gateway-client.pem`: key and certificate in one PEM, written under a
+    temporary name (mode 0400, owned by the directory's owner so the gateway's uid can
+    read it) and renamed into place, so a reader never sees a key without its certificate."""
+    directory.mkdir(parents=True, exist_ok=True)
+    issued = ca.issue_client(GATEWAY_CN, days=GATEWAY_CERT_DAYS, now=now)
+    final = directory / GATEWAY_CERT_FILE
+    tmp = directory / f".{GATEWAY_CERT_FILE}.tmp"
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(issued.key_pem() + issued.cert_pem())
+            f.flush()
+            os.fsync(f.fileno())
+        owner = directory.stat()
+        if os.geteuid() == 0 and (owner.st_uid, owner.st_gid) != (0, 0):
+            os.chown(tmp, owner.st_uid, owner.st_gid)
+        tmp.replace(final)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return issued
+
+
+def write_new_ca(directory: Path, *, now: float | None = None) -> list[str]:
+    """`loom-poolmgr new-ca --out DIR`: a new pod CA (`ca.crt`, `ca.key`, mode 0600) and
+    the manager's client certificate from it (`loom-poolmgr.crt`/`.key`, valid as long
+    as the CA), for the secrets `pod-ca` and `poolmgr-client` (docs/runbook-pod-ca.md).
+    Refuses to overwrite an existing CA. Returns the stems written."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in ("ca.crt", "ca.key"):
+        if (directory / name).exists():
+            raise FileExistsError(f"{directory / name} exists: not overwriting a CA")
+    ca = CertificateAuthority.generate("Loom pod CA", now=now)
+    _write(directory / "ca.key", IssuedCert(ca.cert, ca.key).key_pem(), 0o600)
+    _write(directory / "ca.crt", ca.cert_pem(), 0o644)
+    write_issued(directory, POOLMGR_CN, ca.issue_client(POOLMGR_CN, days=CA_DAYS, now=now))
+    return ["ca", POOLMGR_CN]

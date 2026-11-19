@@ -34,6 +34,10 @@ class GatewaySettings(PlatformSettings):
     gateway_client_cert: str | None = None
     gateway_client_key: str | None = None
     pod_ca_cert: str | None = None
+    # How often (seconds) the gateway checks those files for a change and reloads its TLS
+    # context for new upstream connections (spec §7; tests set 1). The pool manager
+    # rotates the client certificate daily.
+    gateway_cert_check_s: Annotated[float, Field(gt=0)] = 60.0
 
     gateway_host: str = "0.0.0.0"
     gateway_port: Annotated[int, Field(gt=0, lt=65536)] = 8080

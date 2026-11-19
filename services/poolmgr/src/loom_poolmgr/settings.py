@@ -24,13 +24,19 @@
 - `LOOM_POOLMGR_IDLE_STOP_S`: dev only: replaces every model's `idle_stop_s` (unset: the
   serving file's; compose sets 600, so `loom-m2-acceptance` sees an idle stop in minutes
   while the M1 acceptance never sees a model go cold mid-run);
+- `LOOM_POOLMGR_MOCK_BACKEND` (M3, spec §6.8): outside dev, permits `provider: local`
+  and private (RFC 1918) `LOOM_POOLMGR_ALLOW_CIDRS`, and does not require the SSH key,
+  lease bucket or proxy bundle; refused with `provider: runpod`;
+- `LOOM_POOLMGR_GATEWAY_CERT_DIR` (M3, spec §7): where the gateway's client certificate
+  is written;
 - `RUNPOD_API_KEY`: the serving account's key (`provider: runpod` only).
 
 Outside `LOOM_ENV=dev` the manager refuses to start without the CA, the client
 certificate, the SSH key, the lease bucket, and (with the serving config) a non-empty
-`gateway_egress_cidrs` and a provider other than `local`/`fake`. With `provider: runpod`
-the proxy bundle and the lease bucket are required in dev too: the placeholders exist
-only for `local`/`fake`.
+`gateway_egress_cidrs` and a provider other than `local`/`fake` (the mock backend lifts
+the SSH key, lease bucket, bundle and provider rules). With `provider: runpod` the proxy
+bundle and the lease bucket are required in dev too: the placeholders exist only for
+`local`/`fake`.
 """
 
 from __future__ import annotations
@@ -69,11 +75,19 @@ class PoolmgrSettings(PlatformSettings):
     poolmgr_state_dir: Path | None = None
     poolmgr_allow_cidrs: str = ""
     poolmgr_idle_stop_s: Annotated[int, Field(ge=0)] | None = None
+    poolmgr_mock_backend: bool = False
+    poolmgr_gateway_cert_dir: Path | None = None
     runpod_api_key: SecretStr | None = Field(
         default=None, validation_alias=AliasChoices("RUNPOD_API_KEY", "runpod_api_key")
     )
 
-    @field_validator("poolmgr_lease_bucket", "runpod_api_key", "poolmgr_idle_stop_s", mode="before")
+    @field_validator(
+        "poolmgr_lease_bucket",
+        "runpod_api_key",
+        "poolmgr_idle_stop_s",
+        "poolmgr_gateway_cert_dir",
+        mode="before",
+    )
     @classmethod
     def _blank_is_unset(cls, v: object) -> object:
         if isinstance(v, str) and not v.strip():
@@ -107,33 +121,59 @@ class PoolmgrSettings(PlatformSettings):
                 problems.append("LOOM_POOLMGR_PROXY_BUNDLE is not set (provider runpod)")
             if not self.poolmgr_lease_bucket:
                 problems.append("LOOM_POOLMGR_LEASE_BUCKET is not set (provider runpod)")
+        if config is not None and config.provider == "runpod" and self.poolmgr_mock_backend:
+            # Whatever LOOM_ENV is (M4 removes the flag).
+            problems.append(
+                "LOOM_POOLMGR_MOCK_BACKEND is not allowed with provider runpod "
+                "(the mock backend is for provider local)"
+            )
         if self.env == "dev":
             return problems
-        # Dev-only knobs (compose and the acceptance).
-        if self.allow_cidrs:
+        mock = self.poolmgr_mock_backend
+        # Dev-only knobs (compose and the acceptance); the mock backend permits private
+        # networks in ALLOW_CIDRS.
+        if self.allow_cidrs and not mock:
             problems.append("LOOM_POOLMGR_ALLOW_CIDRS is dev only")
+        elif mock:
+            public = [c for c in self.allow_cidrs if not _is_rfc1918(c)]
+            if public:
+                problems.append(
+                    "LOOM_POOLMGR_ALLOW_CIDRS with LOOM_POOLMGR_MOCK_BACKEND takes only private "
+                    f"(RFC 1918) networks, not {', '.join(public)}"
+                )
         if self.poolmgr_idle_stop_s is not None:
             problems.append("LOOM_POOLMGR_IDLE_STOP_S is dev only")
-        required = {
+        required: dict[str, Path | str | None] = {
             "LOOM_POOLMGR_CA_CERT": self.poolmgr_ca_cert,
             "LOOM_POOLMGR_CA_KEY": self.poolmgr_ca_key,
             "LOOM_POOLMGR_CLIENT_CERT": self.poolmgr_client_cert,
             "LOOM_POOLMGR_CLIENT_KEY": self.poolmgr_client_key,
-            "LOOM_POOLMGR_SSH_KEY": self.poolmgr_ssh_key,
-            "LOOM_POOLMGR_LEASE_BUCKET": self.poolmgr_lease_bucket,
-            "LOOM_POOLMGR_PROXY_BUNDLE": self.poolmgr_proxy_bundle,
             # The pods' known_hosts files must survive a restart (spec §11).
             "LOOM_POOLMGR_STATE_DIR": self.poolmgr_state_dir,
         }
+        if not mock:  # the local backend uses neither SSH, leases nor the bundle
+            required |= {
+                "LOOM_POOLMGR_SSH_KEY": self.poolmgr_ssh_key,
+                "LOOM_POOLMGR_LEASE_BUCKET": self.poolmgr_lease_bucket,
+                "LOOM_POOLMGR_PROXY_BUNDLE": self.poolmgr_proxy_bundle,
+            }
         problems += [f"{name} is not set" for name, value in required.items() if not value]
         if config is not None:
-            if config.provider in LOCAL_PROVIDERS:
+            if config.provider in LOCAL_PROVIDERS and not mock:
                 problems.append(f"provider {config.provider} is dev only")
             if not config.network.gateway_egress_cidrs:
                 problems.append("network.gateway_egress_cidrs is empty")
             if config.provider == "runpod" and self.runpod_api_key is None:
                 problems.append("RUNPOD_API_KEY is not set")
         return problems
+
+
+_RFC1918 = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+
+
+def _is_rfc1918(cidr: str) -> bool:
+    net = ipaddress.ip_network(cidr, strict=False)
+    return any(net.version == 4 and net.subnet_of(p) for p in _RFC1918)  # type: ignore[arg-type]
 
 
 def _split(value: str) -> list[str]:
