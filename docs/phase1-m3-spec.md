@@ -297,7 +297,8 @@ The dev `docker-compose.yml` stays as is (CI acceptance, local dev). The product
 `loom-deploy secrets init` (run once, on the box through SSM) generates and puts the values
 Loom makes itself, without echoing them: `internal-token`, `app-db-password`, `auth_secret`,
 the Redis password and its TLS CA and server certificate (SAN `redis`), the pod CA (2-year
-validity) and the manager's client certificate. It refuses to overwrite a secret that has
+validity), the manager's client certificate and the Grafana admin password (§6.12). It
+never reads or writes `serving-runpod-key` (the instance role is denied it, §5.6). It refuses to overwrite a secret that has
 a value. The user puts Stripe and Google values with the runbook's
 `printf %s ... | aws secretsmanager put-secret-value --secret-string file:///dev/stdin`
 pattern (as `aws-setup.md` step 8). SES SMTP: the runbook creates an access key for
@@ -435,7 +436,7 @@ Neither the product name nor the domain is decided (§15 D16). Each is **one set
 Terraform variables `domain` and `brand_name` in `infra/aws/platform/variables.tf`, with no
 defaults (`terraform plan` asks for them; the tftests use placeholders such as
 `example.test`). Terraform writes both into the SSM parameter `/loom/platform/site`
-(String, JSON `{"domain": ..., "brand_name": ...}`, free); the instance role may
+(String, JSON `{"domain": ..., "brand_name": ...}` plus the keys of §6.12, free); the instance role may
 `ssm:GetParameter` that one parameter. `loom-deploy apply` reads it at each deploy and
 renders the services' environment from it:
 
@@ -499,12 +500,17 @@ compose file writes its bind-mount sources `${LOOM_DEPLOY_ROOT:-}/run/loom/...` 
 `${LOOM_DEPLOY_ROOT:-}/var/lib/loom/...`; inside a container the path is the same without
 the prefix. The compose project is `LOOM_DEPLOY_PROJECT` (default `loom`);
 `LOOM_DEPLOY_COMPOSE_OVERRIDE` (tests only) names one more `-f` file after the release's.
-Every `aws` call gets `--region` from `AWS_REGION`, else `us-east-1` (§8.5).
+Every `aws` call gets `--region` from `AWS_REGION`, else `us-east-1` (§8.5). `apply` also
+creates each volume directory of §6.2 and `<root>/var/lib/loom/gateway-cert` (the
+manager's `LOOM_POOLMGR_GATEWAY_CERT_DIR`, §7) and sets its owner with the same `chown`
+as below: redis 999, gateway-spool 10001, caddy 0, poolmgr 0, prometheus 65534,
+gateway-cert 10001 (Docker would create a missing bind source as root).
 
 **What `apply --release <sha>` reads.**
 - The site parameter (`aws ssm get-parameter --name /loom/platform/site`): JSON with
   `domain`, `brand_name` (§6.11), `ops_email`, `releases_bucket`, `db_host`, `db_port` and
-  `db_master_secret_arn`, all written by Terraform. A missing or empty key refuses the apply.
+  `db_master_secret_arn` (`db_port` a JSON number, the rest strings), all written by
+  Terraform. A missing or empty key refuses the apply.
 - The manifest `s3://<releases_bucket>/releases/<sha>.json`: `{"sha": <40 hex>, "images":
   {<compose service>: "<repository>@sha256:<digest>"}, "migrations": <int>, "compose":
   {"path": "releases/<sha>/compose.prod.yml", "sha256": ...}, "bundle": {"path":
@@ -513,7 +519,8 @@ Every `aws` call gets `--region` from `AWS_REGION`, else `us-east-1` (§8.5).
   images as the compose file pins them). The bundle is the `deploy/` directory at that
   commit, its contents at the archive's root. `apply` downloads both, checks both sha256s
   and that the bundle's `compose.prod.yml` is the named one, extracts the bundle to
-  `<root>/var/lib/loom/releases/<sha>/` and runs compose from there.
+  `<root>/var/lib/loom/releases/<sha>/` and runs compose from there. Of `images` it checks
+  only that each value is a non-empty string (A15's manifest holds local tags).
 - `releases/<sha>/loom-deploy.py`: a copy of `loom_devstack/deploy.py`, which imports nothing
   from its package, so the runbook's SSM wrapper fetches it and runs `python3 -S
   loom-deploy.py <subcommand>`.
@@ -521,6 +528,17 @@ Every `aws` call gets `--region` from `AWS_REGION`, else `us-east-1` (§8.5).
   URL is `postgresql://<username>:<password>@<db_host>:<db_port>/loom_platform?sslmode=verify-full&sslrootcert=/etc/loom/rds-ca.pem`
   (password percent-encoded); the app URL the same with `loom_app` and `app-db-password`.
 - ECR: `aws ecr get-login-password | docker login --username AWS --password-stdin <registry>`.
+
+**Order and health.** manifest, render, ECR login, `docker compose pull`, migrate (`run --rm
+migrate`, exit 0), the updates of §6.6, record. Files already rendered stay when a later
+step fails (the next apply re-renders them). A service is healthy when `docker inspect -f
+'{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}'` on its
+container (`docker compose ps -q <svc>`) prints `healthy`, or `running` for a service
+without a healthcheck; `loom-deploy` polls it for at most `LOOM_DEPLOY_HEALTH_TIMEOUT_S`
+(default 300), then logs the update `failed`. P4 (§6.6): an apply is refused when, after
+it, `poolmgr` would run an image of a release other than the gateway's (the manifest has
+no order, so "newer" means "another release"); `release.json` records the release each
+service runs. m3-p's `--p4-release` is therefore any release but the current one.
 
 **What `apply` writes.**
 - `<root>/run/loom/compose.env` (`0400`, `--env-file`): `LOOM_DEPLOY_ROOT` and the image
@@ -533,7 +551,8 @@ Every `aws` call gets `--region` from `AWS_REGION`, else `us-east-1` (§8.5).
   holds the owner URL and `LOOM_APP_DATABASE_PASSWORD`.
 - `<root>/run/loom/secrets/<service>/` (directory `0500`, files `0400`, owned by the
   service's uid): the files the service reads, mounted read-only at
-  `/run/loom/secrets/<service>` in that service only. The uid is the one its image runs as:
+  `/run/loom/secrets/<service>` in that service only. Env files are not chowned (compose
+  reads them as root). The uid is the one its image runs as:
   gateway 10001, billing 10001, web 1001, poolmgr 0, migrate 0, acceptance 0, redis 999,
   grafana 472 (a test checks the Loom ones against their Dockerfiles). Ownership is set by
   running `chown <uid>:<uid> <path>` from `PATH` (tests put a recording `chown` there).
@@ -558,7 +577,8 @@ release's last `apply`/`start` record, `update`/`gateway`/`ok` comes before
 -m loom_devstack.deploy`): `plan_steps(current, target, only)` (manifests as above; steps
 `("migrate",)` and `("up", <service>)`), `check_database_url(url) -> None`, and
 `Refused(Exception)`, raised by both. `ses-smtp-password` reads `aws iam create-access-key`'s
-JSON on stdin.
+JSON on stdin, so the runbook runs it in an interactive SSM session (`aws ssm
+start-session`), not through Run Command (no stdin, parameters kept in its history).
 
 **Caddy.** Image from `deploy/caddy/Dockerfile`, build context `deploy/caddy/` (its
 `go.mod`/`go.sum` pin the rate-limit module). The Caddyfile is not in the image: compose
@@ -572,7 +592,12 @@ one-shot compose service `acceptance` (profile `acceptance`, the devstack image 
 docker CLI added, the compose network, `/var/run/docker.sock`, `deploy.log` read-only,
 `/var/lib/loom/acceptance` read-write, no AWS credentials; the only service that mounts the
 docker socket) with `loom-m3-acceptance --domain <site domain> --release <current sha>
---json /var/lib/loom/acceptance/report.json --deploy-log /var/lib/loom/deploy.log`. The
+--json /var/lib/loom/acceptance/report.json --deploy-log /var/lib/loom/deploy.log
+--admin-email <ops_email> --webhook-secret-file /run/loom/secrets/acceptance/webhook_secret`.
+`apply` renders its inputs like any service's: `env/acceptance.env` with
+`LOOM_ACCEPT_DATABASE_URL` (the app URL, `loom_app`) and `LOOM_ACCEPT_REDIS_URL` (the
+`rediss://` URL of §6.5), and `secrets/acceptance/` with `redis-ca.crt` and
+`webhook_secret`. The
 container runs every box item; for m3-i it scans the containers' logs and writes the
 canaries it planted to `/var/lib/loom/acceptance/canaries.json` (`0600`); for m3-p it
 checks the deploy log's order. Then, on the host, `loom-deploy` runs the two halves that
@@ -591,9 +616,13 @@ it records and answers 0); runs `loom-deploy secrets init` and `apply` with
 `LOOM_DEPLOY_ROOT` under `/dev/shm`, `LOOM_DEPLOY_PROJECT=loom-m3prod` and an override
 that adds a TLS Postgres standing in for RDS (a throwaway CA mounted at
 `/etc/loom/rds-ca.pem`, `migrate` depending on it), runs every service as the test's uid,
-moves Caddy's published ports off 80/443 and sets `LOOM_CADDY_TLS=internal`; nothing else.
-It then checks A15, A29's live half, A35's sign-in page, A37's routes and the deploy log's
-order, and removes the project (`down -v`) and the root.
+moves Caddy's published ports off 80/443, sets `LOOM_CADDY_TLS=internal`, gives Caddy the
+network aliases `example.test`, `api.example.test` and `hooks.example.test`, and lets the
+`acceptance` service trust Caddy's internal root (e.g. `SSL_CERT_FILE`); nothing else. It
+then checks A15, A29's live half, A35's sign-in page, A37's routes and the deploy log's
+order, runs m3-0, m3-b and m3-d in the `acceptance` service, and removes the project
+(`down -v`) and the root. A deploy-area test also checks that `images.yml` runs on
+`workflow_dispatch` only and is the only workflow naming `platform-images` (§5.6).
 
 ### 6.13 Other choices fixed in wave 1 (2026-11-18)
 
@@ -617,6 +646,10 @@ order, and removes the project (`down -v`) and the root.
   limit's boundary stays tested inside flake-check's budget; one test checks the default
   `limit` is 500.
 - **OIDC subject**: the repository is `arulster17/loom` (its `origin`).
+- **CloudWatch agent**: its Prometheus metrics reach CloudWatch as embedded metric format
+  through a log group, which `deploy/cloudwatch-agent.json` names under `/loom/platform`
+  so §5.2's logs grant covers it (the `PutMetricData` namespace condition governs only
+  direct calls). Not checked against AWS in Stage A.
 - **H1** reads `up{job=...}` as §5.3 says; whether the CloudWatch agent publishes `up` for
   its Prometheus targets is not checked in Stage A (m3-a checks that every §5.3 metric is in
   CloudWatch).
@@ -633,7 +666,8 @@ order, and removes the project (`down -v`) and the root.
   7 days) every 24 h, or at start when the current one has under 6 days left (or is missing, fails to load or
   was not issued by the current CA, §6.13), into
   `LOOM_POOLMGR_GATEWAY_CERT_DIR` (a volume shared read-only with the gateway): one PEM
-  file with key and certificate, written to a temporary name and renamed into place, so a
+  file with key and certificate, written to a temporary name (mode `0400`, owned by the
+  directory's owner, so the gateway's uid can read it, §6.12) and renamed into place, so a
   reader never sees a key without its certificate. The gateway checks the file and
   `LOOM_POD_CA_CERT` every `LOOM_GATEWAY_CERT_CHECK_S` seconds (default 60; tests set 1); on a change it builds a new TLS context and uses it for
   new upstream connections (open streams keep theirs). A file that fails to load keeps
@@ -1303,8 +1337,9 @@ Deploy
 - A12 [A] `loom-deploy` uses only the standard library (import scan); `plan_steps` gives
   §6.6's order for every combination of changed images, and refuses a poolmgr newer than
   the gateway, `--only poolmgr` included (P4). *pytest.*
-- A13 [A] Secret rendering (§6.12): files `0400`, owned by the service's uid (the recorded
-  `chown`), on tmpfs (refused elsewhere); no secret
+- A13 [A] Secret rendering (§6.12): mounted files `0400` and their directories `0500`, owned
+  by the service's uid (the recorded `chown`), env files `0400` and not chowned, all on tmpfs
+  (refused elsewhere); `secrets init` never names `serving-runpod-key`; no secret
   in any argv, env file outside `/run/loom`, compose file or log line (captured). `secrets
   init` never overwrites a set secret; the SES SMTP derivation matches AWS's published
   test vector. *pytest with a fake `aws` and `docker` on PATH.*
@@ -1315,8 +1350,9 @@ Deploy
   loom-m3prod -f deploy/compose.prod.yml` (a test override with local images, a local
   Postgres with TLS standing in for RDS, a throwaway CA) comes up healthy with every
   service's production checks on; `/internal`, `/metrics` and anything outside the routes
-  of §6.7 answer 404 through Caddy (Caddy on an internal CA); M1 acceptance items 0, b, d
-  pass against it. *Acceptance-marked pytest in
+  of §6.7 answer 404 through Caddy (Caddy on an internal CA); m3-0, m3-b and m3-d (M1's items
+  0, b, d with database-minted sessions, §10) pass against it, run in the `acceptance`
+  service (§6.12; M1's driver needs mailpit and dev-only admin bootstrap). *Acceptance-marked pytest in
   `services/devstack/tests/test_devstack_m3_prodstack.py`, run by its own CI job
   `m3-prod-stack` (the existing `acceptance` job is unchanged); its harness: §6.12.*
 
