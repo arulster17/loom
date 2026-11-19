@@ -6,10 +6,12 @@ against a fake `aws` on PATH.
 Secrets Manager: the secret containers of §5.2 (`loom/platform/<name>`), each with or
 without a value; it answers `get-secret-value` (ResourceNotFoundException for a container
 with no value, as AWS does), `describe-secret`, `list-secret-version-ids` and
-`put-secret-value` (`--secret-string` inline, or `file://...` such as
-`file:///dev/stdin`), and logs every call's argv. Recording shims for `openssl` (which then
-runs the real one) and `docker` (which fails) are on PATH too, and their argv is scanned
-like `aws`'s. `loom-deploy` runs in a scratch working directory.
+`put-secret-value` (`--secret-string` inline or `file://...` such as `file:///dev/stdin`,
+or `--cli-input-json` inline or `file://...` with `SecretId`/`SecretString`), and logs
+every call's argv. Its state directory is baked into the script (no environment needed).
+Recording shims for `openssl` (which then runs the real one) and `docker` (which fails)
+are on PATH too, and their argv is scanned like `aws`'s. `loom-deploy` runs in a scratch
+working directory.
 
 `secrets init` generates the values Loom makes (internal-token, app-db-password,
 `auth.auth_secret`, the Redis password, CA and server certificate with SAN `redis`, the
@@ -62,7 +64,7 @@ USERS = ("stripe", "ses-smtp", "serving-runpod-key")
 
 FAKE_AWS = r"""#!__PYTHON__ -IS
 import json, os, re, sys
-D = os.environ["FAKE_AWS_DIR"]
+D = __DIR__  # fixed here, so a caller that passes aws a bare environment still works
 argv = sys.argv[1:]
 with open(os.path.join(D, "calls.jsonl"), "a") as f:
     f.write(json.dumps(argv) + "\n")
@@ -80,6 +82,19 @@ while i < len(argv):
         pos.append(a)
     i += 1
 svc, op = (pos + ["", ""])[:2]
+
+def load(v):
+    # `file://<path>` (`file:///dev/stdin` reads stdin) or the value itself.
+    if isinstance(v, str) and v.startswith("file://"):
+        path = v[len("file://"):]
+        return sys.stdin.read() if path in ("/dev/stdin", "-") else open(path).read()
+    return v
+
+# `--cli-input-json` (inline or file://, e.g. file:///dev/stdin): its keys (`SecretId`,
+# `SecretString`, ...) as the matching options (`--secret-id`, `--secret-string`, ...).
+if isinstance(opts.get("cli-input-json"), str):
+    for k, v in json.loads(load(opts.pop("cli-input-json"))).items():
+        opts.setdefault(re.sub(r"(?<!^)(?=[A-Z])", "-", k).lower(), v)
 STORE = os.path.join(D, "secrets.json")
 store = json.load(open(STORE))
 
@@ -132,12 +147,9 @@ if svc == "secretsmanager":
         versions = [] if value is None else [{"VersionId": "v1", "VersionStages": ["AWSCURRENT"]}]
         out({"ARN": arn, "Name": f"loom/platform/{name}", "Versions": versions})
     if op == "put-secret-value":
-        s = opts.get("secret-string")
+        s = load(opts.get("secret-string"))
         if not isinstance(s, str):
             fail("InvalidParameterException", "no --secret-string")
-        if s.startswith("file://"):
-            path = s[len("file://"):]
-            s = sys.stdin.read() if path in ("/dev/stdin", "-") else open(path).read()
         store[name] = s
         json.dump(store, open(STORE, "w"))
         with open(os.path.join(D, "puts.jsonl"), "a") as f:
@@ -180,7 +192,9 @@ class FakeAws:
         store.update(preset or {})
         (self.dir / "secrets.json").write_text(json.dumps(store))
         aws = self.bin / "aws"
-        aws.write_text(FAKE_AWS.replace("__PYTHON__", sys.executable))
+        aws.write_text(
+            FAKE_AWS.replace("__PYTHON__", sys.executable).replace("__DIR__", repr(str(self.dir)))
+        )
         aws.chmod(0o755)
         for tool in SHIMS:
             real = shutil.which(tool) if tool == "openssl" else None  # the test's own PATH
@@ -226,7 +240,6 @@ def run_deploy(
     env = {
         "PATH": f"{fake.bin}:/usr/bin:/bin",
         "PYTHONPATH": str(SRC),
-        "FAKE_AWS_DIR": str(fake.dir),
         "HOME": str(home),
         "TMPDIR": str(tmpdir),
         "AWS_REGION": "us-east-1",

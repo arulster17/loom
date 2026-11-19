@@ -21,14 +21,22 @@ PLATFORM = ROOT / "infra" / "aws" / "platform"
 DEPLOY = ROOT / "deploy"
 CADDYFILE = DEPLOY / "Caddyfile"
 
-# Host names that may appear: third parties the stack talks to or pulls from.
+# Host names that may appear: third parties the stack talks to or pulls from. Subdomains
+# count (`ends with .<name>`), so this covers e.g. the AWS service endpoints
+# (`*.amazonaws.com`, ECR's `<account>.dkr.ecr.<region>.amazonaws.com`), SES's MAIL FROM
+# records (SPF `include:amazonses.com`, MX `feedback-smtp.<region>.amazonses.com`) and
+# DKIM CNAMEs (`*.dkim.amazonses.com`), the Let's Encrypt ACME directories
+# (`acme-v02.api.letsencrypt.org`, `acme-staging-v02.api.letsencrypt.org`), and the IAM
+# OIDC provider for GitHub (`token.actions.githubusercontent.com`).
 THIRD_PARTY = (
     "amazonaws.com",
     "amazon.com",
+    "amazonses.com",
     "amazontrust.com",
+    "awsstatic.com",
     "aws.dev",
     "letsencrypt.org",
-    "api.letsencrypt.org",
+    "lencr.org",
     "stripe.com",
     "github.com",
     "githubusercontent.com",
@@ -42,15 +50,22 @@ THIRD_PARTY = (
     "caddyserver.com",
     "golang.org",
     "go.dev",
+    "googlesource.com",
     "google.com",
     "googleapis.com",
     "gstatic.com",
+    "grafana.net",
     "hashicorp.com",
     "terraform.io",
     "python.org",
     "pypi.org",
     "npmjs.org",
     "npmjs.com",
+    "nodejs.org",
+    "alpinelinux.org",
+    "debian.org",
+    "json-schema.org",
+    "w3.org",
 )
 RESERVED_TLDS = ("test", "example", "invalid", "localhost", "local", "internal")
 RESERVED_DOMAINS = ("example.com", "example.net", "example.org")  # RFC 2606
@@ -146,17 +161,36 @@ def caddy_sites() -> dict[str, str]:
             depth -= 1
             if depth == 0:
                 sites[unmask(header)] = unmask(masked[start:i])
-    return sites
+    # Snippets `(name) { ... }`: expand `import name [args]` lines (also inside a snippet).
+    snippets = {h[1:-1]: b for h, b in sites.items() if h.startswith("(") and h.endswith(")")}
+
+    def expand(body: str, depth: int = 0) -> str:
+        assert depth < 10, "snippet imports nest too deep"
+
+        def one(m: re.Match[str]) -> str:
+            name = m.group(1)
+            return expand(snippets[name], depth + 1) if name in snippets else m.group(0)
+
+        return re.sub(r"^[ \t]*import[ \t]+(\S+).*$", one, body, flags=re.M)
+
+    return {h: expand(b) for h, b in sites.items() if h not in {f"({s})" for s in snippets}}
+
+
+def site_addresses(header: str) -> list[str]:
+    """The HTTPS addresses of a site block's header, without `https://` and `:443`;
+    `http://` and `:80` addresses (the redirects) are not the three sites."""
+    out = []
+    for a in re.split(r"[,\s]+", header):
+        if not a or a.startswith("http://") or a.endswith(":80"):
+            continue
+        out.append(a.removeprefix("https://").removesuffix(":443"))
+    return out
 
 
 def site(prefix: str) -> str:
     sites = caddy_sites()
     want = f"{prefix}{{$LOOM_DOMAIN}}"
-    found = [
-        body
-        for addr, body in sites.items()
-        if want in [a.removeprefix("https://") for a in re.split(r"[,\s]+", addr)]
-    ]
+    found = [body for addr, body in sites.items() if want in site_addresses(addr)]
     assert found, f"no site block for {want} in the Caddyfile: {list(sites)}"
     return found[0]
 
@@ -170,7 +204,10 @@ def test_the_caddyfile_names_the_domain_only_through_loom_domain() -> None:
 
 def test_hooks_routes_only_the_webhook_and_its_health_check_to_billing() -> None:
     body = site("hooks.")
-    assert "/stripe/webhook" in body and "/stripe/health" in body, body
+    # Exact paths or a `path_regexp` such as `^/stripe/(webhook|health)$` (the routing
+    # itself is checked in test_devstack_m3_caddyfile.py).
+    for route in ("webhook", "health"):
+        assert re.search(rf"/stripe/\S*\b{route}\b", body), f"hooks. names no /stripe/{route}"
     assert "billing:8090" in body, "hooks. does not proxy to billing:8090"
     for path in ("/internal", "/health ", "/metrics"):
         assert f"handle {path}" not in body and f"path {path}" not in body, path

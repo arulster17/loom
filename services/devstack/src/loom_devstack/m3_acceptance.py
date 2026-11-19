@@ -99,7 +99,7 @@ MANUAL = {
     "m3-s": [
         "operator pays",
         "operator checks the H1 and H3 alarm emails",
-        "operator resends twice",
+        "operator resends twice (once if Stripe's own retry delivered the event first)",
     ],
 }
 CLOSED_PORTS = (22, 3000, 3001, 5432, 6379, 8080, 8090, 9090, 9100, 9101, 9102)
@@ -366,14 +366,21 @@ class M3Acceptance(m1.Acceptance):
         finally:
             docker("start", billing)
         res.numbers["billing_healthy_after_s"] = round(m1.wait_healthy(billing, 120), 1)
-        check(not self.purchases(org), "a purchase arrived while billing was stopped")
-        say(f"   OPERATOR: resend the event of checkout {session} from the Stripe dashboard")
-        wait_for("the resent purchase", lambda: self.purchases(org), self.args.manual_timeout_s)
+        # Stripe's own retry may deliver the event before the operator resends it (§10):
+        # a purchase right after the restart is that, not a failure.
+        early = bool(self.purchases(org))
+        res.numbers["delivered_by_stripe_retry"] = early
+        if not early:
+            say(
+                f"   OPERATOR: resend the event of checkout {session} from the Stripe "
+                "dashboard (unless Stripe's own retry delivers it first)"
+            )
+            wait_for("the resent purchase", lambda: self.purchases(org), self.args.manual_timeout_s)
         time.sleep(5)
         bought = self.purchases(org)
-        check(len(bought) == 1, f"purchases after the resend: {bought}")
+        check(len(bought) == 1, f"purchases after the redelivery: {bought}")
         dup0 = self.duplicates()
-        say("   OPERATOR: resend the same event once more")
+        say(f"   OPERATOR: resend the event of checkout {session} (once more) from the dashboard")
         wait_for("the second resend", lambda: self.duplicates() > dup0, self.args.manual_timeout_s)
         check(self.purchases(org) == bought, "the second resend changed the ledger")
         res.numbers.update(purchase=bought[0][1], session=session)
@@ -419,9 +426,14 @@ class M3Acceptance(m1.Acceptance):
     # -- m3-p
 
     def item_m3_p(self, res: ItemResult) -> None:
+        if not self.args.release:
+            raise AcceptanceError(
+                "--release (or LOOM_RELEASE) is required for m3-p: the deploy log is read "
+                "from that release's apply"
+            )
         log = Path(self.args.deploy_log)
         check(log.is_file(), f"no deploy log at {log} (--deploy-log)")
-        lines = log.read_text().splitlines()
+        lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
         gw, pm, gh = p4_log_order(lines, self.args.release)
         res.numbers["deploy_log_lines"] = {
             "gateway_update": gw + 1,
@@ -524,15 +536,39 @@ class M3Acceptance(m1.Acceptance):
             name = self.args.brand_name
             check(name, "--brand-name (or LOOM_BRAND_NAME) not given")
             title = re.search(r"<title>(.*?)</title>", page.text, re.S)
-            heading = re.search(r"<h1[^>]*>(.*?)</h1>", page.text, re.S)
+            # "heading" (§10 m3-h): the first <h1> or <h2>, as brand-name.test.ts reads it.
+            heading = re.search(r"<(h1|h2)(?:\s[^>]*)?>(.*?)</\1>", page.text, re.S)
             check(title and name in visible(title.group(1)), f"title lacks {name!r}")
-            check(heading and name in visible(heading.group(1)), f"heading lacks {name!r}")
+            check(heading and name in visible(heading.group(2)), f"heading lacks {name!r}")
         nums["routes_checked"] = len(expect) + 2
 
 
-_HEALTHY = re.compile(r"\bhealthy\b", re.I)
-_NOT_HEALTHY = re.compile(r"\b(unhealthy|not|wait\w*|until)\b", re.I)
-_UPDATE = re.compile(r"\b(up|updat\w*|start\w*|recreat\w*)\b", re.I)
+_HEALTHY = re.compile(r"\bhealthy\b")
+# A record that the service is not (yet) healthy: `unhealthy`, `not healthy`, `healthy:
+# false`, or a failure on the line.
+_NOT_HEALTHY = re.compile(
+    r"\bunhealthy\b"
+    r"|\b(?:not|never|no longer|isn t|wasn t|failed to become)(?:\s+\w+){0,2}?\s+healthy\b"
+    r"|\bhealthy\s+(?:false|no|0)\b"
+    r"|\b(?:failed|failure|error|timed out)\b"
+)
+# A pending wait (`waiting for gateway to be healthy`, `wait_healthy`, `until healthy`):
+# not a result. Removed before looking for `healthy`, so `waited 4.1 s: healthy` and a
+# JSON record `"event": "wait_healthy", "result": "healthy"` still count.
+_PENDING = re.compile(r"\b(?:wait|waits|waiting|awaiting|until)\b(?:\s+\w+){0,6}?\s+healthy\b")
+_UPDATE = re.compile(r"\b(?:up|updat\w*|start\w*|recreat\w*|restart\w*)\b")
+_APPLY = re.compile(r"\bappl(?:y|ying)\b")
+# A line that closes an apply rather than starting it (`apply abc1234: done`).
+_CLOSING = re.compile(
+    r"\b(?:done|finished|complete\w*|succeeded|success\w*|ok|failed|failure|recorded|"
+    r"end|ended|took|refused|aborted)\b"
+)
+
+
+def _words(line: str) -> str:
+    """A log line as lower-case words: `_`, `-`, punctuation and JSON syntax are spaces,
+    so `"service": "gateway"`, `gateway_healthy` and `loom-gateway-1` name the gateway."""
+    return re.sub(r"[\W_]+", " ", line.lower()).strip()
 
 
 def p4_log_order(lines: list[str], release: str | None) -> tuple[int, int, int]:
@@ -541,43 +577,46 @@ def p4_log_order(lines: list[str], release: str | None) -> tuple[int, int, int]:
     the same apply updated is healthy.
 
     The log's format is not fixed by the spec (an assumption: one line per step naming the
-    service, as `loom-deploy` prints them). The release's apply starts at the last line
-    naming the release with `apply` (else its first mention); a plan line (naming `plan`,
-    or both services) is not a step. The poolmgr update is the first after that start, the
-    gateway update the last before it, and a gateway-healthy record must lie between."""
-    start = 0
-    if release:
-        sha = release[:7]
-        named = [i for i, x in enumerate(lines) if sha in x]
-        check(bool(named), f"the deploy log never names release {sha}")
-        applies = [i for i in named if re.search(r"\bapply\b", lines[i], re.I)]
-        start = applies[-1] if applies else named[0]
+    service, as `loom-deploy` prints them, as plain text or JSON-ish records; words joined
+    by `_` or `-` count as words). The release is required. Its apply starts at the last
+    line naming the release with `apply`/`applying` that does not close an apply (`done`,
+    `failed`, `recorded`, ...), else at the release's first mention. A plan line (naming
+    `plan`, or both services) is not a step. The poolmgr update is the first after that
+    start, the gateway update the last before it, and a record that the gateway is healthy
+    must lie between: a line naming the gateway and `healthy` (timings such as `waited
+    4.1 s` included) that is not a negative (`unhealthy`, `not healthy`, a failure) or only
+    a pending wait (`waiting for gateway to be healthy`)."""
+    check(bool(release), "the release is required to read its apply from the deploy log")
+    assert release
+    sha = release[:7].lower()
+    words = [_words(x) for x in lines]
+    named = [i for i, x in enumerate(lines) if sha in x.lower()]
+    check(bool(named), f"the deploy log never names release {sha}")
+    starts = [i for i in named if _APPLY.search(words[i]) and not _CLOSING.search(words[i])]
+    start = starts[-1] if starts else named[0]
 
     def step(i: int, svc: str) -> bool:
-        x = lines[i]
-        if re.search(r"\bplan\b", x, re.I) or ("gateway" in x and "poolmgr" in x):
+        x = words[i]
+        if re.search(r"\bplan\b", x) or (
+            re.search(r"\bgateway\b", x) and re.search(r"\bpoolmgr\b", x)
+        ):
             return False
         return bool(re.search(rf"\b{svc}\b", x))
 
+    def healthy(i: int) -> bool:
+        x = words[i]
+        return not _NOT_HEALTHY.search(x) and bool(_HEALTHY.search(_PENDING.sub(" ", x)))
+
     def updates(i: int, svc: str) -> bool:
-        return step(i, svc) and bool(_UPDATE.search(lines[i])) and not _HEALTHY.search(lines[i])
+        return step(i, svc) and bool(_UPDATE.search(words[i])) and not _HEALTHY.search(words[i])
 
     pm = next((i for i in range(start, len(lines)) if updates(i, "poolmgr")), None)
-    check(pm is not None, "the deploy log shows no poolmgr update for the release")
+    check(pm is not None, f"the deploy log shows no poolmgr update after line {start + 1}")
     assert pm is not None
     gw = next((i for i in range(pm - 1, start - 1, -1) if updates(i, "gateway")), None)
     check(gw is not None, f"no gateway update before the poolmgr update (line {pm + 1})")
     assert gw is not None
-    gh = next(
-        (
-            i
-            for i in range(gw, pm)
-            if step(i, "gateway")
-            and _HEALTHY.search(lines[i])
-            and not _NOT_HEALTHY.search(lines[i])
-        ),
-        None,
-    )
+    gh = next((i for i in range(gw, pm) if step(i, "gateway") and healthy(i)), None)
     check(
         gh is not None,
         f"poolmgr updated (line {pm + 1}) with no record that the gateway updated at line "
@@ -626,7 +665,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--external", action="store_true", help="only what the internet sees (m3-h)")
     p.add_argument("--only", help=f"comma-separated items, e.g. m3-0,m3-b (of {', '.join(ITEMS)})")
     p.add_argument("--json", type=Path, help="write the report here")
-    p.add_argument("--release", default=env("LOOM_RELEASE"), help="the release sha, for the report")
+    p.add_argument(
+        "--release",
+        default=env("LOOM_RELEASE"),
+        help="the release sha: for the report, and required by m3-p (it reads that apply)",
+    )
     p.add_argument("--project", default=env("COMPOSE_PROJECT_NAME") or "loom")
     p.add_argument("--database-url", dest="database_url")
     p.add_argument("--redis-url", dest="redis_url")

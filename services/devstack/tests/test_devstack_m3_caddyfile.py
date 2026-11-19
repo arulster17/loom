@@ -4,7 +4,9 @@ Read statically; A15 checks the behaviour through a running Caddy. The file is p
 the way Caddy reads it (whitespace-separated tokens, quotes, a block opened by a `{` at
 the end of a line and closed by a `}` on its own line; `{$LOOM_DOMAIN}` and other
 placeholders are tokens, not blocks), snippets `(name) { ... }` are expanded where a site
-`import`s them, and only what Caddy itself requires is pinned:
+(or another snippet) `import`s them, site addresses are compared without `https://` and
+`:443` (`http://` and `:80` sites are the redirects), and only what Caddy itself requires
+is pinned:
 
 - HSTS (`Strict-Transport-Security` with `max-age=31536000`) on all three sites;
 - request body limits (`max_size`): `api.` 1 MiB + 1 KiB, `hooks.` 256 KiB (sizes in any
@@ -13,7 +15,8 @@ placeholders are tokens, not blocks), snippets `(name) { ... }` are expanded whe
 - the apex proxies to `web:3000`;
 - `hooks.` proxies to `billing:8090` only under a matcher that selects `/stripe/webhook`
   or `/stripe/health` (a path on the directive, on an enclosing `handle`/`route`, or a
-  named matcher whose paths are those), with `POST` and `GET` method matchers, and
+  named matcher whose `path` values are those or whose `path_regexp` selects only those
+  two paths, probed against a list of other paths), with `POST` and `GET` method matchers, and
   answers 404 otherwise (an unconditional `reverse_proxy billing:8090` fails).
 """
 
@@ -99,17 +102,18 @@ def parse(text: str) -> Node:
 
 
 def expand(node: Node, snippets: dict[str, Node], depth: int = 0) -> None:
-    """Replace `import <snippet>` lines with the snippet's lines (recursively)."""
-    assert depth < 10, "snippet imports nest too deep"
-    out: list[Node] = []
-    for c in node.children:
+    """Replace `import <snippet>` lines with the snippet's lines (recursively: also an
+    `import` at a snippet's own top level, and inside nested blocks)."""
+    assert depth < 20, "snippet imports nest too deep"
+
+    def inline(c: Node, level: int) -> list[Node]:
+        assert level < 10, "snippet imports nest too deep"
         if c.args[:1] == ["import"] and len(c.args) > 1 and c.args[1] in snippets:
-            for s in snippets[c.args[1]].children:
-                copy = clone(s, node)
-                out.append(copy)
-        else:
-            out.append(c)
-    node.children = out
+            body = [clone(s, node) for s in snippets[c.args[1]].children]
+            return [n for s in body for n in inline(s, level + 1)]
+        return [c]
+
+    node.children = [n for c in node.children for n in inline(c, 0)]
     for c in node.children:
         expand(c, snippets, depth + 1)
 
@@ -241,22 +245,75 @@ def not_found(node: Node) -> bool:
     return any(n.args[:1] in (["respond"], ["error"]) and "404" in n.args for n in node.walk())
 
 
-def matcher_defs(scope: Node, name: str) -> list[str]:
-    """The tokens of every definition of the named matcher `name` in `scope`."""
-    return [t for n in scope.walk() if n.args[:1] == [name] for t in n.tokens()[1:]]
+def matcher_lines(scope: Node, name: str) -> list[list[str]]:
+    """The matcher lines (`<type> <args...>`) of every definition of the named matcher
+    `name` in `scope`: the single-line form `@name <type> <args...>` and the block form."""
+    out: list[list[str]] = []
+    for n in scope.walk():
+        if n.args[:1] == [name]:
+            if len(n.args) > 1:
+                out.append(n.args[1:])
+            out += [c.args for c in n.walk() if c.args]
+    return out
+
+
+# Paths a matcher restricted to the two Stripe routes must not select.
+OTHER_PATHS = (
+    "/",
+    "/health",
+    "/metrics",
+    "/internal/credits",
+    "/internal/stripe/webhook",
+    "/stripe",
+    "/stripe/other",
+    "/stripe/webhooks",
+    "/stripe/healthz",
+    "/stripe/webhook/x",
+    "/stripe/health/x",
+    "/x/stripe/webhook",
+    "/v1/chat/completions",
+)
+
+
+def regexp_paths(pattern: str) -> set[str] | None:
+    """The Stripe paths a `path_regexp` selects (Caddy: unanchored RE2 search on the
+    path), or None if it also selects another path (or does not compile here)."""
+    try:
+        rx = re.compile(pattern)
+    except re.error:
+        return None
+    if any(rx.search(p) for p in OTHER_PATHS):
+        return None
+    return {p for p in STRIPE_PATHS if rx.search(p)} or None
 
 
 def stripe_paths(matcher: str, scope: Node) -> set[str] | None:
-    """The Stripe paths a matcher token selects, or None if it selects anything else."""
+    """The Stripe paths a matcher token selects, or None if it selects anything else:
+    exact `path` matchers, or a `path_regexp` that matches only those paths (other
+    matcher types, e.g. `method` or `header`, only narrow it further)."""
     if matcher.startswith("/"):
         return {matcher} if matcher in STRIPE_PATHS else None
-    if matcher.startswith("@"):
-        toks = matcher_defs(scope, matcher)
-        if not toks or "not" in toks:
+    if not matcher.startswith("@"):
+        return None
+    paths: set[str] = set()
+    for kind, *args in matcher_lines(scope, matcher):
+        if kind == "not":
             return None
-        paths = set(re.findall(r"/[\w/*.{}-]*", " ".join(toks)))
-        return paths if paths and paths <= STRIPE_PATHS else None
-    return None
+        if kind == "path":
+            if not args or not set(args) <= STRIPE_PATHS:
+                return None
+            paths |= set(args)
+        elif kind == "path_regexp":
+            sel = regexp_paths(args[-1]) if args else None
+            if sel is None:
+                return None
+            paths |= sel
+        elif kind == "expression":
+            found = set(re.findall(r"/[\w/*.{}-]*", " ".join(args)))
+            if not found or not found <= STRIPE_PATHS:
+                return None
+            paths |= found
+    return paths or None
 
 
 def guard(proxy: Node, scope: Node) -> set[str] | None:

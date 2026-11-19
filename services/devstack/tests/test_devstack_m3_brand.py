@@ -31,13 +31,24 @@ def without_header_names(text: str) -> str:
 
 def strip_ts_comments(src: str) -> str:
     """Source with `//` and `/* */` comments blanked (JSX `{/* */}` included); strings,
-    template literals and JSX text are kept, so a `//` inside a URL string stays."""
+    template literals and JSX text are kept, so a `//` inside a URL string stays.
+
+    An apostrophe in JSX text (`Don't`) is not a string's start: a `'` right after a
+    letter or digit cannot open a string in TypeScript, so it is skipped, and a `'`/`"`
+    string ends at the end of its line in any case (only template literals span lines).
+    A stray `'` after a space in JSX text (`'90s`) is not handled here; the web app's
+    lint (`react/no-unescaped-entities`) refuses it there anyway."""
     out: list[str] = []
     i, n = 0, len(src)
     quote: str | None = None
     while i < n:
         ch = src[i]
         if quote:
+            if ch == "\n" and quote != "`":
+                quote = None
+                out.append(ch)
+                i += 1
+                continue
             out.append(ch)
             if ch == "\\" and i + 1 < n:
                 out.append(src[i + 1])
@@ -56,7 +67,7 @@ def strip_ts_comments(src: str) -> str:
             i = n if j == -1 else j + 2
             out.append(" ")
             continue
-        if ch in "'\"`":
+        if ch in '"`' or (ch == "'" and not (i and src[i - 1].isalnum())):
             quote = ch
         out.append(ch)
         i += 1
@@ -78,7 +89,7 @@ def web_files() -> list[Path]:
 def test_no_product_name_in_web_text() -> None:
     hits = []
     for path in web_files():
-        code = without_header_names(strip_ts_comments(path.read_text()))
+        code = without_header_names(strip_ts_comments(path.read_text(encoding="utf-8")))
         for m in NAME.finditer(code):
             line = code.count("\n", 0, m.start()) + 1
             text = code.splitlines()[line - 1].strip()
@@ -97,7 +108,7 @@ def docstring_nodes(tree: ast.AST) -> set[int]:
 
 
 def python_hits(path: Path) -> list[str]:
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     skip = docstring_nodes(tree)
     return [
         f"{path.relative_to(ROOT)}:{node.lineno}: {node.value[:120]!r}"
@@ -128,7 +139,9 @@ def test_the_scan_sees_jsx_text_and_skips_comments_and_headers() -> None:
         "// Loom comment\n/* Loom block */\nconst LoomEnv = 1;\n"
         'const h = "X-Loom-Request-Id";\nconst u = "https://x.test//Loom";\n'
         "export const A = () => <h1>{/* Loom */}Welcome to Loom</h1>;\n"
+        "export const B = () => <p>Don't panic</p>; // Loom note\n"
+        'const v = "Loom";\n'
     )
     code = without_header_names(strip_ts_comments(src))
     found = [code.count("\n", 0, m.start()) + 1 for m in NAME.finditer(code)]
-    assert found == [5, 6], found
+    assert found == [5, 6, 8], found

@@ -90,14 +90,58 @@ def test_migrate_runs_only_in_its_profile() -> None:
             assert not svc.get("profiles"), f"{name} is in a profile: it would not start"
 
 
+SECRET_KEY = re.compile(r"(?:^|_)(?:PASSWORD|SECRET|TOKEN|KEY)$", re.I)
+
+
+def env_files(svc: dict[str, Any]) -> list[str]:
+    files = svc.get("env_file") or []
+    return [
+        str(f["path"] if isinstance(f, dict) else f)
+        for f in ([files] if isinstance(files, (str, dict)) else files)
+    ]
+
+
+def secret_assignments(text: str) -> list[str]:
+    """`KEY=value` lines of an env file whose key looks secret (`*_PASSWORD`, `*_SECRET`,
+    `*_TOKEN`, `*_KEY`) and whose value is not empty."""
+    out = []
+    for line in text.splitlines():
+        line = line.strip().removeprefix("export ").strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if SECRET_KEY.search(key.strip()) and value.strip().strip("\"'"):
+            out.append(key.strip())
+    return out
+
+
 def test_no_service_sets_loom_env() -> None:
-    """Unset LOOM_ENV means prod: every service runs its production checks (§6.2)."""
+    """Unset LOOM_ENV means prod: every service runs its production checks (§6.2).
+
+    Env files: a secret one lives under `/run/loom` (§6.3, A13). One elsewhere must hold
+    no secret: a file in the repository (a path relative to deploy/) is read and may not
+    give a value to a `*_PASSWORD`, `*_SECRET`, `*_TOKEN` or `*_KEY` key; an absolute path
+    outside `/run/loom` (written on the box, not in the repository) may not be named like
+    a secret one. Neither may set LOOM_ENV.
+    """
     for name, svc in services().items():
         assert "LOOM_ENV" not in env_names(svc), f"{name} sets LOOM_ENV"
-        files = svc.get("env_file") or []
-        for f in [files] if isinstance(files, (str, dict)) else files:
-            path = f["path"] if isinstance(f, dict) else f
-            assert str(path).startswith("/run/loom/"), f"{name}: env file {path} outside /run/loom"
+        for path in env_files(svc):
+            if path.startswith("/run/loom/"):
+                continue
+            if path.startswith("/"):
+                assert not re.search(r"(?i)secret|password|token|credential", path), (
+                    f"{name}: env file {path} looks secret but is outside /run/loom"
+                )
+                continue
+            local = (PROD.parent / path).resolve()
+            assert local.is_file(), f"{name}: env file {path} is neither in deploy/ nor /run/loom"
+            text = local.read_text(encoding="utf-8")
+            hits = secret_assignments(text)
+            assert not hits, f"{name}: env file {path} outside /run/loom holds secrets {hits}"
+            assert not re.search(r"^\s*(export\s+)?LOOM_ENV\s*=", text, re.M), (
+                f"{name}: env file {path} sets LOOM_ENV"
+            )
 
     # Anywhere in the parsed file (extension fields, anchors), not in comments.
     def walk(node: Any) -> None:
@@ -276,9 +320,33 @@ def words(value: Any) -> list[str]:
     return [w for item in value for w in str(item).split()]
 
 
+REDIS_SECRETS = SECRETS_DIR + "redis/"
+DEVSTACK_SRC = ROOT / "services" / "devstack" / "src" / "loom_devstack"
+
+
+def uncommented(text: str) -> list[str]:
+    return [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+
+
+def rendered_redis_conf() -> list[str]:
+    """Arguments of Redis's command line that point at a file loom-deploy renders under
+    `/run/loom/secrets/redis/` (a config file that also holds `requirepass`, §6.3)."""
+    svc = services()["redis"]
+    argv = words(svc.get("entrypoint")) + words(svc.get("command"))
+    return [a.strip("\"'") for a in argv if a.strip("\"'").startswith(REDIS_SECRETS)]
+
+
 def redis_config() -> str:
-    """Redis's settings as written in the compose file: its command and entrypoint, plus
-    any config file from deploy/ it mounts (a `redis.conf` is as good as flags)."""
+    """Redis's settings as the repository states them: its command and entrypoint, plus
+    any config file from deploy/ it mounts (a `redis.conf` is as good as flags).
+
+    When Redis's argument is a config file loom-deploy renders under
+    `/run/loom/secrets/redis/` (so `requirepass` can sit in it), the rendered file is not
+    in the repository; its settings are then read from where it is rendered from: the
+    files of deploy/ (a template) and loom-deploy's module (`loom_devstack/*deploy*.py`).
+    The settings must be stated in one of those places: a static check cannot see a
+    value computed at run time.
+    """
     doc = compose()
     svc = doc["services"]["redis"]
     parts = words(svc.get("entrypoint")) + words(svc.get("command"))
@@ -293,9 +361,13 @@ def redis_config() -> str:
     for source in sources:
         path = (PROD.parent / source).resolve()
         if not source.startswith("/") and path.is_file():
-            for line in path.read_text().splitlines():
-                if not line.lstrip().startswith("#"):
-                    parts += line.split()
+            parts += [w for line in uncommented(path.read_text()) for w in line.split()]
+    if rendered_redis_conf():
+        renderers = [p for p in sorted(PROD.parent.rglob("*")) if p.is_file() and p != PROD]
+        renderers += sorted(DEVSTACK_SRC.glob("*deploy*.py"))
+        for path in renderers:
+            if b"\0" not in path.read_bytes()[:4096]:
+                parts += uncommented(path.read_text(encoding="utf-8", errors="replace"))
     return " ".join(parts)
 
 
@@ -310,11 +382,28 @@ def redis_config() -> str:
 )
 def test_redis_runs_tls_only_durable_and_never_evicts(setting: tuple[str, str]) -> None:
     """§6.5: `--port 0 --tls-port 6379`, `appendonly yes`, `maxmemory-policy noeviction`
-    (contracts §2 checks the last with CONFIG GET)."""
+    (contracts §2 checks the last with CONFIG GET). As flags, in a config file from
+    deploy/, or (for a config file rendered under `/run/loom/secrets/redis/`) in what
+    renders it: see `redis_config`. A15 checks the running Redis."""
     key, value = setting
     config = redis_config()
-    pat = rf"(?:^|\s)(?:--)?{re.escape(key)}\s+[\"']?{re.escape(value)}[\"']?(?:\s|$)"
-    assert re.search(pat, config), f"redis is not run with {key} {value}: {config!r}"
+    # `key value`, `--key value`, or quoted/mapped as in a renderer (`"key": "value"`).
+    pat = rf"(?<![\w-])(?:--)?{re.escape(key)}[\"']?[\s:=,]+[\"']?{re.escape(value)}(?![\w-])"
+    assert re.search(pat, config), f"redis is not run with {key} {value}: {config[:2000]!r}"
+
+
+def test_a_rendered_redis_config_file_keeps_the_password_out_of_the_compose_file() -> None:
+    """If Redis reads a config file from `/run/loom/secrets/redis/`, that is the file
+    loom-deploy renders with `requirepass` (§6.3): the compose file names it only by path
+    and states no `requirepass` value of its own. (That Redis mounts its own secrets
+    directory read-only is checked by the mount tests above; A13 checks the file.)"""
+    confs = rendered_redis_conf()
+    if not confs:
+        return  # flags or a config file from deploy/: the tests above cover them
+    text = "\n".join(uncommented(PROD.read_text()))
+    assert not re.search(r"requirepass[\"']?[\s:=]+\S", text), (
+        "compose.prod.yml states a requirepass value"
+    )
 
 
 def test_the_redis_password_is_not_on_its_command_line() -> None:
@@ -324,9 +413,25 @@ def test_the_redis_password_is_not_on_its_command_line() -> None:
     assert "requirepass" not in argv, f"redis gets requirepass on its command line: {argv!r}"
 
 
+def dockerfile_cmd(path: Path) -> list[str]:
+    """The last `CMD` of a Dockerfile, exec (`["all"]`) or shell form, as words."""
+    cmds = re.findall(r"^\s*CMD\s+(.+?)\s*$", path.read_text(encoding="utf-8"), re.M)
+    if not cmds:
+        return []
+    last = cmds[-1]
+    if last.startswith("["):
+        return [w for item in yaml.safe_load(last) for w in str(item).split()]
+    return last.split()
+
+
 def test_billing_runs_all() -> None:
-    """§6.2: `billing` (`all`): the API, the webhook and the jobs in one service."""
-    argv = words(services()["billing"].get("command"))
+    """§6.2: `billing` (`all`): the API, the webhook and the jobs in one service. In the
+    compose file's command, or (with no `command` and no `entrypoint` override, which
+    would reset it) the image's own `CMD` from services/billing/Dockerfile."""
+    svc = services()["billing"]
+    argv = words(svc.get("entrypoint")) + words(svc.get("command"))
+    if svc.get("command") is None and svc.get("entrypoint") is None:
+        argv = dockerfile_cmd(ROOT / "services" / "billing" / "Dockerfile")
     assert "all" in argv, f"billing does not run `all`: {argv}"
 
 

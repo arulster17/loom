@@ -16,8 +16,10 @@ every counter alarm sums deltas (`statistic`/`stat = "Sum"`, no metric math) or 
 uses `RATE()`/`DIFF()` metric math on cumulative values; if the agent config says which it
 sends (a key or value naming `delta` or `cumulative`), the alarms agree with it.
 
-Conversely, every metric an alarm reads in `Loom/Platform` is one of §5.3's series (the
-namespace holds only those). An alarm on a §5.3 series names the series in its resource
+Conversely, every metric an alarm reads in `Loom/Platform` is one of §5.3's series or one
+of the CloudWatch agent's host metrics (`disk_used_percent`, `mem_used_percent`: the
+instance role may put metrics only in that namespace, §5.2 iam, so the agent's disk and
+memory metrics of §6.9 live there too). An alarm on a §5.3 series names the series in its resource
 block (`metric_name`, possibly inside `metric_query { metric { ... } }`); its namespace may
 be a literal or a simple `local.<name>` / `var.<name>` (resolved from the directory's
 `.tf` files).
@@ -88,7 +90,11 @@ COUNTERS = sorted(n for n, (_, kind, _, _) in SERIES.items() if kind == "counter
 
 PLATFORM = ALARMS.parent
 NAMESPACE = "Loom/Platform"
-EXPORTED = {*SERIES, "up"}
+# The CloudWatch agent's own host metrics (§6.9 "plus disk and memory"): the instance
+# role may put metrics only in Loom/Platform (§5.2 iam), so they live there too, and an
+# alarm on the data volume's disk (§5.3) reads one of them.
+HOST_METRICS = {"disk_used_percent", "mem_used_percent"}
+EXPORTED = {*SERIES, "up", *HOST_METRICS}
 
 
 def strip_comments(text: str) -> str:
@@ -186,8 +192,10 @@ def test_an_alarm_reads_it_in_the_loom_platform_namespace(metric: str) -> None:
 
 
 def test_every_loom_platform_metric_an_alarm_reads_is_a_section_5_3_series() -> None:
-    """The reverse direction: no alarm in Loom/Platform reads a name the services do not
-    export (a typo, or a series §5.3 does not list)."""
+    """The reverse direction: no alarm in Loom/Platform reads a name that is neither a
+    series the services export (§5.3's, plus `up`) nor one of the CloudWatch agent's host
+    metrics (`disk_used_percent`, `mem_used_percent`, §6.9): a typo, or a series §5.3
+    does not list."""
     values = simple_values()
     seen, unknown = 0, {}
     for name, body in alarm_blocks().items():
