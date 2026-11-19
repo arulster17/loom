@@ -92,6 +92,8 @@ SITE_STRINGS = (
     "db_host",
     "db_master_secret_arn",
 )
+# The pool manager's name for the gateway's client certificate file (loom_poolmgr.pki).
+GATEWAY_CERT_FILE = "loom-gateway.pem"
 SHA = re.compile(r"[0-9a-f]{40}")
 ECR_REGISTRY = re.compile(r"^(\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com)/")
 DOMAIN = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", re.I)
@@ -834,10 +836,15 @@ def build_render(
     secret_files["gateway"]["pod-ca.crt"] = pod_ca["crt"]
     secret_files["poolmgr"].update(
         {
-            "pod-ca.crt": pod_ca["crt"],
-            "pod-ca.key": pod_ca["key"],
+            "ca.crt": pod_ca["crt"],
+            "ca.key": pod_ca["key"],
             "client.crt": client["crt"],
             "client.key": client["key"],
+            # M1's overhead probe (loom-m3-acceptance m3-d runs it in this container) takes
+            # `ca.crt`, `gateway.crt` and `gateway.key` from /certs; the manager's client
+            # certificate is signed by the same CA, which is all a pod proxy checks.
+            "gateway.crt": client["crt"],
+            "gateway.key": client["key"],
         }
     )
     secret_files["acceptance"]["webhook_secret"] = stripe["webhook_secret"]
@@ -849,6 +856,25 @@ def build_render(
     }
     secret_files["grafana"] = {"admin_password": grafana["admin_password"]}
     return compose_env, envs, secret_files
+
+
+def bootstrap_gateway_cert(paths: Paths, ca_crt: str, ca_key: str) -> None:
+    """Gives the gateway a client certificate before the manager's first issue: the manager,
+    which issues and rotates it (§7), starts only after the gateway is healthy (P4). Written
+    only when the file is missing (never replacing the manager's), as the manager writes it
+    (`loom-gateway.pem`, key then certificate in one PEM, 0400, owned by the gateway's uid,
+    atomic rename), signed by the current pod CA for 7 days, so the manager's start check
+    accepts it and rotates it on its 24 h schedule. A failure is a warning, not an error."""
+    path = paths.var_lib / "gateway-cert" / GATEWAY_CERT_FILE
+    if path.exists():
+        return
+    try:
+        crt, key = issue_cert(ca_crt, ca_key, "loom-gateway", server=False, dns=[], days=7)
+    except DeployError as e:
+        say(f"warning: no initial gateway client certificate ({e}); the gateway will not start")
+        return
+    write_file(path, key + crt, 0o400)
+    chown(f"{UIDS['gateway']}:{UIDS['gateway']}", path)
 
 
 def render(paths: Paths, site: dict[str, Any], manifest: dict[str, Any]) -> set[str]:
@@ -892,6 +918,9 @@ def render(paths: Paths, site: dict[str, Any], manifest: dict[str, Any]) -> set[
         chown(f"{uid}:{uid}", v)
     paths.acceptance.mkdir(parents=True, exist_ok=True)
     paths.deploy_log.touch(exist_ok=True)
+    bootstrap_gateway_cert(
+        paths, secret_files["poolmgr"]["ca.crt"], secret_files["poolmgr"]["ca.key"]
+    )
     return changed
 
 

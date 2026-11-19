@@ -145,8 +145,8 @@ services:
     environment:
       LOOM_POOLMGR_MOCK_BACKEND: "true"
       LOOM_POOLMGR_SERVING_YAML: /etc/loom/serving.yaml
-      LOOM_POOLMGR_CA_CERT: /run/loom/secrets/poolmgr/pod-ca.crt
-      LOOM_POOLMGR_CA_KEY: /run/loom/secrets/poolmgr/pod-ca.key
+      LOOM_POOLMGR_CA_CERT: /run/loom/secrets/poolmgr/ca.crt
+      LOOM_POOLMGR_CA_KEY: /run/loom/secrets/poolmgr/ca.key
       LOOM_POOLMGR_CLIENT_CERT: /run/loom/secrets/poolmgr/client.crt
       LOOM_POOLMGR_CLIENT_KEY: /run/loom/secrets/poolmgr/client.key
       LOOM_POOLMGR_STATE_DIR: /var/lib/loom-poolmgr
@@ -159,6 +159,9 @@ services:
     volumes:
       - ./serving.m3.yaml:/etc/loom/serving.yaml:ro
       - ${LOOM_DEPLOY_ROOT:-}/run/loom/secrets/poolmgr:/run/loom/secrets/poolmgr:ro
+      # The same directory at /certs: loom-m3-acceptance's overhead probe (m3-d) runs in
+      # this container and reads /certs/ca.crt, gateway.crt and gateway.key.
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/secrets/poolmgr:/certs:ro
       - ${LOOM_DEPLOY_ROOT:-}/var/lib/loom/poolmgr:/var/lib/loom-poolmgr
       - ${LOOM_DEPLOY_ROOT:-}/var/lib/loom/gateway-cert:/var/lib/loom-gateway-cert
       - *rds-ca

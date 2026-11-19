@@ -2,9 +2,9 @@
 # models and timings with provider `local`, the mock backend. Each "pod" is the bench mock
 # engine behind loom-podproxy inside the poolmgr container; the manager outside dev
 # refuses `local` unless LOOM_POOLMGR_MOCK_BACKEND=true (compose.prod.yml sets it). M4
-# replaces the provider and fills network.gateway_egress_cidrs with the Elastic IP (an
-# output of infra/aws/platform: it is not known when this file is committed); with the
-# mock backend the pods' allowlist is the compose network (LOOM_POOLMGR_ALLOW_CIDRS).
+# replaces the provider and puts the Elastic IP in network.gateway_egress_cidrs (an output
+# of infra/aws/platform: it is not known when this file is committed); until then the list
+# holds the compose network's subnet, which the manager needs non-empty outside dev.
 # Keep the models and timings in step with config/serving.yaml.
 version: 1
 provider: local                    # runpod | local (compose) | fake (tests)
@@ -17,7 +17,11 @@ placement:
   allowed_cuda_versions: ["13.0"]
   container_disk_gb: {qwen3-8b: 80, llama-3.3-70b-instruct-fp8: 120}
 network:
-  gateway_egress_cidrs: []         # pod proxy allowlist; empty only with provider local/fake
+  # The pod proxies' allowlist. The manager refuses an empty list outside dev, even with the
+  # mock backend; the Elastic IP (spec §6.8) is for the real pods of M4. The mock pods are
+  # reached from the gateway over the compose network, so that network's subnet (compose.prod.yml)
+  # is the gateway's real source address here.
+  gateway_egress_cidrs: ["10.214.0.0/24"]
   proxy_port: 8443
 lifecycle:
   reconcile_every_s: 15
