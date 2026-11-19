@@ -141,12 +141,16 @@ ECR repositories and buckets refuse to delete while they hold objects. Nothing i
 weakened in code; run these steps in order, with the user's go-ahead, from this
 directory. Replace `<region>` with `us-east-1`.
 
+0. Stop the stack on the box first (SSM or SSH): stop the compose services and the
+   CloudWatch agent (`sudo systemctl stop amazon-cloudwatch-agent`). The snapshot in step 1
+   is then consistent, and the agent cannot recreate the `/loom/platform/prometheus` log
+   group while destroy deletes it.
 1. Keep the data, if wanted: `aws ec2 create-snapshot --volume-id <data volume id>
    --description loom-platform-final` (find the id in the console or `terraform state show
    aws_ebs_volume.data`) and wait for it to complete. The DLM snapshots stay after the
    policy is deleted; delete them by hand when no longer needed.
 2. Database: `terraform apply -var db_deletion_protection=false` (add your usual `-var`s
-   or `terraform.tfvars`; this changes only that setting). Destroy takes a final snapshot
+   or `terraform.tfvars`; review the plan: it should show only `deletion_protection` changing). Destroy takes a final snapshot
    named `loom-platform-final`; if one exists from an earlier teardown, delete it first or
    the destroy fails.
 3. Drop the volume from state so destroy can proceed: `terraform state rm
@@ -167,9 +171,13 @@ directory. Replace `<region>` with `us-east-1`.
    `loom/platform/*` cannot be reused for 7 days; to reuse them sooner run `aws
    secretsmanager delete-secret --force-delete-without-recovery --secret-id <name>` for
    each. The Elastic IP is released and the DNS records (when Terraform owns them) are
-   removed; remove records you created by hand at your DNS host.
-8. State stack, last: empty `infra/aws/state`'s bucket including every object version
-   (`aws s3api list-object-versions` and `delete-objects`), then `terraform state rm
+   removed; remove records you created by hand at your DNS host. The SMTP user
+   `loom-ses-smtp` has `force_destroy`, so its access key (created outside Terraform) is
+   deleted with it; no separate key step is needed.
+8. Optional: the state stack. B22 keeps the state bucket and D8 plans a re-apply in M4, so
+   normally leave it. If you do remove it, do it last: empty `infra/aws/state`'s bucket including every object version
+   AND every delete marker (`aws s3api list-object-versions` and `delete-objects`; both
+   kinds must go), then `terraform state rm
    aws_s3_bucket.state` (its `prevent_destroy` blocks destroy) and `aws s3 rb
    s3://<state bucket>`; `terraform destroy` there then removes the rest (versioning,
    encryption and public-access configuration). Do this only after step 7: the platform

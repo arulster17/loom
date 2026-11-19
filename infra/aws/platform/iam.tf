@@ -259,6 +259,9 @@ resource "aws_iam_role_policy" "serving_reaper" {
 # configuration set; the condition keeps the sender to one address (§5.6).
 resource "aws_iam_user" "ses_smtp" {
   name = "loom-ses-smtp"
+
+  # The runbook's access key is not in Terraform, so destroy must delete it too.
+  force_destroy = true
 }
 
 resource "aws_iam_user_policy" "ses_smtp" {
