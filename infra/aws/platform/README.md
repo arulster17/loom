@@ -141,8 +141,11 @@ ECR repositories and buckets refuse to delete while they hold objects. Nothing i
 weakened in code; run these steps in order, with the user's go-ahead, from this
 directory. Replace `<region>` with `us-east-1`.
 
-0. Stop the stack on the box first (SSM or SSH): stop the compose services and the
-   CloudWatch agent (`sudo systemctl stop amazon-cloudwatch-agent`). The snapshot in step 1
+0. Stop the stack on the box first (SSM or SSH): stop the compose services
+   (`sudo docker compose -p "${LOOM_DEPLOY_PROJECT:-loom}" down`; with `-p` compose finds the
+   containers by project label and needs no file, and the data stays in the bind mounts under
+   `/var/lib/loom`) and the CloudWatch agent (`sudo systemctl stop amazon-cloudwatch-agent`).
+   Alarms and the H3 health check fire from here on. The snapshot in step 1
    is then consistent, and the agent cannot recreate the `/loom/platform/prometheus` log
    group while destroy deletes it.
 1. Keep the data, if wanted: `aws ec2 create-snapshot --volume-id <data volume id>
