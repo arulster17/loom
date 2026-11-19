@@ -1,0 +1,13 @@
+# Accepted `trivy config` findings for the M3 Terraform stacks (infra/aws/platform,
+# infra/aws/state), read by CI job `terraform` with --ignorefile (docs/phase1-m3-spec.md
+# §5.5, A11). Every other finding fails the job. An entry names the finding, the files it
+# applies to (relative to the stack directory, e.g. "rds.tf"; the file serves both stacks)
+# and the reason, and the same finding is listed with its reason in
+# infra/aws/platform/README.md. Entries are added only after the finding is triaged in the
+# PR, e.g.:
+#
+#   misconfigurations:
+#     - id: AWS-0000
+#       paths: ["example.tf"]
+#       statement: why this is accepted
+misconfigurations: []
