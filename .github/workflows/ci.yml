@@ -271,10 +271,15 @@ jobs:
   # The M3 Terraform stacks (docs/phase1-m3-spec.md §5.5, A1, A11), checked with no AWS
   # credentials: fmt, init without a backend against the committed .terraform.lock.hcl
   # (read-only), validate, `terraform test` (mock providers), tflint (AWS ruleset, shallow
-  # rules) and trivy config. Everything is pinned: Terraform here and in the agents' image
-  # (hashicorp/terraform:1.16.7@sha256:c9c77f5b9820832cbc7b88d16df406ac6e75fee5a9077e5437db0c54e5ff33e3),
-  # tflint, its AWS ruleset (.github/terraform/tflint.hcl) and trivy (its embedded checks,
-  # no update) by version and digest. Accepted trivy findings: .github/terraform/trivyignore.yaml.
+  # rules) and trivy config. Pinned: the actions by commit; Terraform here and in the
+  # agents' image (hashicorp/terraform:1.16.7@sha256:c9c77f5b9820832cbc7b88d16df406ac6e75fee5a9077e5437db0c54e5ff33e3);
+  # tflint and trivy (its embedded checks, no update) as images by version and digest; the
+  # AWS ruleset by version (.github/terraform/tflint.hcl; tflint checks its signature).
+  # Accepted trivy findings: .github/terraform/trivyignore.yaml only; inline ignore
+  # comments fail the job (A11). Each stack's .terraform.lock.hcl must hold the hashes of
+  # every platform (`terraform providers lock -platform=linux_amd64 -platform=linux_arm64
+  # -platform=windows_amd64 -platform=darwin_arm64`): with a lock made on one machine only,
+  # init passes here and validate fails.
   terraform:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -295,7 +300,7 @@ jobs:
       run:
         working-directory: ${{ matrix.dir }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
@@ -310,6 +315,12 @@ jobs:
             exit 1
           fi
           terraform test
+      - name: no inline ignore comments (findings are accepted only in .github/terraform/)
+        run: |
+          if grep -rnE 'trivy:ignore|tfsec:ignore|tflint-ignore' --exclude-dir=.terraform --include='*.tf' --include='*.hcl' .; then
+            echo "::error::inline ignore comments in $STACK: fix the finding, or triage it in the PR (A11)"
+            exit 1
+          fi
       - name: tflint
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -332,8 +343,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
       - run: uv sync --frozen
       - run: >-
           uv run pytest -q -m acceptance --timeout 3000
