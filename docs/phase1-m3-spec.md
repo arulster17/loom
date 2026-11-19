@@ -503,7 +503,9 @@ volumes of §6.2). `<root>/run/loom` must be on a tmpfs (read from `/proc/self/m
 otherwise `apply` and `acceptance` refuse (tests use a directory under `/dev/shm`). The
 compose file writes its bind-mount sources `${LOOM_DEPLOY_ROOT:-}/run/loom/...` and
 `${LOOM_DEPLOY_ROOT:-}/var/lib/loom/...`; inside a container the path is the same without
-the prefix. The compose project is `LOOM_DEPLOY_PROJECT` (default `loom`);
+the prefix. The compose project is `LOOM_DEPLOY_PROJECT` (default `loom`): `loom-deploy`
+always passes `-p "$LOOM_DEPLOY_PROJECT"` to every `docker compose` call, and
+`compose.prod.yml` has no top-level `name:` (user decision 2026-11-19);
 `LOOM_DEPLOY_COMPOSE_OVERRIDE` (tests only) names one more `-f` file after the release's.
 Every `aws` call gets `--region` from `AWS_REGION`, else `us-east-1` (§8.5). `apply` also
 creates each volume directory of §6.2 and `<root>/var/lib/loom/gateway-cert` (the
