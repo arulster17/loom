@@ -385,7 +385,7 @@ async def test_a34_product_name_comes_from_the_brand_name(pool, redis_client, mo
     form = await _checkout_form(pool, redis_client, m3s_settings(brand_name="Acme"))
     assert form[NAME_FIELD] == "Acme credits"
     monkeypatch.setenv("LOOM_BRAND_NAME", "Zephyr")
-    s = BillingSettings(**STUB)
+    s = BillingSettings(**{**STUB, "billing_internal_token": TOKEN})
     assert s.brand_name == "Zephyr"  # type: ignore[attr-defined]
     form = await _checkout_form(pool, redis_client, s)
     assert form[NAME_FIELD] == "Zephyr credits"
