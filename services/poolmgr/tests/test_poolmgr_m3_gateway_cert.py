@@ -61,11 +61,25 @@ async def wait_for_file(directory: Path, timeout_s: float = 10.0) -> Path:
     return the_file(directory)
 
 
-def run_once(h: PoolmgrRun) -> None:
-    """`loom-poolmgr run` until the manager's loop has ticked once, then stop."""
+def run_once(h: PoolmgrRun, *, replaced: bool = True) -> None:
+    """`loom-poolmgr run` until the manager's loop has finished at least one tick and
+    the gateway file is as expected, then stop. The file's identity (inode, serial) is
+    taken before the start. With no file before: wait (real time) for one. With a file
+    and `replaced`: wait until it is a different one (a write during the start or the
+    first ticks both count). With a file and not `replaced`: it stays the same file for
+    1 s after the first tick."""
+    old = pem_identity(h.cert_dir)
+    if old is None:
+        assert gateway_pems(h.cert_dir) == [], "a gateway file is there but does not parse"
 
     async def scenario(manager: PoolManager, run: PoolmgrRun) -> None:
-        await wait_for_file(run.cert_dir)
+        await run.wait_tick(0)
+        if old is None:
+            await wait_for_file(run.cert_dir)
+        elif replaced:
+            await wait_for_new_pem(run.cert_dir, old)
+        else:
+            await assert_pem_unchanged(run.cert_dir, old, for_s=1.0)
 
     h.scenario = scenario
     h.serve_metrics()
@@ -109,7 +123,7 @@ def test_at_start_replaced_only_under_six_days_left(
     before = path.read_bytes()
     inode = path.stat().st_ino
 
-    run_once(h)
+    run_once(h, replaced=replaced)
     path = the_file(h.cert_dir)
     if not replaced:
         assert path.read_bytes() == before, "a certificate with 6.5 days left was replaced"

@@ -26,11 +26,14 @@ from poolmgr_fakes import (
     bring_up,
     delete_pod_rows,
     deployment,
+    drive,
     env_fixture,  # noqa: F401
     insert_pod_row,
     serving_config,
+    step,
     tick,
     unique_model_id,
+    wait_until,
 )
 from poolmgr_m3_kit import (
     CREATE_RESULTS,
@@ -276,12 +279,22 @@ async def test_spend_cap_reason_gauge_is_set_and_cleared(
     assert (await env.pool(model)).reason == "spend_cap"
     assert value(metrics, "loom_poolmgr_pool_reason", model=model, reason="spend_cap") == 1.0
 
+    # After the reset the clock moves only until the create (as M2's spend tests do), and
+    # the extra tick is a `step` that leaves the clock where it is: the pod's bootstrap
+    # never reaches its health check, whose TLS check of the pod's 7-day server
+    # certificate runs on real time, not on this test's fixed date.
     await delete_pod_rows(env.database_url, other)
     await env.admin({"op": "reset", "model": model})
     await env.wake(model)
-    await tick(manager, env.clock, advance=5)
+    await manager.reconcile_once()
+    await drive(env.clock, lambda: len(env.runpod.creates()) == 1, max_advance_s=1)
+
+    async def cleared() -> bool:
+        return (await env.pool(model)).reason != "spend_cap"
+
+    await wait_until(cleared)
+    await step(manager, env.clock)
     pool = await env.pool(model)
     assert pool.reason != "spend_cap", pool
-    await follows_after_next_tick(env, manager, metrics, model)
-    assert (await env.pool(model)).reason != "spend_cap"
+    assert_follows(metrics, pool)
     assert value(metrics, "loom_poolmgr_pool_reason", model=model, reason="spend_cap") == 0.0

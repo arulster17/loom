@@ -15,14 +15,14 @@ the gauge on the metrics endpoint), through `poolmgr_m3_kit.PoolmgrRun`.
 
 The refusals are expected from the manager's `PoolmgrSettings.production_problems` (the
 settings check §16 names as a mutation target): the settings-level tests call it
-directly, and a refusal by `run` must be the one it reports, not another start-up check
-(the runpod case accepts any proxy bundle file, so the bundle's sha check cannot be what
-refuses it).
+directly, and a refusal by `run` must carry what it reports, not only another start-up
+check's message (in the runpod case the proxy bundle is a stand-in file whose sha check
+would also fail; `run`'s stderr must still carry the mock-backend line that
+`production_problems` reports for the same environment).
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from pathlib import Path
 
@@ -36,7 +36,6 @@ from poolmgr_m3_kit import (
 
 from loom_platform.serving import ServingConfig, load_serving
 from loom_platform.testing import pg_url  # noqa: F401
-from loom_poolmgr.bootstrap import ProxyBundle
 from loom_poolmgr.manager import PoolManager
 from loom_poolmgr.settings import PoolmgrSettings
 
@@ -86,18 +85,6 @@ def everything_runpod_needs(h: PoolmgrRun) -> None:
     h.mp.setenv("LOOM_POOLMGR_LEASE_BUCKET", "loom-m3-test-leases")
     h.mp.setenv("LOOM_POOLMGR_PROXY_BUNDLE", str(bundle))
     h.mp.setenv("RUNPOD_API_KEY", "rk-m3-test")
-
-
-def any_bundle_matches_the_lock(h: PoolmgrRun) -> None:
-    """The proxy bundle's sha check (against `config/serving-artifacts.lock`, a bundle
-    only the network build makes) accepts whatever file `LOOM_POOLMGR_PROXY_BUNDLE`
-    names: wherever `run` checks the bundle, it passes, so a refusal is another rule's."""
-
-    def load(cls: type[ProxyBundle], path: Path, sha256: str) -> ProxyBundle:
-        data = Path(path).read_bytes()
-        return cls(data, hashlib.sha256(data).hexdigest())
-
-    h.mp.setattr(ProxyBundle, "load", classmethod(load))
 
 
 def refused_for(h: PoolmgrRun, var: str, value: str) -> bool:
@@ -229,17 +216,19 @@ def test_run_is_refused_outside_dev(
     """Exit 2 before any manager is built: `provider: local` without the flag, the flag
     with `provider: runpod`, or the flag with a public `LOOM_POOLMGR_ALLOW_CIDRS`; the
     refusals `production_problems` reports (a bad `ALLOW_CIDRS` may instead be refused
-    when the settings load). The runpod setup is complete (its proxy bundle passes the
-    sha check), so only the mock-backend rule can refuse it, and the refusal names it."""
+    when the settings load). In the runpod case `run`'s stderr carries the mock-backend
+    line(s) of `production_problems(config)` for the same environment (its proxy bundle
+    is a stand-in file, so other refusals may be printed with them)."""
     h = poolmgr_run
     h.prod()
+    runpod_serving: Path | None = None
     if case == "no_flag":
         pass
     elif case == "runpod":
         h.mp.setenv(FLAG, "true")
         everything_runpod_needs(h)
-        any_bundle_matches_the_lock(h)
-        h.mp.setenv("LOOM_POOLMGR_SERVING_YAML", str(serving_file(h.tmp / "s", provider="runpod")))
+        runpod_serving = serving_file(h.tmp / "s", provider="runpod")
+        h.mp.setenv("LOOM_POOLMGR_SERVING_YAML", str(runpod_serving))
     else:
         h.mp.setenv(FLAG, "true")
         h.mp.setenv(ALLOW, "10.1.0.0/24,52.1.2.3")
@@ -250,6 +239,10 @@ def test_run_is_refused_outside_dev(
         code = 2
     assert code == 2, f"loom-poolmgr run exited {code}"
     assert h.constructed == [], "a manager was built"
-    if case == "runpod":
-        out = capsys.readouterr()
-        assert "mock" in (out.err + out.out).lower(), out
+    if runpod_serving is not None:
+        err = capsys.readouterr().err
+        found = PoolmgrSettings().production_problems(config_of(runpod_serving))
+        mock_lines = [p for p in found if "mock" in p.lower()]
+        assert mock_lines, f"production_problems names no mock-backend problem: {found}"
+        for line in mock_lines:
+            assert line in err, f"run's refusal does not carry {line!r}; stderr:\n{err}"

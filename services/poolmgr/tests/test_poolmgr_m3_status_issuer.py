@@ -6,7 +6,8 @@ A manager on the fakes of `poolmgr_fakes` runs with a pod CA whose common name i
 test's own, and brings two models up; `loom-poolmgr status` then runs as from a shell
 (`cli.main` in a thread, its own event loop) against the test's database and Redis, with
 the CA and the manager's client certificate in its environment as on the box. Where the
-command finds the issuer is its choice; its output names the CA once per ready pod.
+command finds the issuer is its choice; its output names the CA in each ready pod's part:
+from the first line naming the pod up to the next line naming another pod or a model.
 """
 
 from __future__ import annotations
@@ -41,6 +42,20 @@ def cli_exit(*argv: str) -> int | str | None:
     except SystemExit as e:
         return e.code
     return 0
+
+
+def pod_section(out: str, pod_id: str, others: list[str]) -> str:
+    """The lines of `out` about `pod_id`: from the first line naming it up to (not
+    including) the next line naming another pod or a model in `others`, or the
+    month's spend line."""
+    lines = out.splitlines()
+    start = next(i for i, line in enumerate(lines) if pod_id in line)
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if any(o in lines[j] for o in others) or lines[j].startswith("spend this month"):
+            end = j
+            break
+    return "\n".join(lines[start:end])
 
 
 def status_env(
@@ -92,6 +107,11 @@ async def test_status_shows_the_issuer_of_each_ready_pods_certificate(
     assert code in (0, None), f"loom-poolmgr status exited {code}"
     for pod in pods:
         assert pod.pod_id in out, f"{pod.pod_id} not in the status output:\n{out}"
-    assert out.count(cn) >= len(pods), (
-        f"the issuer {cn!r} is not shown for each of the {len(pods)} ready pods:\n{out}"
-    )
+    ids = [p.pod_id for p in pods]
+    for pod in pods:
+        others = [i for i in ids if i != pod.pod_id] + [a, b]
+        section = pod_section(out, pod.pod_id, others)
+        assert cn in section, (
+            f"the issuer {cn!r} is not shown for {pod.pod_id}; its section:\n{section}\n"
+            f"the whole output:\n{out}"
+        )

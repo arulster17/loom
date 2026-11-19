@@ -42,6 +42,7 @@ import dataclasses
 import datetime as dt
 import os
 import re
+import socket
 import ssl
 import time
 import uuid
@@ -80,8 +81,6 @@ CREATE_RESULTS = ("ok", "no_capacity", "price_too_high", "spend_cap", "error")
 PROD_DATABASE_URL = "postgresql+psycopg://loom_app:m3-test-not-a-dev-password@127.0.0.1:9/loom"
 PROD_REDIS_URL = "rediss://:m3-test-secret@127.0.0.1:9/0"
 EGRESS = "203.0.113.10/32"  # the box's Elastic IP in deploy/serving.m3.yaml (a stand-in)
-# A non-zero `LOOM_POOLMGR_METRICS_PORT` (0 turns the endpoint off); never bound.
-METRICS_PORT_PLACEHOLDER = 9
 # How long a gateway-certificate check waits for the manager's write (real time).
 FILE_WAIT_S = 10.0
 
@@ -249,6 +248,13 @@ def sample(text: str, name: str, **labels: str) -> float | None:
 Scenario = Callable[[PoolManager, "PoolmgrRun"], Awaitable[None]]
 
 
+def free_port() -> int:
+    """A TCP port on 127.0.0.1 the OS reports free (released again at once)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
 class PoolmgrRun:
     """`loom-poolmgr run` (and the other commands) in process; see the module docstring.
     Built by the `poolmgr_run` fixture; `live()` before a `run` that must start."""
@@ -325,10 +331,15 @@ class PoolmgrRun:
         self.mp.setenv("LOOM_POOLMGR_CLIENT_KEY", str(ca.client_key))
 
     def serve_metrics(self) -> None:
-        """Turn the metrics endpoint on. The port in the setting only switches it on (0
-        is off): the wrapped `start_http_server` binds port 0 and `scrape()` uses the
-        port the server got."""
-        self.mp.setenv("LOOM_POOLMGR_METRICS_PORT", str(METRICS_PORT_PLACEHOLDER))
+        """Turn the metrics endpoint on (0 is off). The setting names a port the OS
+        reported free just now, and `scrape()` starts out using it; the wrapped
+        `start_http_server` still binds port 0 and `scrape()` then uses the port that
+        server got (no other process can take it in between). Should the manager start
+        its endpoint some way the wrapper does not see, it binds the setting's port and
+        scraping still mostly works."""
+        port = free_port()
+        self.metrics_port = port
+        self.mp.setenv("LOOM_POOLMGR_METRICS_PORT", str(port))
 
     def live(self, pg_url: str) -> None:
         """Let `run` really start: the test's database (emptied of serving rows, as the
