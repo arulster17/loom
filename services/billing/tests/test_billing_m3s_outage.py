@@ -139,9 +139,30 @@ async def test_a19_retry_job_with_postgres_down_ends_its_run_without_success(pg_
             await down.close()
     assert n == 0
     assert gauge(RETRY_LAST_SUCCESS) == before  # S5: no success recorded
-    # The run ends at its first statement (the sweep): one pool wait, however long the
-    # pool's own timeout is (the spec does not bound R's wait by the webhook's setting).
-    assert elapsed <= 35, elapsed
+    # The run ends at its first statement (the sweep): one pool wait, bounded by
+    # `stripe_webhook_db_timeout_s` (1 s here, §6.13), not by the pool's own 5 s.
+    assert elapsed < 4.5, elapsed
+
+
+async def test_a19_retry_job_pool_wait_on_an_exhausted_pool_is_bounded(pg_url):
+    """§6.13: R's pool waits are bounded by `stripe_webhook_db_timeout_s`, as a
+    delivery's are. With its pool's only connection taken (Postgres itself is up), the
+    run ends at its first pool wait within about that bound, not the pool's own timeout,
+    and does not set the S5 gauge."""
+    retry_unapplied = ep("retry_unapplied")
+    full = AsyncConnectionPool(pg_url, min_size=1, max_size=1, open=False, timeout=20)
+    await full.open(wait=True, timeout=30)
+    try:
+        async with full.connection():  # held by the test for the whole run
+            before = gauge(RETRY_LAST_SUCCESS)
+            t0 = time.monotonic()
+            n = await retry_unapplied(full, settings=m3s_settings(stripe_webhook_db_timeout_s=1))
+            elapsed = time.monotonic() - t0
+    finally:
+        await full.close()
+    assert n == 0
+    assert gauge(RETRY_LAST_SUCCESS) == before  # S5: not a completed run
+    assert elapsed < 4.5, elapsed
 
 
 # ------------------------------------------------------------------ A19: lock waits

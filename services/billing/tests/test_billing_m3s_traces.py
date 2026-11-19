@@ -93,7 +93,9 @@ async def test_a16_t2_first_worker_fails_second_applies(pool, pg_url):
     one purchase, credited once."""
     process_event = ep("process_event")
     store_failed = ep("StoreFailed")
-    s1 = m3s_settings(stripe_lock_timeout_ms=1500)
+    # W1's lock wait is the window in which W2 must start and queue behind W1's row:
+    # 3 s leaves room under CPU load (flake-check), still below the 4 s statement timeout.
+    s1 = m3s_settings(stripe_lock_timeout_ms=3000)
     s2 = m3s_settings(stripe_lock_timeout_ms=10_000)
     org = await make_org(pool)
     ev = checkout_event(org, 1100)

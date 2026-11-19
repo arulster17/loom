@@ -57,21 +57,32 @@ def resolve_api():
 
 def reason_token() -> str:
     """A reason no other test writes: in the shared session database a test finds its
-    own audit rows by it (§8.6 puts the reason in `details`; the row's target columns
-    are not specified)."""
+    own audit rows by it (§6.13: `details` holds `reason`)."""
     return f"m3s reason {uuid.uuid4().hex}"
 
 
 async def audit_rows(pool, reason: str | None = None) -> list[tuple]:
-    """`admin_audit_log` rows: every row (a scratch database: all of them are the
-    test's own), or those whose `details` carry `reason` (the session database)."""
-    query = "SELECT actor_user_id, action, details FROM admin_audit_log"
+    """`admin_audit_log` rows as (actor_user_id, action, target_type, target_id,
+    details): every row (a scratch database: all of them are the test's own), or those
+    whose `details` carry `reason` (the session database)."""
+    query = "SELECT actor_user_id, action, target_type, target_id, details FROM admin_audit_log"
     async with pool.connection() as conn, conn.cursor() as cur:
         if reason is None:
             await cur.execute(query + " ORDER BY id")
         else:
             await cur.execute(query + " WHERE details::text LIKE %s ORDER BY id", (f"%{reason}%",))
         return await cur.fetchall()
+
+
+def assert_resolve_audit(row: tuple, *, admin_id: uuid.UUID, evt: str, reason: str) -> None:
+    """§6.13: the admin's `users.id`, `stripe_event.resolve`, target `stripe_event` and
+    the event id, `details` holding `reason` (other keys allowed)."""
+    actor, action, target_type, target_id, details = row
+    assert actor == admin_id and action == "stripe_event.resolve", row
+    assert (target_type, target_id) == ("stripe_event", evt), row
+    if isinstance(details, str):
+        details = json.loads(details)
+    assert isinstance(details, dict) and details.get("reason") == reason, details
 
 
 # ------------------------------------------------------------------ refusals
@@ -158,9 +169,7 @@ async def test_a31_resolving_a_credit_event_posts_nothing_and_is_audited(pool):
     assert row is not None and row["processed_at"] == t and row["result"] == "resolved_by_admin"
     audit = await audit_rows(pool, reason)
     assert len(audit) == 1
-    actor, action, details = audit[0]
-    assert actor == admin_id and action == "stripe_event.resolve"
-    assert reason in json.dumps(details)
+    assert_resolve_audit(audit[0], admin_id=admin_id, evt=ev["id"], reason=reason)
     assert await ledger_count(pool, ev["id"]) == 0
     again = reason_token()
     with pytest.raises(refused):  # once resolved, it is processed
@@ -172,7 +181,7 @@ async def test_a31_resolving_a_clawback_without_payment_takes_nothing(pool):
     process_event = ep("process_event")
     resolve_event, _ = resolve_api()
     s = m3s_settings()
-    _, admin = await make_admin(pool)
+    admin_id, admin = await make_admin(pool)
     ev = dispute_event(rid("pi_test"), 500)
     assert (await process_event(pool, ev, settings=s)).result == "unapplied"
     reason = reason_token()
@@ -181,7 +190,9 @@ async def test_a31_resolving_a_clawback_without_payment_takes_nothing(pool):
     row = await event_row(pool, ev["id"])
     assert row is not None and row["processed_at"] is not None
     assert await ledger_count(pool, ev["id"]) == 0
-    assert len(await audit_rows(pool, reason)) == 1
+    audit = await audit_rows(pool, reason)
+    assert len(audit) == 1
+    assert_resolve_audit(audit[0], admin_id=admin_id, evt=ev["id"], reason=reason)
 
 
 async def test_a31_list_events_shows_unapplied_with_their_errors(scratch_pool, scratch_url):

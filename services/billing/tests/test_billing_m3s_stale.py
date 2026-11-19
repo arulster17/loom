@@ -7,7 +7,7 @@ scratch database of its own (§16); counters are compared before and after."""
 from __future__ import annotations
 
 import datetime as dt
-import time
+import inspect
 import uuid
 
 import pytest
@@ -27,6 +27,7 @@ from billing_m3s_kit import (
     make_org,
     now,
     poison,
+    purchases,
     refunds,
     rid,
     sample,
@@ -155,7 +156,13 @@ FROM generate_series(1, %(n)s) g
 """
 
 
-async def backlog(pool, *, start: dt.datetime, n: int = 600) -> None:
+# A backlog larger than the run's `limit` (§6.13: tests pass a small `limit`; the default
+# of 500 is checked on the signature, so the boundary stays tested within flake-check).
+LIMIT = 5
+BACKLOG = LIMIT + 1
+
+
+async def backlog(pool, *, start: dt.datetime, n: int = BACKLOG) -> None:
     """`n` unapplied checkouts of unknown orgs (an operator's test), older than `start`
     plus n seconds, each marked so a re-run (which clears `last_error`) is visible."""
     async with pool.connection() as conn:
@@ -187,14 +194,14 @@ async def test_a24_t21_raced_clawback_behind_a_backlog_is_applied_never_stale(sc
     await store_raw(scratch_pool, raced, received_at=t0)
     refunded_stale = sample(STALE_TOTAL, type="charge.refunded")
 
-    await retry_unapplied(scratch_pool, settings=s, now=t0 + MINUTE)
+    assert await retry_unapplied(scratch_pool, limit=LIMIT, settings=s, now=t0 + MINUTE) == 1
     assert await refunds(scratch_pool, org) == [-600 * M]
     row = await event_row(scratch_pool, raced["id"])
     assert row is not None and row["result"] == "refunded" and row["stale_reported_at"] is None
     assert sample(STALE_TOTAL, type="charge.refunded") == refunded_stale
-    # Newest first, 500 per run: the clawback and the 499 newest; the 101 oldest wait.
-    assert await markers(scratch_pool) == 101
-    assert gauge(STALE_EVENTS) == 600  # the whole backlog is stale (S1b)
+    # Newest first, `limit` per run: the clawback and the 4 newest; the 2 oldest wait.
+    assert await markers(scratch_pool) == BACKLOG - (LIMIT - 1)
+    assert gauge(STALE_EVENTS) == BACKLOG  # the whole backlog is stale (S1b)
 
 
 async def test_a24_t22_purchase_stored_behind_a_backlog_is_rerun_next_run(
@@ -212,10 +219,21 @@ async def test_a24_t22_purchase_stored_behind_a_backlog_is_rerun_next_run(
     out = await process_event(scratch_pool, ev, settings=s, now=t0)
     assert out.result == "unapplied" and out.stored_after_error  # the 500 path
     await cure(scratch_url, ev["id"])
-    await retry_unapplied(scratch_pool, settings=s, now=t0 + MINUTE)
+    assert await retry_unapplied(scratch_pool, limit=LIMIT, settings=s, now=t0 + MINUTE) == 1
     row = await event_row(scratch_pool, ev["id"])
     assert row is not None and row["processed_at"] is not None and row["result"] == "credited"
     assert row["stale_reported_at"] is None
+    assert await purchases(scratch_pool, org) == [1200 * M]
+    # The purchase and the 4 newest of the backlog were re-run; the 2 oldest wait.
+    assert await markers(scratch_pool) == BACKLOG - (LIMIT - 1)
+
+
+def test_a24_retry_unapplied_default_limit_is_500():
+    """§6.13, §8.11: `retry_unapplied(pool, *, limit=500, ...)`; the backlog tests above
+    pass a small `limit`, this pins the default."""
+    params = inspect.signature(ep("retry_unapplied")).parameters
+    assert params["limit"].default == 500
+    assert params["limit"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
 async def test_a24_unapplied_event_older_than_30_days_is_still_rerun(scratch_pool):
@@ -237,13 +255,15 @@ async def test_a24_unapplied_event_older_than_30_days_is_still_rerun(scratch_poo
 
 
 async def test_a24_s5_gauge_moves_on_a_completed_run(scratch_pool):
+    """§6.13: the gauge is the Unix time in seconds of the run's `now` (the injected one),
+    never the wall clock; hours ahead here, so the two cannot be confused."""
     retry_unapplied = ep("retry_unapplied")
     s = m3s_settings()
-    before = gauge(RETRY_LAST_SUCCESS)
     t_run = now() + dt.timedelta(hours=3)
-    wall0 = time.time()
     await retry_unapplied(scratch_pool, settings=s, now=t_run)
     after = gauge(RETRY_LAST_SUCCESS)
-    assert after is not None and after != before
-    # The run's time: the injected `now`, or the wall clock.
-    assert abs(after - t_run.timestamp()) < 1 or wall0 - 1 <= after <= time.time() + 1, after
+    assert after is not None and abs(after - t_run.timestamp()) < 1, after
+    t_next = t_run + MINUTE  # the next completed run moves it to that run's `now`
+    await retry_unapplied(scratch_pool, settings=s, now=t_next)
+    after = gauge(RETRY_LAST_SUCCESS)
+    assert after is not None and abs(after - t_next.timestamp()) < 1, after
