@@ -10,8 +10,10 @@ certificate). Contracts: [phase1-contracts.md](phase1-contracts.md) §2, §9.
   the gateway's client certificate. `loom-deploy secrets init` makes it with 2 years of
   validity. The manager exports `loom_poolmgr_ca_expiry_seconds` and refuses to start
   when the CA has less than `server_cert_renew_before_s` (2 days) left.
-- **The trust bundle** (`LOOM_POD_CA_CERT` in the gateway and the manager's pods): may hold
-  several CA certificates; the gateway trusts a pod whose certificate any of them signed.
+- **The trust bundle** (`LOOM_POD_CA_CERT` in the gateway): the gateway can trust several
+  CA certificates, but in M3 `loom-deploy` renders it from `pod-ca` alone (one CA). A pod
+  trusts, for its clients, only the CA that signed its own certificate. Old + new bundles
+  (`pod-ca-next`) are M4's.
 - **The gateway's client certificate**: issued by the manager from the CA in use, 7 days,
   into `LOOM_POOLMGR_GATEWAY_CERT_DIR/loom-gateway.pem` (key and certificate in one
   file), at start unless the file holds a current one and then every 24 h. The gateway
@@ -34,37 +36,45 @@ certificate). Contracts: [phase1-contracts.md](phase1-contracts.md) §2, §9.
   Restarting the manager issues a new certificate at once if the file is missing, broken,
   from another CA or has under 6 days left.
 
-## Rollover to a new CA (zero downtime)
+## Rollover to a new CA (not zero downtime in M3)
 
-The order matters: the gateway must trust the new CA before any pod presents a
-certificate from it, and the manager must switch before the old CA is dropped. The box
-runs the manager and the gateway in one compose project, so every step is a deploy
-(`loom-deploy apply --release <sha>`, gateway first: P4).
+**The rollover is not zero-downtime in M3** (accepted for M3, spec §7). A pod trusts, for
+its clients, only the CA that signed its own certificate. Once the manager has switched to
+the new CA and re-keyed a pod, that pod refuses the gateway's old-CA client certificate
+until the manager has issued one from the new CA (at its start) and the gateway's next
+check has loaded it. **Expect requests to fail for up to about `LOOM_GATEWAY_CERT_CHECK_S`
+(60 s) after the CA switch**: do the rollover in a quiet period.
+
+M3 has no `pod-ca-next` secret, and `loom-deploy` renders `LOOM_POD_CA_CERT` from `pod-ca`
+alone, so there is no old + new bundle: the steps that put the new CA beside the old one
+in the bundle (make `pod-ca-next`, deploy the gateway with the bundle old + new, drop the
+old CA from the bundle) are M4's, together with the pods' client-trust bundle (spec §7,
+"M4 prerequisite: zero-downtime CA rollover"). The box runs the manager and the gateway in
+one compose project, so the switch is a deploy (`loom-deploy apply --release <sha>`,
+gateway first: P4).
 
 1. **Make the new CA** on the operator's machine (nothing here needs the box, Postgres or
    Redis):
 
    ```bash
-   uv run loom-poolmgr new-ca --out ./pod-ca-next
+   uv run loom-poolmgr new-ca --out ./pod-ca-new
    ```
 
    It writes `ca.crt`, `ca.key` and the manager's client certificate from it
    (`loom-poolmgr.crt`, `loom-poolmgr.key`, valid as long as the CA), keys mode 0600, and
-   refuses to overwrite an existing CA. Check `openssl x509 -in pod-ca-next/ca.crt -noout
-   -dates`. Put the values into Secrets Manager as `pod-ca-next` (`crt`, `key`) and
-   `poolmgr-client-next` (`crt`, `key`) with the `printf %s ... | aws secretsmanager
-   put-secret-value --secret-string file:///dev/stdin` pattern, then delete the local
-   directory (the key never stays on a laptop).
-2. **Deploy the gateway with the bundle old + new**: the file `LOOM_POD_CA_CERT` names
-   holds the old CA certificate followed by the new one. The gateway picks the new bundle
-   up within a minute without a restart. Check: the gateway's log says `reloaded the
-   client certificate and pod CA bundle`; requests still succeed.
-3. **Switch the manager to the new CA**: swap the `pod-ca` and `poolmgr-client` secrets
-   for the new values (the old ones stay in `pod-ca-next`'s history; keep them until step
-   6), deploy (the gateway first, then the manager). On start the manager issues the
-   gateway's client certificate from the new CA (the file was from the old CA, so it is
-   replaced, whatever its age) and begins to issue pod certificates from the new CA.
-   Then re-issue every pod's certificate now instead of waiting for each to near expiry:
+   refuses to overwrite an existing CA. Check `openssl x509 -in pod-ca-new/ca.crt -noout
+   -dates`.
+2. **Switch `pod-ca` and `poolmgr-client` to the new values**: put them into Secrets
+   Manager as new versions of `pod-ca` (`crt`, `key`) and `poolmgr-client` (`crt`, `key`)
+   with the `printf %s ... | aws secretsmanager put-secret-value --secret-string
+   file:///dev/stdin` pattern (the previous version is the way back), then delete the
+   local directory (the key never stays on a laptop).
+3. **Deploy** (the gateway first, then the manager: P4). From here requests can fail until
+   the gateway has loaded its new client certificate (see above). On start the manager
+   issues the gateway's client certificate from the new CA (the file was from the old CA,
+   so it is replaced, whatever its age) and begins to issue pod certificates from the new
+   CA. Then re-issue every pod's certificate now instead of waiting for each to near
+   expiry:
 
    ```bash
    # On the box. The compose project is $LOOM_DEPLOY_PROJECT (default loom); the manager's
@@ -90,16 +100,15 @@ runs the manager and the gateway in one compose project, so every step is a depl
    manager's log for `admin rekey of pod ... failed`. Do not go on until none says it.
 5. **The gateway's client certificate** is from the new CA already (step 3). Check
    `loom_gateway_client_cert_expiry_seconds` (about 7 days) on the gateway's metrics, and
-   that the file in the `gateway-cert` volume was written after the switch.
-6. **Drop the old CA from the bundle and deploy**: `LOOM_POD_CA_CERT` holds only the new
-   CA certificate. The gateway picks it up within a minute; the old CA's certificates are
-   no longer trusted anywhere. Confirm `loom_poolmgr_ca_expiry_seconds` shows the new CA's
-   validity (P3 returns to OK within its next 1-hour period) and delete the old CA's
-   secret versions.
+   that the file in the `gateway-cert` volume was written after the switch; the gateway's
+   log says `reloaded the client certificate and pod CA bundle`, and requests succeed
+   again. Confirm `loom_poolmgr_ca_expiry_seconds` shows the new CA's validity (P3
+   returns to OK within its next 1-hour period). Once everything serves, delete the old
+   CA's secret versions.
 
-If a step fails, going back is the reverse of the one before: the previous secret
-version and a deploy. Until step 6 the gateway trusts both CAs, so either direction
-keeps serving.
+If a step fails, going back is the previous secret versions of `pod-ca` and
+`poolmgr-client`, a deploy and a `rekey`; the same window applies in that direction,
+because the pods again trust only the CA that signed them.
 
 ## With the mock backend (the M3 box)
 
@@ -107,7 +116,10 @@ The whole runbook runs on the box with the mock pods (`provider: local`,
 `LOOM_POOLMGR_MOCK_BACKEND=true`): the local pods' proxies take their certificates the
 same way (written as files instead of over SSH), `rekey` reaches them, and `status` reads
 their certificates over mTLS from inside the manager's container. Run it once with a
-load going (acceptance B20: no failed request while the CA changes).
+load going (acceptance B20): requests may fail only in the window after the CA switch
+described above (none before the switch, none once every pod is re-keyed and the gateway
+has loaded its new client certificate). Record the window's length and the failed
+requests.
 
 ## Notes
 
