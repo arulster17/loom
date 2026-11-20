@@ -331,8 +331,9 @@ mock; no RunPod credential is on the box.
   digest in the compose file. The Caddy build pins Caddy and its rate-limit module in
   `go.mod`/`go.sum`.
 - **Logs.** The `awslogs` driver ships container logs to `/loom/platform` (30 days). No
-  prompt, completion or API key is logged (m3-i scans the containers' logs and, on the
-  host, CloudWatch).
+  prompt, completion or API key is logged (m3-i scans the containers' logs; the
+  CloudWatch group is checked by hand in B26 with the operator's credentials, since no
+  Loom role may read logs).
 
 ## Phase 1 requirements (future, not built)
 

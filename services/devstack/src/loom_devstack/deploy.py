@@ -49,7 +49,6 @@ RDS_CA_PATH = "/etc/loom/rds-ca.pem"
 DATABASE = "loom_platform"
 APP_USER = "loom_app"
 DEFAULT_REGION = "us-east-1"
-LOG_GROUP = "/loom/platform"
 ACME_STAGING = "https://acme-staging-v02.api.letsencrypt.org/directory"
 
 # §6.6 step 4: the update order. `redis` only when its image changed.
@@ -1228,42 +1227,6 @@ def selected(extra: Sequence[str], item: str) -> bool:
     return True
 
 
-def scan_canaries(paths: Paths) -> dict[str, Any]:
-    """m3-i's CloudWatch half: each canary the container planted is looked up in the log
-    group; the file is deleted afterwards, found or not."""
-    path = paths.acceptance / "canaries.json"
-    if not path.exists():
-        return {"ok": False, "detail": "no canaries.json: m3-i did not run in the container"}
-    try:
-        try:
-            canaries = json.loads(path.read_text())
-            if not isinstance(canaries, list) or not all(isinstance(c, str) for c in canaries):
-                raise ValueError("not a list of strings")
-        except (OSError, ValueError) as e:
-            return {"ok": False, "detail": f"canaries.json unreadable: {e}"}
-        found = 0
-        for c in canaries:
-            if not c:
-                continue
-            pattern = '"' + c.replace("\\", "\\\\").replace('"', '\\"') + '"'
-            r = aws(
-                "logs", "filter-log-events", "--log-group-name", LOG_GROUP,
-                "--filter-pattern", pattern, "--limit", "1",
-            )  # fmt: skip
-            try:
-                events = json.loads(r.stdout).get("events") or []
-            except ValueError:
-                return {"ok": False, "detail": "aws logs filter-log-events: not JSON"}
-            if events:
-                found += 1
-        if found:
-            return {"ok": False, "detail": f"{found} canary(ies) found in {LOG_GROUP}"}
-        return {"ok": True, "detail": f"{len(canaries)} canaries not in {LOG_GROUP}"}
-    finally:
-        with contextlib.suppress(OSError):
-            path.unlink()
-
-
 def check_p4_refusal(
     paths: Paths, compose: Compose, current: str, p4_release: str
 ) -> dict[str, Any]:
@@ -1317,12 +1280,6 @@ def cmd_acceptance(p4_release: str, extra: list[str]) -> int:
     paths.acceptance.mkdir(parents=True, exist_ok=True)
     r = compose.run(*cmd, check=False, inherit=True)
     host: dict[str, Any] = {}
-    if selected(extra, "m3-i"):
-        host["m3-i"] = scan_canaries(paths)
-    else:
-        host["m3-i"] = {"ok": True, "detail": "not selected"}
-        with contextlib.suppress(OSError):
-            (paths.acceptance / "canaries.json").unlink()
     if selected(extra, "m3-p"):
         host["m3-p"] = check_p4_refusal(paths, compose, current, p4_release)
     else:
@@ -1359,7 +1316,7 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("rollback", help="apply the previous release")
     cp = sub.add_parser(
         "acceptance",
-        help="run loom-m3-acceptance on the box, then its two host-side halves",
+        help="run loom-m3-acceptance on the box, then m3-p's host-side refusal",
         description="loom-deploy acceptance --p4-release <sha> [-- <loom-m3-acceptance options>]",
     )
     cp.add_argument(

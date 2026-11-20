@@ -353,7 +353,7 @@ ALARM mail arrives (record the minutes); start it: the OK mail arrives.
 
 ## 10. M3 acceptance (B10-B19, B26)
 
-On the box, in the one-shot `acceptance` container and the host halves. Run it in an
+On the box, in the one-shot `acceptance` container and m3-p's host half. Run it in an
 interactive session (section 5's helper) so the output streams and the operator prompts
 of m3-g and m3-s reach you; Run Command cannot do either:
 
@@ -362,16 +362,20 @@ loom_deploy acceptance --p4-release <any release but the current one>
 ```
 
 `loom-deploy acceptance` runs `loom-m3-acceptance` in the compose network through the
-public URLs, then, on the host with the instance role, m3-i's CloudWatch scan of the
-canaries the container planted and m3-p's refusal (`apply --only poolmgr --release <the
+public URLs; for m3-i the container scans the containers' logs only. Then, on the host
+with the instance role, it runs m3-p's refusal (`apply --only poolmgr --release <the
 other release>` exits 2 naming the gateway, and the poolmgr container is not recreated).
-It writes `/var/lib/loom/acceptance/report.json` and `host.json`; exit 0 only when all
-passed. Manual items (m3-g, m3-s) wait for the operator (Stripe test card
+It writes `/var/lib/loom/acceptance/report.json` and `host.json` (`{"m3-p": {"ok",
+"detail"}}`); exit 0 only when the container and m3-p passed. It calls no `aws logs`
+command: m3-i's CloudWatch half needs `logs:FilterLogEvents`, which no Loom role has, so
+B26 runs it by hand. Manual items (m3-g, m3-s) wait for the operator (Stripe test card
 4242 4242 4242 4242, resend, refund). m3-h runs from your machine:
 `uv run loom-m3-acceptance --external --domain <domain> --brand-name <name>`. Results go to
 `docs/phase1-m3-acceptance.md`.
 
-B26 repeats m3-i and m3-p independently with plain `aws` commands (spec §13).
+B26 runs m3-i's CloudWatch half (the only place it is checked) and repeats m3-p
+independently, by hand with your own credentials and plain `aws` commands, not through
+`loom-deploy acceptance` (spec §13).
 
 ## 11. Backups, restore drill, teardown (B21, B22)
 
