@@ -18,7 +18,7 @@ not claimed here.
 
 ## How to reproduce (free)
 
-The CI commands (root `CLAUDE.md`), from the repository root:
+The CI commands (`.github/workflows/ci.yml` job `bench`; root `CLAUDE.md`), from the repository root:
 
 ```bash
 uv sync --frozen
@@ -35,9 +35,11 @@ postgres redis`), so check the `s` count. Gateway tests need Linux (WSL, Docker 
 native Windows mypy needs `--platform linux` to match CI.
 
 Terraform needs no credentials, only the network (providers, the tflint plugin, the
-images). CI job `terraform` runs this in `infra/aws/platform` and in `infra/aws/state`, in
-the pinned `hashicorp/terraform` image (spec §5.5), Terraform 1.16.7 (the version and image
-digest are pinned in `.github/workflows/ci.yml`):
+images). CI job `terraform` runs this in `infra/aws/platform` and `infra/aws/state` with
+Terraform 1.16.7, installed by `hashicorp/setup-terraform` (version pinned in
+`.github/workflows/ci.yml`). Locally, and for agents, run the same version in the official
+`hashicorp/terraform:1.16.7` image pinned by digest (the digest is in the comment above that
+job; spec §5.5):
 
 ```bash
 terraform fmt -check -recursive -diff
