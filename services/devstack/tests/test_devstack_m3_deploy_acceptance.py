@@ -255,7 +255,8 @@ def test_a_failing_container_fails_the_run(box: Box) -> None:
 
 def test_a_failing_container_still_runs_the_host_half(box: Box) -> None:
     """§6.12: m3-p selected (every item), the container fails: the host half runs anyway
-    (a boolean `ok`, its refusal in the deploy log) and the run exits 1."""
+    (its refusal in the deploy log) and the run exits 1. m3-p's `ok` is that half's own
+    result: the refusal works, so `true`, whatever the container did."""
     ready(box)
     box.docker_cfg["run_exit"] = {"acceptance": 1}
     box.save_docker()
@@ -264,6 +265,8 @@ def test_a_failing_container_still_runs_the_host_half(box: Box) -> None:
     proc = acceptance(box)
     assert_exit(proc, 1)
     assert_host_half_ran(box, box.log_records()[n_log:])
+    doc = host_json(box)
+    assert doc["m3-p"]["ok"] is True, f"m3-p's ok is the host half's result, not the run's: {doc}"
     assert not [s for _, s in ups(box.timeline()[n_tl:])], "acceptance updated a service"
 
 
@@ -322,6 +325,8 @@ def test_the_host_half_runs_exactly_when_the_driver_runs_m3_p(box: Box, opts: li
     new = box.log_records()[n_log:]
     if "m3-p" in driver_items:
         assert_host_half_ran(box, new)
+        doc = host_json(box)
+        assert doc["m3-p"]["ok"] is True, f"the refusal works, so m3-p's ok is true: {doc}"
     else:
         assert_host_half_did_not_run(box, new)
 
