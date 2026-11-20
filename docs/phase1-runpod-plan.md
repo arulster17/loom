@@ -21,7 +21,7 @@ RunPod only).
 
 - **Control plane on AWS** (`us-east-1`): one small EC2 instance runs the gateway,
   billing worker, web app, Redis, Prometheus and Grafana under Docker Compose, behind
-  Caddy for TLS; Postgres is a small RDS instance. About $50 a month.
+  Caddy for TLS; Postgres is a small RDS instance. About $63 a month (M3 spec §14; this plan's first estimate was $50).
 - **GPU replicas on RunPod Secure Cloud on-demand pods**, one pod per replica, created
   and replaced by a **pool manager** that runs next to the gateway and reuses the bench
   RunPod provider (API client, pod creation, SSH bootstrap, engine start, watchdog,
@@ -89,6 +89,8 @@ RDS PostgreSQL (db.t4g.micro)               v
 | Secrets (RunPod key, CA key, Stripe keys, Auth.js secret, SSH key) | AWS Secrets Manager, ~6 secrets | $2.40 |
 | Logs, alarms, DNS zone, S3 (leases, backups) | CloudWatch, Route 53, S3 | ~$3 |
 | **Total** | | **about $50** |
+
+M3 spec §14 re-costs this with all its secrets, alarms and the health check: about $63 a month.
 
 Choices and their trade-offs:
 
@@ -337,7 +339,7 @@ real runs (1x L40S in 7a8237d0, 80 GB disk; 2x H100 SXM in 9f0853d7, 260 GB disk
 | Qwen3-8B, 1x L40S | $1.10 | $26.42 | $803.70 |
 | Llama 3.3 70B FP8, 2x H100 SXM | $8.02 | $192.37 | $5,851.40 |
 | **Both models** | **$9.12** | **$218.80** | **$6,655.10** |
-| Control plane on AWS | ~$0.07 | ~$1.65 | ~$50 |
+| Control plane on AWS | ~$0.087 | ~$2.09 | ~$63 (M3 spec §14) |
 
 The 70B pod only needs about 120 GB of disk for the FP8 checkpoint (to $5,837 a month):
 the disk is not where the money is.
@@ -379,7 +381,7 @@ its GPU to someone else in the meantime.
 |---|---|---|
 | M4 serving smoke: 8B pod ~1.5 h, then 70B FP8 pod ~1.5 h | $1.65 + $12.02 = $13.67 | $20 |
 | M5 acceptance window: both models up ~3 h | $27.35 | $35 |
-| After M5 | the chosen mode, plus ~$50 a month for AWS | the serving cap in `config/serving.yaml` |
+| After M5 | the chosen mode, plus ~$63 a month for AWS (M3 spec §14) | the serving cap in `config/serving.yaml` |
 
 ## 12. Reused from the bench RunPod provider
 
@@ -410,7 +412,7 @@ Each milestone ends with a stop for the user's go-ahead before the next paid one
 |---|---|---|---|
 | M1 | Platform locally on the mock: gateway, billing worker, web app, Postgres, Redis, mock backend behind a local mTLS pod proxy, all in `docker compose up` | No | Sign up, free $5, create key, chat in the playground, call with the OpenAI Python SDK, see usage and balance drop [deliverable 1]; mock backend [deliverable 2]; unit tests for pricing, ledger, rate limiter, key hashing, reserve/settle; integration test request to usage to ledger including an aborted stream; cross-tenant tests; load test reporting TTFT and tokens/s [deliverable 4]; SDK unchanged, revoked key fails within 5 s, documented worst-case overshoot under concurrent load, gateway p50 overhead < 10 ms [acceptance] |
 | M2 | Pool manager offline: lifecycle, health checks, lease watchdog, reaper serving rule, spend guard, routing, retry and 503 rules | No | Against `FakeRunpod` and `FakePodExec`: create, bootstrap, ready, drain, replace; lease expiry terminates; reaper ignores bench pods and the other project's; pod killed mid-stream bills exactly the streamed tokens; retry happens only before the first byte; no replica gives 503 with `Retry-After` |
-| M3 | AWS control plane: Terraform (`infra/aws/platform`: VPC, EC2, RDS, Secrets Manager, IAM, alarms), Compose deploy, domain and TLS, Stripe test webhooks; backend still the mock | ~$50/month from apply | M1's flow on the public URL; Stripe test checkout posts a ledger credit idempotently; revoked key within 5 s and p50 overhead < 10 ms re-measured on the deployed box [acceptance] |
+| M3 | AWS control plane: Terraform (`infra/aws/platform`: VPC, EC2, RDS, Secrets Manager, IAM, alarms), Compose deploy, domain and TLS, Stripe test webhooks; backend still the mock | ~$63/month from apply (spec §14) | M1's flow on the public URL; Stripe test checkout posts a ledger credit idempotently; revoked key within 5 s and p50 overhead < 10 ms re-measured on the deployed box [acceptance] |
 | M4 | Serving smoke on RunPod: one 8B pod, then one 70B FP8 pod, through the real gateway | Cap $20 | mTLS path works and refuses a request without our client certificate and from another IP; usage equals the engine's tokens exactly, including a client abort and a pod terminated mid-stream [acceptance]; cold start, gateway-to-pod RTT and GPU metrics recorded; load test through the gateway at the Lab's goodput reports TTFT and tokens/s within the Lab's intervals plus the RTT [deliverable 4]; engine log holds no prompt text; teardown verified |
 | M5 | Go-live in the chosen mode (invite-only preview unless decided otherwise) | Cap $35 for the window, then the mode's cost | Both models live, Stripe test mode [deliverable 3]; dashboards show cost per 1M served next to the Lab prediction; the M4 checks pass again on both models; a written acceptance note like `phase0-acceptance.md` |
 
@@ -432,7 +434,33 @@ of the M2 acceptance found the manager blind to requests on a ready model (billi
 the usage stream before the manager reads it); the gateway now stamps
 `loom:pool:<model>:last_request` in `settle.lua` instead (spec §11 "Fixed after CI").
 The branch review found no M2 blockers; its M3 prerequisites are P1-P4 below. Before M3
-starts, the review follow-ups below are being fixed ([m3-review-fixes-spec.md](m3-review-fixes-spec.md)).
+started, the review follow-ups below due in M3 were fixed ([m3-review-fixes-spec.md](m3-review-fixes-spec.md); merged into `main`, PRs #12-#14).
+
+**M3 status (2026-11-19): Stage A built** on branch `phase1-m3` to
+[phase1-m3-spec.md](phase1-m3-spec.md), approved by the user on 2026-11-18 with the
+decisions of its §15. Stage A (free: code, tests, runbooks, Terraform up to `terraform
+plan`) was built in four areas and merged into `phase1-m3` on 2026-11-19: Terraform
+(`infra/aws/platform`, `infra/aws/state`); deploy tooling (`loom-deploy`,
+`deploy/compose.prod.yml`, Caddy, the acceptance driver `loom-m3-acceptance`); Stripe test
+mode (webhooks, `resolve`, migration 0012); and the pod PKI (CA expiry gauge, gateway
+client-certificate rotation, `rekey`, `new-ca`). It is tested offline: Terraform under
+`mock_provider`, the production stack run locally (A15), no AWS or Stripe calls. Still
+open: A28 (`terraform plan` with the user's read-only credentials, spec §5.5 and §13), the
+final verification at the branch head, and CI on the PR. It is not yet merged into `main`. Stage B (`terraform apply`, DNS, deploy, the live acceptance
+B1-B26, teardown) needs the user's separate yes with its cap ($25 over a 14-day window; a
+$75 a month AWS budget). The spec's estimate of the running cost is about $63 a month (its
+§14). Results so far are in [phase1-m3-acceptance.md](phase1-m3-acceptance.md).
+P1-P4 below are done in M3 (spec §5.3, §6.6, §7): P1 by the alarms
+`loom-platform-p1a-serving-reaper-errors` and `loom-platform-p1b-serving-reaper-not-running`
+and the reaper role's `s3:ListBucket` on the lease bucket (with `s3:GetObject` on `serving/leases/*` only); P2 by the alarms
+`loom-platform-p2a-spend-cap-refusal` and `loom-platform-p2b-model-held-at-cap` (the second
+reads the new gauge `loom_poolmgr_pool_reason`); P3 by the gauge
+`loom_poolmgr_ca_expiry_seconds`, the alarm `loom-platform-p3-pod-ca-near-expiry` at 30 days
+and `docs/runbook-pod-ca.md`; P4 by `loom-deploy`, which deploys the gateway before the
+manager and refuses a manager newer than the gateway (also with `--only poolmgr`), and
+the runbook. The CA rollover in M3 is not zero downtime: requests can fail for minutes
+while the pool manager re-keys the pods (M4-1, below). What Stripe live mode needs on top
+of M3 is listed under "Live-mode prerequisites" below.
 
 ### Follow-ups from the M1 pre-merge review (2026-11-15)
 
@@ -477,10 +505,46 @@ manager run against the real RunPod account.
 
 | # | From (M2 spec) | Gap | M3 work |
 |---|---|---|---|
-| P1 | §6 reaper serving rule, §11 (fail closed on S3) | Any S3 error other than a missing key (a missing bucket, a role without `s3:ListBucket`) makes every reaper run raise and delete nothing, so the second backstop is off with no other sign | CloudWatch alarm on the reaper Lambda's `Errors` (any in an hour) and on missing `Invocations` (no run in 2 schedule periods), to the ops address; give the role `s3:ListBucket` |
-| P2 | §5 spend guard, §11 (refusal signal) | A create refused at the monthly cap writes no `serving_spend_alerts` row: only an error log line and `loom_poolmgr_creates_total{result="spend_cap"}`. The model stays `unavailable` until an admin `reset` | Alert on any increase of that counter (and on the pool `reason` `spend_cap` lasting more than 5 minutes) through whatever M3 uses to scrape port 9102 |
-| P3 | §5 certificates, §11 (CA near expiry) | The manager refuses to start once the pod CA is within `server_cert_renew_before_s` (2 days) of expiry, and only logs an error while running; nothing warns earlier | Expose the CA's expiry (a gauge such as `loom_poolmgr_ca_expiry_seconds`, or a scheduled check of the certificate in Secrets Manager) and alarm 30 days ahead; write `docs/runbook-pod-ca.md`: issue the new CA, have the gateway trust old and new during the rollover, restart the manager, let it re-key every pod, then drop the old CA |
-| P4 | §11 "Fixed after CI" (`last_request` stamps) | The manager's only signal that a ready model is in use, besides requests in flight at a tick, is the stamp the new `settle.lua` writes. A gateway still on the old script writes none, so a manager deployed first would drain models in use | Deploy the gateways before or together with the manager, never the manager alone first; say so in the M3 deploy runbook |
+| P1 | §6 reaper serving rule, §11 (fail closed on S3) | Any S3 error other than a missing key (a missing bucket, a role without `s3:ListBucket`) makes every reaper run raise and delete nothing, so the second backstop is off with no other sign | CloudWatch alarm on the reaper Lambda's `Errors` (any in an hour) and on missing `Invocations` (no run in 2 schedule periods), to the ops address; give the role `s3:ListBucket` **Done in M3 (2026-11-19)**: alarms P1a and P1b (spec §5.3) to `loom-platform-alerts`; the reaper role has `s3:ListBucket` on the lease bucket and `s3:GetObject` on `serving/leases/*` only (spec §5.2); the P1 alarms' actions follow `serving_reaper_enabled` (spec §5.3, checked by §13 A8), so they stay off until M4 turns the reaper on (spec §2, §5.2) |
+| P2 | §5 spend guard, §11 (refusal signal) | A create refused at the monthly cap writes no `serving_spend_alerts` row: only an error log line and `loom_poolmgr_creates_total{result="spend_cap"}`. The model stays `unavailable` until an admin `reset` | Alert on any increase of that counter (and on the pool `reason` `spend_cap` lasting more than 5 minutes) through whatever M3 uses to scrape port 9102 **Done in M3 (2026-11-19)**: the CloudWatch agent scrapes the services; alarms P2a (counter) and P2b (new gauge `loom_poolmgr_pool_reason`, 5 minutes) (spec §5.3, §7) |
+| P3 | §5 certificates, §11 (CA near expiry) | The manager refuses to start once the pod CA is within `server_cert_renew_before_s` (2 days) of expiry, and only logs an error while running; nothing warns earlier | Expose the CA's expiry (a gauge such as `loom_poolmgr_ca_expiry_seconds`, or a scheduled check of the certificate in Secrets Manager) and alarm 30 days ahead; write `docs/runbook-pod-ca.md`: issue the new CA, have the gateway trust old and new during the rollover, restart the manager, let it re-key every pod, then drop the old CA **Done in M3 (2026-11-19)**: gauge `loom_poolmgr_ca_expiry_seconds`, alarm P3 at 30 days, `docs/runbook-pod-ca.md`, plus `rekey`, `new-ca` and the gateway client-certificate rotation (spec §7). The rollover is not zero downtime in M3 (M4-1) |
+| P4 | §11 "Fixed after CI" (`last_request` stamps) | The manager's only signal that a ready model is in use, besides requests in flight at a tick, is the stamp the new `settle.lua` writes. A gateway still on the old script writes none, so a manager deployed first would drain models in use | Deploy the gateways before or together with the manager, never the manager alone first; say so in the M3 deploy runbook **Done in M3 (2026-11-19)**: `loom-deploy` deploys the gateway before the manager and refuses a manager newer than the gateway (spec §6.6); the runbook says so |
+
+### Live-mode prerequisites (from the M3 spec, 2026-11-18)
+
+Phase 1 stays in Stripe test mode. Everything below is required before live mode. Copied
+from [phase1-m3-spec.md](phase1-m3-spec.md) §8.13; the section numbers, traces (T) and
+decisions (D) in it are the M3 spec's.
+
+| # | Prerequisite | Why live mode needs it | Why test mode does not |
+|---|---|---|---|
+| LM1 | An Events-API sync (or an equivalent) of deliveries Stripe gave up on (D15, §8.12) | A missed delivery is a real customer's payment, refund or dispute; while it waits for the operator, a customer is short of credit or keeps credit they were refunded, and the failures H3 cannot see (endpoint disabled in Stripe, certificate) and events past the resend limit lose money | The operator is the only payer; a missed event costs a delay, and the alarms and the runbook resend cover it |
+| LM2 | A Loom-only live account, or foreign-event handling again (cut with D4) | Events of other products on a shared account would arrive as stuck clawbacks and checkouts for an admin to resolve by hand | The sandbox is Loom's alone (D4) |
+| LM3 | Payload sanitising, or a store for the raw body, so every signed event can be stored (removed in round 18) | Live payloads carry customer-entered text (names, addresses, custom fields) that may hold characters `jsonb` refuses; such an event gets 503 on every attempt and is lost when Stripe gives up (§8.10) | Payloads come only from the operator's own test payments |
+| LM4 | Telling transient failures from handler failures: a lock or statement timeout, deadlock or lost connection answered 503 without `last_error` and without S4 (the SQLSTATE classification and failure identity removed in round 18, or a simpler equivalent) | At live volume transient lock waits happen; each would raise a false S4 and S2c, and S4 would stop meaning "a handler bug" | A few deliveries a day; a false S4 is rare and the runbook covers it (§8.10) |
+| LM5 | A re-run policy for a backlog: back-off for failing events and an order that neither starves old events nor delays new ones (the back-off and the step tiers removed in round 18) | A live backlog of stuck events grows; re-running all of them every minute costs a transaction each, and past 500 the oldest are never re-run (T21) | The backlog is the operator's own test events, resolved by hand |
+| LM6 | Disputes and refunds: a won dispute reinstated automatically (D5) with the won-then-refunded case (T18) handled, and a refund that later fails (`charge.refund.updated`) handled | Real money moves both ways; the hand adjustments of §8.10 do not scale and are easy to miss | Test disputes and refunds are the operator's own, adjusted by hand |
+| LM7 | Lift the live-mode refusals deliberately (`sk_live_`/`rk_live_`, `livemode: true` -> 400) in a reviewed change, with a restricted live key (Checkout Sessions write, plus Events read for LM1) and a live endpoint and secret | Billing refuses live keys and live events today (§8.1) | Not used |
+| LM8 | Decide the public API key prefix and header names (`loom_sk_`, `X-Loom-*`, `LOOM_API_KEY` in the playground snippet): a contracts change with a transition for issued keys (§6.11) | Paying customers write these names into their code; changing them later breaks their integrations | M3 keeps the `loom` wire names; testers are few and known |
+| LM9 | Secrets as files only (no secret in a container's environment) | `loom-deploy` puts the secrets that have no `*_FILE` form in env files (§6.12), and Docker keeps a container's environment in its on-disk configuration under `/var/lib/docker`, outside the tmpfs: it outlives a reboot and anyone with root or the docker socket can read it | Accepted for M3 (user, 2026-11-19): test-mode keys only, and only the operator reaches the box |
+| LM10 | Boot-time apply (a systemd unit that runs `loom-deploy apply` for the current release at boot) | A reboot or an EC2 recover (H2) empties the tmpfs `/run/loom`, so the services come back without their secret files and stay down until the operator runs `apply` (§6.3): customers would wait for a human | The operator is the only user; H1 and H3 page, and the runbook step (§6.3) brings the stack back |
+| LM11 | Review the trivy acceptances (open egress, customer-managed keys, flow logs): the 13 findings `.github/terraform/trivyignore.yaml` accepts, each with its reason in `infra/aws/platform/README.md` | Live mode holds customers' data and money: open egress lets a compromised container send data anywhere, AWS-managed keys cannot be scoped or revoked apart from the account, and without VPC flow logs or bucket access logs an incident leaves no network or access record | Accepted for M3 (user, 2026-11-19): test-mode data only, one operator, one account |
+
+Considered and **not** required for live mode: the 6 s deadline with its cancelled task (an
+answer Stripe stopped waiting for and a 503 are the same failed delivery to Stripe, and L1
+makes a late COMMIT safe); the 3-consecutive-stops rule (the error store's own failure is
+the stop signal); the `IMMEDIATE`/`DEFERRED` pair (`loom_post_transaction` checks before
+it inserts); `DuplicatePurchase` (the L3 index with the 500 path suffices, and LM4 would
+treat the race as transient anyway).
+
+### M4 prerequisites from M3 (2026-11-19)
+
+Accepted for M3 by the user and required before real pods serve customers in M4. The
+section numbers are the M3 spec's.
+
+| # | Prerequisite | Why M3 does without it |
+|---|---|---|
+| M4-1 | Zero-downtime pod CA rollover (§7): the pods' client-trust bundle holds the old and the new CA during a rollover (a pod setting the manager passes at bootstrap and re-key); `loom-deploy` renders the gateway's and the pods' bundles from `pod-ca` and `pod-ca-next`; a `pod-ca-next` secret container in §5.2 with the instance role's read (§5.6) | In M3 the gateway trusts only the CA `pod-ca` holds and a pod only the CA that signed it, so from the deploy that switches the CA requests can fail until the pool manager has re-keyed every pod and the gateway has loaded its new certificate (minutes, longer with more pods); the runbook says so (roll over at low traffic; scaling the pool down first shortens the outage) and B20 records it. The M3 box runs mock pods for one operator |
 
 ## 14. Risks
 
@@ -496,7 +560,7 @@ manager run against the real RunPod account.
 
 ## 15. Open questions for the user
 
-**Decided 2026-10-31** ([PLAN.md](PLAN.md#decisions-so-far)): 1 on demand (always-on comes back with outside users); 2 yes, the user creates the account; 7 yes; 8 manual admin approval of every signup at first, open signups later. New: when no GPU of the model's own config can be had, no fallback to other GPU types: the request is declined with a clear "model temporarily unavailable" error. Still open: 3-6, 9, 10.
+**Decided 2026-10-31** ([PLAN.md](PLAN.md#decisions-so-far)): 1 on demand (always-on comes back with outside users); 2 yes, the user creates the account; 7 yes; 8 manual admin approval of every signup at first, open signups later. New: when no GPU of the model's own config can be had, no fallback to other GPU types: the request is declined with a clear "model temporarily unavailable" error. **Decided 2026-11-18** by the M3 spec's D16 ([PLAN.md](PLAN.md#decisions-so-far)): 4 approve the AWS control plane as in spec §14 at Stage B (with the Stage B yes); 5 replaced: the product name and the domain are not decided, each is one setting (spec §6.11), and the user registers the domain before Stage B; 6 SES in the same account, production access requested once the domain is verified. Still open: 3, 9, 10.
 
 Each needs an account, money or a hard-to-reverse choice.
 
@@ -516,12 +580,13 @@ Each needs an account, money or a hard-to-reverse choice.
    an outage. **Recommendation:** prepaid with at least two months of the chosen mode's
    cost, auto-pay on with a monthly limit at the serving cap, and a low-balance alarm at
    two weeks of runway.
-4. **AWS control plane** (money, infra). About $50 a month: `t4g.medium`, RDS
+4. **AWS control plane** (money, infra). About $63 a month (M3 spec §14): `t4g.medium`, RDS
    `db.t4g.micro`, in `us-east-1`, in the existing AWS account under its own VPC, tags
-   and Terraform state. **Recommendation: approve as described** at M3, not before.
-5. **Domain** (account, money). Needed for TLS, OAuth redirects and Stripe. The brand is
-   Loom, domain TBD. **Recommendation:** the user registers it (Route 53 is simplest
-   with this setup) before M3.
+   and Terraform state. **Recommendation: approve as described** at M3 Stage B, with the Stage B yes (M3 spec §15 D16).
+5. **Domain** (account, money). Needed for TLS, OAuth redirects and Stripe. The product
+   name and the domain are not decided; each is one setting (M3 spec §6.11, §15 D16).
+   **Recommendation:** the user registers the domain (Route 53 is simplest with this
+   setup) before M3 Stage B; nothing in Stage A needs it.
 6. **Google OAuth client and email sending** (accounts). Auth.js needs a Google OAuth
    client (the user creates it in Google Cloud) and an email sender for verification
    and low-balance mail. **Recommendation:** Amazon SES in the same AWS account; the user

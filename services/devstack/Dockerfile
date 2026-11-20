@@ -5,6 +5,10 @@
 FROM python:3.12-slim-bookworm
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.2 /uv /usr/local/bin/uv
+# The docker CLI (a static binary) for `loom-m3-acceptance`, which runs on the production
+# box in the `acceptance` compose service with the docker socket: it reads the containers'
+# logs and stops and starts services (M3 spec §6.12). Pinned by digest.
+COPY --from=docker:27.3.1-cli@sha256:328eb399a065780c2cebe9224de003aa14084cf69efae882ac27430f921819b7 /usr/local/bin/docker /usr/local/bin/docker
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -26,7 +30,7 @@ COPY services/billing/pyproject.toml services/billing/
 COPY services/podproxy/pyproject.toml services/podproxy/
 COPY services/devstack/pyproject.toml services/devstack/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --package loom-devstack --no-install-workspace
+    uv sync --frozen --no-dev --package loom-devstack --extra acceptance --no-install-workspace
 
 COPY config config
 COPY bench/src bench/src
@@ -35,7 +39,7 @@ COPY services/platform_common/src services/platform_common/src
 COPY services/podproxy/src services/podproxy/src
 COPY services/devstack/src services/devstack/src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --package loom-devstack
+    uv sync --frozen --no-dev --package loom-devstack --extra acceptance
 
 # The pod proxy's port; the engine stays on 127.0.0.1:8000 inside the container.
 EXPOSE 8443

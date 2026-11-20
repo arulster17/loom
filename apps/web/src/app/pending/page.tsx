@@ -11,19 +11,19 @@ const COPY = {
   pending_approval: {
     title: "Your account is awaiting approval",
     body: [
-      "Thanks for signing up. A person on the Loom team reviews every new account, usually within one working day.",
+      "Thanks for signing up. A person reviews every new account, usually within one working day.",
       "Once approved, your account gets $5 of free credit and you can create API keys and use the playground. We will not email you about it yet, so check back here.",
     ],
   },
   rejected: {
     title: "Your signup was not approved",
-    body: ["If you think this is a mistake, reply to your sign-in email or contact the Loom team."],
+    body: ["If you think this is a mistake, reply to your sign-in email or contact the administrators."],
   },
   suspended: {
     title: "Your account is suspended",
     body: [
       "API keys for this account are refused while it is suspended. Your balance and usage history are kept.",
-      "Contact the Loom team to find out more.",
+      "Contact the administrators to find out more.",
     ],
   },
 } as const;

@@ -1,0 +1,280 @@
+# Loom production stack on the one EC2 box (docs/phase1-m3-spec.md §4, §6.2, §6.12).
+#
+# Run by `loom-deploy` only, never by hand:
+#
+#   docker compose -p "$LOOM_DEPLOY_PROJECT" -f compose.prod.yml \
+#       --env-file /run/loom/compose.env ...
+#
+# There is no top-level `name:`: loom-deploy always passes `-p` (the project is
+# LOOM_DEPLOY_PROJECT, default `loom`). `LOOM_ENV` is never set, so every service runs its
+# production checks. Nothing in this file is a secret and none names the domain or the
+# product name (§6.11): loom-deploy renders them, from the site parameter and Secrets
+# Manager, into files under /run/loom (a tmpfs):
+#
+#   /run/loom/compose.env            the image references and LOOM_DEPLOY_ROOT (this file's
+#                                    ${LOOM_IMAGE_<NAME>} variables)
+#   /run/loom/env/<service>.env      the service's env-only settings (env_file, never mounted)
+#   /run/loom/secrets/<service>/     the files the service reads, mounted read-only into
+#                                    that one service
+#
+# `${LOOM_DEPLOY_ROOT:-}` is empty on the box; a test sets a scratch root so the whole box
+# moves under it (§6.12). Inside a container the paths are the same without the prefix.
+# Images are named by digest only: the Loom ones through compose.env (from the release
+# manifest), the third-party ones literally below.
+
+x-logging: &logging
+  # The awslogs driver uses the instance role through the Docker daemon (the host, not a
+  # container). The group exists (Terraform, 30-day retention); it is never created here.
+  driver: awslogs
+  options:
+    awslogs-region: us-east-1
+    awslogs-group: /loom/platform
+    tag: "{{.Name}}"
+
+x-rds-ca: &rds-ca ./global-bundle.pem:/etc/loom/rds-ca.pem:ro
+
+services:
+  # TLS and the three public host names (Caddyfile, from the bundle). The only service
+  # that publishes ports to the internet.
+  caddy:
+    image: ${LOOM_IMAGE_CADDY:?run loom-deploy apply (compose.env sets the image)}
+    restart: unless-stopped
+    env_file:
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/env/caddy.env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${LOOM_DEPLOY_ROOT:-}/var/lib/loom/caddy:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    logging: *logging
+
+  # Dashboard, playground and admin (apps/web). The product name is read at request time
+  # from LOOM_BRAND_NAME (web.env), so one image serves any name.
+  web:
+    image: ${LOOM_IMAGE_WEB:?run loom-deploy apply (compose.env sets the image)}
+    restart: unless-stopped
+    env_file:
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/env/web.env
+    environment:
+      AUTH_TRUST_HOST: "true"
+      LOOM_GATEWAY_URL: http://gateway:8080
+      LOOM_BILLING_URL: http://billing:8090
+      # Redis is TLS with Loom's own CA (a rediss:// URL names it for the Python
+      # services; node reads it from here).
+      NODE_EXTRA_CA_CERTS: /run/loom/secrets/web/redis-ca.crt
+    volumes:
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/secrets/web:/run/loom/secrets/web:ro
+      - *rds-ca
+    logging: *logging
+
+  # Public API behind Caddy (api.<domain>/v1/*); Prometheus on 127.0.0.1:9100.
+  gateway:
+    image: ${LOOM_IMAGE_GATEWAY:?run loom-deploy apply (compose.env sets the image)}
+    restart: unless-stopped
+    # contracts §6 "Shutdown": LOOM_SHUTDOWN_GRACE_S (10) + settle time + 8 s, with margin.
+    stop_grace_period: 30s
+    env_file:
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/env/gateway.env
+    environment:
+      LOOM_SERVING_YAML: /etc/loom/serving.yaml
+      # One PEM with key and certificate, written by the pool manager and rotated daily
+      # (§7); the pod CA bundle is a secret file (the old and the new CA during a rollover).
+      LOOM_GATEWAY_CLIENT_CERT: /var/lib/loom-gateway-cert/loom-gateway.pem
+      LOOM_GATEWAY_CLIENT_KEY: /var/lib/loom-gateway-cert/loom-gateway.pem
+      LOOM_POD_CA_CERT: /run/loom/secrets/gateway/pod-ca.crt
+    volumes:
+      - ./serving.m3.yaml:/etc/loom/serving.yaml:ro
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/secrets/gateway:/run/loom/secrets/gateway:ro
+      - ${LOOM_DEPLOY_ROOT:-}/var/lib/loom/gateway-cert:/var/lib/loom-gateway-cert:ro
+      # The settle spool outlives the container (contracts §6 "Settle spool"; the image's
+      # LOOM_SETTLE_SPOOL_PATH is /var/lib/loom-gateway/settle-spool.jsonl).
+      - ${LOOM_DEPLOY_ROOT:-}/var/lib/loom/gateway-spool:/var/lib/loom-gateway
+      - *rds-ca
+    ports:
+      - "127.0.0.1:9100:9100"
+    logging: *logging
+
+  # The usage-stream worker, the HTTP API (Stripe webhook and health, the internal
+  # checkout API) and the metrics in one process; Prometheus on 127.0.0.1:9101.
+  billing:
+    image: ${LOOM_IMAGE_BILLING:?run loom-deploy apply (compose.env sets the image)}
+    restart: unless-stopped
+    command: ["all"]
+    env_file:
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/env/billing.env
+    environment:
+      LOOM_STRIPE_MODE: stripe
+      # Stable across container re-creates, so a restart recovers its own pending entries.
+      LOOM_BILLING_CONSUMER: billing-1
+    volumes:
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/secrets/billing:/run/loom/secrets/billing:ro
+      - *rds-ca
+    ports:
+      - "127.0.0.1:9101:9101"
+    healthcheck:
+      test:
+        - CMD
+        - /app/.venv/bin/python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    logging: *logging
+
+  # The pool manager on its mock backend (provider `local`: the pods are the bench mock
+  # engine behind loom-podproxy inside this container), by explicit opt-in (§6.8). P4: it
+  # starts only after the gateway is healthy and is never updated before it.
+  poolmgr:
+    image: ${LOOM_IMAGE_POOLMGR:?run loom-deploy apply (compose.env sets the image)}
+    restart: unless-stopped
+    command: ["loom-poolmgr", "run"]
+    depends_on:
+      gateway:
+        condition: service_healthy
+    env_file:
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/env/poolmgr.env
+    environment:
+      LOOM_POOLMGR_MOCK_BACKEND: "true"
+      LOOM_POOLMGR_SERVING_YAML: /etc/loom/serving.yaml
+      LOOM_POOLMGR_CA_CERT: /run/loom/secrets/poolmgr/ca.crt
+      LOOM_POOLMGR_CA_KEY: /run/loom/secrets/poolmgr/ca.key
+      LOOM_POOLMGR_CLIENT_CERT: /run/loom/secrets/poolmgr/client.crt
+      LOOM_POOLMGR_CLIENT_KEY: /run/loom/secrets/poolmgr/client.key
+      LOOM_POOLMGR_STATE_DIR: /var/lib/loom-poolmgr
+      LOOM_POOLMGR_GATEWAY_CERT_DIR: /var/lib/loom-gateway-cert
+      LOOM_POOLMGR_METRICS_PORT: "9102"
+      # Where the gateway reaches the mock pods' proxies (this service's name), and the
+      # compose network the proxies admit (the network's fixed subnet below).
+      LOOM_POOLMGR_LOCAL_HOST: poolmgr
+      LOOM_POOLMGR_ALLOW_CIDRS: 10.214.0.0/24
+    volumes:
+      - ./serving.m3.yaml:/etc/loom/serving.yaml:ro
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/secrets/poolmgr:/run/loom/secrets/poolmgr:ro
+      # The same directory at /certs: loom-m3-acceptance's overhead probe (m3-d) runs in
+      # this container and reads /certs/ca.crt, gateway.crt and gateway.key.
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/secrets/poolmgr:/certs:ro
+      - ${LOOM_DEPLOY_ROOT:-}/var/lib/loom/poolmgr:/var/lib/loom-poolmgr
+      - ${LOOM_DEPLOY_ROOT:-}/var/lib/loom/gateway-cert:/var/lib/loom-gateway-cert
+      - *rds-ca
+    ports:
+      - "127.0.0.1:9102:9102"
+    logging: *logging
+
+  # TLS only, a password, AOF (§6.5). Its settings are redis.conf; the password and the
+  # certificates are the secret files loom-deploy renders.
+  redis:
+    image: redis:7.4-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/secrets/redis:/run/loom/secrets/redis:ro
+      - ${LOOM_DEPLOY_ROOT:-}/var/lib/loom/redis:/data
+    healthcheck:
+      # The password is read from the rendered file, not put on a command line.
+      test:
+        - CMD-SHELL
+        - >-
+          REDISCLI_AUTH="$$(sed -n 's/^requirepass //p' /run/loom/secrets/redis/requirepass.conf)"
+          redis-cli --tls --cacert /run/loom/secrets/redis/ca.crt -h redis ping | grep -q PONG
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+  # Scrapes the three services (15 days of series on the data volume); 127.0.0.1 only.
+  prometheus:
+    image: prom/prometheus:v2.55.1@sha256:2659f4c2ebb718e7695cb9b25ffa7d6be64db013daba13e05c875451cf51b0d3
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.listen-address=:9090
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ${LOOM_DEPLOY_ROOT:-}/var/lib/loom/prometheus:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    logging: *logging
+
+  # Dashboards (provisioned); reached with SSM port forwarding on 127.0.0.1:3001 (D13).
+  # Stateless: the dashboards and the data source are files, the admin password a secret.
+  grafana:
+    image: grafana/grafana:11.3.1@sha256:fa801ab6e1ae035135309580891e09f7eb94d1abdbd2106bdc288030b028158c
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/loom/secrets/grafana/admin_password
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/secrets/grafana:/run/loom/secrets/grafana:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana-dashboards:ro
+    ports:
+      - "127.0.0.1:3001:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+    logging: *logging
+
+  # One-shot, run by loom-deploy before any service is updated (§6.4): creates
+  # loom_platform on the first deploy, applies the migrations as the owner (the RDS master
+  # user, whose URL is in migrate.env) and creates or updates the runtime login.
+  migrate:
+    image: ${LOOM_IMAGE_DEVSTACK:?run loom-deploy apply (compose.env sets the image)}
+    profiles: ["migrate"]
+    restart: "no"
+    command: ["loom-migrate", "--create-database"]
+    env_file:
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/env/migrate.env
+    volumes:
+      - *rds-ca
+    logging: *logging
+
+  # One-shot, run by `loom-deploy acceptance` (§6.12): loom-m3-acceptance in the compose
+  # network, through the public URLs. The only service with the docker socket (it reads
+  # the containers' logs and stops and starts billing for m3-s); it has no AWS credentials.
+  acceptance:
+    image: ${LOOM_IMAGE_DEVSTACK:?run loom-deploy apply (compose.env sets the image)}
+    profiles: ["acceptance"]
+    restart: "no"
+    env_file:
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/env/acceptance.env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${LOOM_DEPLOY_ROOT:-}/var/lib/loom/deploy.log:/var/lib/loom/deploy.log:ro
+      - ${LOOM_DEPLOY_ROOT:-}/var/lib/loom/acceptance:/var/lib/loom/acceptance
+      - ${LOOM_DEPLOY_ROOT:-}/run/loom/secrets/acceptance:/run/loom/secrets/acceptance:ro
+      - *rds-ca
+    logging: *logging
+
+# One network, on a fixed subnet outside Docker's own address pools and the VPC's
+# (10.42.0.0/16): the mock pods' proxies (inside poolmgr) admit the gateway by its address
+# in it (LOOM_POOLMGR_ALLOW_CIDRS above). Not the dev stack's 10.213.0.0/24, so both can
+# run on one machine.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.214.0.0/24

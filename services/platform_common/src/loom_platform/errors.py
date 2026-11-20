@@ -54,7 +54,7 @@ def org_not_active(status: str) -> ApiError:
             403,
             "permission_error",
             "org_pending_approval",
-            "This organization is awaiting approval by a Loom admin.",
+            "This organization is awaiting approval by an administrator.",
         )
     return ApiError(403, "permission_error", "org_suspended", f"This organization is {status}.")
 

@@ -43,6 +43,9 @@ inference-platform-build-prompt.md
 .claude/worktrees/
 .playwright-mcp/
 
+# Hidden (holdout) tests: only the test writer and the verifier see them
+.holdout/
+
 # Local-only: dev-stack certs/keys and issue drafts (.dev/), scratch work
 .dev/
 /scratchpad/

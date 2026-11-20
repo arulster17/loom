@@ -1,0 +1,7 @@
+# Plugins and the local state file. The state holds no secrets (docs/phase1-m3-spec.md
+# §5.4) and the user keeps it; it stays out of git.
+.terraform/
+terraform.tfstate
+terraform.tfstate.*
+*.tfvars
+!*.tfvars.example

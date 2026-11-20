@@ -11,6 +11,10 @@ internal checkout API (§7), the `/v1/completions` default `max_tokens` (§8), t
 `GET /v1/models` shape (§12), the 502 `upstream_lost` timeout and 503
 `balance_unavailable` (§11).
 
+M3 ([phase1-m3-spec.md](phase1-m3-spec.md) §11) adds the production deploy on AWS, the
+Stripe webhook's response contract, missed deliveries and stuck events, and the pod PKI
+rotation, marked *(M3)*; the M3 spec's sections are cited as "M3 §n".
+
 Background: [PLAN.md](PLAN.md) (decisions, the accepted ledger draft) and
 [phase1-runpod-plan.md](phase1-runpod-plan.md) (§4 pod security, §7 routing, §8 failure
 handling, §13 milestones).
@@ -27,6 +31,9 @@ handling, §13 milestones).
 | `services/devstack` | Local stack: mock pod launcher, poolsim, dev certificates, load test, M1 and M2 acceptance drivers | `loom-devstack` / `loom_devstack` |
 | `services/poolmgr` | The pool manager (M2): creates, bootstraps, health-checks, drains and terminates serving pods, writes the pool hashes (§10); its admin CLI and Prometheus metrics | `loom-poolmgr` / `loom_poolmgr` |
 | `bench/` | Benchmark Lab; its mock backend is M1's engine | `loom-bench` |
+| `infra/aws/platform` | *(M3)* Terraform for the control plane: VPC, EC2 instance, RDS, Secrets Manager containers (no values), IAM, ECR, S3 lease bucket, DNS and SES, the site parameter `/loom/platform/site`, the serving reaper Lambda (disabled), CloudWatch alarms and their SNS topic, the AWS budget; `terraform test` with mock providers in `tests/` (no credentials) | Terraform |
+| `infra/aws/state` | *(M3)* The remote-state bucket of `infra/aws/platform` (bootstrap; its own local state, kept by the user) | Terraform |
+| `deploy/` | *(M3)* The production deploy: `compose.prod.yml`, the Caddyfile, the CloudWatch agent config, Prometheus and Grafana config, the box's serving file `serving.m3.yaml`. The deploy tool `loom-deploy` (secrets to files, migrations, ordered rollout) is in `services/devstack` | files |
 
 All Python packages are uv workspace members with their dependencies already locked;
 add a dependency only to your own package's `pyproject.toml`. Tests live in
@@ -51,7 +58,7 @@ compose servers are down, and fail when the variable is set. Factories:
 | redis | 6379 | AOF `everysec`, `maxmemory-policy noeviction` (already in `docker-compose.yml`) |
 | migrate | none | One-shot: `loom-migrate --create-database` as the owner `loom`, which also creates or updates the runtime login `loom_app` (§3 "Roles"); others start after it succeeds |
 | gateway | 8080 | Public API at `http://localhost:8080/v1`; Prometheus `/metrics` on 9100 |
-| billing | 8090 | `POST /stripe/webhook`, `POST /internal/checkout-sessions` (§7), `GET /health`; Prometheus `/metrics` on 9101 |
+| billing | 8090 | `POST /stripe/webhook`, `GET /stripe/health` *(M3)*, `POST /internal/checkout-sessions` (§7), `GET /health`; Prometheus `/metrics` on 9101 |
 | web | 3000 | Next.js |
 | stripe-stub | 12111 | Local Stripe stand-in (`loom-billing stripe-stub`) |
 | mailpit | 8025 (UI), 1025 (SMTP) | Catches the web app's magic-link email |
@@ -65,13 +72,37 @@ The compose network has a fixed subnet (`10.213.0.0/24`): the local pods' proxie
 sources inside it only (`LOOM_POOLMGR_ALLOW_CIDRS`), so a second stack next to the first
 needs a compose override with another subnet and that variable changed with it.
 
+**Production** *(M3)*: `deploy/compose.prod.yml` on one EC2 instance (M3 §4, §6.2) runs
+`caddy`, `web`, `gateway`, `billing` (`all`), `poolmgr` (provider `local`, the mock
+backend, §10), `redis` (TLS and a password), `prometheus`, `grafana`, and `migrate`
+(profile `migrate`, run by `loom-deploy` only); no `mailpit`, `stripe-stub`, `devcerts`,
+poolsim or mock pods. Postgres is RDS. `LOOM_ENV` is unset (prod), so every service runs
+its production checks.
+
+| Host name (`LOOM_DOMAIN`) | Routed by Caddy to | Only |
+|---|---|---|
+| `<domain>` | `web:3000` | everything |
+| `api.<domain>` | `gateway:8080` | `/v1/*`; anything else 404 |
+| `hooks.<domain>` | `billing:8090` | `POST /stripe/webhook` and `GET /stripe/health` (the endpoint health check, §7 "Stripe webhook"); anything else 404 |
+
+Only Caddy publishes ports: 80 (redirects to HTTPS and answers ACME) and 443. Billing's
+`/internal/*` and `/health`, the gateway's `/health`, and every `/metrics` are never routed.
+The metrics ports 9100, 9101 and 9102, Prometheus and Grafana (`3001`) are bound to
+`127.0.0.1` only; Grafana is reached with SSM port forwarding.
+
+**Production deploy checks** *(M3)*: `loom-deploy` refuses to render a `LOOM_DATABASE_URL`
+or `DATABASE_URL` without `sslmode=verify-full` and the RDS CA file, and refuses an apply
+whose site parameter (`/loom/platform/site`) lacks the domain or the product name (M3 §6.4,
+§6.11). These checks are the deploy tool's: the services' own start-up checks (the
+`LOOM_ENV` row below) are unchanged.
+
 Settings are `LOOM_*` environment variables, read by `loom_platform.settings.PlatformSettings`
 (services subclass it). Defaults are the compose values.
 
 | Variable | Default | Used by |
 |---|---|---|
 | `LOOM_ENV` | unset = `prod`; compose: `dev` | all services: `dev` or `prod` (anything else refuses to start). Outside dev a service refuses to start on a missing secret or a compose dev default: gateway and billing (a `LOOM_REDIS_URL` without a password or not `rediss://`; Redis `maxmemory-policy` other than `noeviction` when `CONFIG GET` is permitted, a warning when it is not), gateway (DB password, `LOOM_SETTLE_SPOOL_PATH`, `LOOM_POD_CA_CERT`, client certificate, `LOOM_CORS_ORIGINS`; and it never uses an `http://` replica), billing (DB password, `LOOM_STRIPE_MODE=stub`, internal token missing or the compose value), web (`AUTH_SECRET` missing or the compose value, `AUTH_URL` missing, internal token missing or the compose value). "DB password" means none, or either compose one (the owner's `loom` or the runtime login's `loom-app-dev`). Every Python service (gateway, billing, pool manager) also checks at start, over its own connection with `LOOM_DATABASE_URL`, that its role (the login, `session_user`, and `current_user`) is not a superuser and owns no table in schema `public` (directly or through a role it is a member of), and refuses otherwise (§3 "Roles"). All problems are listed together in one exit-2 message. Postgres unreachable at start is not a refusal: the service logs one warning line naming Postgres and starts (the gateway answers 503 `service_unavailable` to requests that need Postgres), and runs the role check on its first successful connection. Until that check has passed it does no Postgres work (no pool connection, no `LISTEN`); if it fails, the service prints the problem, stops through its normal shutdown (the gateway drains and settles its open streams as at SIGTERM) and exits 2. Only an outage counts as unreachable (§3 "Roles"): failed authentication (any method), a missing role or database, no `pg_hba.conf` entry or a `pg_hba.conf` rejection exits 2, at start and in the deferred check; every other connection error is retried, with a warning naming it at most once a minute |
-| `LOOM_DATABASE_URL` | `postgresql://loom:loom@localhost:5432/loom_platform`; compose: `postgresql://loom_app:loom-app-dev@postgres:5432/loom_platform` for every service, the owner `loom` for `migrate` | all (web: as `DATABASE_URL`). Services connect as the runtime login, `loom-migrate` as the owner (§3 "Roles"). Outside dev a Python service starts while this database is unreachable and checks its role once it connects (`LOOM_ENV` above) |
+| `LOOM_DATABASE_URL` | `postgresql://loom:loom@localhost:5432/loom_platform`; compose: `postgresql://loom_app:loom-app-dev@postgres:5432/loom_platform` for every service, the owner `loom` for `migrate` | all (web: as `DATABASE_URL`). Services connect as the runtime login, `loom-migrate` as the owner (§3 "Roles"). Outside dev a Python service starts while this database is unreachable and checks its role once it connects (`LOOM_ENV` above). *(M3)* Billing merges `keepalives=1 keepalives_idle=10 keepalives_interval=5 keepalives_count=2 tcp_user_timeout=10000` (milliseconds) into its own conninfo with `psycopg.conninfo.make_conninfo` (URL and keyword forms alike), so a connection blackholed by an RDS failover fails in seconds; `loom_platform.db` is unchanged |
 | `LOOM_APP_DATABASE_PASSWORD` | unset; compose (`migrate` only): `loom-app-dev` | `loom-migrate`: when set, creates or updates the runtime login with this password (`LOGIN`, member of the group role). Unset: the login is left as it is. `loom-migrate` accepts the compose value; a service whose `LOOM_DATABASE_URL` uses it refuses to start outside dev |
 | `LOOM_APP_DATABASE_USER` / `LOOM_APP_DATABASE_GROUP` | `loom_app` / `loom_runtime` | `loom-migrate`: the runtime login's name and its `NOLOGIN` group role's (roles are server-wide: two stacks sharing one Postgres server can use different names). It refuses, before changing anything, a name that is the role it connects as (`current_user` or `session_user`), and a group name that exists as a `LOGIN` role |
 | `LOOM_REDIS_URL` | `redis://localhost:6379/0` | gateway, billing, pool manager, poolsim, web (model status fallback; sign-in rate limit) |
@@ -89,17 +120,26 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_DEFAULT_ORG_RPM` / `_TPM` / `_CONCURRENCY` | 120 / 400000 / 16 | gateway |
 | `LOOM_SIGNUP_PROMO_MICROS` | 5000000 | web (admin approval) |
 | `LOOM_CLOUD` / `LOOM_REGION` | `local` / empty | gateway (usage events) |
-| `LOOM_GATEWAY_CLIENT_CERT` / `_KEY`, `LOOM_POD_CA_CERT` | none | gateway (mTLS to pods; required outside `LOOM_ENV=dev`) |
+| `LOOM_GATEWAY_CLIENT_CERT` / `_KEY`, `LOOM_POD_CA_CERT` | none | gateway (mTLS to pods; required outside `LOOM_ENV=dev`). *(M3)* Reloaded: the gateway checks the files every 60 s and uses a changed set for new upstream connections (§9). `LOOM_POD_CA_CERT` may hold several CA certificates (old and new during a rollover; any of them is trusted). The client certificate and key may be the pool manager's combined file (key and certificate in one PEM, in `LOOM_POOLMGR_GATEWAY_CERT_DIR`) |
+| `LOOM_GATEWAY_CERT_CHECK_S` | 60 | *(M3)* gateway: how often (seconds, a positive number) it checks its client certificate file and `LOOM_POD_CA_CERT` for a change and reloads its TLS context for new upstream connections (§9); the checks run before an upstream request and at a metrics scrape, at most this often. Tests use 1 |
 | `LOOM_CORS_ORIGINS` | `http://localhost:3000` | gateway |
 | `LOOM_REDIS_SOCKET_TIMEOUT_S` / `LOOM_REDIS_CONNECT_TIMEOUT_S` | 2 / 1 | gateway, billing: a frozen or unreachable Redis fails a call within this (gateway: 503 `service_unavailable`, `/ready` 503); billing raises the read timeout to its blocking read + 3 s |
 | `LOOM_SETTLE_SPOOL_PATH` | unset: a per-process temp file; image: `/var/lib/loom-gateway/settle-spool.jsonl` (a volume) | gateway: settles Redis refused, replayed until accepted (§6 "Settle spool"); required outside `LOOM_ENV=dev` |
 | `LOOM_SHUTDOWN_GRACE_S` | 10 | gateway: on SIGTERM, how long in-flight requests may finish before open streams are cut (§6 "Shutdown") |
 | `AUTH_SECRET`, `AUTH_URL`, `AUTH_GOOGLE_ID` / `_SECRET`, `EMAIL_SERVER` | none | web (Auth.js); `AUTH_URL` is required outside `LOOM_ENV=dev` |
+| `EMAIL_FROM` | *(M3)* no default name (was `Loom <no-reply@loom.local>`); compose: `Loom <login@loom.localhost>` | web: the magic-link sender. Production: `<name> <no-reply@<domain>>`, rendered by `loom-deploy` from the site parameter |
+| `LOOM_BRAND_NAME` | unset | *(M3)* web and billing, optional: the product name; unset = no name shown (the web app uses each page's own title and a neutral header; billing's Checkout product is `API credits`). Web reads it on the server at request time (not a `NEXT_PUBLIC_` variable, not at build time); billing names the Checkout line item `<name> credits` |
+| `LOOM_DOMAIN` | none | *(M3)* Caddy, production compose only: the domain; the Caddyfile serves `{$LOOM_DOMAIN}`, `api.{$LOOM_DOMAIN}` and `hooks.{$LOOM_DOMAIN}` |
+| `LOOM_CADDY_TLS` | none | *(M3)* Caddy, production compose only: the argument of each site's `tls` directive: the ops email on the box (the Let's Encrypt contact), `internal` in the local production stack (A15). Rendered by `loom-deploy` into `env/caddy.env` with `LOOM_DOMAIN`. Optional `LOOM_ACME_CA` (the ACME directory; the first issuance sets Let's Encrypt's staging one, `loom-deploy apply` with `LOOM_DEPLOY_ACME_STAGING=1`) |
 | `LOOM_GOOGLE_EMAIL_LINKING` | `true` | web: a Google sign-in may link to an existing user with the same email; Google sign-in always requires `email_verified` |
 | `LOOM_ADMIN_EMAILS` | empty | web: dev bootstrap of the first admin (§4); only with `LOOM_ENV=dev`, ignored (with a startup warning) anywhere else |
 | `LOOM_SIGNIN_EMAIL_LIMIT` / `LOOM_SIGNIN_IP_LIMIT` / `LOOM_SIGNIN_WINDOW_S` | 5 / 20 / 900 | web: magic-link emails per address and per client IP (right-most `X-Forwarded-For`) per fixed window, counted once per email Auth.js sends (the sign-in form and `POST /api/auth/signin/nodemailer` alike; over the limit nothing is sent); Redis keys `loom:web:signin:{email,ip}:<hmac>:<window>`; fails open when Redis is down |
 | `LOOM_INTERNAL_TOKEN` / `LOOM_BILLING_INTERNAL_TOKEN` | compose: one shared dev value | web / billing: bearer token of billing's internal API |
 | `LOOM_STRIPE_MODE` | `stripe`; compose: `stub` | billing: real Stripe (test keys required) or the local stub (explicit opt-in, never a fallback) |
+| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | none | billing in `stripe` mode: the test key and the webhook endpoint's `whsec_` secret, both required; live keys (`sk_live_`, `rk_live_`) are refused. *(M3)* The key is a **restricted** `rk_test_` key with Checkout Sessions write only (billing reads nothing else from Stripe's API) |
+| `LOOM_STRIPE_WEBHOOK_DB_TIMEOUT_S` | 5 | *(M3)* billing: the pool wait of each webhook transaction (§7 "Stripe webhook") |
+| `LOOM_STRIPE_LOCK_TIMEOUT_MS` / `LOOM_STRIPE_STATEMENT_TIMEOUT_MS` | 3000 / 5000 | *(M3)* billing: `SET LOCAL lock_timeout` / `statement_timeout` inside each Stripe transaction (a delivery, its second transaction, `retry_unapplied`'s attempts, `resolve`) |
+| `LOOM_STRIPE_STALE_AFTER_S` | 900 | *(M3)* billing: an event unapplied this long since `received_at` is marked stale, once (§7 "Stripe webhook") |
 | `LOOM_STRIPE_STUB_WEBHOOK_SECRET` / `_FILE` | none; compose: `.dev/certs/stripe-stub-webhook.secret` from `loom-devcerts --secret` | billing and stripe-stub in stub mode |
 | `LOOM_GATEWAY_URL`, `LOOM_PUBLIC_API_URL`, `LOOM_BILLING_URL` | `http://localhost:8080`, `http://localhost:8080/v1`, `http://localhost:8090` | web: the gateway and billing as the server reaches them; the API base shown to users |
 | `LOOM_PLAYGROUND_KEY_SECRET` / `LOOM_PLAYGROUND_KEY_TTL_S` | derived from `AUTH_SECRET` / 3600 | web: playground keys (§5) *(wave 2)* |
@@ -110,11 +150,13 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_POOLMGR_SSH_KEY` | none (dev: a key generated in the state directory) | pool manager: the private key serving pods authorize (`<key>.pub` next to it). Required outside dev |
 | `LOOM_POOLMGR_LEASE_BUCKET` | none (dev: lease records kept in memory) | pool manager: S3 bucket of the pod lease records `serving/leases/<pod id>`. Required outside dev |
 | `LOOM_POOLMGR_PROXY_BUNDLE` | none (dev: a placeholder; the local backend installs nothing) | pool manager: the `loom-podproxy` bundle tarball (`loom-podproxy-bundle`), its sha256 checked against `config/serving-artifacts.lock`. Required outside dev |
+| `LOOM_POOLMGR_MOCK_BACKEND` | unset (false) | *(M3)* pool manager, outside dev: `true` permits `provider: local` (refused with `runpod`; M4 removes the flag) and `LOOM_POOLMGR_ALLOW_CIDRS` (private RFC 1918 networks only), and does not require the SSH key, lease bucket or proxy bundle (it still requires the CA and the manager's client certificate). Logs a warning at start and exports `loom_poolmgr_mock_backend 1` (§10) |
+| `LOOM_POOLMGR_GATEWAY_CERT_DIR` | none | *(M3)* pool manager: the directory (a volume shared read-only with the gateway) where it writes the gateway's client certificate, one PEM file with key and certificate, named `loom-gateway.pem` (§9) |
 | `LOOM_POOLMGR_METRICS_PORT` | 9102 (0 = none) | pool manager: Prometheus, served once it holds the lock and has adopted its pods (the image's healthcheck) |
 | `LOOM_POOLMGR_STATE_DIR` | dev: a temporary directory; compose: `/var/lib/loom-poolmgr` | pool manager: per-pod known_hosts files (and in dev a generated SSH key and CA; the local backend's pod directories). Required outside dev |
 | `LOOM_POOLMGR_LOCAL_COLD_START_S` | 20 | pool manager, `provider: local`: seconds before a local pod reports `RUNNING` (a simulated image pull) |
 | `LOOM_POOLMGR_LOCAL_HOST` | `127.0.0.1`; compose: `poolmgr` | pool manager, `provider: local`: the host the local pods' proxies are advertised at in the pool hash (anything but loopback makes them listen on all interfaces) |
-| `LOOM_POOLMGR_ALLOW_CIDRS` | empty; compose: the compose subnet | pool manager, dev and `provider: local` only (refused otherwise): comma-separated CIDRs added to the local pods' proxy allowlist, which is otherwise `gateway_egress_cidrs` or loopback. Compose keeps it inside the network's fixed `ipam` subnet, never wider |
+| `LOOM_POOLMGR_ALLOW_CIDRS` | empty; compose: the compose subnet | pool manager, `provider: local` only, in dev or *(M3)* with `LOOM_POOLMGR_MOCK_BACKEND=true` outside dev (then private RFC 1918 ranges only); refused otherwise: comma-separated CIDRs added to the local pods' proxy allowlist, which is otherwise `gateway_egress_cidrs` or loopback. Compose keeps it inside the network's fixed `ipam` subnet, never wider |
 | `LOOM_POOLMGR_IDLE_STOP_S` | unset (each model's `idle_stop_s` from `serving.yaml`); compose: 600 | pool manager, dev only (refused otherwise): replaces every model's `idle_stop_s`; the committed file's 1800 s is too long for an acceptance run |
 | `RUNPOD_API_KEY` | none | pool manager, `provider: runpod`: the **serving** account's key (not the bench's) |
 | `LOOM_POOLSIM_REPLICAS` | compose: `<model>=<pod>@https://<pod>:8443,...` | poolsim (§10) |
@@ -143,6 +185,9 @@ Every table of the accepted PLAN.md draft exists as drafted, with these addition
 | `admin_audit_log.actor_user_id` has no foreign key | Deleting a user must not need an UPDATE of the log. |
 | `usage_posted_org`, `usage_posted_key` (migration 0008) | Per org / key, the cost of events linked to a ledger transaction, kept by trigger; the usage-total functions read them instead of summing all history |
 | `stripe_payments` (migration 0007): PaymentIntent -> session, org, purchase, amount, cumulative refunded and clawed-back micros | Refund and dispute events name the PaymentIntent; this maps them to the org and keeps clawbacks cumulative-safe and capped at the purchase. |
+| *(M3)* Migration 0012: unique partial index `ledger_transactions_purchase_external_ref` on `ledger_transactions (external_ref) WHERE kind = 'purchase' AND external_ref IS NOT NULL` | At most one purchase per Checkout Session, in the database (§7 "Stripe webhook", L3). A violation reaches callers as `IdempotencyConflict` like any unique violation; `post_transaction` is unchanged. The migration fails if a database already holds two purchases with the same `external_ref` |
+| *(M3)* Migration 0012: `stripe_events` columns `result` (the last outcome, e.g. `credited`, `unapplied`, `resolved_by_admin`), `last_error`, `last_error_at`, `error_count` (default 0), `stale_reported_at`; a partial index for the reopen sweep on `(payload -> 'data' -> 'object' ->> 'payment_intent') WHERE result = 'resolved_by_admin'` | Each event's last outcome and error, and when it was reported stale (§7 "Stripe webhook"). Grants as for the other `stripe_events` columns; no new table |
+| *(M3)* `admin_audit_log` action `stripe_event.resolve` | Written by `loom-billing stripe-event resolve` in the resolve's transaction, with the reason in `details`; a resolve posts nothing, ever (§7 "Stripe webhook") |
 | `serving_pods`, `serving_spend_alerts` (migration 0010) | The pool manager's pod records (one row per pod, written before RunPod is called; state, placement, `cost_per_hr_micros`, ports, lease, stages; never a token, key or certificate) and the monthly spend alerts sent, once per (month, fraction). See docs/phase1-m2-spec.md §5. |
 
 Invariants enforced in the database:
@@ -169,10 +214,10 @@ the first transaction with `created = false`; other content raises `unique_viola
 
 | Kind | org_credit | Counter-account | Idempotency key |
 |---|---|---|---|
-| purchase | +X | stripe_clearing -X | `stripe:<event id>` |
+| purchase | +X | stripe_clearing -X | `stripe:<event id>`; at most one per Checkout Session (unique index, migration 0012) |
 | usage | -X | revenue +X | `usage:<org id>:<YYYY-MM-DDTHH:MMZ>` (`ledger.usage_batch_key`) |
 | promo | +X | promo_expense -X | `promo:signup:<org id>` |
-| refund | -X | stripe_clearing +X | `stripe:<event id>` (`charge.refunded`: the new part of the cumulative `amount_refunded`; `charge.dispute.created`: the disputed amount, once per dispute; at most the purchase in total; the balance may go negative). One that arrives before its purchase is stored unapplied and applied in the purchase's transaction; the billing worker also re-runs unapplied events every minute (migration 0009 indexes them) |
+| refund | -X | stripe_clearing +X | `stripe:<event id>` (`charge.refunded`: the new part of the cumulative `amount_refunded`; `charge.dispute.created`: the disputed amount, once per dispute; at most the purchase in total; the balance may go negative). One that arrives before its purchase is stored unapplied and applied in the purchase's transaction, with these exceptions *(M3)*: each is applied in its own savepoint, and one that fails there is rolled back alone and left to `retry_unapplied` while the purchase commits; a lock wait on the pending rows past `lock_timeout` fails the delivery, which is stored and retried; one an admin resolved before its payment existed is not seen by the purchase and is reopened by `retry_unapplied`'s sweep once the purchase is credited (§7 "Stripe webhook"). The billing worker also re-runs unapplied events every minute (migration 0009 indexes them) |
 | adjustment | +/-X | promo_expense (grant) or revenue (correction) | `admin:adjust:<form token>` (the admin page's adjust-credits form; §4). |
 
 Platform accounts have fixed ids: revenue `...0001`, stripe_clearing `...0002`,
@@ -207,7 +252,8 @@ cross-tenant tests M1 requires.
 Two Postgres roles (migration 0011, plan R8):
 
 - the **owner** runs `loom-migrate` and owns every object (compose: `loom`, the server's
-  superuser). Only migrations run as the owner;
+  superuser; *(M3)* on RDS: the master user `loom_owner`, a member of `rds_superuser`, not a
+  superuser, used only by `migrate`). Only migrations run as the owner;
 - the **runtime** login `loom_app` (`LOOM_APP_DATABASE_USER`), which every service uses
   (gateway, billing, pool manager, web). It is not a superuser, owns nothing, cannot
   create objects in the schema, and holds its privileges only through membership of the
@@ -524,9 +570,9 @@ reconcile reports it as `missing_in_postgres` drift and the balance shows lower,
 higher.
 
 The file is held with an exclusive `flock` (one gateway process per file) and replayed
-at the next start when a process stops with entries left. **M3**: put it on a volume
-that outlives the task, or accept that a task stopped during a Redis outage longer than
-its shutdown loses the spooled settles (logged at error with the count).
+at the next start when a process stops with entries left. **M3**: the spool is on the
+instance's data volume (`/var/lib/loom/gateway-spool`, `deploy/compose.prod.yml`), so it
+outlives the container and an instance replacement.
 
 A replayed settle stamps `loom:pool:<model>:last_request` with the replay time, not the
 request's: after an outage every ready model in the backlog counts as freshly used and
@@ -593,14 +639,11 @@ On SIGTERM the gateway (`python -m loom_gateway`, `GatewayServer`):
 5. waits up to 5 s for the settles it started, then closes Redis and Postgres.
 
 The process exits within about `LOOM_SHUTDOWN_GRACE_S` + 8 s (exit status: uvicorn
-re-raises the SIGTERM after a clean shutdown, so 143). **M3 (ECS behind an ALB)**: the
-task's `stopTimeout` must exceed that, so set **30 s** (the ECS default; 120 s max) with
-the default grace; a SIGKILL before step 5 is the crash case above. Set the target
-group's **deregistration delay to 15 s or less** (ECS deregisters a task and waits for the
-delay before sending SIGTERM): longer only delays the stop, since streams can run 600 s
-and are cut and billed at SIGTERM anyway, and an ALB that closes a connection at the end
-of the delay is a client abort, also billed. Keep `LOOM_SHUTDOWN_GRACE_S` +
-deregistration delay well under the deploy's health-check grace.
+re-raises the SIGTERM after a clean shutdown, so 143). **M3** (production compose,
+`deploy/compose.prod.yml`): the gateway's `stop_grace_period` is **30 s**, more than
+`LOOM_SHUTDOWN_GRACE_S` + 8 s with margin, so a SIGKILL before step 5 is the crash case
+above. While the gateway restarts, Caddy holds a new request that cannot connect for up to
+`lb_try_duration` (15 s) instead of failing it.
 
 A **non-streaming** request cut at `LOOM_REQUEST_TIMEOUT_S` is billed an estimate: the
 engine reports usage only in its final body, so the tokens it generated before the cut are
@@ -739,8 +782,153 @@ checked the caller may buy credit for the org. Body `{"org_id", "amount_micros",
 Answers `{"id", "url", "amount_micros"}`; the web app redirects the browser to `url`
 (Stripe Checkout, or the local stub's pay page). Errors: 401 bad token, 400 bad body or
 amount, 404 unknown org, 409 org not active, 502 Stripe error. The credit is posted only
-by the signed `checkout.session.completed` webhook, as a `purchase` keyed
-`stripe:<event id>`, and at most once per session.
+by a signed webhook (`checkout.session.completed` when paid, or
+`checkout.session.async_payment_succeeded`), as a `purchase` keyed `stripe:<event id>`, and
+at most once per session. *(M3)* Each session gets `expires_at` = now + 1 h and Adaptive
+Pricing off (`adaptive_pricing[enabled]=false`: the customer always pays in USD); its line
+item's product name is `<name> credits` with the name from `LOOM_BRAND_NAME` (`API
+credits` when unset).
+
+**Stripe webhook** *(M3; M3 §8)*. Test mode only (a live key or a `livemode: true` event
+is refused). The Stripe sandbox is Loom's alone: no laptop, script or other stack takes
+payments through it, so every event the endpoint receives is this deployment's; anything
+else that reaches it stays unapplied, becomes stale and is resolved by an admin. The
+endpoint `https://hooks.<domain>/stripe/webhook` (§2) is subscribed, at the sandbox's
+default API version, to exactly:
+
+| Event | Handling |
+|---|---|
+| `checkout.session.completed` | credit if the session is Loom's (`metadata.purpose = loom_credits`) and `payment_status = paid`; a Loom session not yet paid -> `not_paid`; a session that is not Loom's -> `ignored` |
+| `checkout.session.async_payment_succeeded` | credit (delayed payment methods) |
+| `checkout.session.async_payment_failed` | stored, `ignored` (nothing was credited) |
+| `charge.refunded` | claw back the new part of the cumulative `amount_refunded` |
+| `charge.dispute.created` | claw back the disputed `amount`, once per dispute |
+
+Any other type that arrives is stored and marked `ignored`. Snapshot events only (Stripe's
+"thin" events are not supported).
+
+Response contract (what Stripe sees; Stripe retries anything but a 2xx, in test mode only a
+few times over a few hours):
+
+| Situation | Answer (metric `loom_billing_stripe_webhooks_total{result}`) |
+|---|---|
+| Body over `LOOM_BILLING_MAX_BODY_BYTES` (256 KiB) | 413, before reading more |
+| Signature header missing or malformed, or no `v1` matches and `t` is outside 300 s | 400 `bad_signature` (result `bad_signature`; no alarm reads it) |
+| Header well-formed, `t` within 300 s, but no `v1` matches (`stripe_sig.SignatureMismatch`) | 400 `bad_signature` (result `signature_mismatch`, alarm S2a: the box's secret is not the endpoint's) |
+| HMAC valid but `t` outside 300 s (`stripe_sig.StaleTimestamp`) | 400 `bad_signature` (result `stale_timestamp`, alarm S2b) |
+| Signed, but not JSON, or no `id`/`type`, or `livemode: true` | 400 `bad_event`, decided before any transaction |
+| Stored and applied, stored unapplied, or a duplicate | **200**, only after COMMIT returned |
+| **Anything** raised by the Postgres part of a delivery (the pool wait, `handle_event`, COMMIT), with no classification by exception class or SQLSTATE | the transaction rolls back; a second transaction stores the event unapplied with `last_error`; **500** `internal_error` (200 `duplicate` if its guard found the event processed meanwhile) |
+| The same, and the second transaction fails too (Postgres unreachable; a payload `jsonb` refuses) | **503** `service_unavailable`, nothing stored |
+
+`SignatureMismatch` and `StaleTimestamp` are subclasses of `stripe_sig.SignatureError`, so
+callers catching `SignatureError` are unchanged.
+
+- **Second transaction**: a new transaction from the pool, under the same timeouts. It
+  inserts the event, or updates its row, with `result = 'unapplied'`, `last_error` (`<exception
+  class>: <message>`, NUL characters replaced, at most 1,000 characters), `last_error_at` and
+  `error_count` + 1, only while `processed_at` is NULL: it never touches a row another
+  delivery has processed meanwhile (then the answer is 200 `duplicate`). It needs the event's
+  row lock, so when the first failure was a lock timeout on that row itself (held by
+  `retry_unapplied`, a `resolve` or another delivery, or an uncommitted insert of the same
+  id) it times out too, and the answer is 503 while the holder lives; a lock wait
+  elsewhere (the session's advisory lock, a `stripe_payments` row, a pending clawback's row)
+  gives the 500. Every attempt whose outcome is not `duplicate` or `skipped` writes `result`
+  and clears `last_error` and `error_count` in the attempt's own transaction (a failed
+  attempt's is rolled back, so the second transaction's values stand), so the next failure
+  counts again.
+- **Timeouts**: inside each transaction `SET LOCAL lock_timeout` =
+  `LOOM_STRIPE_LOCK_TIMEOUT_MS` and `statement_timeout` = `LOOM_STRIPE_STATEMENT_TIMEOUT_MS`;
+  the pool wait is `LOOM_STRIPE_WEBHOOK_DB_TIMEOUT_S` (§2). There is no overall deadline:
+  with the defaults a delivery is answered within roughly 30 s at worst; an answer Stripe
+  stopped waiting for is a failed delivery it retries, and L1 makes a late COMMIT safe.
+- **After COMMIT**: the credit refresh in Redis is awaited for at most 2 s
+  (`loom_billing.api.REFRESH_WAIT_S`), then left to finish in the background
+  (`loom_credit_changed` and reconcile cover a refresh that fails). Outcome metrics and the
+  handler-failure counter are counted after COMMIT only.
+- **Pending clawbacks**: a purchase applies the clawbacks of its PaymentIntent that arrived
+  before it (`processed_at IS NULL`, `ORDER BY received_at, id FOR UPDATE`), each in its own
+  plain savepoint, with no `SET CONSTRAINTS` anywhere in billing. A clawback that raises is
+  rolled back to its savepoint and stored unapplied with its error in the purchase's
+  transaction; the purchase and the other clawbacks commit. If that store fails too, or a
+  wait on the pending rows passes `lock_timeout`, the delivery fails as a whole (the 500 or
+  503 rows above).
+- **Idempotency layers**: L1 the event id (`stripe_events.id`; `processed_at` checked under
+  `FOR UPDATE`); L2 the ledger key `stripe:<event id>`; L3 one purchase per Checkout
+  Session (an advisory lock on the session id, a look-up by `kind = 'purchase' AND
+  external_ref = <session id>`, and migration 0012's unique index, §3); L4 clawbacks never
+  exceed the purchase (`stripe_payments` row lock, the refunded high-water mark, the
+  `clawed_back_micros <= amount_micros` check; each dispute once).
+- **`retry_unapplied`** (the billing worker, each minute at :50 and once at start), in
+  order: (1) the **reopen sweep**: every clawback (`charge.refunded`,
+  `charge.dispute.created`) with `result = 'resolved_by_admin'` whose PaymentIntent now has
+  a `stripe_payments` row gets `processed_at = NULL`, `result = 'unapplied'`,
+  `stale_reported_at = NULL`, `last_error = 'reopened: payment credited after resolve'`
+  (rows another transaction holds are skipped until the next run; credit events are never
+  reopened); (2) **re-run** unapplied events newest first (`received_at DESC, id`), up to
+  500, with no age window, each in its own transaction, taking the row `FOR UPDATE SKIP
+  LOCKED` (a row a delivery holds is skipped this run); an event that raises is rolled back
+  and recorded by the second transaction's statement, and the run **continues** with the
+  next event; a stored row that fails the shape check is skipped with no error store;
+  (3) **stale marking** (set-based, rows taken `ORDER BY received_at, id FOR UPDATE SKIP
+  LOCKED`, the purchase's lock order, never waiting): an event unapplied for
+  `LOOM_STRIPE_STALE_AFTER_S` since `received_at`, with `stale_reported_at` NULL, gets
+  `stale_reported_at` set and is counted once. Any failure outside a per-event attempt, and an attempt whose error store fails
+  too, ends the run there; only a run that finishes step 3 moves its last-success gauge.
+- **Stuck events** (`loom-billing stripe-event list [--unapplied]`, `loom-billing
+  stripe-event resolve <event id> --admin-email <email> --reason <text>`): `resolve`, in one
+  transaction under the same timeouts, checks the admin (`users.role = 'admin'`), locks the
+  event row, refuses an unknown or already processed event, refuses a clawback whose
+  PaymentIntent is not a non-empty string or has a `stripe_payments` row, and otherwise sets
+  `processed_at` and `result = 'resolved_by_admin'` and writes `admin_audit_log`
+  (`stripe_event.resolve`, the reason in `details`). It posts nothing, ever; a refusal
+  changes nothing and the CLI exits 2. Once resolved no retry or redelivery applies the
+  event, except a clawback the sweep reopens.
+- **Missed deliveries**: billing does not fetch events Stripe gave up on (no Events-API
+  sync in Phase 1; one is required before live mode, phase1-runpod-plan.md §13 "Live-mode
+  prerequisites"). Alarms (M3 §5.3) tell the operator, who resends them from the Stripe
+  dashboard (`docs/runbook-stripe.md`); a resend is signed afresh, and L1 answers
+  `duplicate` to one that was already applied. `GET /stripe/health` on billing's API app
+  answers 200 `{"listener":"stripe_webhook","status":"ok"}` with no authentication and no
+  Postgres, Redis or Stripe call, for the Route 53 health check of `hooks.` (alarm H3);
+  billing's `GET /health` is unchanged and never routed publicly.
+- **Python entry points** (`loom_billing`; M3 §8.11 is the full text):
+  - `webhooks.process_event(pool, event, *, retry=False, settings=None, now=None) ->
+    Outcome` owns the Postgres behaviour above. It checks the event's shape first
+    (`BadEvent`, before any transaction). Any exception from the Postgres part runs the
+    second transaction: an event it stores returns `Outcome("unapplied",
+    stored_after_error=True)` (the route's 500), an event its guard finds processed returns
+    `Outcome("duplicate")`; if the second transaction fails too it raises
+    `webhooks.StoreFailed` with the original exception as `__cause__` (the route's 503). No
+    exception class or SQLSTATE is inspected. With `retry=True` it takes the row `FOR
+    UPDATE SKIP LOCKED` and returns `Outcome("skipped")` (`.processed` False) when a
+    delivery holds it.
+  - `webhooks.handle_event(conn, event, *, retry=False, settings=None, now=None) ->
+    Outcome`: the in-transaction core, never calls Stripe; called directly it counts no
+    outcome metric.
+  - `webhooks.retry_unapplied(pool, *, limit=500, settings=None, now=None) -> int`: the
+    events this run marked processed (every result except `unapplied`, `skipped` and
+    `duplicate`); it never raises, and shows a failed run only by not moving its
+    last-success gauge.
+  - `resolve.resolve_event(pool, event_id, *, admin_email, reason, settings=None, now=None)
+    -> Outcome` (`result = "resolved_by_admin"`, nothing posted); every refusal raises
+    `resolve.ResolveRefused(reason)` with nothing changed. `resolve.list_events(pool, *,
+    unapplied=False) -> list[dict]`, keys `id`, `type`, `received_at`, `result`,
+    `last_error`, `error_count`, `stale_reported_at`, ordered by `received_at DESC, id`.
+  - `settings` is a `BillingSettings` (`None`: the defaults, M1's behaviour); `now` is one
+    timestamp per call, the injected one or the current time read once. The M1 calls
+    `handle_event(conn, event)` and `retry_unapplied(pool)` keep working.
+
+Billing metrics the alarms read (every counter initialised at 0 for each label value at
+start; M3 §5.3): `loom_billing_stripe_webhooks_total{result}` (S2a `signature_mismatch`,
+S2b `stale_timestamp`); `loom_billing_stripe_webhook_errors_total{status}` (`503`, `500`;
+S2c); `loom_billing_stripe_handler_failures_total{path}` (`webhook`, `retry`,
+`pending_clawback`; counted when a failure makes `error_count` 1; S4);
+`loom_billing_stripe_unapplied_stale_total{type}` (the five subscribed types or `other`;
+S1a); the gauge `loom_billing_stripe_unapplied_stale_events` (unapplied events with
+`stale_reported_at` set; S1b); `loom_billing_stripe_retry_last_success_seconds` (the last
+completed `retry_unapplied` run; S5). `loom_billing_stripe_unapplied_events` stays, as
+information.
 
 ## 8. Gateway request order
 
@@ -750,9 +938,9 @@ by the signed `checkout.session.completed` webhook, as a `purchase` keyed
    without reading or buffering up to 1 MiB. Unknown keys are cached like known ones
    (`{"found":false}`, §6), so one invalid key costs one Postgres lookup per 4 s; Postgres
    key lookups are capped at 4 concurrent per gateway, so a flood of distinct random keys
-   cannot starve balance loads of connections. **M3**: put a per-IP request limit (ALB +
-   WAF rate rule) in front of the gateway for such floods; the gateway has no per-IP
-   limit. `api_keys.last_used_at` is written off the request path, at most once a minute
+   cannot starve balance loads of connections. **M3**: Caddy's per-IP request limit (the
+   pinned rate-limit module on `api.<domain>`, §2) is in front of the gateway for such
+   floods; the gateway itself has no per-IP limit. `api_keys.last_used_at` is written off the request path, at most once a minute
    per key.
 2. Model: registry id, priced and not disabled (`pricing.servable`), else 404. Request
    validation (400), including `max_tokens` above the cap.
@@ -794,6 +982,22 @@ a replica's URL host and `server_name` are the same (`https://mock-pod-1:8443`).
   available, pooled connections. Client certificate `LOOM_GATEWAY_CLIENT_CERT` /
   `_KEY`; the server certificate must chain to `LOOM_POD_CA_CERT` and name
   `replica.server_name` (the pod id; `mock-pod-1` in M1).
+- **Client certificate rotation and CA bundle** *(M3)*: the pool manager issues the
+  gateway's client certificate (`clientAuth`, 7 days) every 24 h, or at start when the
+  current one has under 6 days left, into `LOOM_POOLMGR_GATEWAY_CERT_DIR`: one PEM file
+  with key and certificate, written to a temporary name and renamed into place, so a reader
+  never sees a key without its certificate. The gateway checks that file and
+  `LOOM_POD_CA_CERT` every `LOOM_GATEWAY_CERT_CHECK_S` (60 s); on a change it builds a new TLS
+  context and uses it for new upstream connections (open streams keep theirs). A file that
+  fails to load keeps the old context and logs an error. A missing or unloadable file at
+  start does not stop the gateway (the manager, deployed after it, writes the file): until
+  the files load, upstream requests fail as connect errors (502 `upstream_lost`), and each
+  check retries the load. `LOOM_POD_CA_CERT` may hold several CA certificates (old and
+  new during a rollover) and the gateway trusts any of them. The gateway exports
+  `loom_gateway_client_cert_expiry_seconds` (alarm G3). `loom-poolmgr rekey [--model M]`
+  re-issues every ready pod's server certificate now (the SIGHUP path below);
+  `loom-poolmgr new-ca --out DIR` writes a new CA outside dev. The rollover steps are in
+  `docs/runbook-pod-ca.md`.
 - **Header** `X-Loom-Pod-Token: <replica.token>`; the proxy refuses a request without
   it (403). No client headers are forwarded except `Content-Type` and `Accept`.
 - **Paths** the proxy forwards: `POST /v1/chat/completions`, `POST /v1/completions`,
@@ -905,6 +1109,17 @@ manager's next tick (found by the M2 acceptance's idle check in CI). A ready pod
 long is removed from the hash first, then drained and terminated. Admin: `loom-poolmgr status|warm|drain|stop|
 reset` (services/poolmgr/README.md).
 
+**Mock backend outside dev** *(M3)*: the production box runs the manager with `provider:
+local` (the bench mock behind `loom-podproxy`, as in compose) and
+`LOOM_POOLMGR_MOCK_BACKEND=true` (§2), with `LOOM_ENV` unset, so every other production
+check stays on. Its serving file is `deploy/serving.m3.yaml` (`provider: local`, the
+committed models and timings, `gateway_egress_cidrs` = the compose subnet `10.214.0.0/24`).
+Gauges *(M3)*: `loom_poolmgr_ca_expiry_seconds` (seconds until the pod CA's `notAfter`,
+set at start and each tick; alarm P3 at 30 days; the refusal at
+`server_cert_renew_before_s` stays); `loom_poolmgr_pool_reason{model,reason}`, 1 for each
+model's current `reason` and 0 for the others, rewritten each tick (alarm P2b on
+`spend_cap`); `loom_poolmgr_mock_backend`, 1 with the flag.
+
 **M1 simulation** (`poolsim`, now a test tool under the compose profile `poolsim`; never
 run it against the manager's Redis): seeds every servable model as `ready` with the one mock
 pod replica. Simulated on-demand behaviour, for the tests and demos: setting a model
@@ -1007,5 +1222,7 @@ strings. An unknown id is 404 `model_not_found`.
 - **Google email linking**: kept on (`LOOM_GOOGLE_EMAIL_LINKING`, verified emails only);
   whether to keep it at all is a user decision.
 - **Disputes won** (`charge.dispute.closed`, status `won`) do not reinstate the credit
-  taken back yet; an admin adjustment does. Stripe's webhook endpoint must subscribe to
-  `charge.refunded` and `charge.dispute.created`.
+  taken back yet; an admin adjustment does (decided for M3, test mode: M3 §15 D5).
+  Automatic reinstatement is a live-mode prerequisite (phase1-runpod-plan.md §13, LM6).
+- **Stripe webhook subscriptions**: closed in M3: the endpoint subscribes to the five
+  event types listed in §7 "Stripe webhook".

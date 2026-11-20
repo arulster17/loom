@@ -1,0 +1,86 @@
+# Accepted `trivy config` findings for the M3 Terraform stacks (infra/aws/platform,
+# infra/aws/state), read by CI job `terraform` with --ignorefile (docs/phase1-m3-spec.md
+# §5.5, A11). Every other finding fails the job, and so does an inline ignore comment. An
+# entry names the finding, the files it applies to (relative to the stack directory, e.g.
+# "rds.tf") and the reason, and the same finding is listed with its reason in
+# infra/aws/platform/README.md. The file serves both stacks: an entry for a file name both
+# have (versions.tf, variables.tf) mutes that finding in both. Entries are added only after
+# the finding is triaged in the PR, e.g.:
+#
+#   misconfigurations:
+#     - id: AWS-0000
+#       paths: ["example.tf"]
+#       statement: why this is accepted
+#
+# The 13 below were accepted for M3 by the user on 2026-11-19, all of them for test mode
+# only: reviewing them is live-mode prerequisite LM11 (spec §8.13). `main.tf` is the state
+# stack's file (its bucket); the platform stack's main.tf holds no bucket.
+misconfigurations:
+  # Platform stack (infra/aws/platform).
+  - id: AWS-0017
+    paths: ["ec2.tf", "reaper_serving.tf"]
+    statement: >-
+      Log groups /loom/platform, /loom/platform/prometheus and the serving reaper's use
+      CloudWatch's default encryption, not a customer-managed KMS key (cost and a key policy
+      for every writer; one account, no customer data in M3).
+  - id: AWS-0027
+    paths: ["ec2.tf"]
+    statement: >-
+      The volumes are encrypted with the AWS-managed EBS key, not a customer-managed one
+      (spec §5.2 asks for encryption only).
+  - id: AWS-0033
+    paths: ["ecr.tf"]
+    statement: >-
+      The six ECR repositories use the AWS-managed key, not a customer-managed one.
+  - id: AWS-0066
+    paths: ["reaper_serving.tf"]
+    statement: >-
+      No X-Ray tracing on the serving reaper: its role is an exact allowlist (spec §5.6, A6)
+      with no tracing permission.
+  - id: AWS-0089
+    paths: ["s3.tf", "main.tf"]
+    statement: >-
+      No S3 access-log bucket for the lease, releases and state buckets; CloudTrail covers
+      management events.
+  - id: AWS-0090
+    paths: ["s3.tf"]
+    statement: >-
+      Versioning is off on the lease and releases buckets by the spec (§5.2 s3, §5.6), and
+      a test pins it.
+  - id: AWS-0095
+    paths: ["alarms.tf"]
+    statement: >-
+      The alarm topic is not encrypted: the AWS-managed alias/aws/sns key blocks CloudWatch
+      alarm delivery, and a customer-managed key (about $1 a month) is not worth it for a
+      topic that carries alarm names only.
+  - id: AWS-0098
+    paths: ["secrets.tf"]
+    statement: >-
+      The ten secrets use the AWS-managed key; a customer-managed key would add cost and a
+      second policy to every reader.
+  - id: AWS-0104
+    paths: ["network.tf"]
+    statement: >-
+      The instance's security group allows all egress: the box needs package mirrors, ECR,
+      S3, Stripe, SES and Let's Encrypt, whose addresses are not fixed. Ingress is 80/443
+      only.
+  - id: AWS-0132
+    paths: ["s3.tf", "main.tf"]
+    statement: >-
+      SSE-S3 (AES256) instead of a customer-managed KMS key on the lease, releases and state
+      buckets (spec §5.2 "SSE"; one account, no sensitive content).
+  - id: AWS-0133
+    paths: ["rds.tf"]
+    statement: >-
+      Performance Insights is off: the spec does not ask for it, and its support on
+      db.t4g.micro is unverified without AWS access.
+  - id: AWS-0143
+    paths: ["iam.tf"]
+    statement: >-
+      The SES SMTP user holds its policy directly (spec §5.2; a test reads
+      aws_iam_user_policy.ses_smtp); it is the only IAM user.
+  - id: AWS-0178
+    paths: ["network.tf"]
+    statement: >-
+      No VPC flow logs: an extra log group, role and ingestion cost, and the spec lists
+      none.

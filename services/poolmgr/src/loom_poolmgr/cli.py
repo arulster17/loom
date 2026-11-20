@@ -9,11 +9,13 @@ The admin commands act on the running manager's Postgres and Redis
     loom-poolmgr drain <pod id>        # drain and terminate one pod
     loom-poolmgr stop <model>          # drain and terminate a model's pods (stays cold)
     loom-poolmgr reset <model>         # clear crash_loop / spend_cap / price_too_high holds
+    loom-poolmgr rekey [--model M]     # re-issue every ready pod's server certificate now
+    loom-poolmgr new-ca --out DIR      # a new pod CA (and the manager's client certificate)
     loom-poolmgr issue-ca --out DIR    # dev only: CA plus manager and gateway client certs
     loom-poolmgr local-capacity off|on # dev only, provider local: creates fail for capacity
 
-`drain`, `stop`, `reset` and `local-capacity` queue a command the running manager picks
-up on its next tick (`loom_poolmgr.manager.push_admin`).
+`drain`, `stop`, `reset`, `rekey` and `local-capacity` queue a command the running
+manager picks up on its next tick (`loom_poolmgr.manager.push_admin`).
 """
 
 from __future__ import annotations
@@ -25,12 +27,15 @@ import datetime as dt
 import hashlib
 import logging
 import signal
+import ssl
 import sys
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
 import psycopg
+from cryptography import x509
+from cryptography.x509.oid import NameOID
 from redis.asyncio import Redis
 
 from loom_bench.prices import load_prices
@@ -38,7 +43,7 @@ from loom_bench.providers.runpod_api import RunpodApi
 from loom_bench.providers.runpod_ssh import OpenSshExec, SshExec
 from loom_bench.registry import REPO_ROOT, load_registry
 from loom_platform.db import RoleCheckFailed, libpq_url, role_gate
-from loom_platform.pool import get_pool, request_wake
+from loom_platform.pool import Replica, get_pool, request_wake
 from loom_platform.pricing import servable
 from loom_platform.serving import LOCAL_PROVIDERS, load_serving
 from loom_platform.settings import enforce_environment
@@ -57,7 +62,7 @@ from loom_poolmgr.manager import (
 )
 from loom_poolmgr.metrics import PoolmgrMetrics
 from loom_poolmgr.metrics import serve as serve_metrics
-from loom_poolmgr.pki import Pki, write_dev_ca
+from loom_poolmgr.pki import Pki, write_dev_ca, write_new_ca
 from loom_poolmgr.provider import ServingProvider
 from loom_poolmgr.runpod import USER_AGENT, RunpodServing
 from loom_poolmgr.settings import PoolmgrSettings
@@ -77,6 +82,14 @@ def build_parser() -> argparse.ArgumentParser:
     stop.add_argument("model")
     reset = sub.add_parser("reset", help="clear a model's crash_loop / spend_cap hold")
     reset.add_argument("model")
+    rekey = sub.add_parser(
+        "rekey", help="re-issue every ready pod's server certificate now (--model: one model's)"
+    )
+    rekey.add_argument("--model", default=None, help="only this model's pods")
+    new_ca = sub.add_parser(
+        "new-ca", help="create a new pod CA and the manager's client certificate from it"
+    )
+    new_ca.add_argument("--out", type=Path, required=True, help="directory to write into")
     ca = sub.add_parser(
         "issue-ca", help="dev only: create a CA plus manager and gateway client certificates"
     )
@@ -124,6 +137,12 @@ async def _run(settings: PoolmgrSettings) -> int:
     if settings.allow_cidrs and config.provider != "local":
         print("loom-poolmgr: LOOM_POOLMGR_ALLOW_CIDRS is for provider local", file=sys.stderr)
         return 2
+    if settings.poolmgr_mock_backend:
+        logging.getLogger("loom_poolmgr").warning(
+            "LOOM_POOLMGR_MOCK_BACKEND: the mock backend (provider %s, no cloud pods) is serving; "
+            "this is not a production serving setup",
+            config.provider,
+        )
     if settings.poolmgr_idle_stop_s is not None:
         idle = settings.poolmgr_idle_stop_s
         models = {m: s.model_copy(update={"idle_stop_s": idle}) for m, s in config.models.items()}
@@ -181,6 +200,7 @@ async def _run(settings: PoolmgrSettings) -> int:
         )
         provider, pod_exec = local, local.exec
     metrics = PoolmgrMetrics()
+    metrics.mock_backend.set(1 if settings.poolmgr_mock_backend else 0)
     redis = Redis.from_url(settings.redis_url)
     manager = PoolManager(
         config,
@@ -196,6 +216,7 @@ async def _run(settings: PoolmgrSettings) -> int:
         servable=tuple(m.id for m in servable(registry)),
         metrics=metrics,
         extra_allow=settings.allow_cidrs,
+        gateway_cert_dir=settings.poolmgr_gateway_cert_dir,
     )
     try:
         # Postgres unreachable at start (outside dev): nothing touches it until the
@@ -262,6 +283,46 @@ def _age(now: dt.datetime, then: dt.datetime | None) -> str:
     return f"{s // 3600}h{s % 3600 // 60:02d}m" if s >= 3600 else f"{s // 60}m{s % 60:02d}s"
 
 
+async def _issuer_line(settings: PoolmgrSettings, replica: Replica) -> str | None:
+    """`status` for a ready pod: who issued the certificate its proxy presents, and
+    whether that is the manager's CA (runbook-pod-ca.md, step 4). It connects as the
+    manager does (its client certificate) but does not verify the pod: it reads the
+    certificate. None without the manager's client certificate in the environment."""
+    if not (settings.poolmgr_client_cert and settings.poolmgr_client_key):
+        return None
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        ctx.load_cert_chain(str(settings.poolmgr_client_cert), str(settings.poolmgr_client_key))
+        host, port = replica.url.removeprefix("https://").rsplit(":", 1)
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, int(port), ssl=ctx, server_hostname=replica.server_name),
+            timeout=5,
+        )
+        try:
+            der = writer.get_extra_info("ssl_object").getpeercert(binary_form=True)
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+        cert = x509.load_der_x509_certificate(der)
+    except (OSError, ValueError, TimeoutError, ssl.SSLError) as e:
+        return f"certificate: not read ({type(e).__name__}: {e})"
+    names = cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)
+    issuer = str(names[0].value) if names else cert.issuer.rfc4514_string()
+    line = f"certificate: issued by {issuer}, expires {cert.not_valid_after_utc:%Y-%m-%d %H:%M}Z"
+    if settings.poolmgr_ca_cert:
+        try:
+            ca = x509.load_pem_x509_certificate(settings.poolmgr_ca_cert.read_bytes())
+            cert.verify_directly_issued_by(ca)
+            line += " (chains to the manager's CA)"
+        except Exception:
+            line += " (does NOT chain to the manager's CA)"
+    return line
+
+
 async def _status(settings: PoolmgrSettings) -> int:
     config = load_serving(settings.poolmgr_serving_yaml, check_registry=False)
     now = dt.datetime.now(dt.UTC)
@@ -279,6 +340,7 @@ async def _status(settings: PoolmgrSettings) -> int:
                 f"{model}: {pool.state}{reason}, retry after {pool.retry_after_s} s, "
                 f"{len(pool.replicas)} replica(s)"
             )
+            replicas = {r.id: r for r in pool.replicas}
             for row in (r for r in rows if r.model_id == model):
                 price = (
                     "-"
@@ -290,6 +352,9 @@ async def _status(settings: PoolmgrSettings) -> int:
                     f"  {row.pod_id or row.pod_name}  {row.state}  age {_age(now, row.created_at)}"
                     f"  {price}  lease until {lease}"
                 )
+                replica = replicas.get(row.pod_id or "")
+                if replica is not None and (line := await _issuer_line(settings, replica)):
+                    print(f"    {line}")
         cap = spend.usd_micros(config.spend.monthly_cap_usd)
         print(
             f"spend this month: ${month / 1e6:.2f} of the ${cap / 1e6:.2f} cap "
@@ -309,6 +374,10 @@ async def _admin(settings: PoolmgrSettings, args: argparse.Namespace) -> int:
         elif args.command == "drain":
             await push_admin(redis, {"op": "drain", "pod_id": args.pod_id})
             print(f"{args.pod_id}: drain queued")
+        elif args.command == "rekey":
+            command = {"op": "rekey"} | ({"model": args.model} if args.model else {})
+            await push_admin(redis, command)
+            print(f"{args.model or 'every model'}: rekey queued")
         elif args.command == "local-capacity":
             await push_admin(redis, {"op": "local_capacity", "capacity": args.capacity})
             print(f"local capacity {args.capacity} queued")
@@ -329,6 +398,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             raise SystemExit(2)
         written = write_dev_ca(args.out)
         print(f"{args.out}: {', '.join(written)} written")
+        return
+    if args.command == "new-ca":
+        try:
+            written = write_new_ca(args.out)
+        except FileExistsError as e:
+            print(f"loom-poolmgr new-ca: {e}", file=sys.stderr)
+            raise SystemExit(2) from None
+        print(f"{args.out}: {', '.join(written)} written (keys 0600)")
         return
     if args.command == "local-capacity":
         provider = load_serving(settings.poolmgr_serving_yaml, check_registry=False).provider

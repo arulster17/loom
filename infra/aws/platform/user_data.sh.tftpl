@@ -1,0 +1,47 @@
+#!/bin/bash
+# First-boot setup of the platform box (docs/phase1-m3-spec.md §5.2): Docker and the
+# compose plugin, the CloudWatch agent, Python 3.12, chrony on Amazon Time Sync, and the
+# data volume mounted at /var/lib/loom. Safe to run again. Never put a secret here:
+# user data is readable from the instance metadata and the EC2 console.
+set -euo pipefail
+exec > >(tee -a /var/log/loom-user-data.log) 2>&1
+
+COMPOSE_VERSION=v2.39.4
+COMPOSE_SHA256=49082844b87f03cdcd5f5bbef1ba8c9c897b7a2dfb80cea18d61ec8ca6117e0c
+
+dnf install -y docker amazon-cloudwatch-agent python3.12 chrony xfsprogs
+
+# Docker compose plugin, pinned and checked.
+install -d /usr/local/lib/docker/cli-plugins
+curl -fsSL -o /tmp/docker-compose \
+  "https://github.com/docker/compose/releases/download/$${COMPOSE_VERSION}/docker-compose-linux-aarch64"
+echo "$${COMPOSE_SHA256}  /tmp/docker-compose" | sha256sum -c -
+install -m 0755 /tmp/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+
+# Amazon Time Sync (the Stripe webhook's timestamp tolerance depends on the clock).
+if ! grep -q '169.254.169.123' /etc/chrony.conf; then
+  echo 'server 169.254.169.123 prefer iburst minpoll 4 maxpoll 4' >> /etc/chrony.conf
+fi
+systemctl enable --now chronyd
+
+# The data volume: wait for the attachment, format it once, mount it by UUID.
+DEVICE=/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${data_volume_serial}
+for _ in $(seq 1 120); do
+  [ -e "$DEVICE" ] && break
+  sleep 5
+done
+[ -e "$DEVICE" ] || { echo "data volume $DEVICE never appeared" >&2; exit 1; }
+if ! blkid "$DEVICE" > /dev/null 2>&1; then
+  mkfs.xfs -L loomdata "$DEVICE"
+fi
+install -d /var/lib/loom
+UUID=$(blkid -s UUID -o value "$DEVICE")
+if ! grep -q "$UUID" /etc/fstab; then
+  echo "UUID=$UUID /var/lib/loom xfs defaults,nofail,x-systemd.before=docker.service 0 2" >> /etc/fstab
+fi
+mountpoint -q /var/lib/loom || mount /var/lib/loom
+
+install -d /etc/loom
+
+systemctl enable --now docker
+systemctl enable amazon-ssm-agent

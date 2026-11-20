@@ -267,3 +267,85 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen
       - run: uv run pytest -m network -q -s bench/tests/deps
+
+  # The M3 Terraform stacks (docs/phase1-m3-spec.md §5.5, A1, A11), checked with no AWS
+  # credentials: fmt, init without a backend against the committed .terraform.lock.hcl
+  # (read-only), validate, `terraform test` (mock providers), tflint (AWS ruleset, shallow
+  # rules) and trivy config. Pinned: the actions by commit; Terraform here and in the
+  # agents' image (hashicorp/terraform:1.16.7@sha256:c9c77f5b9820832cbc7b88d16df406ac6e75fee5a9077e5437db0c54e5ff33e3);
+  # tflint and trivy (its embedded checks, no update) as images by version and digest; the
+  # AWS ruleset by version (.github/terraform/tflint.hcl; tflint checks its signature).
+  # Accepted trivy findings: .github/terraform/trivyignore.yaml only; inline ignore
+  # comments fail the job (A11). Each stack's .terraform.lock.hcl must hold the hashes of
+  # every platform (`terraform providers lock -platform=linux_amd64 -platform=linux_arm64
+  # -platform=windows_amd64 -platform=darwin_arm64`): with a lock made on one machine only,
+  # init passes here and validate fails.
+  terraform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [infra/aws/platform, infra/aws/state]
+    env:
+      TERRAFORM_VERSION: 1.16.7
+      TFLINT_IMAGE: ghcr.io/terraform-linters/tflint:v0.65.0@sha256:2788f4d4fc663c0e953b011b01bf443fe5bfce7587ee916e588e6057b85d6359
+      TRIVY_IMAGE: aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+      STACK: ${{ matrix.dir }}
+      TF_IN_AUTOMATION: "1"
+      TF_INPUT: "0"
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive -diff
+      - run: terraform init -backend=false -input=false -lockfile=readonly
+      - run: terraform validate
+      - name: terraform test (mock providers)
+        run: |
+          if [ "$STACK" = infra/aws/platform ] && ! ls tests/*.tftest.hcl > /dev/null 2>&1; then
+            echo "::error::no tests/*.tftest.hcl in $STACK"
+            exit 1
+          fi
+          terraform test
+      - name: no inline ignore comments (findings are accepted only in .github/terraform/)
+        run: |
+          if grep -rnE 'trivy:ignore|tfsec:ignore|tflint-ignore' --exclude-dir=.terraform --include='*.tf' --include='*.hcl' .; then
+            echo "::error::inline ignore comments in $STACK: fix the finding, or triage it in the PR (A11)"
+            exit 1
+          fi
+      - name: tflint
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          docker run --rm -e GITHUB_TOKEN -v "$GITHUB_WORKSPACE:/repo:ro" -w "/repo/$STACK"
+          --entrypoint /bin/sh "$TFLINT_IMAGE" -c
+          'tflint --init --config /repo/.github/terraform/tflint.hcl
+          && tflint --config /repo/.github/terraform/tflint.hcl'
+      - name: trivy config
+        run: >-
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo:ro" "$TRIVY_IMAGE" config
+          --skip-check-update --skip-dirs '**/.terraform' --exit-code 1
+          --ignorefile /repo/.github/terraform/trivyignore.yaml "/repo/$STACK"
+
+  # A15 (docs/phase1-m3-spec.md §13): the production compose stack (deploy/compose.prod.yml
+  # with local images, a TLS Postgres standing in for RDS, a throwaway CA) comes up in
+  # production mode as project loom-m3prod, and M1 acceptance items 0, b and d pass against
+  # it. The acceptance-marked test starts and removes the stack itself. Free: no cloud.
+  m3-prod-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - run: uv sync --frozen
+      - run: >-
+          uv run pytest -q -m acceptance --timeout 3000
+          services/devstack/tests/test_devstack_m3_prodstack.py

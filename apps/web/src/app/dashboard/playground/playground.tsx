@@ -117,7 +117,7 @@ export function Playground({ models, apiBase, gatewayDown }: { models: Playgroun
       <aside className="space-y-4">
         {gatewayDown ? (
           <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-900 ring-1 ring-amber-200">
-            The Loom API is not reachable right now, so this list comes from the catalog and requests may fail.
+            The API is not reachable right now, so this list comes from the catalog and requests may fail.
           </p>
         ) : null}
         <div>

@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars (gitignored). The domain and the product name have no defaults
+# on purpose (docs/phase1-m3-spec.md §6.11).
+domain          = "example.com"
+brand_name      = "Example"
+ops_email       = "ops@example.com"
+budget_usd      = 75
+releases_bucket = "REPLACE-with-a-globally-unique-bucket-name"
+
+# route53_zone_id = "Z0123456789ABCDEFGHIJ"

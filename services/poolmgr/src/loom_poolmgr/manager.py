@@ -60,8 +60,15 @@ retried while demand lasts, `capacity.backoff_s[n]` after the n-th consecutive r
 onto the Redis list `admin_queue` (default `ADMIN_QUEUE`; `{"op": "drain", "pod_id":
 ...}`, `{"op": "stop", "model": ...}`, `{"op": "reset", "model": ...}`, and the dev-only
 `{"op": "local_capacity", "capacity": "on"|"off"}`, which only `provider: local` obeys:
-`off` makes every create fail for capacity, the acceptance's switch); each tick pops
-them all first. `warm` is `request_wake`, as the gateway's.
+`off` makes every create fail for capacity, the acceptance's switch), and (M3) `{"op":
+"rekey"}` / `{"op": "rekey", "model": ...}`: re-issue every ready pod's server
+certificate now, the path the renewal near expiry takes; each tick pops them all first.
+`warm` is `request_wake`, as the gateway's.
+
+**Gateway client certificate** (M3, docs/phase1-m3-spec.md §7). With `gateway_cert_dir`
+the manager issues the gateway's client certificate (7 days) into it: at start unless the
+file holds a current one (loads, from this CA, 6 days or more left), then every 24 h on
+the injected clock (a failed write is retried on the next tick).
 
 **Single writer.** `start()` takes `pg_try_advisory_lock(hashtext('loom-poolmgr'))` on a
 connection it keeps for its lifetime and raises `ManagerLocked` if another manager holds
@@ -117,7 +124,13 @@ from loom_poolmgr.bootstrap import LOOPBACK_ALLOW, PodSecrets, ProxyBundle
 from loom_poolmgr.leases import LeaseRecord, LeaseRecords, renew_on_pod
 from loom_poolmgr.local import LocalServing
 from loom_poolmgr.metrics import PoolmgrMetrics
-from loom_poolmgr.pki import Pki
+from loom_poolmgr.pki import (
+    GATEWAY_CERT_FILE,
+    GATEWAY_ROTATE_EVERY_S,
+    Pki,
+    gateway_cert_is_current,
+    write_gateway_cert,
+)
 from loom_poolmgr.provider import (
     CreateFailed,
     Deployment,
@@ -277,7 +290,7 @@ def build_deployments(
 async def push_admin(redis: Redis, command: Mapping[str, str], *, queue: str = ADMIN_QUEUE) -> None:
     """Queue an admin command for the running manager (see the module docstring)."""
     op = command.get("op")
-    if op not in ("drain", "stop", "reset", "local_capacity"):
+    if op not in ("drain", "stop", "reset", "local_capacity", "rekey"):
         raise ValueError(f"unknown admin command {command!r}")
     if op == "local_capacity" and command.get("capacity") not in ("on", "off"):
         raise ValueError(f"local_capacity takes capacity on|off: {command!r}")
@@ -414,6 +427,7 @@ class PoolManager:
         admin_queue: str = ADMIN_QUEUE,
         metrics: PoolmgrMetrics | None = None,
         extra_allow: tuple[str, ...] = (),
+        gateway_cert_dir: Path | None = None,
     ) -> None:
         """
         - `config`: the validated serving.yaml (`loom_platform.serving.load_serving`).
@@ -436,6 +450,8 @@ class PoolManager:
         - `metrics`: Prometheus metrics (default: a registry of its own).
         - `extra_allow`: CIDRs added to every pod proxy's allowlist (dev only, the local
           backend's `LOOM_POOLMGR_ALLOW_CIDRS`).
+        - `gateway_cert_dir`: where the gateway's client certificate is written
+          (`LOOM_POOLMGR_GATEWAY_CERT_DIR`; None: not issued).
         """
         self.config = config
         self.deployments = dict(deployments)
@@ -454,6 +470,8 @@ class PoolManager:
         self.admin_queue = admin_queue
         self.metrics = metrics or PoolmgrMetrics()
         self.extra_allow = tuple(extra_allow)
+        self.gateway_cert_dir = gateway_cert_dir
+        self._gateway_cert_next = math.inf
         self._own_http = http is None
         self._pods: dict[uuid.UUID, _Pod] = {}
         self._holds: dict[str, str] = {}
@@ -516,7 +534,10 @@ class PoolManager:
             # Requests settled before this start are not demand (adoption counts its own).
             self._last_request = await self._read_last_requests()
             self.metrics.spend_cap.set(spend.usd_micros(self.config.spend.monthly_cap_usd))
+            self.metrics.ca_expiry.set(left)
+            self.metrics.init_models(self._published_models())
             await self._adopt_all()
+            self._gateway_cert(self.clock(), at_start=True)
         except BaseException:
             await self.stop()
             raise
@@ -630,7 +651,13 @@ class PoolManager:
         t0 = time.perf_counter()
         try:
             now = self.clock()
+            self.metrics.ca_expiry.set(self._ca_left(now))
             await self._admin_commands(now)
+            if now >= self._gateway_cert_next:
+                try:
+                    self._gateway_cert(now, at_start=False)
+                except Exception as e:
+                    log.error("issuing the gateway's client certificate failed: %s", _describe(e))
             if now - self._last_listing >= self.config.health.pod_state_every_s:
                 self._listing_seq += 1
                 seq = self._listing_seq
@@ -690,6 +717,21 @@ class PoolManager:
                     log.warning("admin drain of pod %s (%s)", pod_id, pod.model)
                     await self._admin_remove(pod, now)
                     await self._publish(pod.model, now)
+            elif op == "rekey":
+                model_arg = cmd.get("model")
+                targets = [
+                    p
+                    for p in self._pods.values()
+                    if p.state == "ready" and (model_arg is None or p.model == str(model_arg))
+                ]
+                log.warning(
+                    "admin rekey of %s: %d ready pod(s)", model_arg or "every model", len(targets)
+                )
+                for pod in targets:
+                    prev = pod.maint_task
+                    pod.maint_task = self._spawn(
+                        self._rekey_now(pod, prev), f"admin rekey of {pod.pod_id}"
+                    )
             elif op == "local_capacity":
                 capacity = cmd.get("capacity")
                 if self.config.provider != "local" or not isinstance(self.provider, LocalServing):
@@ -883,6 +925,25 @@ class PoolManager:
         """Seconds until the pod CA expires."""
         return self.pki.ca.cert.not_valid_after_utc.timestamp() - now
 
+    def _gateway_cert(self, now: float, *, at_start: bool) -> None:
+        """Issue the gateway's client certificate into `gateway_cert_dir` (spec §7): at
+        start unless the file already holds a current one, and on each 24 h rotation.
+        The next rotation is 24 h from now; it is not moved by a failure."""
+        directory = self.gateway_cert_dir
+        if directory is None:
+            return
+        path = directory / GATEWAY_CERT_FILE
+        if at_start and gateway_cert_is_current(path, self.pki.ca, now):
+            log.info("the gateway's client certificate in %s is current", directory)
+        else:
+            issued = write_gateway_cert(directory, self.pki.ca, now=now)
+            log.info(
+                "issued the gateway's client certificate into %s (expires %s)",
+                directory,
+                issued.not_after.isoformat(),
+            )
+        self._gateway_cert_next = now + GATEWAY_ROTATE_EVERY_S
+
     def _cert_due(self, pod: _Pod, now: float) -> bool:
         """The pod's server certificate is due for renewal, and the CA can issue one that
         is not (otherwise: an error, once, and no re-key on every tick)."""
@@ -927,6 +988,21 @@ class PoolManager:
                 log.warning("certificate renewal of pod %s failed: %s", pod.pod_id, _describe(e))
                 if expires <= now:
                     await self._fail(pod, "certificate_expired", now=now)
+
+    async def _rekey_now(self, pod: _Pod, after: asyncio.Task[None] | None) -> None:
+        """The admin `rekey`: a new server certificate delivered over SSH now, after the
+        pod's maintenance task in flight (if any) has finished. The pod keeps its token
+        and stays in routing; a failure is logged and the pod's own renewal rule goes on."""
+        if after is not None and not after.done():
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.shield(after)
+        if pod.state != "ready":
+            return
+        try:
+            await self._rekey(pod, new_token=False)
+            log.warning("admin rekey: new server certificate on pod %s (%s)", pod.pod_id, pod.model)
+        except Exception as e:
+            log.error("admin rekey of pod %s failed: %s", pod.pod_id, _describe(e))
 
     async def _check_draining(self, pod: _Pod, now: float) -> None:
         self._start_maintenance(pod, now)
@@ -1114,6 +1190,7 @@ class PoolManager:
 
     async def _publish(self, model: str, now: float | None = None) -> None:
         state = self._pool_state(model, self.clock() if now is None else now)
+        self.metrics.set_pool_reason(model, state.reason)
         try:
             await set_pool(self.redis, state)
         except Exception as e:

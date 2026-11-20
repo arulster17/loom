@@ -1,0 +1,10 @@
+# Local Terraform state and plugins, the Lambda zip built on every plan, and the files
+# each operator writes from the *.example files (docs/phase1-m3-spec.md §5.4, §5.5).
+.terraform/
+.build/
+backend.hcl
+backend_override.tf
+terraform.tfstate
+terraform.tfstate.*
+*.tfvars
+!*.tfvars.example

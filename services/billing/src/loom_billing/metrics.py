@@ -60,6 +60,45 @@ STRIPE_UNAPPLIED = Gauge(
     P + "stripe_unapplied_events",
     "Stored Stripe events not applied yet (e.g. a refund before its purchase): alert if it stays",
 )
+# S2c: a delivery answered 500 (stored with its error) or 503 (nothing stored).
+WEBHOOK_ERRORS = Counter(
+    P + "stripe_webhook_errors_total", "Stripe webhook deliveries answered 500 or 503", ["status"]
+)
+# S4: an attempt on one event raised; counted on the write that makes error_count 1.
+HANDLER_FAILURES = Counter(
+    P + "stripe_handler_failures_total", "Stripe event attempts that raised", ["path"]
+)
+# S1a: an event became stale (unapplied for LOOM_STRIPE_STALE_AFTER_S), once per event.
+STRIPE_STALE = Counter(
+    P + "stripe_unapplied_stale_total", "Stripe events that became stuck", ["type"]
+)
+# S1b: unapplied events with stale_reported_at set.
+STRIPE_STALE_EVENTS = Gauge(
+    P + "stripe_unapplied_stale_events", "Unapplied Stripe events already reported stale"
+)
+# S5: the Unix time of the last completed retry_unapplied run (that run's `now`).
+STRIPE_RETRY_LAST_SUCCESS = Gauge(
+    P + "stripe_retry_last_success_seconds", "Unix time of the last completed Stripe retry run"
+)
 CHECKOUT_SESSIONS = Counter(P + "checkout_sessions_total", "Checkout sessions", ["result"])
 
 NOTIFICATIONS = Counter(P + "notifications_total", "Outbox notifications emitted", ["type"])
+
+
+# Every label value an alarm reads exists from the start, so the series is there before its
+# first increment (spec §5.3, §8.6, §8.11). Importing this module is enough.
+SUBSCRIBED_TYPES = (
+    "checkout.session.completed",
+    "checkout.session.async_payment_succeeded",
+    "checkout.session.async_payment_failed",
+    "charge.refunded",
+    "charge.dispute.created",
+)
+for _type in (*SUBSCRIBED_TYPES, "other"):
+    STRIPE_STALE.labels(_type)
+for _path in ("webhook", "retry", "pending_clawback"):
+    HANDLER_FAILURES.labels(_path)
+for _status in ("500", "503"):
+    WEBHOOK_ERRORS.labels(_status)
+for _result in ("bad_signature", "signature_mismatch", "stale_timestamp"):
+    WEBHOOKS.labels(_result)

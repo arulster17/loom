@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { NavLinks } from "@/components/nav";
 import { SignOutButton } from "@/components/sign-out";
+import { brandName } from "@/lib/brand";
 import { requireActiveOrg } from "@/lib/session";
 
 const LINKS = [
@@ -21,7 +22,7 @@ export default async function DashboardLayout({ children }: LayoutProps<"/dashbo
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-6 py-3">
           <div className="flex items-center gap-6">
             <Link href="/dashboard" className="font-semibold tracking-tight">
-              Loom
+              {brandName() ?? "Dashboard"}
             </Link>
             <NavLinks links={LINKS} />
           </div>
