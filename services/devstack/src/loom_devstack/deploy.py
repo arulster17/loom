@@ -1215,16 +1215,25 @@ def cmd_status() -> int:
 
 
 def selected(extra: Sequence[str], item: str) -> bool:
-    """Whether `loom-m3-acceptance` runs `item`: all unless `--only` names a list."""
+    """Whether `loom-m3-acceptance` runs `item` (§6.12 "Item selection"): the LAST `--only`
+    (`--only X` or `--only=X`, comma-separated, spaces ignored) names the list, else every
+    box item; `--external` runs only m3-h, so never m3-p."""
+    if "--external" in extra:
+        return item == "m3-h"
+    value: str | None = None
+    skip = False
     for i, word in enumerate(extra):
-        value = None
+        if skip:
+            skip = False
+            continue
         if word == "--only" and i + 1 < len(extra):
             value = extra[i + 1]
+            skip = True
         elif word.startswith("--only="):
             value = word.split("=", 1)[1]
-        if value is not None:
-            return item in [s.strip() for s in value.split(",")]
-    return True
+    if value is None:
+        return item != "m3-h"
+    return item in [s.strip() for s in value.split(",")]
 
 
 def check_p4_refusal(
@@ -1283,11 +1292,12 @@ def cmd_acceptance(p4_release: str, extra: list[str]) -> int:
     if selected(extra, "m3-p"):
         host["m3-p"] = check_p4_refusal(paths, compose, current, p4_release)
     else:
-        host["m3-p"] = {"ok": True, "detail": "not selected"}
+        host["m3-p"] = {"ok": None, "detail": "not selected"}  # never true: it did not run
     write_file(paths.acceptance / "host.json", json.dumps(host, indent=2) + "\n", 0o644)
     for item, res in host.items():
-        say(f"{item}: {'PASS' if res['ok'] else 'FAIL'}: {res['detail']}")
-    ok = r.returncode == 0 and all(v["ok"] for v in host.values())
+        label = "SKIP" if res["ok"] is None else ("PASS" if res["ok"] else "FAIL")
+        say(f"{item}: {label}: {res['detail']}")
+    ok = r.returncode == 0 and all(v["ok"] is not False for v in host.values())
     return 0 if ok else 1
 
 

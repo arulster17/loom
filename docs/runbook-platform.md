@@ -349,7 +349,8 @@ ALARM mail arrives (record the minutes); start it: the OK mail arrives.
   `admin_password` value, and clear the terminal afterwards).
 - Prometheus the same way on 9090.
 - Logs: CloudWatch log group `/loom/platform` (30 days; the `awslogs` driver). No prompt,
-  completion or key ever reaches them (m3-i).
+  completion or key ever reaches them: the containers' logs are scanned by m3-i, and the
+  CloudWatch log group is checked by B26 (by hand, with operator credentials).
 
 ## 10. M3 acceptance (B10-B19, B26)
 
@@ -366,7 +367,10 @@ public URLs; for m3-i the container scans the containers' logs only. Then, on th
 with the instance role, it runs m3-p's refusal (`apply --only poolmgr --release <the
 other release>` exits 2 naming the gateway, and the poolmgr container is not recreated).
 It writes `/var/lib/loom/acceptance/report.json` and `host.json` (`{"m3-p": {"ok",
-"detail"}}`); exit 0 only when the container and m3-p passed. It calls no `aws logs`
+"detail"}}`): `ok` is `true` or `false` when the host half ran, and `null` with detail
+"not selected" when `-- --only` leaves m3-p out or `-- --external` is given; exit 0 only
+when the container passed and m3-p passed or was not selected. A run with `--only` is not
+B10-B19 evidence; one full run (no `--only`) is. It calls no `aws logs`
 command: m3-i's CloudWatch half needs `logs:FilterLogEvents`, which no Loom role has, so
 B26 runs it by hand. Manual items (m3-g, m3-s) wait for the operator (Stripe test card
 4242 4242 4242 4242, resend, refund). m3-h runs from your machine:
