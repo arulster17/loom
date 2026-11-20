@@ -38,6 +38,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import psycopg
 import pytest
@@ -111,37 +112,56 @@ async def credited_payment(pool, cents: int = 1000) -> tuple[uuid.UUID, str]:
     return org, pi
 
 
-async def wait_advisory_wait(
-    url: str, pid: int, task: asyncio.Task[object], *, timeout_s: float
-) -> None:
-    """Poll until backend `pid` is seen waiting on an advisory lock (a barrier: one read
-    can land before the wait shows or after it ended). Fails if `task` finishes first
-    (with its result or error) or `timeout_s` passes."""
+@contextlib.asynccontextmanager
+async def watcher(url: str) -> AsyncIterator[psycopg.AsyncConnection[Any]]:
+    """The barrier's own connection, opened before the task it watches is created, so its
+    first read follows the task's start as closely as possible."""
+    async with await psycopg.AsyncConnection.connect(url, autocommit=True) as conn:
+        yield conn
+
+
+async def wait_advisory_wait_blocked_by(
+    conn: psycopg.AsyncConnection[Any],
+    blocker: int,
+    task: asyncio.Task[Any],
+    *,
+    timeout_s: float,
+) -> int:
+    """Poll (one query each time, on `conn`) until some backend is seen waiting on an
+    `advisory` lock with `blocker` among its blocking pids; returns that backend's pid on
+    the first sighting. The lock type and the blocker are read in the same query, so a
+    wait on another lock of `blocker`, or on an advisory lock someone else holds, is not
+    taken for it. Fails at once if `task` finishes first (with its own error, or its
+    result), and after `timeout_s` (cancelling `task`)."""
     deadline = time.monotonic() + timeout_s
     seen: list[str] = []
-    async with await psycopg.AsyncConnection.connect(url, autocommit=True) as conn:
-        while True:
-            done = task.done()
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT locktype FROM pg_locks WHERE pid = %s AND NOT granted", (pid,)
-                )
-                types = [str(r[0]) for r in await cur.fetchall()]
-            if "advisory" in types:
-                return
-            seen += [t for t in types if t not in seen]
-            if done:
-                result = task.result()  # re-raises the task's error
-                raise AssertionError(
-                    f"finished before backend {pid} was seen waiting on an advisory lock "
-                    f"(lock types it waited on: {seen}): {result!r}"
-                )
-            if time.monotonic() > deadline:
-                raise AssertionError(
-                    f"backend {pid} not seen waiting on an advisory lock within {timeout_s} s "
-                    f"(lock types it waited on: {seen})"
-                )
-            await asyncio.sleep(0.01)
+    while True:
+        if task.done():
+            result = task.result()  # re-raises the task's error
+            raise AssertionError(
+                f"finished before a backend was seen waiting on an advisory lock blocked by "
+                f"{blocker} (lock types waited on behind it: {seen}): {result!r}"
+            )
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT pid, locktype FROM pg_locks "
+                "WHERE NOT granted AND %s = ANY(pg_blocking_pids(pid))",
+                (blocker,),
+            )
+            rows = await cur.fetchall()
+        for pid, locktype in rows:
+            if locktype == "advisory":
+                return int(pid)
+        seen += [str(r[1]) for r in rows if str(r[1]) not in seen]
+        if time.monotonic() > deadline:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            raise AssertionError(
+                f"no backend seen waiting on an advisory lock blocked by {blocker} within "
+                f"{timeout_s} s (lock types waited on behind it: {seen})"
+            )
+        await asyncio.sleep(0.01)
 
 
 @contextlib.asynccontextmanager
@@ -267,14 +287,12 @@ async def test_a19_delivery_blocks_on_the_sessions_advisory_lock_then_500_stored
     async with (
         session_lock_held(scratch_pool, scratch_url, org, sid, pi) as purchase_pid,
         billing_client(s, scratch_pool, redis_client) as c,
+        watcher(scratch_url) as w,
     ):
         errs = sample(WEBHOOK_ERRORS, status="500")
         started = time.monotonic()
         task = asyncio.create_task(deliver(c, second))
-        waiter = await wait_task_or_blocked(
-            scratch_url, purchase_pid, task, timeout_s=LOCK_TIMEOUT_S + 15
-        )
-        await wait_advisory_wait(scratch_url, waiter, task, timeout_s=LOCK_TIMEOUT_S + 15)
+        await wait_advisory_wait_blocked_by(w, purchase_pid, task, timeout_s=LOCK_TIMEOUT_S + 15)
         r = await task
         elapsed = time.monotonic() - started
         assert r.status_code == 500 and error_code(r) == "internal_error", r.text
@@ -304,7 +322,10 @@ async def test_a33_retry_blocks_on_the_sessions_advisory_lock_for_lock_timeout(
     second = checkout_event(
         org, 1000, session_id=sid, payment_intent=pi, typ="checkout.session.async_payment_succeeded"
     )
-    async with session_lock_held(scratch_pool, scratch_url, org, sid, pi) as purchase_pid:
+    async with (
+        session_lock_held(scratch_pool, scratch_url, org, sid, pi) as purchase_pid,
+        watcher(scratch_url) as w,
+    ):
         t0 = now()
         await store_raw(scratch_pool, second, received_at=t0)  # newest: re-run first
         other = charge_event(other_pi, 400, 1000)
@@ -312,10 +333,7 @@ async def test_a33_retry_blocks_on_the_sessions_advisory_lock_for_lock_timeout(
         retry_s4, before = sample(HANDLER_FAILURES, path="retry"), gauge(RETRY_LAST_SUCCESS)
         started = time.monotonic()
         run = asyncio.create_task(retry_unapplied(scratch_pool, settings=s))
-        waiter = await wait_task_or_blocked(
-            scratch_url, purchase_pid, run, timeout_s=LOCK_TIMEOUT_S + 15
-        )
-        await wait_advisory_wait(scratch_url, waiter, run, timeout_s=LOCK_TIMEOUT_S + 15)
+        await wait_advisory_wait_blocked_by(w, purchase_pid, run, timeout_s=LOCK_TIMEOUT_S + 15)
         n = await run
         elapsed = time.monotonic() - started
         assert_waited_for_lock_timeout(elapsed)
