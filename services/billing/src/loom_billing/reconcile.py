@@ -62,8 +62,8 @@ from redis.asyncio import Redis
 from loom_billing import metrics
 from loom_billing.logs import fields
 from loom_billing.notify import AutoRecharge, Notifier
+from loom_billing.settings import billing_conninfo
 from loom_billing.streams import StreamId, consumed_through, group_state, parse_id, s
-from loom_platform.db import libpq_url
 from loom_platform.ledger import org_credit_state
 from loom_platform.limiter import HEAL_TOKEN, KEY_ROOT, Limiter, new_heal_token, org_key
 
@@ -360,7 +360,7 @@ class CreditListener:
         while True:
             try:
                 conn = await psycopg.AsyncConnection.connect(
-                    libpq_url(self.database_url), autocommit=True
+                    billing_conninfo(self.database_url), autocommit=True
                 )
                 async with conn:
                     await conn.execute(f"LISTEN {self.CHANNEL}")
