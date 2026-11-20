@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 ## Branches and docs
-- Phase 1 M1 (the platform on the mock) and M2 (the pool manager, offline) are merged into `main`; M3 is next, after the before-M3 review fixes (`docs/m3-review-fixes-spec.md`). Plan: `docs/phase1-runpod-plan.md`; overall plan and user decisions: `docs/PLAN.md`.
+- Phase 1 M1 (the platform on the mock) and M2 (the pool manager, offline) are merged into `main`, with the before-M3 review fixes (`docs/m3-review-fixes-spec.md`). M3 (the AWS control plane, spec `docs/phase1-m3-spec.md`, acceptance note `docs/phase1-m3-acceptance.md`): Stage A (free: code, tests, runbooks, Terraform up to `terraform plan`) is built on branch `phase1-m3` and goes to `main` by PR; Stage B (`terraform apply`, DNS, deploy, live AWS/Stripe acceptance) has not run and needs the user's separate yes with its cap. Next: Stage B, then M4. Plan: `docs/phase1-runpod-plan.md`; overall plan and user decisions: `docs/PLAN.md`.
 - Interfaces between platform services are fixed in `docs/phase1-contracts.md`. Changing one means changing that doc, `services/platform_common` (`loom_platform`) and its tests in the same change.
 
 ## Python (uv workspace; members in root `pyproject.toml`)
@@ -27,6 +27,22 @@ uv run loom-podproxy-bundle --check --out "$RUNNER_TEMP/podproxy-bundle"
 uv run pytest -q -m network services/podproxy/tests/test_podproxy_bundle.py services/podproxy/tests/test_podproxy_bundle_dirty.py
 ```
 Job `acceptance` runs `docker compose up -d --build --wait`, then `uv run loom-m1-acceptance` and `uv run loom-m2-acceptance` (M2's takes ~13 min, mostly the idle-stop wait). The job sets `LOOM_POOLMGR_IDLE_STOP_S=300`; compose's default stays 600.
+
+Job `terraform` (no AWS credentials; needs the network and docker) runs for each of `infra/aws/platform` and `infra/aws/state`, with Terraform 1.16.7 (pinned in the job's `env`; the agents' image uses the same version):
+```
+terraform fmt -check -recursive -diff
+terraform init -backend=false -input=false -lockfile=readonly
+terraform validate
+terraform test        # mock providers; infra/aws/platform must have tests/*.tftest.hcl
+```
+then fails on inline `trivy:ignore`/`tfsec:ignore`/`tflint-ignore` comments (accepted findings live only in `.github/terraform/`: `trivyignore.yaml`, `tflint.hcl`), and runs `tflint` and `trivy config` from digest-pinned docker images. Each stack's `.terraform.lock.hcl` must hold the hashes of every platform (`terraform providers lock -platform=linux_amd64 -platform=linux_arm64 -platform=windows_amd64 -platform=darwin_arm64`), or `init` passes in CI and `validate` fails.
+
+Job `m3-prod-stack` (free; docker) starts the production compose stack (`deploy/compose.prod.yml`, local images, TLS Postgres, throwaway CA) as project `loom-m3prod` and checks M1 acceptance items 0, b and d against it. The test starts and removes the stack itself:
+```
+uv run pytest -q -m acceptance --timeout 3000 services/devstack/tests/test_devstack_m3_prodstack.py
+```
+
+Workflow `.github/workflows/images.yml` (job `images`, not part of `ci`) runs on manual dispatch only (`workflow_dispatch`), on an `ubuntu-24.04-arm` runner, in the GitHub environment `platform-images` (deployment branches: `main` only). It needs AWS: the repository variables `LOOM_IMAGES_ROLE_ARN` and `LOOM_RELEASES_BUCKET`, and OIDC (`id-token: write`). It builds the arm64 images (gateway, billing, web, poolmgr, devstack, caddy) and pushes them to ECR tagged by git sha (an image already pushed for the commit is reused), then uploads the release manifest and the deploy bundle to the releases bucket. Run it only on a commit of `main`, and only for Stage B.
 
 Flaky tests (plan R15). Don't re-run CI to look for flakes:
 - On PRs, job `flake-check` runs the test files the PR adds or changes 20 times under CPU load, with a 7-minute limit. That is 10 pytest sessions, each with `-n auto --count 2` (pytest-repeat). Separate sessions are needed because pytest-repeat's copies share module-scoped fixtures. The job fails if a test both passed and failed (`scripts/flaky_report.py`), and is skipped when no test file changed.
