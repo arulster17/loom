@@ -22,7 +22,7 @@ import sys
 import psycopg
 import uvicorn
 from prometheus_client import start_http_server
-from psycopg_pool import PoolTimeout
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 from loom_billing.api import create_app
 from loom_billing.logs import configure_logging
@@ -35,7 +35,7 @@ from loom_platform.settings import enforce_environment, redis_policy_problems
 
 log = logging.getLogger("loom_billing")
 
-BUSY_EXIT = 75  # `stripe-event resolve`: lock or pool timeout, nothing changed, retry (EX_TEMPFAIL)
+BUSY_EXIT = 75  # `stripe-event`: lock/statement/pool timeout or no database; retry (EX_TEMPFAIL)
 
 COMMANDS = (
     "all",
@@ -98,21 +98,29 @@ def _stripe_event_parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def _list_events(pool: AsyncConnectionPool, args: argparse.Namespace) -> int:
+    for e in await list_events(pool, unapplied=args.unapplied):
+        stale = f" stale {e['stale_reported_at']:%Y-%m-%d %H:%M}" if e["stale_reported_at"] else ""
+        err = f" errors={e['error_count']} {e['last_error']}" if e["last_error"] else ""
+        when = f"{e['received_at']:%Y-%m-%d %H:%M:%S}"
+        print(f"{e['id']}  {e['type']}  {when}  {e['result']}{stale}{err}")
+    return 0
+
+
 async def _stripe_event(settings: BillingSettings, args: argparse.Namespace) -> int:
-    pool = await open_pool(billing_conninfo(settings.database_url), max_size=2)
+    resolving = args.action == "resolve"
+    what = f"resolve {args.event_id}" if resolving else "list events"
+    pool: AsyncConnectionPool | None = None
     try:
-        if args.action == "list":
-            for e in await list_events(pool, unapplied=args.unapplied):
-                stale = (
-                    f" stale {e['stale_reported_at']:%Y-%m-%d %H:%M}"
-                    if e["stale_reported_at"]
-                    else ""
-                )
-                err = f" errors={e['error_count']} {e['last_error']}" if e["last_error"] else ""
-                when = f"{e['received_at']:%Y-%m-%d %H:%M:%S}"
-                print(f"{e['id']}  {e['type']}  {when}  {e['result']}{stale}{err}")
-            return 0
         try:
+            # The pool wait is bounded like the webhook's (spec §6.13): an unreachable
+            # database fails fast instead of after psycopg's 30 s.
+            pool = await asyncio.wait_for(
+                open_pool(billing_conninfo(settings.database_url), max_size=2),
+                timeout=settings.stripe_webhook_db_timeout_s,
+            )
+            if not resolving:
+                return await _list_events(pool, args)
             await resolve_event(
                 pool,
                 args.event_id,
@@ -123,18 +131,42 @@ async def _stripe_event(settings: BillingSettings, args: argparse.Namespace) -> 
         except ResolveRefused as e:
             print(f"refused: {e.reason}", file=sys.stderr)
             return 2
-        except (psycopg.Error, PoolTimeout) as e:
-            # The row lock, the statement or the pool timed out: the transaction rolled back.
+        except (TimeoutError, PoolTimeout) as e:
+            # No connection in time (nothing was sent), or the pool wait timed out.
             print(
-                f"busy, retry: could not resolve {args.event_id} ({type(e).__name__}); "
-                "nothing changed",
+                f"busy, retry: could not {what} ({type(e).__name__}): the database did not "
+                f"answer in time; nothing changed",
                 file=sys.stderr,
             )
             return BUSY_EXIT
+        except (psycopg.errors.LockNotAvailable, psycopg.errors.QueryCanceled) as e:
+            # The row lock or the statement timed out: the transaction rolled back.
+            print(
+                f"busy, retry: could not {what} ({type(e).__name__}); nothing changed",
+                file=sys.stderr,
+            )
+            return BUSY_EXIT
+        except psycopg.OperationalError as e:
+            # The connection broke: a COMMIT may or may not have reached the server.
+            print(
+                f"database connection failed during {what} ({type(e).__name__}); "
+                + (
+                    f"{args.event_id} may or may not have been resolved: check with "
+                    "`stripe-event list`, then retry if it is still unresolved"
+                    if resolving
+                    else "retry"
+                ),
+                file=sys.stderr,
+            )
+            return BUSY_EXIT
+        except psycopg.Error as e:
+            print(f"database error during {what} ({type(e).__name__}): {e}", file=sys.stderr)
+            return 1
         print(f"resolved {args.event_id}: nothing was posted")
         return 0
     finally:
-        await pool.close()
+        if pool is not None:
+            await pool.close()
 
 
 def _stripe_event_main(argv: list[str]) -> int:

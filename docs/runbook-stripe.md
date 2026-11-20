@@ -68,7 +68,11 @@ is refused (exit 2, nothing changed) for a non-admin, an unknown or already proc
 event, a clawback whose PaymentIntent is not a non-empty string, and a clawback whose
 payment is already credited. If the event row is locked (the webhook or the retry job is
 working on it) or the database is slow, `resolve` prints `busy, retry: ...` to stderr and
-exits **75**, nothing changed: run it again in a minute.
+exits **75**, nothing changed: run it again in a minute. The same exit 75 (`list` too)
+means the database did not answer in time (nothing changed), or the connection broke
+mid-way (the message says the event may or may not have been resolved: check with `list`,
+then retry if it is still unresolved). Any other database error exits 1 with its message and
+no claim about what changed.
 
 Which case is which:
 
