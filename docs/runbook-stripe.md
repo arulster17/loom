@@ -113,7 +113,12 @@ customer is short until an admin adjustment.
 1. In the Stripe dashboard, roll the endpoint's signing secret and choose an overlap window
    (Stripe signs every delivery with both secrets during it).
 2. Put the new `whsec_` into Secrets Manager `loom/platform/stripe`
-   (`STRIPE_WEBHOOK_SECRET`).
+   (`STRIPE_WEBHOOK_SECRET`). The secret is one JSON object with `secret_key` and
+   `webhook_secret`, and you cannot read the current value from your laptop, so put the
+   whole object: the current `rk_test_` key and the new `whsec_`, from your laptop with
+   `read -rs`, `jq -n --arg` and `--secret-string file:///dev/stdin`, exactly as in
+   [runbook-platform.md](runbook-platform.md) section 4, step 2. A value with only the new
+   `whsec_` makes the next apply fail.
 3. Redeploy billing (`loom-deploy apply` with the current release) **at any point inside
    the overlap window**: every delivery stays verifiable, since any matching `v1` is enough.
 4. Check `loom_billing_stripe_webhooks_total{result="signature_mismatch"}` did not move and

@@ -91,8 +91,8 @@ line, in a compose file, in the release manifest or in a log. The instance role 
 Run on the box through SSM. `loom-deploy.py` is the module itself, copied into every
 release; the first time, take it from the releases bucket (after section 5's image build).
 Run it with `python3.12 -S` (the boot script installs 3.12; the host's `python3` is the
-older system Python). Only the secrets' creation and the Stripe values use Run Command
-here; everything that reads a secret value runs in an interactive session on the box
+older system Python). Only the secrets' creation uses Run Command here (Run Command keeps
+its parameters in history, so no secret value goes through it); everything that reads a secret value runs in an interactive session on the box
 (`aws ssm start-session --region $AWS_REGION --target $INSTANCE`, then `sudo -i`), because
 each secret's policy lets only its reader role (the instance role) read it: your own
 principal cannot, by design.
@@ -110,12 +110,20 @@ aws ssm get-command-invocation --region $AWS_REGION --instance-id $INSTANCE --co
    (never a value) and never overwrites one. **Run it before you put Google values into
    `auth`**: a secret that already has a value is left whole, so an `auth` holding only the
    Google keys would lack `auth_secret` and `apply` would stop naming it.
-2. Put the user's values (nothing is echoed; stdin, not the command line):
+2. Put the Stripe values from **your laptop**, not Run Command and not the box (your
+   principal may `PutSecretValue`; the secrets' policies deny only `GetSecretValue` to
+   everyone but the reader role). Read both at the prompt (not echoed, not in shell
+   history, not on a command line), build the JSON with `jq`, and pipe it on stdin. Anyone
+   holding the webhook secret can forge credit events, so keep it out of history:
 
    ```sh
-   printf %s '{"secret_key":"rk_test_...","webhook_secret":"whsec_..."}' \
-     | aws secretsmanager put-secret-value --secret-id loom/platform/stripe \
-         --secret-string file:///dev/stdin
+   read -rs SK   # paste the rk_test_ key, press Enter
+   read -rs WH   # paste the whsec_ signing secret, press Enter
+   jq -n --arg secret_key "$SK" --arg webhook_secret "$WH" \
+     '{secret_key: $secret_key, webhook_secret: $webhook_secret}' \
+     | aws secretsmanager put-secret-value --region $AWS_REGION \
+         --secret-id loom/platform/stripe --secret-string file:///dev/stdin
+   unset SK WH
    ```
 
    Google: merge `google_id` and `google_secret` into the `auth` JSON **on the box**, in an

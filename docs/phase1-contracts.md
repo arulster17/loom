@@ -1113,7 +1113,7 @@ reset` (services/poolmgr/README.md).
 local` (the bench mock behind `loom-podproxy`, as in compose) and
 `LOOM_POOLMGR_MOCK_BACKEND=true` (§2), with `LOOM_ENV` unset, so every other production
 check stays on. Its serving file is `deploy/serving.m3.yaml` (`provider: local`, the
-committed models and timings, `gateway_egress_cidrs` = the instance's Elastic IP).
+committed models and timings, `gateway_egress_cidrs` = the compose subnet `10.214.0.0/24`).
 Gauges *(M3)*: `loom_poolmgr_ca_expiry_seconds` (seconds until the pod CA's `notAfter`,
 set at start and each tick; alarm P3 at 30 days; the refusal at
 `server_cert_renew_before_s` stays); `loom_poolmgr_pool_reason{model,reason}`, 1 for each
