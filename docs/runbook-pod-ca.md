@@ -97,10 +97,10 @@ gateway first: P4).
    issues the gateway's client certificate from the new CA (the file was from the old CA,
    so it is replaced, whatever its age) and begins to issue pod certificates from the new
    CA. Recreating the manager makes it adopt the running pods, and adoption already re-keys
-   each of them from the new CA. So `rekey` is a safety net, not a required step: it
-   re-issues every ready pod's certificate again. After the recreate it is redundant and
-   harmless (a pod whose adoption fails is terminated and replaced with a certificate from
-   the new CA), and step 4 is the gate:
+   each of them from the new CA. So `rekey` is not a required step: it re-issues every
+   ready pod's certificate again, which after the recreate is redundant and harmless (a
+   pod whose adoption fails is terminated and replaced with a certificate from the new
+   CA). Step 4 is the gate:
 
    ```bash
    # On the box. The compose project is $LOOM_DEPLOY_PROJECT (default loom); the manager's
@@ -135,8 +135,8 @@ gateway first: P4).
    returns to OK within its next 1-hour period). The old CA's secret versions need no
    cleanup: Secrets Manager has no per-version delete. After the put the old version keeps
    the `AWSPREVIOUS` label (the way back, still readable by the instance role) until the
-   next rollover's put; only then does it lose its label, and Secrets Manager eventually
-   removes it.
+   next rollover's put; only then does it lose its label. It stays stored and retrievable
+   by its version id after that (there is no per-version delete).
 
 If a step fails, going back means moving the `AWSCURRENT` stage of each of the two
 secrets back to the version id you noted before the put, a deploy and a `rekey`. Roll
