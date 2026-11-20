@@ -75,7 +75,11 @@ gateway first: P4).
    Each value is a JSON object `{"crt": ..., "key": ...}` (the certificate and key PEMs
    as strings). Build it with `jq` and use the same `put-secret-value` pattern as
    `aws-setup.md` step 8, from `./pod-ca-new` (`ca.crt`, `ca.key` for `pod-ca`;
-   `loom-poolmgr.crt`, `loom-poolmgr.key` for `poolmgr-client`):
+   `loom-poolmgr.crt`, `loom-poolmgr.key` for `poolmgr-client`).
+
+   First note each secret's current version id (`aws secretsmanager list-secret-version-ids
+   --region us-east-1 --secret-id <id>`: the one with stage `AWSCURRENT`). It is the way
+   back, and the rollback below needs it:
 
    ```bash
    jq -n --rawfile crt pod-ca-new/ca.crt --rawfile key pod-ca-new/ca.key '{crt: $crt, key: $key}' \
@@ -86,10 +90,7 @@ gateway first: P4).
        --secret-id loom/platform/poolmgr-client --secret-string file:///dev/stdin
    ```
 
-   Note each secret's previous version id first (`aws secretsmanager list-secret-version-ids
-   --secret-id <id>`: the one with stage `AWSCURRENT` before the put, `AWSPREVIOUS`
-   after): it is the way back. Then delete the local directory (the key never stays on a
-   laptop).
+   Then delete the local directory (the key never stays on a laptop).
 3. **Deploy** (`loom-deploy apply --release <sha>`; the gateway first, then the manager:
    P4). The outage begins here: requests can fail until the manager has re-keyed every pod
    and the gateway has loaded its new client certificate (see above). On start the manager
@@ -97,8 +98,9 @@ gateway first: P4).
    so it is replaced, whatever its age) and begins to issue pod certificates from the new
    CA. Recreating the manager makes it adopt the running pods, and adoption already re-keys
    each of them from the new CA. So `rekey` is a safety net, not a required step: it
-   re-issues every ready pod's certificate again, which catches a pod whose adoption
-   failed or is still pending, instead of waiting for that pod to near expiry:
+   re-issues every ready pod's certificate again. After the recreate it is redundant and
+   harmless (a pod whose adoption fails is terminated and replaced with a certificate from
+   the new CA), and step 4 is the gate:
 
    ```bash
    # On the box. The compose project is $LOOM_DEPLOY_PROJECT (default loom); the manager's
@@ -122,23 +124,31 @@ gateway first: P4).
    Under each ready pod a line shows `certificate: issued by <CA name>, expires ...
    (chains to the manager's CA)`. A pod whose line says `does NOT chain to the manager's
    CA` still has an old certificate: run `rekey` again, and if it persists look at the
-   manager's log for `admin rekey of pod ... failed`. Do not go on until none says it.
+   manager's log for `admin rekey of pod ... failed`. A pod whose line says `certificate:
+   not read (...)` blocks the next step too: its certificate could not be checked. Do not
+   go on until no pod says either.
 5. **The gateway's client certificate** is from the new CA already (step 3). Check
    `loom_gateway_client_cert_expiry_seconds` (about 7 days) on the gateway's metrics, and
    that the file in the `gateway-cert` volume was written after the switch; the gateway's
    log says `reloaded the client certificate and pod CA bundle`, and requests succeed
    again. Confirm `loom_poolmgr_ca_expiry_seconds` shows the new CA's validity (P3
    returns to OK within its next 1-hour period). The old CA's secret versions need no
-   cleanup: Secrets Manager has no per-version delete, and an unstaged version is removed
-   by the service in time.
+   cleanup: Secrets Manager has no per-version delete. After the put the old version keeps
+   the `AWSPREVIOUS` label (the way back, still readable by the instance role) until the
+   next rollover's put; only then does it lose its label, and Secrets Manager eventually
+   removes it.
 
 If a step fails, going back means moving the `AWSCURRENT` stage of each of the two
-secrets back to the previous version, a deploy and a `rekey`:
+secrets back to the version id you noted before the put, a deploy and a `rekey`. Roll
+back only a secret whose put succeeded, i.e. one whose `AWSCURRENT` is no longer the noted
+id: if the `pod-ca` put succeeded and the `poolmgr-client` put failed, `poolmgr-client`'s
+`AWSPREVIOUS` is an even older certificate, or none:
 
 ```bash
 aws secretsmanager update-secret-version-stage --region us-east-1 \
   --secret-id loom/platform/pod-ca --version-stage AWSCURRENT \
-  --move-to-version-id <AWSPREVIOUS version id> --remove-from-version-id <current version id>
+  --move-to-version-id <the version id you noted before the put> \
+  --remove-from-version-id <the current (new) version id>
 ```
 
 (the same for `loom/platform/poolmgr-client`). Do not try to delete the new version. The
