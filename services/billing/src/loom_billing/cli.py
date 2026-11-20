@@ -30,7 +30,7 @@ from loom_billing.resolve import ResolveRefused, list_events, resolve_event
 from loom_billing.settings import BillingSettings, billing_conninfo
 from loom_billing.stripe_stub import create_stub_app
 from loom_billing.worker import Worker, redis_from_settings, run_worker
-from loom_platform.db import RoleCheckFailed, open_pool, role_gate
+from loom_platform.db import RoleCheckFailed, libpq_url, open_pool, role_gate
 from loom_platform.settings import enforce_environment, redis_policy_problems
 
 log = logging.getLogger("loom_billing")
@@ -115,10 +115,17 @@ async def _stripe_event(settings: BillingSettings, args: argparse.Namespace) -> 
         try:
             # The pool wait is bounded like the webhook's (spec §6.13): an unreachable
             # database fails fast instead of after psycopg's 30 s.
-            pool = await asyncio.wait_for(
-                open_pool(billing_conninfo(settings.database_url), max_size=2),
-                timeout=settings.stripe_webhook_db_timeout_s,
+            # Each step carries its own bound: cancelling `open_pool` from outside would
+            # land inside a pool worker's connect, which psycopg_pool retries forever.
+            timeout = settings.stripe_webhook_db_timeout_s
+            await asyncio.wait_for(role_gate.wait(), timeout=timeout)
+            pool = AsyncConnectionPool(
+                libpq_url(billing_conninfo(settings.database_url)),
+                min_size=1,
+                max_size=2,
+                open=False,
             )
+            await pool.open(wait=True, timeout=timeout)
             if not resolving:
                 return await _list_events(pool, args)
             await resolve_event(
