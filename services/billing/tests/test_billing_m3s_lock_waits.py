@@ -111,12 +111,37 @@ async def credited_payment(pool, cents: int = 1000) -> tuple[uuid.UUID, str]:
     return org, pi
 
 
-async def waiting_lock_types(url: str, pid: int) -> list[str]:
-    """The types of the locks backend `pid` is waiting for."""
-    conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
-    async with conn, conn.cursor() as cur:
-        await cur.execute("SELECT locktype FROM pg_locks WHERE pid = %s AND NOT granted", (pid,))
-        return [str(r[0]) for r in await cur.fetchall()]
+async def wait_advisory_wait(
+    url: str, pid: int, task: asyncio.Task[object], *, timeout_s: float
+) -> None:
+    """Poll until backend `pid` is seen waiting on an advisory lock (a barrier: one read
+    can land before the wait shows or after it ended). Fails if `task` finishes first
+    (with its result or error) or `timeout_s` passes."""
+    deadline = time.monotonic() + timeout_s
+    seen: list[str] = []
+    async with await psycopg.AsyncConnection.connect(url, autocommit=True) as conn:
+        while True:
+            done = task.done()
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT locktype FROM pg_locks WHERE pid = %s AND NOT granted", (pid,)
+                )
+                types = [str(r[0]) for r in await cur.fetchall()]
+            if "advisory" in types:
+                return
+            seen += [t for t in types if t not in seen]
+            if done:
+                result = task.result()  # re-raises the task's error
+                raise AssertionError(
+                    f"finished before backend {pid} was seen waiting on an advisory lock "
+                    f"(lock types it waited on: {seen}): {result!r}"
+                )
+            if time.monotonic() > deadline:
+                raise AssertionError(
+                    f"backend {pid} not seen waiting on an advisory lock within {timeout_s} s "
+                    f"(lock types it waited on: {seen})"
+                )
+            await asyncio.sleep(0.01)
 
 
 @contextlib.asynccontextmanager
@@ -249,7 +274,7 @@ async def test_a19_delivery_blocks_on_the_sessions_advisory_lock_then_500_stored
         waiter = await wait_task_or_blocked(
             scratch_url, purchase_pid, task, timeout_s=LOCK_TIMEOUT_S + 15
         )
-        assert "advisory" in await waiting_lock_types(scratch_url, waiter)
+        await wait_advisory_wait(scratch_url, waiter, task, timeout_s=LOCK_TIMEOUT_S + 15)
         r = await task
         elapsed = time.monotonic() - started
         assert r.status_code == 500 and error_code(r) == "internal_error", r.text
@@ -290,7 +315,7 @@ async def test_a33_retry_blocks_on_the_sessions_advisory_lock_for_lock_timeout(
         waiter = await wait_task_or_blocked(
             scratch_url, purchase_pid, run, timeout_s=LOCK_TIMEOUT_S + 15
         )
-        assert "advisory" in await waiting_lock_types(scratch_url, waiter)
+        await wait_advisory_wait(scratch_url, waiter, run, timeout_s=LOCK_TIMEOUT_S + 15)
         n = await run
         elapsed = time.monotonic() - started
         assert_waited_for_lock_timeout(elapsed)
