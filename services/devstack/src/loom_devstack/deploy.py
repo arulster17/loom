@@ -1246,6 +1246,20 @@ def check_p4_refusal(
             "ok": False,
             "detail": "--p4-release is the current release: apply --only poolmgr is not refused",
         }
+    # The apply's own pre-fetch plan (apply_release): if it would not refuse, running the
+    # apply would really fetch, migrate and recreate the poolmgr. Do not run it.
+    try:
+        plan_steps(current_view(load_release(paths)), {"sha": p4_release}, ["poolmgr"])
+    except Refused:
+        pass
+    else:
+        return {
+            "ok": False,
+            "detail": (
+                f"the gateway already runs {p4_release[:12]}: apply --only poolmgr would not "
+                "be refused; not run"
+            ),
+        }
     before = compose.started_at("poolmgr")
     code = apply_release(p4_release, ["poolmgr"])
     after = compose.started_at("poolmgr")

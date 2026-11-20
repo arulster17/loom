@@ -16,6 +16,12 @@ variable "brand_name" {
     condition     = length(trimspace(var.brand_name)) > 0 && length(var.brand_name) <= 60
     error_message = "brand_name must be 1 to 60 characters."
   }
+
+  # loom-deploy refuses these too (§6.11): they would pass apply and then fail every deploy.
+  validation {
+    condition     = !can(regex("[\\x00-\\x1f,;:@()\\[\\]<>\"\\\\]", var.brand_name))
+    error_message = "brand_name must not contain control characters or any of , ; : @ ( ) [ ] < > \" \\ (§6.11)."
+  }
 }
 
 variable "releases_bucket" {
