@@ -56,7 +56,8 @@ web app and the registry.
 | `AUTH_SECRET` | none, **required** | Auth.js secret; also derives the playground key secret |
 | `AUTH_URL` | from the request (dev only) | Public URL of the app, e.g. `http://localhost:3000` (links in emails, Stripe return URLs). Required outside `LOOM_ENV=dev`: Auth.js trusts the request's Host header without it |
 | `EMAIL_SERVER` | `smtp://localhost:1025` | SMTP for magic links; compose: `smtp://mailpit:1025` |
-| `EMAIL_FROM` | `Loom <no-reply@loom.local>` | Sender |
+| `EMAIL_FROM` | `no-reply@localhost` (no default name) | The magic-link sender. Production: `<name> <no-reply@<domain>>`, rendered by `loom-deploy` from the site parameter; compose: `Loom <login@loom.localhost>` |
+| `LOOM_BRAND_NAME` | unset | The product name shown in the page title, the sign-in heading and the dashboard and admin headers. Read on the server at request time (not a `NEXT_PUBLIC_` variable, not at build time), so one image serves any name. Unset: no name is shown (each page uses its own title and a neutral header) |
 | `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` | none | Google sign-in appears only when both are set; redirect URI `<AUTH_URL>/api/auth/callback/google`. A Google sign-in is refused unless Google reports `email_verified: true` |
 | `LOOM_GOOGLE_EMAIL_LINKING` | `true` | `true`/`false`: a Google sign-in may attach to an existing user with the same (verified) email, e.g. one who signed up by magic link (Auth.js `allowDangerousEmailAccountLinking`) |
 | `LOOM_ADMIN_EMAILS` | empty | Comma-separated; with `LOOM_ENV=dev` only, these users get `users.role = 'admin'` at sign-in (audited). Elsewhere it grants nothing and the app logs a startup warning if it is set |

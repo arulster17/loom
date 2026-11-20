@@ -1,0 +1,19 @@
+# Prometheus on the box (docs/phase1-m3-spec.md §6.9): the three services' metrics ports
+# on the compose network, and itself; 15 days of series (the command line).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: gateway
+    static_configs:
+      - targets: ["gateway:9100"]
+  - job_name: billing
+    static_configs:
+      - targets: ["billing:9101"]
+  - job_name: poolmgr
+    static_configs:
+      - targets: ["poolmgr:9102"]
+  - job_name: prometheus
+    static_configs:
+      - targets: ["127.0.0.1:9090"]

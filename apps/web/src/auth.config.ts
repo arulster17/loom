@@ -25,7 +25,8 @@ function magicLink(env: Env): Provider {
   // Local dev: EMAIL_SERVER=smtp://localhost:1025 (Mailpit).
   const mail = {
     server: env.EMAIL_SERVER ?? "smtp://localhost:1025",
-    from: env.EMAIL_FROM ?? "Loom <no-reply@loom.local>",
+    // No default name: the sender is EMAIL_FROM (`<name> <no-reply@<domain>>` in production).
+    from: env.EMAIL_FROM ?? "no-reply@localhost",
     maxAge: 15 * 60,
   };
   const send = Nodemailer(mail).sendVerificationRequest;

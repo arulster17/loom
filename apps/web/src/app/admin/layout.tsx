@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { SignOutButton } from "@/components/sign-out";
+import { brandName } from "@/lib/brand";
 import { requireAdmin } from "@/lib/session";
 
 export default async function AdminLayout({ children }: LayoutProps<"/admin">) {
@@ -11,7 +12,7 @@ export default async function AdminLayout({ children }: LayoutProps<"/admin">) {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
           <div className="flex items-center gap-6 text-sm">
             <Link href="/admin" className="font-semibold">
-              Loom admin
+              {brandName() ? `${brandName()} admin` : "Admin"}
             </Link>
             <Link href="/dashboard" className="text-zinc-300 hover:text-white">
               Dashboard

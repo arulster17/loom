@@ -55,7 +55,7 @@ export async function POST(req: Request) {
       cache: "no-store",
     });
   } catch {
-    return error(502, "The Loom API is not reachable right now.", "gateway_unreachable");
+    return error(502, "The API is not reachable right now.", "gateway_unreachable");
   }
 
   const headers = new Headers({ "Cache-Control": "no-store" });

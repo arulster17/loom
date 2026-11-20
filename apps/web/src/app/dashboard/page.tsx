@@ -47,7 +47,7 @@ export default async function OverviewPage() {
       </div>
       <Card title="Quick start" className="mt-6">
         <p className="text-sm text-zinc-700">
-          Loom works with the OpenAI SDKs: change the base URL and use a Loom key. Try models in the{" "}
+          This API works with the OpenAI SDKs: change the base URL and use a key from the API keys page. Try models in the{" "}
           <Link href="/dashboard/playground" className="underline">
             playground
           </Link>{" "}
@@ -60,7 +60,7 @@ export default async function OverviewPage() {
   -d '{"model": "qwen3-8b", "messages": [{"role": "user", "content": "Hello"}]}'`}
         </pre>
         <p className="mt-3 text-xs text-zinc-500">
-          Every response carries its cost in the X-Loom-Cost-USD header. Loom does not store your prompts or completions.
+          Every response carries its cost in the X-Loom-Cost-USD header. Prompts and completions are not stored.
         </p>
       </Card>
     </>
