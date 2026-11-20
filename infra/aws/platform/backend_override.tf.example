@@ -1,0 +1,8 @@
+# For `terraform plan` before the state bucket exists (docs/phase1-m3-spec.md §5.5): copy
+# to backend_override.tf (gitignored; Terraform merges it over backend.tf), then
+# `terraform init -reconfigure`. Local state only; never apply with it.
+terraform {
+  backend "local" {
+    path = "terraform.tfstate"
+  }
+}
