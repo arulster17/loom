@@ -11,9 +11,9 @@ its local state.
 | File | Resources |
 |---|---|
 | `network.tf` | VPC `10.42.0.0/16`, one public subnet (the box), two private subnets (RDS), internet gateway, route tables, security groups (box: 80/443 in; RDS: 5432 from the box only). No NAT gateway |
-| `ec2.tf`, `user_data.sh.tftpl`, `dlm.tf` | `t4g.medium` Amazon Linux 2023 arm64 box (IMDSv2, hop limit 1, no key pair, SSM only), 30 GB root and a separate 20 GB data volume at `/var/lib/loom` (`prevent_destroy`), Elastic IP, log group `/loom/platform`, daily snapshots of the data volume (7 kept) |
+| `ec2.tf`, `user_data.sh.tftpl`, `dlm.tf` | `t4g.medium` Amazon Linux 2023 arm64 box (IMDSv2, hop limit 1, no key pair, SSM only), 30 GB root and a separate 20 GB data volume at `/var/lib/loom` (`prevent_destroy`), Elastic IP, log groups `/loom/platform` and `/loom/platform/prometheus`, daily snapshots of the data volume (7 kept) |
 | `rds.tf` | PostgreSQL 16 `db.t4g.micro`, 20 GB gp3, encrypted, single AZ, 7-day backups, `rds.force_ssl = 1`, TCP keepalives, master user `loom_owner` with an RDS-managed secret |
-| `secrets.tf` | Ten secret containers under `loom/platform/` (no values, ever) with resource policies naming their one reader role |
+| `secrets.tf` | Ten secret containers under `loom/platform/` (no values, ever) with resource policies that deny `secretsmanager:GetSecretValue` to every principal except the secret's one reader role (the instance role, or the serving reaper role for `serving-runpod-key`) and allow that role |
 | `iam.tf` | Instance role, GitHub OIDC role for `images.yml`, serving reaper role, SES SMTP user `loom-ses-smtp` (spec §5.6 lists every grant) |
 | `ecr.tf` | Repositories `loom/gateway`, `billing`, `web`, `poolmgr`, `devstack`, `caddy` (immutable tags, scan on push, last 20 images) |
 | `s3.tf` | Lease bucket (M4) and releases bucket (`var.releases_bucket`): private, SSE, TLS-only policy, versioning off |
@@ -94,7 +94,7 @@ step passes. Spend and the spec's own choices drive most of them.
 | AWS-0178 | MEDIUM | `aws_vpc.platform` | No VPC flow logs: extra log group, role and ingestion cost; the spec lists none |
 | AWS-0090 | MEDIUM | `aws_s3_bucket.leases`, `.releases` | Versioning is off by the spec (§5.2 s3, §5.6), and a test pins it |
 | AWS-0089 | LOW | `aws_s3_bucket.leases`, `.releases` (and `state`) | No access-log bucket; CloudTrail covers management events |
-| AWS-0017 | LOW | `aws_cloudwatch_log_group.platform`, `.serving_reaper` | Log groups use the default encryption, not a customer-managed key |
+| AWS-0017 | LOW | `aws_cloudwatch_log_group.platform`, `.prometheus`, `.serving_reaper` | Log groups use the default encryption, not a customer-managed key |
 | AWS-0027 | LOW | `aws_ebs_volume.data` | Encrypted with the AWS-managed key, not a customer-managed one |
 | AWS-0033 | LOW | `aws_ecr_repository.loom` (six) | Same, for the repositories |
 | AWS-0098 | LOW | `aws_secretsmanager_secret.platform` (ten) | Secrets use the AWS-managed key; a customer-managed key would add cost and a second policy to every reader |

@@ -200,7 +200,7 @@ resource "aws_cloudwatch_metric_alarm" "g1" {
   alarm_description   = "G1: the settle spool has held records for 5 minutes"
   namespace           = "Loom/Platform"
   metric_name         = "loom_gateway_settle_spool_depth"
-  statistic           = "Minimum"
+  statistic           = "Maximum"
   comparison_operator = "GreaterThanThreshold"
   threshold           = 0
   period              = 60
@@ -263,7 +263,7 @@ resource "aws_cloudwatch_metric_alarm" "s1b" {
   alarm_description   = "S1b: stuck Stripe events have been outstanding for 24 hours"
   namespace           = "Loom/Platform"
   metric_name         = "loom_billing_stripe_unapplied_stale_events"
-  statistic           = "Minimum"
+  statistic           = "Maximum"
   comparison_operator = "GreaterThanThreshold"
   threshold           = 0
   period              = 3600
@@ -424,7 +424,7 @@ resource "aws_cloudwatch_metric_alarm" "r1_cpu" {
   namespace           = "AWS/RDS"
   metric_name         = "CPUUtilization"
   dimensions          = { DBInstanceIdentifier = aws_db_instance.platform.identifier }
-  statistic           = "Average"
+  statistic           = "Maximum"
   comparison_operator = "GreaterThanThreshold"
   threshold           = 80
   period              = 300
