@@ -19,7 +19,11 @@ Sign-in: test users are signed in by inserting an Auth.js database session and s
 its cookie; the admin is granted with contracts §4's SQL. The acceptance's users
 (`<who>-<run>@m3-acceptance.test`) and their orgs are left in place, as M1's are.
 
-Items (box mode runs all but m3-h; `--external` runs only m3-h):
+Items (box mode runs all but m3-h; `--external` runs only m3-h). `--only <items>` (or
+`--only=<items>`) selects a comma-separated subset of the mode's items, spaces around an
+item ignored; given more than once, the last one wins (§6.12 "Item selection", which
+`loom-deploy acceptance` reads the same way to decide whether m3-p's host half runs). An
+empty or unknown item is a usage error, and no option name may be abbreviated:
 
 m3-0  M1's flow through https://api.<domain>/v1: sign up -> pending -> approve -> $5 -> key
       -> SDK (both models, stream and not, chat and completions) -> playground -> usage
@@ -632,12 +636,20 @@ class _External(M3Acceptance):
 
 
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="loom-m3-acceptance", description=__doc__.splitlines()[0])
+    p = argparse.ArgumentParser(
+        prog="loom-m3-acceptance",
+        description=__doc__.splitlines()[0],
+        allow_abbrev=False,  # §6.12: `--onl` is a usage error, not `--only`
+    )
     env = os.environ.get
     p.add_argument("--domain", default=env("LOOM_DOMAIN"), help="the site's domain (§6.11)")
     p.add_argument("--brand-name", default=env("LOOM_BRAND_NAME"), help="the product name (m3-h)")
     p.add_argument("--external", action="store_true", help="only what the internet sees (m3-h)")
-    p.add_argument("--only", help=f"comma-separated items, e.g. m3-0,m3-b (of {', '.join(ITEMS)})")
+    p.add_argument(
+        "--only",
+        help=f"comma-separated items, e.g. m3-0,m3-b (of {', '.join(ITEMS)}); "
+        "given more than once, the last one wins",
+    )
     p.add_argument(
         "--json",
         type=Path,
@@ -679,15 +691,28 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+def items(args: argparse.Namespace) -> list[str]:
+    """The items a run with `args` checks, in run order (§6.12 "Item selection"): `--only`'s
+    comma-separated list (spaces around an item ignored; argparse keeps the last `--only`),
+    else every item of the mode (box: all but m3-h; `--external`: m3-h only). An empty item
+    or one outside the mode is a usage error (exit 2)."""
+    pool = EXTERNAL_ITEMS if args.external else BOX_ITEMS
+    if args.only is None:
+        return list(pool)
+    chosen = [i.strip() for i in args.only.split(",")]
+    if "" in chosen:
+        parser().error(f"--only {args.only!r}: an empty item (mode items: {', '.join(pool)})")
+    unknown = [i for i in chosen if i not in pool]
+    if unknown:
+        parser().error(f"not items of this mode: {unknown} (mode items: {', '.join(pool)})")
+    return [i for i in pool if i in chosen]
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parser().parse_args(argv)
     if not args.domain:
         parser().error("--domain (or LOOM_DOMAIN) is required")
-    pool = EXTERNAL_ITEMS if args.external else BOX_ITEMS
-    items = [i.strip() for i in args.only.split(",")] if args.only else list(pool)
-    unknown = [i for i in items if i not in pool]
-    if unknown:
-        parser().error(f"not items of this mode: {unknown} (mode items: {', '.join(pool)})")
+    chosen = items(args)
     if not args.project:
         args.project = (None if args.external else own_project()) or "loom"
     stack = public_stack(args)
@@ -695,7 +720,7 @@ def main(argv: list[str] | None = None) -> None:
     say(f"M3 acceptance ({'external' if args.external else 'box'}) against {stack.web}")
     acc = _External(stack, report, args) if args.external else M3Acceptance(stack, report, args)
     with contextlib.suppress(AcceptanceError):
-        run(acc, items, report)
+        run(acc, chosen, report)
     say("\n== summary")
     for i in report.items:
         say(f"{i.item:5} {i.status:4}  {i.title}")
@@ -705,7 +730,7 @@ def main(argv: list[str] | None = None) -> None:
             mode="external" if args.external else "box",
             domain=args.domain,
             release=args.release,
-            manual={k: v for k, v in MANUAL.items() if k in items},
+            manual={k: v for k, v in MANUAL.items() if k in chosen},
         )
         try:
             args.json.parent.mkdir(parents=True, exist_ok=True)

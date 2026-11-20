@@ -2,8 +2,16 @@
 one half, m3-p's refusal (M3 spec §6.12, §10 m3-p), against the fakes of
 `devstack_m3_kit.py`. m3-i's CloudWatch half is not run here (user, 2026-11-19: no Loom
 role may read logs, §5.6; B26 runs it by hand): `host.json` is `{"m3-p": {"ok",
-"detail"}}`, the run exits 0 only when the container and m3-p passed, and no `aws logs`
-command is called.
+"detail"}}`, `ok` a boolean when the host half ran and `null` with detail "not selected"
+when it did not (never `true` for a check that did not run); the run exits 0 only when the
+container passed and m3-p passed or was not selected; the host half also runs when the
+container failed; and no `aws logs` command is called.
+
+Item selection (§6.12, user 2026-11-19): `loom-deploy` reads the options after `--` as
+`loom-m3-acceptance` reads them, so the host half runs exactly when the container runs
+m3-p. `test_the_host_half_runs_exactly_when_the_driver_runs_m3_p` ties the two together by
+parsing the argv the container was given with the driver's own parser and `items()`, not a
+second copy of the rule.
 
 Each test first applies release A (fake docker), so the box has a current release, then
 publishes release B and runs `acceptance`. The fake docker's `compose run --rm acceptance`
@@ -12,7 +20,8 @@ stands in for the container: it writes nothing and exits with a configured code.
 
 Readings this file takes where §6.12 leaves a choice: the `compose run` of `acceptance`
 passes `loom-m3-acceptance` and §6.12's options after the service name, then the options
-given after `--`; `host.json`'s `m3-p` carries a boolean `ok`.
+given after `--`; whether the host half ran is seen in the deploy log, as the
+`apply`/`refused` record of `--p4-release` that its `apply --only poolmgr` writes.
 """
 
 from __future__ import annotations
@@ -37,6 +46,8 @@ from devstack_m3_kit import (
     site,
     ups,
 )
+
+from loom_devstack import m3_acceptance as m3
 
 SHA_A = "c3" * 20
 SHA_B = "d4" * 20
@@ -83,15 +94,59 @@ def acceptance(box: Box, *args: str) -> Any:
 
 
 def host_json(box: Box) -> dict[str, Any]:
-    """§6.12: `{"m3-p": {"ok", "detail"}}`, the one host half; no `m3-i` (B26's)."""
+    """§6.12: `{"m3-p": {"ok", "detail"}}`, the one host half; no `m3-i` (B26's). `ok` is
+    a boolean when the half ran, `null` with detail "not selected" when it did not."""
     p = box.var_lib / "acceptance" / "host.json"
     assert p.is_file(), "no <root>/var/lib/loom/acceptance/host.json"
     doc: dict[str, Any] = json.loads(p.read_text())
-    assert isinstance(doc.get("m3-p"), dict) and isinstance(doc["m3-p"].get("ok"), bool), doc
-    assert "detail" in doc["m3-p"], doc
     assert "m3-i" not in doc, f"host.json still has an m3-i half: {doc}"
     assert set(doc) == {"m3-p"}, f"host.json holds more than m3-p: {sorted(doc)}"
+    m3p = doc["m3-p"]
+    assert isinstance(m3p, dict) and set(m3p) >= {"ok", "detail"}, doc
+    assert isinstance(m3p["detail"], str), doc
+    ok = m3p["ok"]
+    if ok is None:
+        assert m3p["detail"] == "not selected", f"ok null means not selected: {doc}"
+    else:
+        assert isinstance(ok, bool), f"m3-p ok is neither a boolean nor null: {doc}"
+        assert m3p["detail"] != "not selected", (
+            f"a check that did not run is never true or false, it is null (§6.12): {doc}"
+        )
     return doc
+
+
+NOT_SELECTED = {"m3-p": {"ok": None, "detail": "not selected"}}
+
+
+def host_half_records(new: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The deploy-log records the host half writes: its `apply --only poolmgr --release
+    <p4-release>` logs as an apply of release B (refused, §6.12 "Deploy log")."""
+    return [r for r in new if r.get("release") == SHA_B or r.get("status") == "refused"]
+
+
+def assert_host_half_ran(box: Box, new: list[dict[str, Any]]) -> None:
+    """The half ran: a boolean `ok`, and its refusal (naming the gateway) in the log."""
+    ok = host_json(box)["m3-p"]["ok"]
+    assert isinstance(ok, bool), f"m3-p's host half did not run (ok {ok!r}); log: {new}"
+    refused = [r for r in new if r.get("step") == "apply" and r.get("status") == "refused"]
+    assert len(refused) == 1 and refused[0].get("release") == SHA_B, new
+    assert "gateway" in str(refused[0].get("detail")).lower(), refused[0]
+
+
+def assert_host_half_did_not_run(box: Box, new: list[dict[str, Any]]) -> None:
+    """Not selected: `host.json` says so (`ok` null), and no apply of release B is logged."""
+    doc = host_json(box)
+    assert doc == NOT_SELECTED, f"m3-p not selected, host.json: {doc}"
+    assert not host_half_records(new), f"the host half ran though m3-p is not selected: {new}"
+
+
+def driver_argv(timeline: list[dict[str, Any]]) -> list[str]:
+    """The words after `loom-m3-acceptance` in the one `compose run` of `acceptance`."""
+    acc = [rest for _, svc, rest in runs(timeline) if svc == "acceptance"]
+    assert len(acc) == 1, f"acceptance runs: {acc}"
+    rest = acc[0]
+    assert "loom-m3-acceptance" in rest, f"the acceptance service runs {rest}"
+    return rest[rest.index("loom-m3-acceptance") + 1 :]
 
 
 def aws_logs_calls(timeline: list[dict[str, Any]]) -> list[list[str]]:
@@ -196,6 +251,79 @@ def test_a_failing_container_fails_the_run(box: Box) -> None:
     assert_exit(proc, 1)
     calls = aws_logs_calls(box.timeline()[n:])
     assert not calls, f"loom-deploy acceptance called aws logs: {calls}"
+
+
+def test_a_failing_container_still_runs_the_host_half(box: Box) -> None:
+    """§6.12: m3-p selected (every item), the container fails: the host half runs anyway
+    (a boolean `ok`, its refusal in the deploy log) and the run exits 1."""
+    ready(box)
+    box.docker_cfg["run_exit"] = {"acceptance": 1}
+    box.save_docker()
+    n_log = len(box.log_records())
+    n_tl = len(box.timeline())
+    proc = acceptance(box)
+    assert_exit(proc, 1)
+    assert_host_half_ran(box, box.log_records()[n_log:])
+    assert not [s for _, s in ups(box.timeline()[n_tl:])], "acceptance updated a service"
+
+
+def test_only_leaving_m3_p_out_is_not_selected_and_exits_0(box: Box) -> None:
+    """`-- --only m3-0`: m3-p is not selected, so the host half does not run: `host.json`
+    has m3-p `{"ok": null, "detail": "not selected"}`, no apply of the p4-release is
+    logged, and with a passing container the run exits 0 (§6.12)."""
+    ready(box)
+    n_log = len(box.log_records())
+    n_tl = len(box.timeline())
+    proc = acceptance(box, "--", "--only", "m3-0")
+    assert_exit(proc, 0)
+    assert_host_half_did_not_run(box, box.log_records()[n_log:])
+    assert option_values(driver_argv(box.timeline()[n_tl:]), "--only") == ["m3-0"]
+    assert not [s for _, s in ups(box.timeline()[n_tl:])], "acceptance updated a service"
+
+
+def test_only_leaving_m3_p_out_with_a_failing_container_exits_1(box: Box) -> None:
+    """m3-p not selected and the container fails: still "not selected" (never `true`),
+    no host half, and the run exits 1 (it exits 0 only when the container passed)."""
+    ready(box)
+    box.docker_cfg["run_exit"] = {"acceptance": 1}
+    box.save_docker()
+    n_log = len(box.log_records())
+    proc = acceptance(box, "--", "--only", "m3-0")
+    assert_exit(proc, 1)
+    assert_host_half_did_not_run(box, box.log_records()[n_log:])
+
+
+SELECTIONS = [
+    pytest.param(["--only", "m3-0", "--only", "m3-p"], id="only-m3-0-then-only-m3-p"),
+    pytest.param(["--only", "m3-p", "--only", "m3-0"], id="only-m3-p-then-only-m3-0"),
+    pytest.param(["--only=m3-0", "--only", "m3-p"], id="only=m3-0-then-only-m3-p"),
+    pytest.param(["--only", "m3-p", "--only=m3-0"], id="only-m3-p-then-only=m3-0"),
+    pytest.param(["--only", " m3-0 , m3-p "], id="spaces-around-items"),
+    pytest.param(["--external"], id="external"),
+    pytest.param([], id="no-options"),
+]
+
+
+@pytest.mark.parametrize("opts", SELECTIONS)
+def test_the_host_half_runs_exactly_when_the_driver_runs_m3_p(box: Box, opts: list[str]) -> None:
+    """§6.12 "Item selection": `loom-deploy` reads the options after `--` as
+    `loom-m3-acceptance` does (the last `--only` wins, `--only=`, spaces ignored,
+    `--external` never runs m3-p, no `--only` runs every box item). The items are computed
+    from the argv the container was given, with the driver's own parser and `items()`."""
+    ready(box)
+    n_log = len(box.log_records())
+    n_tl = len(box.timeline())
+    proc = acceptance(box, "--", *opts) if opts else acceptance(box)
+    assert_exit(proc, 0)
+
+    argv = driver_argv(box.timeline()[n_tl:])
+    assert argv[len(argv) - len(opts) :] == opts, f"the options after -- are not passed: {argv}"
+    driver_items = m3.items(m3.parser().parse_args(argv))
+    new = box.log_records()[n_log:]
+    if "m3-p" in driver_items:
+        assert_host_half_ran(box, new)
+    else:
+        assert_host_half_did_not_run(box, new)
 
 
 def test_no_secret_on_a_command_line_or_the_output(box: Box) -> None:
