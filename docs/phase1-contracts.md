@@ -121,6 +121,7 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_SIGNUP_PROMO_MICROS` | 5000000 | web (admin approval) |
 | `LOOM_CLOUD` / `LOOM_REGION` | `local` / empty | gateway (usage events) |
 | `LOOM_GATEWAY_CLIENT_CERT` / `_KEY`, `LOOM_POD_CA_CERT` | none | gateway (mTLS to pods; required outside `LOOM_ENV=dev`). *(M3)* Reloaded: the gateway checks the files every 60 s and uses a changed set for new upstream connections (§9). `LOOM_POD_CA_CERT` may hold several CA certificates (old and new during a rollover; any of them is trusted). The client certificate and key may be the pool manager's combined file (key and certificate in one PEM, in `LOOM_POOLMGR_GATEWAY_CERT_DIR`) |
+| `LOOM_GATEWAY_CERT_CHECK_S` | 60 | *(M3)* gateway: how often (seconds, a positive number) it checks its client certificate file and `LOOM_POD_CA_CERT` for a change and reloads its TLS context for new upstream connections (§9); the checks run before an upstream request and at a metrics scrape, at most this often. Tests use 1 |
 | `LOOM_CORS_ORIGINS` | `http://localhost:3000` | gateway |
 | `LOOM_REDIS_SOCKET_TIMEOUT_S` / `LOOM_REDIS_CONNECT_TIMEOUT_S` | 2 / 1 | gateway, billing: a frozen or unreachable Redis fails a call within this (gateway: 503 `service_unavailable`, `/ready` 503); billing raises the read timeout to its blocking read + 3 s |
 | `LOOM_SETTLE_SPOOL_PATH` | unset: a per-process temp file; image: `/var/lib/loom-gateway/settle-spool.jsonl` (a volume) | gateway: settles Redis refused, replayed until accepted (§6 "Settle spool"); required outside `LOOM_ENV=dev` |
@@ -149,7 +150,7 @@ Settings are `LOOM_*` environment variables, read by `loom_platform.settings.Pla
 | `LOOM_POOLMGR_LEASE_BUCKET` | none (dev: lease records kept in memory) | pool manager: S3 bucket of the pod lease records `serving/leases/<pod id>`. Required outside dev |
 | `LOOM_POOLMGR_PROXY_BUNDLE` | none (dev: a placeholder; the local backend installs nothing) | pool manager: the `loom-podproxy` bundle tarball (`loom-podproxy-bundle`), its sha256 checked against `config/serving-artifacts.lock`. Required outside dev |
 | `LOOM_POOLMGR_MOCK_BACKEND` | unset (false) | *(M3)* pool manager, outside dev: `true` permits `provider: local` (refused with `runpod`; M4 removes the flag) and `LOOM_POOLMGR_ALLOW_CIDRS` (private RFC 1918 networks only), and does not require the SSH key, lease bucket or proxy bundle (it still requires the CA and the manager's client certificate). Logs a warning at start and exports `loom_poolmgr_mock_backend 1` (§10) |
-| `LOOM_POOLMGR_GATEWAY_CERT_DIR` | none | *(M3)* pool manager: the directory (a volume shared read-only with the gateway) where it writes the gateway's client certificate, one PEM file with key and certificate (§9) |
+| `LOOM_POOLMGR_GATEWAY_CERT_DIR` | none | *(M3)* pool manager: the directory (a volume shared read-only with the gateway) where it writes the gateway's client certificate, one PEM file with key and certificate, named `loom-gateway.pem` (§9) |
 | `LOOM_POOLMGR_METRICS_PORT` | 9102 (0 = none) | pool manager: Prometheus, served once it holds the lock and has adopted its pods (the image's healthcheck) |
 | `LOOM_POOLMGR_STATE_DIR` | dev: a temporary directory; compose: `/var/lib/loom-poolmgr` | pool manager: per-pod known_hosts files (and in dev a generated SSH key and CA; the local backend's pod directories). Required outside dev |
 | `LOOM_POOLMGR_LOCAL_COLD_START_S` | 20 | pool manager, `provider: local`: seconds before a local pod reports `RUNNING` (a simulated image pull) |
@@ -985,9 +986,12 @@ a replica's URL host and `server_name` are the same (`https://mock-pod-1:8443`).
   current one has under 6 days left, into `LOOM_POOLMGR_GATEWAY_CERT_DIR`: one PEM file
   with key and certificate, written to a temporary name and renamed into place, so a reader
   never sees a key without its certificate. The gateway checks that file and
-  `LOOM_POD_CA_CERT` every 60 s; on a change it builds a new TLS context and uses it for new
-  upstream connections (open streams keep theirs). A file that fails to load keeps the old
-  context and logs an error. `LOOM_POD_CA_CERT` may hold several CA certificates (old and
+  `LOOM_POD_CA_CERT` every `LOOM_GATEWAY_CERT_CHECK_S` (60 s); on a change it builds a new TLS
+  context and uses it for new upstream connections (open streams keep theirs). A file that
+  fails to load keeps the old context and logs an error. A missing or unloadable file at
+  start does not stop the gateway (the manager, deployed after it, writes the file): until
+  the files load, upstream requests fail as connect errors (502 `upstream_lost`), and each
+  check retries the load. `LOOM_POD_CA_CERT` may hold several CA certificates (old and
   new during a rollover) and the gateway trusts any of them. The gateway exports
   `loom_gateway_client_cert_expiry_seconds` (alarm G3). `loom-poolmgr rekey [--model M]`
   re-issues every ready pod's server certificate now (the SIGHUP path below);

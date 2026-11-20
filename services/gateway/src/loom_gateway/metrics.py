@@ -3,16 +3,57 @@ never on the public port)."""
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
+from prometheus_client.core import GaugeMetricFamily
+from prometheus_client.registry import Collector
 
 _FAST = (0.0005, 0.001, 0.002, 0.003, 0.005, 0.0075, 0.01, 0.025, 0.05, 0.1, 0.25)
 _SLOW = (0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120, 300, 600)
 _RATE = (1, 5, 10, 20, 40, 60, 80, 100, 150, 200, 400, 1000)
 
 
+class _ClientCertExpiry(Collector):
+    """`loom_gateway_client_cert_expiry_seconds` (alarm G3): seconds until the client
+    certificate in use expires, read at each scrape. The family (HELP/TYPE) is always
+    exported, so the owning service's exports name it (A9), but it has no sample while
+    none is configured or loaded (dev without mTLS), so it never reads as an expired
+    certificate."""
+
+    def __init__(self) -> None:
+        self.read: Callable[[], float | None] | None = None
+
+    def describe(self) -> Iterator[GaugeMetricFamily]:
+        # Registration records the family's name (no sample), so the registry maps this
+        # collector to it.
+        yield self._family()
+
+    @staticmethod
+    def _family() -> GaugeMetricFamily:
+        return GaugeMetricFamily(
+            "loom_gateway_client_cert_expiry_seconds",
+            "Seconds until the gateway's client certificate (the one in use) expires",
+        )
+
+    def collect(self) -> Iterator[GaugeMetricFamily]:
+        value = None
+        if self.read is not None:
+            try:
+                value = self.read()
+            except Exception:
+                value = None
+        family = self._family()
+        if value is not None:
+            family.add_metric([], value)
+        yield family
+
+
 class GatewayMetrics:
     def __init__(self) -> None:
         r = self.registry = CollectorRegistry()
+        self._cert_expiry = _ClientCertExpiry()
+        r.register(self._cert_expiry)
         self.requests = Counter(
             "loom_gateway_requests",
             "Requests by endpoint, model and HTTP status",
@@ -146,6 +187,10 @@ class GatewayMetrics:
             ["model", "state", "reason"],
             registry=r,
         )
+
+    def set_client_cert_expiry(self, read: Callable[[], float | None]) -> None:
+        """Export the client certificate's time left, as `read` reports it per scrape."""
+        self._cert_expiry.read = read
 
     def render(self) -> bytes:
         return generate_latest(self.registry)

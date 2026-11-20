@@ -54,8 +54,8 @@ their rows terminated and starts over.
 
 ## CLI
 
-Admin commands act on the running manager's Postgres and Redis; `drain`, `stop`, `reset`
-and `local-capacity` are queued on `loom:poolmgr:admin` and applied on its next tick.
+Admin commands act on the running manager's Postgres and Redis; `drain`, `stop`, `reset`,
+`rekey` and `local-capacity` are queued on `loom:poolmgr:admin` and applied on its next tick.
 
 | Command | Does |
 |---|---|
@@ -65,6 +65,8 @@ and `local-capacity` are queued on `loom:poolmgr:admin` and applied on its next 
 | `loom-poolmgr drain <pod id>` | Drain and terminate one pod |
 | `loom-poolmgr stop <model>` | Drain and terminate all of a model's pods; it stays `cold` (wakes still start it) |
 | `loom-poolmgr reset <model>` | Clear `crash_loop` / `spend_cap` / `price_too_high` holds (and the crash-loop count) |
+| `loom-poolmgr rekey [--model M]` | Re-issue every ready pod's server certificate now (all models, or one): the renewal path, run at once. Pods keep their tokens and stay in routing |
+| `loom-poolmgr new-ca --out DIR` | A new pod CA, any environment: `ca.crt`, `ca.key` and the manager's client certificate from it (`loom-poolmgr.crt`/`.key`, valid as long as the CA), keys 0600. Refuses to overwrite a CA. See [docs/runbook-pod-ca.md](../../docs/runbook-pod-ca.md) |
 | `loom-poolmgr issue-ca --out DIR` | Dev only: a CA plus manager and gateway client certificates |
 | `loom-poolmgr local-capacity off\|on` | Dev only, `provider: local` only: `off` makes every create fail for capacity (the acceptance's no-capacity switch) |
 
@@ -87,11 +89,15 @@ and `local-capacity` are queued on `loom:poolmgr:admin` and applied on its next 
 | `LOOM_POOLMGR_LOCAL_HOST` | `127.0.0.1` | `provider: local`: where the gateway reaches the local pods |
 | `LOOM_POOLMGR_ALLOW_CIDRS` | empty | Dev and `provider: local` only: CIDRs added to the local pods' allowlist |
 | `LOOM_POOLMGR_IDLE_STOP_S` | unset | Dev only: replaces every model's `idle_stop_s` |
+| `LOOM_POOLMGR_MOCK_BACKEND` | unset | Outside dev: `true` permits `provider: local` (not `runpod`) and private (RFC 1918) `LOOM_POOLMGR_ALLOW_CIDRS`, and lifts the SSH key, lease bucket and proxy bundle requirements; the CA and client certificate stay required. Warns at start; exports `loom_poolmgr_mock_backend 1`. M4 removes it |
+| `LOOM_POOLMGR_GATEWAY_CERT_DIR` | none | Where the manager writes the gateway's client certificate (`loom-gateway.pem`: key and certificate, mode 0400, renamed into place): at start unless the file holds a current one (loads, issued by this CA, 6 days or more left), then every 24 h; 7-day validity |
 | `RUNPOD_API_KEY` | none | `provider: runpod`: the serving account's key |
 
 Outside `LOOM_ENV=dev` it refuses to start without the CA, the client certificate, the
 SSH key, the lease bucket, the proxy bundle, the state directory and a non-empty
-`gateway_egress_cidrs`; it refuses `provider: local|fake` and the dev-only variables.
+`gateway_egress_cidrs`; it refuses `provider: local|fake` and the dev-only variables
+(`LOOM_POOLMGR_MOCK_BACKEND` lifts the provider, SSH key, lease bucket, bundle and
+private-`ALLOW_CIDRS` rules, below).
 With `provider: runpod` the proxy bundle and the lease bucket are required in dev too
 (the placeholders are for `local` only, so no paid pod is bootstrapped with them). It
 also refuses to start when the CA expires within `server_cert_renew_before_s`, and logs
@@ -102,7 +108,42 @@ Metrics: `loom_poolmgr_pods{model,state}`, `loom_poolmgr_cold_start_seconds{mode
 `loom_poolmgr_creates_total{model,result}`, `loom_poolmgr_replacements_total{model,why}`,
 `loom_poolmgr_lease_renewals_total{result}`, `loom_poolmgr_spend_month_micros`,
 `loom_poolmgr_spend_cap_micros`, `loom_poolmgr_reconcile_seconds`,
-`loom_poolmgr_orphans_terminated_total`.
+`loom_poolmgr_orphans_terminated_total`, and from M3:
+
+- `loom_poolmgr_ca_expiry_seconds`: seconds until the pod CA's `notAfter`, set at start and
+  each tick (alarm P3 below 30 days; the refusal at `server_cert_renew_before_s` stays);
+- `loom_poolmgr_pool_reason{model,reason}`: 1 for each model's current pool `reason`
+  (`crash_loop`, `spend_cap`, `price_too_high`, `not_configured`, `no_capacity`), 0 for the
+  others, rewritten each tick (alarm P2b reads `spend_cap`);
+- `loom_poolmgr_mock_backend`: 1 with `LOOM_POOLMGR_MOCK_BACKEND`, else 0.
+
+Every `creates_total{model,result}` and `pool_reason{model,reason}` series of the models the
+manager serves exists at 0 from start, so the alarms never see a missing series.
+
+## The mock backend outside dev (M3)
+
+The M3 box has no GPUs: it runs `provider: local` (the bench mock behind `loom-podproxy`,
+as in compose) with `LOOM_ENV` unset, so every production check stays on, and
+`LOOM_POOLMGR_MOCK_BACKEND=true` to allow what dev-only rules would refuse. The flag is
+refused with `provider: runpod`. Its serving file is `deploy/serving.m3.yaml`. The manager
+still requires the CA, its client certificate and `LOOM_POOLMGR_STATE_DIR`.
+
+## Certificates
+
+- **Pod server certificates** (`server_cert_days`) are renewed near expiry over SSH and
+  re-issued at once by `rekey`. `loom-poolmgr status` shows, under each ready pod, who issued
+  the certificate its proxy presents and whether that is the manager's CA (it connects with
+  the manager's client certificate, so run it where `LOOM_POOLMGR_CLIENT_CERT`/`_KEY` and
+  `LOOM_POOLMGR_CA_CERT` are set and the pods are reachable).
+- **The gateway's client certificate** (`clientAuth`, 7 days) is written to
+  `LOOM_POOLMGR_GATEWAY_CERT_DIR/loom-gateway.pem`: at start unless the file already holds
+  a current one (key and certificate load together, signed by the CA in use, 6 days or more
+  left), then every 24 h by the manager's clock. The file is written under a temporary name
+  with mode 0400, owned by the directory's owner (so the gateway's uid can read it), and
+  renamed into place. A failed write is logged and retried on the next tick; at start it
+  stops the manager. The gateway reloads it, and `LOOM_POD_CA_CERT`, every
+  `LOOM_GATEWAY_CERT_CHECK_S` (default 60 s).
+- **A new CA** is a runbook: [docs/runbook-pod-ca.md](../../docs/runbook-pod-ca.md).
 
 ## Tests and acceptance
 
