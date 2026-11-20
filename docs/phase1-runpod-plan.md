@@ -525,7 +525,7 @@ section numbers are the M3 spec's.
 
 | # | Prerequisite | Why M3 does without it |
 |---|---|---|
-| M4-1 | Zero-downtime pod CA rollover (§7): the pods' client-trust bundle holds the old and the new CA during a rollover (a pod setting the manager passes at bootstrap and re-key); `loom-deploy` renders the gateway's and the pods' bundles from `pod-ca` and `pod-ca-next`; a `pod-ca-next` secret container in §5.2 with the instance role's read (§5.6) | In M3 a pod trusts only the CA that signed it, so after the CA switch requests can fail for up to about a minute (`LOOM_GATEWAY_CERT_CHECK_S`), until the gateway loads its client certificate from the new CA; the runbook says so and B20 records the window. The M3 box runs mock pods for one operator |
+| M4-1 | Zero-downtime pod CA rollover (§7): the pods' client-trust bundle holds the old and the new CA during a rollover (a pod setting the manager passes at bootstrap and re-key); `loom-deploy` renders the gateway's and the pods' bundles from `pod-ca` and `pod-ca-next`; a `pod-ca-next` secret container in §5.2 with the instance role's read (§5.6) | In M3 the gateway trusts only the CA `pod-ca` holds and a pod only the CA that signed it, so from the deploy that switches the CA requests can fail until the pool manager has re-keyed every pod and the gateway has loaded its new certificate (minutes, longer with more pods); the runbook says so (roll over at low traffic; scaling the pool down first shortens the outage) and B20 records it. The M3 box runs mock pods for one operator |
 
 ## 14. Risks
 

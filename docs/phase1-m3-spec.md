@@ -643,9 +643,22 @@ container runs every box item; for m3-i it scans the containers' logs only (it w
 canaries file: nothing on the box reads one), and for m3-p it checks the deploy log's
 order. Then, on the host, `loom-deploy` runs the one half that needs the instance role:
 m3-p's refusal (`apply --only poolmgr --release <p4-release>` exits 2 naming the gateway,
-and the poolmgr container is not recreated). It writes
-`/var/lib/loom/acceptance/host.json` (`{"m3-p": {"ok", "detail"}}`) and exits 0 only when
-the container and that half passed. m3-i's CloudWatch half is **not** run here: it needs
+and the poolmgr container is not recreated), when m3-p is selected (below); it runs it
+also when the container failed. It writes `/var/lib/loom/acceptance/host.json`,
+`{"m3-p": {"ok": <ok>, "detail": <text>}}`: `ok` is `true` or `false` when that half ran,
+and `null` with `detail` `"not selected"` when it did not; a check that did not run is
+never `true` (user, 2026-11-19). It exits 0 only when the container passed and that half
+passed or was not selected.
+**Item selection (`--only`, user, 2026-11-19).** `loom-deploy` reads the options after
+`--` as `loom-m3-acceptance` reads them, so the host half runs exactly when the container
+runs m3-p: `--only <items>` and `--only=<items>` give a comma-separated list (spaces
+around an item ignored); given more than once, the **last** one wins (argparse's reading);
+without `--only` every box item runs, m3-p included; with `--external` m3-p never runs (it
+is not an external item). `loom-m3-acceptance` takes no abbreviated option names
+(`--onl` is a usage error) and refuses an empty or unknown item (usage error, exit 2), so
+a list `loom-deploy` reads differently from it fails the run anyway. A run with `--only`
+checks a subset: B10-B19's evidence is the `report.json` and `host.json` of one full run
+(no `--only`, §13). m3-i's CloudWatch half is **not** run here: it needs
 `logs:FilterLogEvents`, which no Loom role has (§5.6); B26 runs it with the operator's
 credentials (user, 2026-11-19). `loom-deploy acceptance` calls no `aws logs` command.
 
@@ -730,19 +743,22 @@ order, runs m3-0, m3-b and m3-d in the `acceptance` service, and removes the pro
   gateway's client certificate from the new CA (the manager does on start); 6) drop the
   old CA from the bundle and deploy. With the mock backend the whole runbook runs on the
   box (B20).
-- **Rollover downtime (accepted for M3; user, 2026-11-19).** The rollover is **not**
-  zero-downtime in M3, and the runbook says so instead of "zero downtime". A pod trusts,
-  for its clients, only the CA that signed its own certificate (the manager passes that
-  one at bootstrap and re-key), so once the manager has switched to the new CA and
-  re-keyed a pod, that pod refuses the gateway's old-CA client certificate until the
-  manager has issued one from the new CA (at its start, §6.13) and the gateway's next
-  check has loaded it: requests can fail for up to about `LOOM_GATEWAY_CERT_CHECK_S`
-  (60 s) after the CA switch. M3 has no `pod-ca-next` secret, and `loom-deploy` renders
-  `LOOM_POD_CA_CERT` from `pod-ca` alone, so the bundle steps (1, 2 and 6 with
-  `pod-ca-next`) are M4's (below); in M3 the runbook switches `pod-ca` and
-  `poolmgr-client` to the new values (new secret versions; the previous version is the
-  way back), deploys (gateway first, P4) and re-keys, and tells the operator to expect
-  that window (a quiet period). B20 records it.
+- **Rollover outage (accepted for M3; user, 2026-11-19).** The rollover is **not**
+  zero-downtime in M3, and the runbook says so instead of "zero downtime". M3 has no
+  `pod-ca-next` secret, and `loom-deploy` renders `LOOM_POD_CA_CERT` from `pod-ca` alone,
+  so once the deploy that switches `pod-ca` has run, the gateway trusts only the new CA
+  and refuses every pod still serving a certificate from the old one. A pod trusts, for
+  its clients, only the CA that signed its own certificate (the manager passes that one
+  at bootstrap and re-key), so a re-keyed pod refuses the gateway's old-CA client
+  certificate. Requests can therefore fail from that deploy until the pool manager has
+  re-keyed every pod and the gateway has loaded its new certificate (issued by the
+  manager from the new CA at its start, §6.13, and loaded at the gateway's next check):
+  **minutes, longer with more pods**, not one `LOOM_GATEWAY_CERT_CHECK_S` (user,
+  2026-11-19). The bundle steps (1, 2 and 6 with `pod-ca-next`) are M4's (below); in M3
+  the runbook switches `pod-ca` and `poolmgr-client` to the new values (new secret
+  versions; the previous version is the way back), deploys (gateway first, P4) and
+  re-keys, and tells the operator to expect that outage: roll over at low traffic, and
+  scaling the pool down first shortens it. B20 records it. M4-1 (below) is the real fix.
 - **M4 prerequisite: zero-downtime CA rollover** (plan §13, "M4 prerequisites from M3"):
   the pods' client-trust bundle holds the old and the new CA during a rollover (a pod
   setting the manager passes at bootstrap and re-key); `loom-deploy` renders the gateway's
@@ -1304,7 +1320,9 @@ M1's driver does. A second mode, `--external`, runs from the operator's machine 
 only what the internet sees. The container has no AWS credentials (§4): m3-p's refusal,
 which needs the instance role, runs in `loom-deploy acceptance` on the host (§6.12), and
 m3-i's CloudWatch half, which needs `logs:FilterLogEvents` (no Loom role has it, §5.6),
-is B26's, run with the operator's credentials (user, 2026-11-19).
+is B26's, run with the operator's credentials (user, 2026-11-19). `--only` selects items
+(the last one given wins; `loom-deploy` reads it the same way, §6.12); B10-B19 need a
+full run.
 
 Sign-in: the automated items sign in test users by inserting an Auth.js database session
 for them (the web app uses database sessions) and sending its cookie; the admin is granted
@@ -1593,13 +1611,18 @@ Endpoint health check
 - B10-B19 [B] `loom-m3-acceptance` items m3-0, m3-b, m3-d, m3-g, m3-s, m3-h, m3-i, m3-p,
   m3-x pass; m3-a done by hand, which also settles two Stage A unknowns (§6.13): the
   CloudWatch agent's metrics arrive through its log group under `/loom/platform`, and
-  every §5.3 metric, `up{job=...}` (H1) included, is in CloudWatch. *The script's JSON
-  report + the acceptance doc.*
+  every §5.3 metric, `up{job=...}` (H1) included, is in CloudWatch. The box items' evidence
+  comes from one **full** run of `loom-deploy acceptance` (no `--only`): its `report.json`
+  holds every box item and its `host.json` has m3-p `ok: true`; a run with `--only` (m3-p
+  `ok: null`, "not selected", when it is left out) is not B10-B19 evidence, and a partial
+  re-run overwrites both files (§6.12). m3-h comes from the `--external` run. *The
+  script's JSON report, `host.json` + the acceptance doc.*
 - B20 [B] `docs/runbook-pod-ca.md` executed once on the box (mock pods) during a
-  concurrent load run: requests fail only in the window after the CA switch that §7
-  accepts for M3 (none before the switch, none once every pod is re-keyed and the gateway
-  has loaded its new client certificate); the window's length and the failed requests are
-  recorded. *Runbook + load test numbers.*
+  concurrent load run: requests fail only during the outage §7 accepts for M3 (none
+  before the deploy that switches the CA, none once the pool manager has re-keyed every
+  pod and the gateway has loaded its new client certificate: minutes, longer with more
+  pods); the outage's length, the number of pods and the failed requests are recorded.
+  *Runbook + load test numbers.*
 - B21 [B] (optional, D8) RDS point-in-time restore to a new instance, `loom_platform`
   readable, instance deleted. *Runbook.*
 - B22 [B] Teardown or keep (D8): if teardown, `terraform destroy` leaves only the final
