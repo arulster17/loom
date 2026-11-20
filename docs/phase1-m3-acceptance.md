@@ -21,7 +21,9 @@ not claimed here.
 The CI commands (root `CLAUDE.md`), from the repository root:
 
 ```bash
+uv sync --frozen
 uv run ruff format --check . && uv run ruff check .
+uv run mypy bench/src
 uv run mypy services/platform_common/src services/gateway/src services/billing/src
 uv run mypy services/platform_common/src services/podproxy/src services/devstack/src
 uv run mypy services/platform_common/src services/poolmgr/src
@@ -29,11 +31,13 @@ uv run pytest -q -n auto
 ```
 
 Postgres and Redis tests skip silently when no server is reachable (`docker compose up -d
-postgres redis`), so check the `s` count. Gateway tests need Linux (WSL, Docker or CI).
+postgres redis`), so check the `s` count. Gateway tests need Linux (WSL, Docker or CI). On
+native Windows mypy needs `--platform linux` to match CI.
 
-Terraform needs no credentials. CI job `terraform` runs this in `infra/aws/platform` and in
-`infra/aws/state`, with Terraform 1.16.7 (the version and image digest are pinned in
-`.github/workflows/ci.yml`):
+Terraform needs no credentials, only the network (providers, the tflint plugin, the
+images). CI job `terraform` runs this in `infra/aws/platform` and in `infra/aws/state`, in
+the pinned `hashicorp/terraform` image (spec §5.5), Terraform 1.16.7 (the version and image
+digest are pinned in `.github/workflows/ci.yml`):
 
 ```bash
 terraform fmt -check -recursive -diff

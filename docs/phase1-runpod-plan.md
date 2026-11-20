@@ -442,14 +442,15 @@ plan`) was built in four areas and merged into `phase1-m3` on 2026-11-19: Terraf
 `deploy/compose.prod.yml`, Caddy, the acceptance driver `loom-m3-acceptance`); Stripe test
 mode (webhooks, `resolve`, migration 0012); and the pod PKI (CA expiry gauge, gateway
 client-certificate rotation, `rekey`, `new-ca`). It is tested offline: Terraform under
-`mock_provider`, the production stack run locally (A15), no AWS or Stripe calls. It is not
-yet merged into `main`. Stage B (`terraform apply`, DNS, deploy, the live acceptance
+`mock_provider`, the production stack run locally (A15), no AWS or Stripe calls. Still
+open: A28 (`terraform plan` with the user's read-only credentials, spec §5.5 and §13), the
+final verification at the branch head, and CI on the PR. It is not yet merged into `main`. Stage B (`terraform apply`, DNS, deploy, the live acceptance
 B1-B26, teardown) needs the user's separate yes with its cap ($25 over a 14-day window; a
 $75 a month AWS budget). The spec's estimate of the running cost is about $63 a month (its
 §14). Results so far are in [phase1-m3-acceptance.md](phase1-m3-acceptance.md).
 P1-P4 below are done in M3 (spec §5.3, §6.6, §7): P1 by the alarms
 `loom-platform-p1a-serving-reaper-errors` and `loom-platform-p1b-serving-reaper-not-running`
-and the reaper role's `s3:ListBucket` (on `serving/leases/*` only); P2 by the alarms
+and the reaper role's `s3:ListBucket` on the lease bucket (with `s3:GetObject` on `serving/leases/*` only); P2 by the alarms
 `loom-platform-p2a-spend-cap-refusal` and `loom-platform-p2b-model-held-at-cap` (the second
 reads the new gauge `loom_poolmgr_pool_reason`); P3 by the gauge
 `loom_poolmgr_ca_expiry_seconds`, the alarm `loom-platform-p3-pod-ca-near-expiry` at 30 days
@@ -502,7 +503,7 @@ manager run against the real RunPod account.
 
 | # | From (M2 spec) | Gap | M3 work |
 |---|---|---|---|
-| P1 | §6 reaper serving rule, §11 (fail closed on S3) | Any S3 error other than a missing key (a missing bucket, a role without `s3:ListBucket`) makes every reaper run raise and delete nothing, so the second backstop is off with no other sign | CloudWatch alarm on the reaper Lambda's `Errors` (any in an hour) and on missing `Invocations` (no run in 2 schedule periods), to the ops address; give the role `s3:ListBucket` **Done in M3 (2026-11-19)**: alarms P1a and P1b (spec §5.3) to `loom-platform-alerts`; the reaper role has `s3:ListBucket` and `s3:GetObject` on `serving/leases/*` only (§5.6) |
+| P1 | §6 reaper serving rule, §11 (fail closed on S3) | Any S3 error other than a missing key (a missing bucket, a role without `s3:ListBucket`) makes every reaper run raise and delete nothing, so the second backstop is off with no other sign | CloudWatch alarm on the reaper Lambda's `Errors` (any in an hour) and on missing `Invocations` (no run in 2 schedule periods), to the ops address; give the role `s3:ListBucket` **Done in M3 (2026-11-19)**: alarms P1a and P1b (spec §5.3) to `loom-platform-alerts`; the reaper role has `s3:ListBucket` on the lease bucket and `s3:GetObject` on `serving/leases/*` only (spec §5.2); the P1 alarms' actions follow `serving_reaper_enabled`, so they stay off until M4 turns the reaper on (spec §5.3) |
 | P2 | §5 spend guard, §11 (refusal signal) | A create refused at the monthly cap writes no `serving_spend_alerts` row: only an error log line and `loom_poolmgr_creates_total{result="spend_cap"}`. The model stays `unavailable` until an admin `reset` | Alert on any increase of that counter (and on the pool `reason` `spend_cap` lasting more than 5 minutes) through whatever M3 uses to scrape port 9102 **Done in M3 (2026-11-19)**: the CloudWatch agent scrapes the services; alarms P2a (counter) and P2b (new gauge `loom_poolmgr_pool_reason`, 5 minutes) (spec §5.3, §7) |
 | P3 | §5 certificates, §11 (CA near expiry) | The manager refuses to start once the pod CA is within `server_cert_renew_before_s` (2 days) of expiry, and only logs an error while running; nothing warns earlier | Expose the CA's expiry (a gauge such as `loom_poolmgr_ca_expiry_seconds`, or a scheduled check of the certificate in Secrets Manager) and alarm 30 days ahead; write `docs/runbook-pod-ca.md`: issue the new CA, have the gateway trust old and new during the rollover, restart the manager, let it re-key every pod, then drop the old CA **Done in M3 (2026-11-19)**: gauge `loom_poolmgr_ca_expiry_seconds`, alarm P3 at 30 days, `docs/runbook-pod-ca.md`, plus `rekey`, `new-ca` and the gateway client-certificate rotation (spec §7). The rollover is not zero downtime in M3 (M4-1) |
 | P4 | §11 "Fixed after CI" (`last_request` stamps) | The manager's only signal that a ready model is in use, besides requests in flight at a tick, is the stamp the new `settle.lua` writes. A gateway still on the old script writes none, so a manager deployed first would drain models in use | Deploy the gateways before or together with the manager, never the manager alone first; say so in the M3 deploy runbook **Done in M3 (2026-11-19)**: `loom-deploy` deploys the gateway before the manager and refuses a manager newer than the gateway (spec §6.6); the runbook says so |
@@ -577,11 +578,11 @@ Each needs an account, money or a hard-to-reverse choice.
    an outage. **Recommendation:** prepaid with at least two months of the chosen mode's
    cost, auto-pay on with a monthly limit at the serving cap, and a low-balance alarm at
    two weeks of runway.
-4. **AWS control plane** (money, infra). About $50 a month: `t4g.medium`, RDS
+4. **AWS control plane** (money, infra). About $63 a month (M3 spec §14): `t4g.medium`, RDS
    `db.t4g.micro`, in `us-east-1`, in the existing AWS account under its own VPC, tags
    and Terraform state. **Recommendation: approve as described** at M3, not before.
-5. **Domain** (account, money). Needed for TLS, OAuth redirects and Stripe. The brand is
-   Loom, domain TBD. **Recommendation:** the user registers it (Route 53 is simplest
+5. **Domain** (account, money). Needed for TLS, OAuth redirects and Stripe. The product
+   name and the domain are settings (M3 spec §6.11); not decided. **Recommendation:** the user registers it (Route 53 is simplest
    with this setup) before M3.
 6. **Google OAuth client and email sending** (accounts). Auth.js needs a Google OAuth
    client (the user creates it in Google Cloud) and an email sender for verification
