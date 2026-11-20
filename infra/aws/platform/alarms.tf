@@ -6,7 +6,8 @@
 # Counter math (A9): the agent sends a Prometheus counter as the delta since the previous
 # scrape (it computes the delta itself), so a counter alarm reads Sum over its window, and
 # every counter is initialised to 0 at process start so the first increment is a delta.
-# Gauges read Maximum (alarm when high) or Minimum (alarm when low, or "every datapoint").
+# Gauges read Maximum when alarming on a high value, and Minimum for health checks and low
+# values (§5.3 "Statistics"); "for N min" is datapoints_to_alarm over N periods.
 # The dimensions are the label values the agent's allowlist keeps.
 
 resource "aws_sns_topic" "alerts" {
