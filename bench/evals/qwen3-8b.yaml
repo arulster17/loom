@@ -26,7 +26,7 @@
 suite: qwen3-8b
 model: qwen3-8b
 # The FP8 checkpoint runs this same suite and is gated against the BF16 baseline.
-also_models: [qwen3-8b-fp8, qwen3-8b-fp8-modelopt]
+also_models: [qwen3-8b-fp8]
 seed: 1234
 # Non-thinking mode, as served (config/models.yaml); applied to every chat request.
 chat_template_kwargs: {enable_thinking: false}
@@ -192,9 +192,9 @@ sanity_limits:
 # on those, and reports the strict task as not gated until a baseline has run it too.
 #
 # gsm8k-only keeps a config change that only touches decoding honest without a full gate
-# (qwen3-8b-trtllm-fp8-cudagraph-aws: CUDA-graph padding). The divergence half scores
-# the reference teacher-forced, a prefill pass, so it never runs the decode CUDA graphs
-# such a change swaps; GSM8K's long chain-of-thought decodes at every batch size the eval
+# (for example CUDA-graph padding). The divergence half scores the reference
+# teacher-forced, a prefill pass, so it never runs the decode CUDA graphs such a change
+# swaps; GSM8K's long chain-of-thought decodes at every batch size the eval
 # reaches (up to its 16 in flight), and one flipped token derails the answer. Its items
 # pair with a phase0 run's GSM8K.
 subsets:

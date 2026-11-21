@@ -91,7 +91,7 @@ class LocalProviderSpec(_Strict):
     kind: Literal["local"]
     base_url: str  # including the API prefix, e.g. http://127.0.0.1:8000/v1
     metrics_url: str | None = None
-    engine: Literal["vllm", "sglang", "trtllm", "mock"]
+    engine: Literal["vllm", "sglang", "mock"]
     served_model: str
     tokenizer: Literal["hf", "simple"] = "hf"
     hourly_price: HourlyPrice | None = None
@@ -105,8 +105,7 @@ class AwsEc2ProviderSpec(_Strict):
     disk_gb: PositiveInt = 200
     # Set in the engine container's environment (validated: no secret names), as on
     # runpod. Part of the cell's launch, so its config hash once set; empty changes
-    # nothing. E.g. TRTLLM_ENABLE_PDL=0 if TensorRT-LLM's FlashInfer kernels refuse sm_89
-    # (docs/perf/tensorrt-llm.md).
+    # nothing. E.g. NCCL_P2P_DISABLE=1.
     engine_env: dict[str, str] = Field(default_factory=dict)
 
 
@@ -825,7 +824,7 @@ def serving_model_doc(spec: ModelSpec) -> dict[str, Any]:
     competitiveness view read prices from the registry by model id.
 
     `tool_call_parsers` keeps the engines every stored hash already recorded (vLLM and
-    SGLang) and the cell's own engine: a parser for an engine added later (TensorRT-LLM)
+    SGLang) and the cell's own engine: a parser for an engine added later
     says nothing about how a vLLM cell is served, and recording it would move every
     stored hash of that model (7a8237d0's bf16 cell, the stored baselines)."""
     doc = {**spec.model_dump(mode="json"), "pricing": None}

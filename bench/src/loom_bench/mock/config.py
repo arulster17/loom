@@ -7,7 +7,7 @@ plausible absolute numbers; benchmarks of the Lab itself only rely on shapes.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Self
 
 import yaml
 from pydantic import (
@@ -18,9 +18,6 @@ from pydantic import (
     NonNegativeInt,
     PositiveFloat,
     PositiveInt,
-    SerializationInfo,
-    SerializerFunctionWrapHandler,
-    model_serializer,
     model_validator,
 )
 
@@ -29,15 +26,6 @@ Probability = Annotated[float, Field(ge=0, le=1)]
 
 class MockConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-
-    @model_serializer(mode="wrap")
-    def _drop_default_profile_api(
-        self, handler: SerializerFunctionWrapHandler, info: SerializationInfo
-    ) -> Any:
-        out = handler(self)
-        if isinstance(out, dict) and out.get("profile_api") == "vllm":
-            out.pop("profile_api")
-        return out
 
     models: list[str] = Field(default_factory=lambda: ["mock-model"], min_length=1)
     max_model_len: PositiveInt = 32768
@@ -88,20 +76,14 @@ class MockConfig(BaseModel):
     # them as vLLM does ("" then the whole character) with text_offsets on, or as SGLang
     # does (each token alone, a fragment as latin-1 bytes) with it off.
     byte_level: bool = False
-    # False rejects `logprobs` on /v1/completions with a 400, as TensorRT-LLM 1.2.1 does
-    # ("logprobs is not supported"): the divergence check cannot score such an engine.
+    # False rejects `logprobs` on /v1/completions with a 400 ("logprobs is not supported"),
+    # as an engine without prompt logprobs would: the divergence check cannot score it.
     completions_logprobs: bool = True
 
     # Where /start_profile ... /stop_profile writes its synthetic trace
     # (loom_bench.profile.mock_trace); None: the endpoints answer 404, as vLLM does
     # without --profiler-config.
     profile_dir: str | None = None
-    # Which engine's profiler API the endpoints imitate: vLLM's (a per-session prefix,
-    # max_iterations, delay_iterations; files `<prefix>_rank0.<ns>.pt.trace.json.gz`) or
-    # TensorRT-LLM 1.4.0rc2's (a StartProfileRequest body, `step[DECODE bs=N]` step labels,
-    # files `trtllm-trace-<id>-rank-0.json`). Left out of the dump when vllm, so configs
-    # that do not set it keep their config hash.
-    profile_api: Literal["vllm", "trtllm"] = "vllm"
 
     # Faults.
     error_rate: Probability = 0.0

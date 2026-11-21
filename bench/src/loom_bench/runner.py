@@ -681,7 +681,7 @@ class _Executor:
         is_baseline = cell.variant == quality.baseline_variant
         # The last pass also runs the divergence half (after its tasks); the others only
         # score the tasks. Last, so an engine the divergence requests take down costs only
-        # the divergence: 46938d1f's TensorRT-LLM died in pass 1's divergence, and pass 2
+        # the divergence: 46938d1f's engine died in pass 1's divergence, and pass 2
         # found it dead and lost the whole suite.
         last = quality.replicates - 1
         job = self._eval_job(cell, endpoint, suite)
