@@ -4,8 +4,11 @@
 
 - [PLAN.md](PLAN.md): decisions, stack, phase plan, Postgres schemas, registry schema, open questions.
 - [architecture.md](architecture.md): Phase 0 components, data flow, module contracts, where each measurement lives.
-- [phase1-runpod-plan.md](phase1-runpod-plan.md): Phase 1 serving on RunPod (draft for approval): where things run, gateway-to-pod security, replicas, costs, milestones.
+- [phase1-runpod-plan.md](phase1-runpod-plan.md): Phase 1 serving on RunPod (the approved plan; M1, M2 and M3 Stage A are merged into `main`): where things run, gateway-to-pod security, replicas, costs, milestones.
 - [phase1-contracts.md](phase1-contracts.md): Phase 1 M1 contracts: services and env, schema and ledger, Redis keys and reserve/settle, usage stream, gateway-to-pod, errors, cost headers.
+- [phase1-m2-spec.md](phase1-m2-spec.md) and [phase1-m2-acceptance.md](phase1-m2-acceptance.md): M2 (the pool manager, offline): spec and acceptance record.
+- [phase1-m3-spec.md](phase1-m3-spec.md) and [phase1-m3-acceptance.md](phase1-m3-acceptance.md): M3 (the AWS control plane, built and tested offline): spec and Stage A acceptance record.
+- [m3-review-fixes-spec.md](m3-review-fixes-spec.md): the fixes from the review before M3.
 - [local-dev.md](local-dev.md): setup, tests, the mock backend, mock experiments end to end, lint, CI.
 
 ## Benchmark Lab
@@ -15,7 +18,6 @@
 - [quality-gate.md](quality-gate.md): eval suites, the gate's decision rule, sample sizes, logprob divergence, sanity checks.
 - [perf/roofline-and-profiling.md](perf/roofline-and-profiling.md): why the numbers come out as they do: decode-step floors (`bench roofline`), achieved share per config, the fp8-kv8 2.4x explained, engine profile windows (`profile:`, `bench profile analyze`).
 - [cost-model.md](cost-model.md): $/1M tokens at SLO: goodput, allocation, CIs, what the hourly price includes, margins.
-- [perf/tensorrt-llm.md](perf/tensorrt-llm.md): TensorRT-LLM as a third engine: what it does differently from vLLM, the pinned version and its API gaps, the measured comparison (46938d1f, 9647a23b, 08204560) and the profiled "why" (71e2c32c, ad5b1408).
 - [perf/speculative-decoding.md](perf/speculative-decoding.md): speculative decoding in plain words, the Qwen3-8B n-gram vs EAGLE3 study (measured, 53e4c107) and why EAGLE3 did not help the 70B on 4x L40S.
 - [site.md](site.md): the public results site: snapshot export, build, deployment, waitlist form.
 
@@ -29,6 +31,8 @@
 - [aws-setup.md](aws-setup.md): one-time AWS account setup: quotas, HF token secret, Terraform, runner policy, settings.
 - [runbook-runpod.md](runbook-runpod.md): GPU runs on RunPod (the primary path): preflight, monitoring spend, incidents, teardown checks, smoke test.
 - [runbook.md](runbook.md): GPU runs on AWS: preflight, monitoring spend, incidents, reproducing, publishing, teardown.
+- [runbook-platform.md](runbook-platform.md): the Phase 1 control plane on AWS (M3, Stage B): deploy, rollback, secrets, Stripe, SES, alarms, teardown.
+- [runbook-pod-ca.md](runbook-pod-ca.md): the pod CA: rollover, expiry, the gateway's certificate.
 - [security.md](security.md): Phase 0 security measures and their limits; Phase 1 requirements.
 
 ## Reference (how to add ...)

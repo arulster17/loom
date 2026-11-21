@@ -1,3 +1,0 @@
-plain: 45/45 called the expected function
-strict: 27/45 called the expected function
-strict: 45/45 called the expected function

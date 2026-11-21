@@ -12,9 +12,9 @@ webhooks and the pod PKI ([phase1-m3-spec.md](phase1-m3-spec.md); plan §13 in
   $25 over a 14-day window, inside a $75 a month AWS budget). It has **not run**. Its table
   at the end is empty.
 
-This note records the Stage A results and holds the places for Stage B. The final
-verification at the integrated branch head and CI on the PR come after this note. They are
-not claimed here.
+This note records the Stage A results and holds the places for Stage B. After this note,
+the final verification at the branch head (2a2c23e) passed and every CI job on PR #15
+passed; Stage A was merged into `main` on 2026-11-20 (merge commit eabdc7e).
 
 ## How to reproduce (free)
 
