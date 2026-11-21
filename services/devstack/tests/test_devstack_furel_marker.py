@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import shutil
 import stat
 import sys
 from collections.abc import Iterator
@@ -125,6 +126,23 @@ def write_marker(box: Box, content: str | dict[str, Any], perms: int = 0o644) ->
     p.write_text(content if isinstance(content, str) else json.dumps(content))
     p.chmod(perms)
     return p
+
+
+def dangle_marker(box: Box) -> Path:
+    """A symbolic link at the marker's path to a path that does not exist."""
+    p = marker(box)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    target = box.root / "no-such-dir" / "apply-in-progress.json"
+    os.symlink(target, p)
+    assert os.path.lexists(p) and not p.exists(), "the link is not dangling"
+    return p
+
+
+def status_first_line(box: Box) -> str:
+    proc = box.deploy("status")
+    assert_exit(proc, 0)
+    lines = proc.stdout.splitlines()
+    return lines[0] if lines else ""
 
 
 def read_marker(box: Box) -> dict[str, Any]:
@@ -301,24 +319,71 @@ UNREADABLE = [
     pytest.param({"release": SHA_B, "only": None, "started_at": 5}, id="started-at-a-number"),
     pytest.param({"release": SHA_B, "only": ["gateway"], "started_at": TS}, id="valid-only"),
     pytest.param("mode-000", id="valid-mode-000"),
+    pytest.param("dangling-link", id="dangling-link"),
 ]
+VALID_ONLY = {"release": SHA_B, "only": ["gateway"], "started_at": TS}
+
+
+def cannot_be_read(content: Any) -> bool:
+    """§6.12: which UNREADABLE markers `loom-deploy` cannot read. A mode-000 file reads fine
+    as root (CI); the valid-only one is a valid marker."""
+    if content == "mode-000":
+        return os.geteuid() != 0
+    return content != VALID_ONLY
 
 
 @pytest.mark.parametrize("content", UNREADABLE)
 def test_a_marker_that_cannot_be_read_still_refuses(box: Box, content: Any) -> None:
     """Whatever the marker holds, `--only` is refused; the message never prints `only`
-    (no "gateway") and has no "None"/"null"; a full apply then clears it."""
+    (no "gateway") and has no "None"/"null"; a full apply then clears it.
+
+    §6.12: something at the path (a dangling symbolic link included) is a set marker; one
+    that cannot be read makes the messages say so, the refusal gives only the R command,
+    and `status`'s first line is `<path> cannot be read; ...`."""
     applied(box, SHA_A)
     if content == "mode-000":
         write_marker(box, {"release": SHA_B, "only": None, "started_at": TS}, 0o000)
+    elif content == "dangling-link":
+        dangle_marker(box)
     else:
         write_marker(box, content)
     n_log, n_tl = len(box.log_records()), len(box.timeline())
     proc = apply(box, SHA_A, "poolmgr")
     said = assert_refused_by_marker(box, proc, n_log, n_tl)
     assert "None" not in said and "null" not in said, said
+    assert f"loom-deploy apply --release {SHA_A}" in said, f"no full apply of R: {said}"
+    first = status_first_line(box)
+    assert first.startswith(str(marker(box))), f"status's first line: {first!r}"
+    if cannot_be_read(content):
+        assert "cannot be read" in said, f"the refusal does not say it cannot be read: {said}"
+        assert f"--release {SHA_B}" not in said, f"only the R command when unreadable: {said}"
+        assert "cannot be read" in first, f"status's first line: {first!r}"
+        assert "refused until a full apply succeeds" in first, first
     again = apply(box, SHA_A)
     assert_exit(again, 0)
+    assert_no_marker(box)
+
+
+@pytest.mark.parametrize("kind", ["not-json", "dangling-link"])
+def test_an_unreadable_marker_with_no_release_recorded(box: Box, kind: str) -> None:
+    """§6.12: neither release known (the marker cannot be read, no `release.json`): the
+    refusal says "a full apply of the release you were applying"; `status` exits 0."""
+    box.publish(SHA_A)
+    if kind == "dangling-link":
+        dangle_marker(box)
+    else:
+        write_marker(box, "not json")
+    assert not (box.var_lib / "release.json").exists()
+    n_log, n_tl = len(box.log_records()), len(box.timeline())
+    proc = apply(box, SHA_A, "poolmgr")
+    said = assert_refused_by_marker(box, proc, n_log, n_tl)
+    assert "a full apply of the release you were applying" in said, said
+    assert "cannot be read" in said, said
+    assert "None" not in said and "null" not in said, said
+    first = status_first_line(box)
+    assert first.startswith(str(marker(box))) and "cannot be read" in first, first
+    full = apply(box, SHA_A)
+    assert_exit(full, 0)
     assert_no_marker(box)
 
 
@@ -348,6 +413,55 @@ def test_a_stop_after_record_is_cleared_by_a_full_apply(box: Box) -> None:
     assert_exit(full, 0)
     assert up_services(box, n_tl) == ORDER
     assert_no_marker(box)
+
+
+def test_a_record_that_cannot_write_release_json_keeps_the_marker(box: Box) -> None:
+    """§6.6 step 5 ("removes it once `release.json` is written") and §6.12 ("Removed in the
+    `record` step: `record`/`start`, `release.json` written, the marker removed ..."): when
+    `release.json` cannot be written, the marker stays and `--only` stays refused.
+
+    `release.json` is replaced by a non-empty directory during the last service's `up`
+    (after every read an apply makes before step 4), so only its write at `record` fails."""
+    applied(box, SHA_A)
+    box.publish(SHA_B)
+    rj = box.var_lib / "release.json"
+    recorded = rj.read_bytes()
+    wrap = box.base / "wrap"
+    wrap.mkdir()
+    fake = box.bin / "docker"
+    script = wrap / "docker"
+    script.write_text(
+        f"#!{sys.executable} -IS\n"
+        "import os, sys\n"
+        "argv = sys.argv[1:]\n"
+        f"rj = {str(rj)!r}\n"
+        f"last = {ORDER[-1]!r}\n"
+        "if argv[:1] == ['compose'] and 'up' in argv and last in argv and os.path.isfile(rj):\n"
+        "    os.unlink(rj)\n"
+        "    os.mkdir(rj)\n"
+        "    with open(os.path.join(rj, 'keep'), 'w') as f:\n"
+        "        f.write('x')\n"
+        f"os.execv({str(fake)!r}, [{str(fake)!r}, *argv])\n"
+    )
+    script.chmod(0o755)
+    n_log = len(box.log_records())
+    proc = apply(box, SHA_B, PATH=f"{wrap}:{box.bin}:/usr/local/bin:/usr/bin:/bin")
+    assert_exit(proc, 1)
+    assert rj.is_dir(), f"the {ORDER[-1]} update never ran, so release.json was not replaced"
+    new = box.log_records()[n_log:]
+    pairs = [(r["step"], r["status"]) for r in new]
+    assert ("record", "start") in pairs, new
+    failed = [p for p in pairs if p[1] == "failed"]
+    assert failed == [("record", "failed"), ("apply", "failed")], new
+    assert read_marker(box).get("release") == SHA_B, "the marker does not name B"
+    # As after a rename that failed: the old release.json is still there.
+    shutil.rmtree(rj)
+    rj.write_bytes(recorded)
+    n_log, n_tl = len(box.log_records()), len(box.timeline())
+    refused = apply(box, SHA_B, "poolmgr")
+    said = assert_refused_by_marker(box, refused, n_log, n_tl)
+    assert f"loom-deploy apply --release {SHA_A}" in said, f"no full apply of A: {said}"
+    assert f"--release {SHA_B}" in said, f"no full apply of B: {said}"
 
 
 # ---------------------------------------------------------------- full apply, rollback
@@ -430,6 +544,7 @@ def test_any_successful_full_apply_clears_the_marker(box: Box, target: str) -> N
 
 def test_status_shows_the_marker(box: Box) -> None:
     failed_b_over_a(box)
+    doc = read_marker(box)
     proc = box.deploy("status")
     assert_exit(proc, 0)
     lines = proc.stdout.splitlines()
@@ -438,6 +553,9 @@ def test_status_shows_the_marker(box: Box) -> None:
     assert f"release {SHA_B}" in first, first
     assert f"recorded: {SHA_A}" in first, first
     assert "refused until a full apply" in first, first
+    # §6.12 status form: "started <started_at>, only <the list, comma-separated, or all>"
+    assert f"started {doc['started_at']}" in first, first
+    assert "only all" in first, first
 
 
 def test_acceptance_is_refused_while_the_marker_is_set(box: Box) -> None:
@@ -494,6 +612,8 @@ def test_a_marker_that_cannot_be_written_fails_cleanly(box: Box) -> None:
     assert [(r["step"], r["status"]) for r in failed] == [("apply", "failed")], new
     assert "apply-in-progress.json" in str(failed[0].get("detail")), failed[0]
     assert any((r["step"], r["status"]) == ("migrate", "ok") for r in new), new
+    # §6.12: written before the first `update`/`start` record, so no `update` record.
+    assert not [r for r in new if r["step"] == "update"], f"an update was logged: {new}"
     assert p.is_dir() and (p / "keep").read_text() == "x", "the marker already there changed"
 
 
