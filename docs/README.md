@@ -4,8 +4,9 @@
 
 - [PLAN.md](PLAN.md): decisions, stack, phase plan, Postgres schemas, registry schema, open questions.
 - [architecture.md](architecture.md): Phase 0 components, data flow, module contracts, where each measurement lives.
-- [phase1-runpod-plan.md](phase1-runpod-plan.md): Phase 1 serving on RunPod (the approved plan; M1, M2 and M3 Stage A are merged into `main`): where things run, gateway-to-pod security, replicas, costs, milestones.
+- [phase1-runpod-plan.md](phase1-runpod-plan.md): Phase 1 serving on RunPod: where things run, gateway-to-pod security, replicas, costs, milestones; M1, M2 and M3 Stage A are merged into `main`.
 - [phase1-contracts.md](phase1-contracts.md): Phase 1 M1 contracts: services and env, schema and ledger, Redis keys and reserve/settle, usage stream, gateway-to-pod, errors, cost headers.
+- [phase1-m1-acceptance.md](phase1-m1-acceptance.md): M1 (the platform on the mock backend): acceptance results, with how to reproduce each for free.
 - [phase1-m2-spec.md](phase1-m2-spec.md) and [phase1-m2-acceptance.md](phase1-m2-acceptance.md): M2 (the pool manager, offline): spec and acceptance record.
 - [phase1-m3-spec.md](phase1-m3-spec.md) and [phase1-m3-acceptance.md](phase1-m3-acceptance.md): M3 (the AWS control plane, built and tested offline): spec and Stage A acceptance record.
 - [m3-review-fixes-spec.md](m3-review-fixes-spec.md): the fixes from the review before M3.
@@ -32,6 +33,7 @@
 - [runbook-runpod.md](runbook-runpod.md): GPU runs on RunPod (the primary path): preflight, monitoring spend, incidents, teardown checks, smoke test.
 - [runbook.md](runbook.md): GPU runs on AWS: preflight, monitoring spend, incidents, reproducing, publishing, teardown.
 - [runbook-platform.md](runbook-platform.md): the Phase 1 control plane on AWS (M3, Stage B): deploy, rollback, secrets, Stripe, SES, alarms, teardown.
+- [runbook-stripe.md](runbook-stripe.md): the M3 Stripe test-mode runbook: operating the webhook on the deployed box.
 - [runbook-pod-ca.md](runbook-pod-ca.md): the pod CA: rollover, expiry, the gateway's certificate.
 - [security.md](security.md): Phase 0 security measures and their limits; Phase 1 requirements.
 

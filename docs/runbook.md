@@ -459,7 +459,7 @@ The provider waits out `InsufficientInstanceCapacity` itself, for up to `capacit
 - **SGLang's retraction counter** is absent until SGLang first retracts a request, so a
   run's server metrics list `preemptions` as missing; read it as zero.
 
-### 7b. The perf-track runs on AWS (ran 2026-11-03 to 2026-11-05)
+### 7b. The perf-track runs on AWS (ran 2026-11-02 to 2026-11-04)
 
 RunPod Secure 1x L40S was out of stock all of 2026-11-02 (191 refused creates), so the
 perf-track runs (profiling and speculative decoding) have AWS twins on g6e.xlarge

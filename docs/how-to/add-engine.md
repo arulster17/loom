@@ -28,8 +28,12 @@ writing code:
 ## Code changes
 
 1. **Registry schema** (`bench/src/loom_bench/registry.py`): add the name to
-   `Engine.name: Literal["vllm", "sglang"]`. Also add it to
-   `LocalProviderSpec.engine` in `experiment.py` so the `local` provider accepts it.
+   `EngineName = Literal["vllm", "sglang"]` (it types `Engine.name` and the
+   `tool_call_parsers` keys). Also add it to `LocalProviderSpec.engine` in
+   `experiment.py` so the `local` provider accepts it. A new engine's tool parser is
+   hashed only in its own cells (`serving_model_doc` keeps the parsers of the cell's
+   engine plus `HASHED_PARSER_ENGINES`); do not add the engine to
+   `HASHED_PARSER_ENGINES` (`experiment.py`), or every vLLM and SGLang config hash moves.
 2. **Launch renderer** (`bench/src/loom_bench/engines.py`):
    - `ENTRYPOINTS[name]`: the container entrypoint (`("vllm", "serve")` for vLLM).
    - `_RESERVED_FLAGS[name]`: every flag rendered from registry fields, so

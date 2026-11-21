@@ -38,7 +38,7 @@ workload's own input:output mix.
 | [95cde129](reports/8b-aws-g6e-v1/leaderboard.md) | Qwen3-8B BF16, AWS g6e.xlarge (1x L40S), chat | 2.213 req/s (fails at 2.449) | $0.1765 [0.1654, 0.1880] | reference | AWS reference row (serving runs on RunPod) |
 | 95cde129 | Qwen3-8B FP8 + FP8 KV, AWS g6e.xlarge | 5.239 req/s (fails at 5.511) | $0.0799 [0.0714, 0.0893] | **FAIL** (IFEval −2.03 pts vs a 2-pt margin) | **no** |
 | [fccf9ed3](reports/8b-aws-engines-v1/leaderboard.md) | Qwen3-8B BF16 on **SGLang 0.5.21** vs vLLM 0.30.0, AWS g6e.xlarge | 1.633 req/s (fails at 2) | $0.2453 [0.2019, 0.2980] | **FAIL** (strict tool calling −11.11 pts [−16.30, −5.93]) | **no** |
-| [53e4c107](reports/8b-specdec-v1/leaderboard.md) | Qwen3-8B vLLM 0.30.0 BF16, no speculation (reference for the next row; its own host and day) | 2 req/s (fails at 3) | $0.2047 [0.1746, 0.2390] | reference | reference row; **untrusted** (throughput CV 10.8%) |
+| [53e4c107](reports/8b-specdec-v1/leaderboard.md) | Qwen3-8B vLLM 0.30.0 BF16, AWS g6e.xlarge, chat, no speculation (reference for the next row; its own host and day) | 2 req/s (fails at 3) | $0.2047 [0.1746, 0.2390] | reference | reference row; **untrusted** (throughput CV 10.8%) |
 | 53e4c107 | Qwen3-8B vLLM BF16 + **EAGLE3** speculative decoding | ≥3 req/s (none failed) | ≤$0.1336 [0.1150, 0.1548] | **INCONCLUSIVE** (IFEval −0.49 pts [−2.16, +1.11] vs a 2-pt margin) | **no**; **untrusted** (TTFT p95 CV 13.2%) |
 
 What these say:
