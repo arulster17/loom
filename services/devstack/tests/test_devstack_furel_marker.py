@@ -325,8 +325,11 @@ VALID_ONLY = {"release": SHA_B, "only": ["gateway"], "started_at": TS}
 
 
 def cannot_be_read(content: Any) -> bool:
-    """§6.12: which UNREADABLE markers `loom-deploy` cannot read. A mode-000 file reads fine
-    as root (CI); the valid-only one is a valid marker."""
+    """§6.12: which UNREADABLE markers `loom-deploy` cannot read. A mode-000 file cannot be
+    read by a non-root user (as in CI: its `bench` and `flake-check` jobs run on GitHub's
+    `ubuntu-latest` runners as user `runner`, with no `container:` or `sudo`), but root
+    reads it anyway (as in a container or WSL shell running as root), hence the
+    `os.geteuid()` check; the valid-only one is a valid marker."""
     if content == "mode-000":
         return os.geteuid() != 0
     return content != VALID_ONLY
