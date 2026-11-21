@@ -139,7 +139,7 @@ TRANSIENT_CAPACITY_ERRORS = frozenset(
 UNSUPPORTED = "Unsupported"
 CAPACITY_ERRORS = TRANSIENT_CAPACITY_ERRORS | {UNSUPPORTED}
 # RunInstances refused for the account's vCPU quota. AWS counts an instance against it
-# for a while after it reports `terminated`: aws-smoke-trtllm (d549221f) launched its
+# for a while after it reports `terminated`: a three-host smoke (d549221f) launched its
 # third host 0.3 s after the second's teardown saw `terminated`, and was refused (the
 # first handover, 44 s later, was not). The quota is per account and region, so a sweep
 # skips the rest of a region at its first such refusal and goes on to the next region.

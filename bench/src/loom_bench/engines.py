@@ -6,13 +6,6 @@ its entrypoint. Experiment variants patch the spec before it gets here
 `docker run` used on a GPU host; `engine_process_argv` is the bare process used
 where the host is the engine's own container (RunPod).
 
-TensorRT-LLM (`trtllm`) differs from vLLM and SGLang in three ways, all handled here:
-its `engine.args` are LLM-API options (the YAML `trtllm-serve --extra_llm_api_options`
-reads, e.g. `{kv_cache_config: {enable_block_reuse: false}}`), not CLI flags, so they go
-through a small launcher that writes them to a file; it loads the checkpoint from its HF
-cache snapshot directory (the pinned revision is in the path, and nothing resolves a hub
-ref offline); and it serves Prometheus metrics at `/prometheus/metrics` (`metrics_path`).
-docs/perf/tensorrt-llm.md has the reasons and the verified version facts.
 """
 
 from __future__ import annotations
@@ -20,45 +13,21 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
-from loom_bench.profile.spec import TRTLLM_TRACE_DIR
 from loom_bench.providers.base import EngineLaunch
 from loom_bench.registry import ModelSpec
-
-# TensorRT-LLM's launcher. $1 is the Python source of `trtllm-serve` with Loom's
-# prompt-logprobs route (`TRTLLM_SERVE_SOURCE`); $2 the LLM-API options as JSON (JSON is
-# YAML), written to a private temp file for `--extra_llm_api_options`; the rest are
-# `trtllm-serve serve` arguments. `trtllm-launch` is only bash's $0 (the process name).
-TRTLLM_LAUNCHER = (
-    'set -eu; src="$1"; cfg="$(mktemp /tmp/loom-trtllm.XXXXXX)"; printf "%s\\n" "$2" >"$cfg"; '
-    'shift 2; exec python3 -c "$src" serve "$@" --extra_llm_api_options "$cfg"'
-)
-# loom_bench/trtllm_scorer.py after the detokenize.py it renders tokens with, run by the
-# image's python3 (loom_bench is not installed there). Code, not config: it changes only
-# the answer to echo+logprobs completions requests, which trtllm-serve itself cannot give.
-TRTLLM_SERVE_SOURCE = (
-    (Path(__file__).parent / "detokenize.py").read_text()
-    + "\n\n"
-    + (Path(__file__).parent / "trtllm_scorer.py").read_text()
-)
 
 ENTRYPOINTS: dict[str, tuple[str, ...]] = {
     "vllm": ("vllm", "serve"),
     "sglang": ("python3", "-m", "sglang.launch_server"),
-    "trtllm": ("bash", "-c", TRTLLM_LAUNCHER, "trtllm-launch", TRTLLM_SERVE_SOURCE),
 }
 
 CONTAINER_HF_HOME = "/root/.cache/huggingface"
 ENGINE_PORT = 8000
 
-# Prometheus path per engine (default `/metrics`). TensorRT-LLM's `/metrics` is JSON
-# iteration stats; its Prometheus text is at `/prometheus/metrics`, mounted only with the
-# `return_perf_metrics` option, which `trtllm_options` always sets (as SGLang always gets
-# `--enable-metrics`); its running/waiting/KV gauges also need `enable_iter_perf_stats`.
-# Verified in tensorrt_llm/serve/openai_server.py at v1.2.1 and v1.4.0rc2.
-METRICS_PATHS: dict[str, str] = {"trtllm": "/prometheus/metrics"}
+# Prometheus path per engine (default `/metrics`); both engines serve it there.
+METRICS_PATHS: dict[str, str] = {}
 
 
 def metrics_path(engine: str) -> str:
@@ -114,33 +83,7 @@ _RESERVED_FLAGS: dict[str, frozenset[str]] = {
             "tool-call-parser",
         }
     ),
-    # LLM-API option names (snake_case) and serve flags, set from the registry by
-    # `_trtllm_args` / `trtllm_options`.
-    "trtllm": frozenset(
-        {
-            "model",
-            "tokenizer",
-            "revision",
-            "backend",
-            "tensor_parallel_size",
-            "tp_size",
-            "pipeline_parallel_size",
-            "pp_size",
-            "max_seq_len",
-            "trust_remote_code",
-            "tool_parser",
-            "guided_decoding_backend",
-            "return_perf_metrics",
-            "enable_iter_perf_stats",
-            "served_model_name",
-            "host",
-            "port",
-        }
-    ),
 }
-
-# Engines whose `engine.args` are an options document rather than CLI flags.
-OPTION_ENGINES = frozenset({"trtllm"})
 
 _FLAG_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -293,118 +236,6 @@ def _sglang_args(spec: ModelSpec, extra: list[str]) -> list[str]:
     ]
 
 
-_OPTION_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-# TensorRT-LLM's FP8 KV cache is E4M3 (`kv_cache_config.dtype: fp8`).
-_TRTLLM_KV_CACHE_DTYPE = {"fp8": "fp8", "fp8_e4m3": "fp8"}
-
-
-def _trtllm_snapshot(spec: ModelSpec) -> str:
-    """The checkpoint's HF cache snapshot directory in the engine's container.
-
-    The path names the pinned revision, so loading from it pins the weights, tokenizer
-    and chat template to it with no hub lookup (offline, a hub id resolves `main`, which
-    a download by commit never records). `engine_process_argv` moves it to the host's
-    weights directory where that differs (RunPod).
-    """
-    folder = "models--" + spec.hf.repo.replace("/", "--")
-    return f"{CONTAINER_HF_HOME}/hub/{folder}/snapshots/{spec.hf.revision}"
-
-
-def trtllm_options(spec: ModelSpec) -> dict[str, Any]:
-    """`engine.args` as TensorRT-LLM LLM-API options, plus those set from the registry.
-
-    Set here: `guided_decoding_backend: xgrammar` (`response_format` needs a grammar
-    backend; vLLM and SGLang use xgrammar by default, TensorRT-LLM has none by default),
-    `return_perf_metrics: true` (mounts the Prometheus endpoint), `enable_iter_perf_stats:
-    true` (feeds its running, waiting and KV-cache gauges; v1.4.0rc2 openai_server.py
-    starts the collector only with it) and, unless `auto`, `kv_cache_config.dtype`.
-    Everything else stays the engine's default unless `engine.args` sets it
-    (`kv_cache_config` is merged).
-    """
-    out: dict[str, Any] = {}
-    for key, value in spec.engine.args.items():
-        if not _OPTION_RE.match(key):
-            raise ValueError(f"invalid TensorRT-LLM option name {key!r}")
-        if key in _RESERVED_FLAGS["trtllm"]:
-            raise ValueError(f"engine arg {key!r} is set from the registry; change it there")
-        if key == "profiler_config":
-            raise ValueError(
-                "profiler_config is vLLM's; TensorRT-LLM profiles at runtime (profile: section)"
-            )
-        if key == "speculative_config":
-            raise ValueError(
-                "speculative_config on trtllm is not wired: its draft checkpoint would not "
-                "be downloaded (engines.draft_weights)"
-            )
-        out[key] = value
-    kv = out.get("kv_cache_config", {})
-    if not isinstance(kv, dict):
-        raise ValueError("kv_cache_config must be a mapping")
-    if "dtype" in kv:
-        raise ValueError("kv_cache_config.dtype is set from the registry's kv_cache_dtype")
-    if spec.kv_cache_dtype != "auto":
-        if spec.kv_cache_dtype not in _TRTLLM_KV_CACHE_DTYPE:
-            raise ValueError(f"trtllm has no {spec.kv_cache_dtype} KV cache (its FP8 is E4M3)")
-        kv = {**kv, "dtype": _TRTLLM_KV_CACHE_DTYPE[spec.kv_cache_dtype]}
-    if kv:
-        out["kv_cache_config"] = kv
-    out["guided_decoding_backend"] = "xgrammar"
-    out["return_perf_metrics"] = True
-    out["enable_iter_perf_stats"] = True
-    return out
-
-
-def _trtllm_quantization(spec: ModelSpec) -> None:
-    """TensorRT-LLM's PyTorch backend reads a pre-quantized checkpoint's format from its
-    files (ModelOpt `hf_quant_config.json`, or `quantization_config` with quant_method
-    fp8) and has no flag to quantize BF16 weights on load. It reads no compressed-tensors
-    checkpoint (tensorrt_llm/_torch/model_config.py at v1.2.1 and v1.4.0rc2)."""
-    method = spec.hf.quant_method
-    if method is None and spec.quantization == "fp8":
-        raise ValueError(
-            f"{spec.id}: trtllm does not quantize BF16 weights on load; serve a "
-            "pre-quantized FP8 checkpoint (ModelOpt) instead"
-        )
-    if method not in (None, "modelopt", "fp8"):
-        raise ValueError(f"{spec.id}: trtllm cannot load {method} checkpoints")
-
-
-def _trtllm_args(spec: ModelSpec, extra: list[str]) -> list[str]:
-    """`[options JSON, trtllm-serve serve args...]` for `TRTLLM_LAUNCHER`.
-
-    The PyTorch backend (trtllm-serve's default and, in 1.4.0rc2, its only choice; named
-    so the config hash records it) loads the HF checkpoint directly: no TensorRT engine
-    build. `--served_model_name` (new in 1.4.0rc2) serves it as `spec.id`, as the other
-    engines do.
-    """
-    if extra:
-        raise ValueError("trtllm takes engine.args as options, not flags")
-    _trtllm_quantization(spec)
-    parser = _tool_call_parser(spec)
-    tools = ["--tool_parser", parser] if parser else []
-    options = json.dumps(trtllm_options(spec), sort_keys=True, separators=(",", ":"))
-    return [
-        options,
-        _trtllm_snapshot(spec),
-        "--backend",
-        "pytorch",
-        "--tp_size",
-        str(spec.parallelism.tp),
-        "--pp_size",
-        str(spec.parallelism.pp),
-        "--max_seq_len",
-        str(spec.max_context),
-        *(["--trust_remote_code"] if _trust_remote_code(spec) else []),
-        *tools,
-        "--served_model_name",
-        spec.id,
-        "--host",
-        "0.0.0.0",
-        "--port",
-        str(ENGINE_PORT),
-    ]
-
-
 def validate_engine_env(env: dict[str, str]) -> dict[str, str]:
     for name in env:
         if not _ENV_NAME_RE.match(name):
@@ -418,7 +249,6 @@ def validate_engine_env(env: dict[str, str]) -> dict[str, str]:
 ARG_RENDERERS: dict[str, Callable[[ModelSpec, list[str]], list[str]]] = {
     "vllm": _vllm_args,
     "sglang": _sglang_args,
-    "trtllm": _trtllm_args,
 }
 
 
@@ -490,7 +320,7 @@ def render_launch(spec: ModelSpec) -> EngineLaunch:
             f"(known: {', '.join(sorted(ARG_RENDERERS))}); see docs/how-to/add-engine.md"
         )
     name = spec.engine.name
-    args = renderer(spec, [] if name in OPTION_ENGINES else render_args(name, spec.engine.args))
+    args = renderer(spec, render_args(name, spec.engine.args))
     draft_weights(spec.engine.name, args)  # a draft must be a pinned HF repo
     return EngineLaunch(
         engine=spec.engine.name,
@@ -510,11 +340,11 @@ def engine_process_argv(
     """The engine run as a plain process (no container runtime), listening on `host`.
 
     For providers whose host is itself the engine's container (RunPod): the
-    entrypoint plus `launch.args` with the `--host` value replaced, and a checkpoint
-    path under the container HF cache (`CONTAINER_HF_HOME`: TensorRT-LLM's model
-    argument) moved to `weights_dir`, so the config hash, which covers `launch.args`,
-    is unchanged. `launch.env` is validated (no secret names); the caller sets it in
-    the process environment.
+    entrypoint plus `launch.args` with the `--host` value replaced, so the config hash,
+    which covers `launch.args`, is unchanged. `weights_dir` is accepted for callers that
+    pass it and is not used: the engines find their weights through `HF_HOME`.
+    `launch.env` is validated (no secret names); the caller sets it in the process
+    environment.
     """
     if launch.engine not in ENTRYPOINTS:
         raise ValueError(f"no entrypoint for engine {launch.engine!r}")
@@ -524,31 +354,16 @@ def engine_process_argv(
     if len(at) != 1 or at[0] + 1 >= len(args):
         raise ValueError("engine args must set --host exactly once")
     args[at[0] + 1] = host
-    prefix = CONTAINER_HF_HOME + "/"
-    home = weights_dir.rstrip("/") + "/"
-    args = [home + a.removeprefix(prefix) if a.startswith(prefix) else a for a in args]
     return [*ENTRYPOINTS[launch.engine], *args]
 
 
 _TRACE_DIR_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
-# NVIDIA's documented `docker run` for TensorRT-LLM release images (its quick start and
-# NGC page): pinned host memory unlimited, an 64 MiB stack. Docker's defaults (memlock
-# 8 MiB on Ubuntu 24.04, stack 8 MiB) are what the container gets otherwise; RunPod pods
-# set their own limits. With `--ipc host`, /dev/shm is the host's (half its RAM).
-DOCKER_ENGINE_FLAGS: dict[str, tuple[str, ...]] = {
-    "trtllm": ("--ulimit", "memlock=-1", "--ulimit", "stack=67108864"),
-}
 
 
 def profiler_trace_dir(launch: EngineLaunch) -> str | None:
     """Where a launch's torch profiler writes traces, or None when it cannot profile.
 
-    vLLM: `--profiler-config`'s `torch_profiler_dir` (None without it). TensorRT-LLM:
-    always `TRTLLM_TRACE_DIR`, the `output_dir` a profile window names in its
-    /start_profile body; its runtime profiling needs nothing at launch, so the launch
-    (and its config hash) is the same whether a window ever runs."""
-    if launch.engine == "trtllm":
-        return TRTLLM_TRACE_DIR
+    vLLM: `--profiler-config`'s `torch_profiler_dir` (None without it)."""
     if launch.engine != "vllm":
         return None
     raw = _flag_value(launch.args, "--profiler-config")
@@ -570,10 +385,9 @@ def docker_run_argv(launch: EngineLaunch, *, weights_dir: str, container_name: s
     the engine starts with `HF_HUB_OFFLINE=1` and never sees a Hugging Face token.
     `launch.env` is passed by name only (`-e NAME`); the caller exports the values.
     The port is published on loopback only: load is generated on the host itself.
-    A profiled vLLM launch, and every TensorRT-LLM one (whose profiling is decided at run
-    time), gets its trace directory bind-mounted at the same path, so the host's
-    collection script (aws_scripts/collect_profile.sh) finds the traces where the profile
-    section says they are. Engine-specific flags: `DOCKER_ENGINE_FLAGS`.
+    A profiled vLLM launch gets its trace directory bind-mounted at the same path, so the
+    host's collection script (aws_scripts/collect_profile.sh) finds the traces where the
+    profile section says they are.
     """
     if launch.engine not in ENTRYPOINTS:
         raise ValueError(f"no container entrypoint for engine {launch.engine!r}")
@@ -602,7 +416,6 @@ def docker_run_argv(launch: EngineLaunch, *, weights_dir: str, container_name: s
     ]
     if trace_dir is not None:
         argv += ["--volume", f"{trace_dir}:{trace_dir}"]
-    argv += DOCKER_ENGINE_FLAGS.get(launch.engine, ())
     for name in sorted(validate_engine_env(launch.env)):
         argv += ["--env", name]
     argv += ["--entrypoint", entry[0], launch.image, *entry[1:], *launch.args]

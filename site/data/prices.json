@@ -1,5 +1,5 @@
 {
-  "last_checked": "2026-10-31",
+  "last_checked": "2026-11-03",
   "clouds": {
     "aws": {
       "us-east-1": {
@@ -227,6 +227,74 @@
             "https://aws.amazon.com/ebs/pricing/"
           ],
           "last_checked": "2026-10-05",
+          "verified": true,
+          "note": null,
+          "kind": "ebs-gp3",
+          "per_gb_month": 80000
+        },
+        "data_transfer": null
+      },
+      "us-east-2": {
+        "instances": {
+          "g6e.xlarge": {
+            "sources": [
+              "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/us-east-2/index.json",
+              "https://aws.amazon.com/ec2/pricing/on-demand/"
+            ],
+            "last_checked": "2026-11-03",
+            "verified": true,
+            "note": null,
+            "gpu": "L40S",
+            "gpu_count": 1,
+            "gpu_memory_gb": 48,
+            "vcpus": 4,
+            "memory_gib": 32,
+            "local_nvme_gb": 250,
+            "on_demand_per_hour": 1861000,
+            "spot_per_hour": null,
+            "committed_1y_per_hour": null
+          }
+        },
+        "storage": {
+          "sources": [
+            "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/us-east-2/index.json",
+            "https://aws.amazon.com/ebs/pricing/"
+          ],
+          "last_checked": "2026-11-03",
+          "verified": true,
+          "note": null,
+          "kind": "ebs-gp3",
+          "per_gb_month": 80000
+        },
+        "data_transfer": null
+      },
+      "us-west-2": {
+        "instances": {
+          "g6e.xlarge": {
+            "sources": [
+              "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/us-west-2/index.json",
+              "https://aws.amazon.com/ec2/pricing/on-demand/"
+            ],
+            "last_checked": "2026-11-03",
+            "verified": true,
+            "note": null,
+            "gpu": "L40S",
+            "gpu_count": 1,
+            "gpu_memory_gb": 48,
+            "vcpus": 4,
+            "memory_gib": 32,
+            "local_nvme_gb": 250,
+            "on_demand_per_hour": 1861000,
+            "spot_per_hour": null,
+            "committed_1y_per_hour": null
+          }
+        },
+        "storage": {
+          "sources": [
+            "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/us-west-2/index.json",
+            "https://aws.amazon.com/ebs/pricing/"
+          ],
+          "last_checked": "2026-11-03",
           "verified": true,
           "note": null,
           "kind": "ebs-gp3",

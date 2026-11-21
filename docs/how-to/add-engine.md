@@ -1,20 +1,12 @@
 # How to add a serving engine
 
-Adding an engine is **code, not configuration**. vLLM, SGLang and TensorRT-LLM are wired
-into the registry schema, the command-line renderer, the Prometheus name map and the host
-start script. Switching an existing model between those engines, or pinning a new version
-of one, is configuration (a new `engine.version` and `engine.image` digest in
-`config/models.yaml` or an experiment variant); this page is for another engine.
-
-TensorRT-LLM (`trtllm`) is the worked example of an engine that does not fit the vLLM
-mould ([perf/tensorrt-llm.md](../perf/tensorrt-llm.md)): its `engine.args` are LLM-API
-options passed as a file (`OPTION_ENGINES`, `TRTLLM_LAUNCHER`), it loads the checkpoint
-from its HF cache snapshot directory (moved to the pod's cache by `engine_process_argv`),
-its Prometheus text is at another path (`engines.METRICS_PATHS`), it has no prompt
-logprobs over HTTP, so it runs behind a small wrapper that adds them for the divergence
-check (`trtllm_scorer.py`, `engines.TRTLLM_SERVE_SOURCE`), its tool parser is
-recorded only in its own cells' config hashes (`experiment.serving_model_doc`), and its
-slower start is priced in `plan.ENGINE_START_EXTRA_S`.
+Adding an engine is **code, not configuration**. vLLM and SGLang are wired into the
+registry schema, the command-line renderer, the Prometheus name map and the host start
+script. Switching an existing model between those engines, or pinning a new version of
+one, is configuration (a new `engine.version` and `engine.image` digest in
+`config/models.yaml` or an experiment variant); this page is for another engine. The
+steps below assume an engine shaped like those two: an OpenAI-compatible HTTP server
+started from a container image with command-line flags.
 
 ## What the engine must provide
 
@@ -36,8 +28,13 @@ writing code:
 ## Code changes
 
 1. **Registry schema** (`bench/src/loom_bench/registry.py`): add the name to
-   `Engine.name: Literal["vllm", "sglang"]`. Also add it to
-   `LocalProviderSpec.engine` in `experiment.py` so the `local` provider accepts it.
+   `EngineName = Literal["vllm", "sglang"]` (it types `Engine.name` and the
+   `tool_call_parsers` keys). Also add it to `LocalProviderSpec.engine` in
+   `experiment.py` so the `local` provider accepts it. A new engine's tool parser is
+   hashed only in its own cells (`serving_model_doc` keeps the parsers of the cell's
+   engine plus `HASHED_PARSER_ENGINES`); do not add the engine to
+   `HASHED_PARSER_ENGINES` (`experiment.py`), or the vLLM and SGLang config hashes of
+   every model with a parser for the new engine move.
 2. **Launch renderer** (`bench/src/loom_bench/engines.py`):
    - `ENTRYPOINTS[name]`: the container entrypoint (`("vllm", "serve")` for vLLM).
    - `_RESERVED_FLAGS[name]`: every flag rendered from registry fields, so

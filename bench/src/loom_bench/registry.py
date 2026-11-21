@@ -100,12 +100,12 @@ class HFSource(StrictModel):
 
 
 # Serving engines with a launch renderer (`engines.ARG_RENDERERS`).
-EngineName = Literal["vllm", "sglang", "trtllm"]
+EngineName = Literal["vllm", "sglang"]
 
 
 class Engine(StrictModel):
     name: EngineName
-    # x.y.z, optionally a PEP 440 pre-release (TensorRT-LLM "1.4.0rc2") and/or a suffix.
+    # x.y.z, optionally a PEP 440 pre-release ("1.4.0rc2") and/or a suffix.
     version: Annotated[
         str, StringConstraints(pattern=r"^\d+\.\d+\.\d+((a|b|rc)\d+)?([.+-][\w.]+)?$")
     ]
@@ -185,10 +185,9 @@ class ModelSpec(StrictModel):
     scaling: Scaling
     clouds: Annotated[list[Cloud], Field(min_length=1)]
     capabilities: Capabilities
-    # Tool-call parser per engine (vLLM `--tool-call-parser`, SGLang `--tool-call-parser`,
-    # TensorRT-LLM `--tool_parser`). Model-level, not under `engine`, so it survives a
-    # variant switching engines. `capabilities.tools` needs one: without it the engine
-    # rejects `tool_choice: auto` (or, TensorRT-LLM, returns the call as plain text).
+    # Tool-call parser per engine (vLLM `--tool-call-parser`, SGLang `--tool-call-parser`).
+    # Model-level, not under `engine`, so it survives a variant switching engines.
+    # `capabilities.tools` needs one: without it the engine rejects `tool_choice: auto`.
     tool_call_parsers: dict[EngineName, NonEmptyStr] = Field(default_factory=dict)
     routing_tier: Annotated[int, Field(ge=0)]
     status: Status

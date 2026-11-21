@@ -7,6 +7,7 @@ from loom_bench.experiment import (
     ExpansionError,
     Experiment,
     LoadSpec,
+    RunpodProviderSpec,
     Variant,
     derive_seed,
     expand,
@@ -371,16 +372,16 @@ def test_runpod_engine_env_is_part_of_the_config_hash():
 
 
 def test_aws_engine_env_reaches_the_launch_and_only_then_moves_the_hash():
-    # The RunPod TensorRT-LLM smoke's fallback (TRTLLM_ENABLE_PDL=0) must exist on AWS too.
+    # RunPod's provider.engine_env (e.g. NCCL_P2P_DISABLE) must exist on AWS too.
     def aws(**provider):
         doc = read_yaml(QWEN)
         prov = {"kind": "aws_ec2", "market": "on_demand", **provider}
         return expand(Experiment.model_validate({**doc, "provider": prov}), REGISTRY)
 
-    plain, env = aws()[0], aws(engine_env={"TRTLLM_ENABLE_PDL": "0"})[0]
+    plain, env = aws()[0], aws(engine_env={"NCCL_P2P_DISABLE": "1"})[0]
     assert plain.launch.env == {}
-    assert env.launch.env == {"TRTLLM_ENABLE_PDL": "0"}
-    assert env.config["launch"]["env"] == {"TRTLLM_ENABLE_PDL": "0"}
+    assert env.launch.env == {"NCCL_P2P_DISABLE": "1"}
+    assert env.config["launch"]["env"] == {"NCCL_P2P_DISABLE": "1"}
     assert env.config_hash != plain.config_hash and env.host_key == plain.host_key
     for bad in ({"HF_TOKEN": "x"}, {"lower": "1"}):
         with pytest.raises(ExpansionError, match=r"provider\.engine_env"):
@@ -401,6 +402,15 @@ def test_runpod_spec_defaults_and_rejects_bad_fields():
     for bad in ({"market": "spot"}, {"cloud_type": "community"}, {"allowed_cuda_versions": []}):
         with pytest.raises(ValidationError):
             runpod_experiment(**bad)
+
+
+@pytest.mark.parametrize("version", ["13.1", "13.2", "14.0"])
+def test_runpod_cuda_versions_outside_runpods_list_fail_at_load(version):
+    # RunPod's REST API refused "13.1"/"13.2" with a 400 at pod create (2b2b18f6,
+    # 2026-11-02); the spec now refuses them before anything is created.
+    with pytest.raises(ValidationError):
+        RunpodProviderSpec(kind="runpod", allowed_cuda_versions=["13.0", version])
+    assert RunpodProviderSpec(kind="runpod").allowed_cuda_versions == ["13.0"]
 
 
 def registry_without_runpod_instance() -> Registry:

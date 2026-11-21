@@ -87,6 +87,20 @@ def test_categories(name: str, cat: str) -> None:
     assert categorize(name) == cat
 
 
+def test_normalization_kernels_are_other_whatever_library_they_come_from() -> None:
+    # FlashInfer's FusedAddRMSNorm: "flashinfer" alone would file it under attention
+    # (71e2c32c: 0.2-0.8 ms a step).
+    flashinfer_norm = (
+        "kernel_cutlass_kernel_flashinfernormkernelsfused_add_rmsnormFusedAddRMSNormKernel"
+        "_object_at__tensorptrbf16gmem"
+    )
+    assert categorize(flashinfer_norm) == "other"
+    assert categorize("triton_red_fused_fused_add_rms_norm_2") == "other"
+    assert categorize("fused_add_rms_norm_static_fp8_quant_kernel") == "quant"
+    # A QK-norm fused with RoPE is not an RMSNorm/LayerNorm: RoPE makes it attention.
+    assert categorize("void kernels::fusedQKNormRopeKernel<128>") == "attention"
+
+
 def two_step_trace() -> list[dict]:
     """Two 10 ms steps on GPU 0, each: 1 ms idle, 5 ms GEMM, 2 ms attention, 1 ms of
     sampling, and an all-reduce of 2 ms on its own stream, half of it under the GEMM."""

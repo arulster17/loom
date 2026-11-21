@@ -17,9 +17,15 @@ from loom_bench.experiment import Experiment
 from loom_bench.mock.config import MockConfig
 from loom_bench.mock.server import create_app
 from loom_bench.prices import load_prices
-from loom_bench.profile.capture import engine_root, run_capture, window_latency
+from loom_bench.profile.capture import (
+    capture_for,
+    engine_root,
+    run_capture,
+    start_body,
+    window_latency,
+)
 from loom_bench.profile.mock_trace import SHARES
-from loom_bench.profile.spec import ProfileCapture
+from loom_bench.profile.spec import ProfileCapture, ProfileSpec
 from loom_bench.records import RequestRecord, RequestStatus
 from loom_bench.registry import load_registry
 from loom_bench.runner import RunnerContext, plan_experiment, run_experiment
@@ -187,9 +193,35 @@ def test_a_searched_workload_cannot_be_profiled() -> None:
         Experiment.model_validate(doc)
 
 
+def test_an_sglang_variant_cannot_be_profiled() -> None:
+    doc = {
+        **mock_profile_doc(),
+        "provider": {"kind": "aws_ec2", "instance_type": "g6e.xlarge", "market": "on_demand"},
+        "variants": [
+            {
+                "name": "t",
+                "engine": {"name": "sglang", "version": "0.5.6", "image": "lmsysorg/sglang:x"},
+            }
+        ],
+        "profile": {"windows": [{"workload": "fixed-128-128"}]},
+    }
+    with pytest.raises(ValidationError, match="engines only, not sglang"):
+        Experiment.model_validate(doc)
+
+
 def test_engine_root() -> None:
     assert engine_root("http://127.0.0.1:8000/v1") == "http://127.0.0.1:8000"
     assert engine_root("http://h:1/v1/") == "http://h:1"
+
+
+def test_the_vllm_start_body_carries_its_per_session_options() -> None:
+    # vLLM's /start_profile takes the session's bounds and file prefix in its body.
+    spec = ProfileSpec(windows=[{"workload": "w"}], max_iterations=400, delay_iterations=3)
+    assert start_body(capture_for(spec, "r1")) == {
+        "profile_prefix": "loom-r1",
+        "max_iterations": 400,
+        "delay_iterations": 3,
+    }
 
 
 class _Server:

@@ -1,19 +1,18 @@
-"""The three perf-track runs (profiling, speculative decoding, TensorRT-LLM vs vLLM) on
-one AWS g6e.xlarge on-demand host at a time, and their smokes, before any of them spends
-anything. RunPod Secure 1x L40S was out of stock on 2026-11-02; the account's on-demand
-G/VT quota (4 vCPU) fits exactly one g6e.xlarge, the same L40S.
+"""The perf-track runs (profiling, speculative decoding) on one AWS g6e.xlarge on-demand
+host at a time, and their smokes, before any of them spends anything. RunPod Secure 1x
+L40S was out of stock on 2026-11-02; the account's on-demand G/VT quota (4 vCPU) fits
+exactly one g6e.xlarge, the same L40S.
 
-- Each AWS spec is its RunPod original with only the provider block and budget changed
-  (and, for TensorRT-LLM, a host group for trtllm-bf16: AWS keys hosts by instance type,
-  not image), so the twins compare point for point; each AWS smoke mirrors its AWS run.
-- Every plan uses one host at a time, fits its cap even to TTL, and the six together fit
-  the overall cap; TensorRT-LLM's start is priced at the EC2 pull rate.
+- Each AWS spec is its RunPod original with only the provider block and budget changed,
+  so the twins compare point for point; each AWS smoke mirrors its AWS run.
+- Every plan uses one host at a time, fits its cap even to TTL, and all four together fit
+  the overall cap.
 - End to end on the aws_ec2 provider (moto EC2 and S3, HostSim behind SSM), each run at
   test scale: profile traces written through the engine container's bind mount and
   collected over SSM; n-gram and EAGLE3 rows with the EAGLE3 head fetched on its warm
   restart, the CommitPackFT file fetched onto the host and the EAGLE3 rows' output text
-  stored; TensorRT-LLM on three hosts in a row, each launched only after the previous one
-  is terminated (the quota fits one), with its wrapper, ulimits and Prometheus path."""
+  stored; two host groups in a row, the second launched only after the first is
+  terminated (the quota fits one), waiting out a quota still held just after it."""
 
 from __future__ import annotations
 
@@ -30,16 +29,11 @@ import yaml
 from sqlalchemy import select
 
 from loom_bench.budget import load_budget
-from loom_bench.engines import (
-    ENTRYPOINTS,
-    TRTLLM_SERVE_SOURCE,
-    docker_run_argv,
-    profiler_trace_dir,
-)
+from loom_bench.engines import docker_run_argv, profiler_trace_dir
 from loom_bench.experiment import EXPERIMENTS_DIR, Experiment, expand, load_experiment
 from loom_bench.jobs import EvalJob, LoadJob
 from loom_bench.money import parse_usd
-from loom_bench.plan import AWS_ENGINE_START_EXTRA_S, AWS_TIMING, _aws_disk_problems
+from loom_bench.plan import _aws_disk_problems
 from loom_bench.store.db import session_scope
 from loom_bench.store.models import BenchExperiment, BenchResource, BenchRun, BenchSpend
 from loom_bench.store.parquet import read_requests
@@ -66,12 +60,6 @@ RUNS = {
         X / "runpod-smoke-specdec.yaml",
         X / "qwen3-8b-specdec-runpod.yaml",
     ),
-    "trtllm": (
-        X / "aws-smoke-trtllm.yaml",
-        X / "qwen3-8b-trtllm-vs-vllm-aws.yaml",
-        X / "runpod-smoke-trtllm.yaml",
-        X / "qwen3-8b-trtllm-vs-vllm-runpod.yaml",
-    ),
 }
 TWINS = [(aws, runpod) for s, r, rs, rr in RUNS.values() for aws, runpod in ((s, rs), (r, rr))]
 PAIRS = [(s, r) for s, r, _, _ in RUNS.values()]
@@ -81,8 +69,6 @@ QUOTES = {
     "qwen3-8b-profile-aws": ("$5.25", 165, 1),
     "aws-smoke-specdec": ("$3.75", 115, 1),
     "qwen3-8b-specdec-aws": ("$15.25", 480, 1),
-    "aws-smoke-trtllm": ("$6.25", 65, 3),
-    "qwen3-8b-trtllm-vs-vllm-aws": ("$27", 285, 3),
 }
 # Billable spend in the results DB when the quotes were made (bench plan, 2026-11-02).
 SPENT_AT_QUOTE = parse_usd("$96.57")
@@ -93,10 +79,7 @@ PINNED_PROVIDER = {
     "market": "on_demand",
     "disk_gb": 200,
 }
-# 95cde129's bf16 cell (vLLM v0.30.0 BF16 on g6e.xlarge on-demand), as recorded.
-VLLM_BF16_HASH = "48f3d8d1850a0b1bfc6f454ee35a29902d4dc858ed984252defa8ffe5f621375"
 EAGLE3 = ("RedHatAI/Qwen3-8B-speculator.eagle3", "08610ffa01dd9f16731fe8f627b85905b6aa51c4")
-FP8_MODELOPT = ("nvidia/Qwen3-8B-FP8", "2cebc4c89e25abc17668c81b01dceaf3d8b914d5")
 
 
 def _doc(path: Path) -> dict[str, Any]:
@@ -114,11 +97,6 @@ def test_each_aws_spec_is_its_runpod_original_on_one_g6e_xlarge(aws, runpod):
     for key in ("name", "description", "provider", "budget"):
         a.pop(key)
         r.pop(key)
-    # TensorRT-LLM: AWS keys a host by instance type, not image, so trtllm-bf16 needs its
-    # own host group to keep RunPod's three hosts (one per cell).
-    if "trtllm" in aws.stem:
-        (trt,) = [v for v in a["variants"] if v["name"] == "trtllm-bf16"]
-        assert trt.pop("host_group") == "trtllm-bf16"
     assert a == r  # variants, workloads, windows, search, SLO, quality, profile, seed
     a_cells, r_cells = (
         expand(load_experiment(aws), REGISTRY),
@@ -183,36 +161,12 @@ def test_each_plan_uses_one_host_at_a_time_and_fits_its_cap_to_ttl(name):
         assert host.seconds < 0.95 * host.ttl_s
 
 
-def test_the_real_runs_fit_the_per_experiment_cap_and_all_six_the_overall_cap():
+def test_the_real_runs_fit_the_per_experiment_cap_and_all_four_the_overall_cap():
     budget = load_budget()
     caps = {name: parse_usd(cap) for name, (cap, _, _) in QUOTES.items()}
     assert all(c <= parse_usd(budget.per_experiment_cap) for c in caps.values())
-    assert sum(caps.values()) == parse_usd("$59.25")
+    assert sum(caps.values()) == parse_usd("$26.00")
     assert sum(caps.values()) <= parse_usd(budget.overall_cap) - SPENT_AT_QUOTE
-
-
-def test_the_runner_runs_host_groups_one_after_another():
-    # The three TensorRT-LLM host groups run in sequence (runner._run_group, each host torn
-    # down before the next group): with the teardown wait, never two hosts at once.
-    exp = load_experiment(RUNS["trtllm"][1])
-    cells = expand(exp, REGISTRY)
-    assert [c.variant for c in cells] == ["vllm-bf16", "trtllm-bf16", "trtllm-fp8"]
-    assert len({c.host_key for c in cells}) == 3
-
-
-def test_the_trtllm_runs_vllm_row_is_95cde129s_bf16_cell():
-    cells = {c.variant: c for c in expand(load_experiment(RUNS["trtllm"][1]), REGISTRY)}
-    assert cells["vllm-bf16"].config_hash == VLLM_BF16_HASH
-
-
-def test_trtllm_cold_starts_are_priced_at_the_ec2_pull_rate():
-    plan = _plan(load_experiment(RUNS["trtllm"][1]))
-    vllm, trt, fp8 = (h.steps[0].seconds for h in plan.hosts)
-    pull, init = AWS_ENGINE_START_EXTRA_S["trtllm"]
-    assert trt - vllm == pytest.approx(pull + init)  # the same BF16 checkpoint
-    # 17.3 GB at the ~37 MB/s EC2 hosts pulled SGLang's 15.2 GB in 416 s (fccf9ed3).
-    assert AWS_TIMING.image_pull_s + pull >= 17.3e9 / (15.2e9 / 416)
-    assert fp8 < trt  # the FP8 checkpoint is half the BF16 one
 
 
 def test_every_host_fits_its_checkpoints_and_datasets_on_the_instance_store():
@@ -514,17 +468,17 @@ def test_both_speculative_rows_are_gated_against_bf16s_in_run_reference(specdec_
     }
 
 
-# TensorRT-LLM ------------------------------------------------------------------------------
+# Host groups on a one-host quota ----------------------------------------------------------
 
 
-class TrtllmHostSim(HostSim):
-    """A TensorRT-LLM engine answers echo+logprobs scoring only through Loom's wrapper."""
-
-    def start(self, instance: str, script: str) -> tuple[int, str, str]:
-        cmd = array(script, "ENGINE_CMD")
-        stock = "trtllm-launch" in cmd and TRTLLM_SERVE_SOURCE not in cmd
-        self.mock = {"completions_logprobs": not stock}
-        return super().start(instance, script)
+def two_host_groups(path: Path, tmp: Path, body: bytes) -> Experiment:
+    """`path` at test scale with its second variant on a host of its own (`host_group`):
+    two hosts in a row on the same g6e.xlarge quota, as a multi-host-group AWS run has."""
+    doc = _doc(path)
+    doc["variants"][1]["host_group"] = doc["variants"][1]["name"]
+    split = tmp / f"{path.stem}-two-hosts.yaml"
+    split.write_text(yaml.safe_dump(doc))
+    return at_test_scale(split, tmp, body)
 
 
 class OneHostQuota:
@@ -578,83 +532,8 @@ class OneHostQuota:
         return out
 
 
-@pytest.fixture(scope="module", params=RUNS["trtllm"][:2], ids=lambda p: p.stem)
-def trtllm_run(request, tmp_path_factory):
-    quota: dict[str, OneHostQuota] = {}
-
-    def wrap(ec2: Any) -> OneHostQuota:
-        quota["ec2"] = OneHostQuota(ec2)
-        return quota["ec2"]
-
-    out = run_on_host_sim(
-        request.param,
-        tmp_path_factory.mktemp(request.param.stem),
-        build=at_test_scale,
-        sim_cls=TrtllmHostSim,
-        wrap_ec2=wrap,
-    )
-    return (*out, quota["ec2"])
-
-
-def test_three_hosts_in_a_row_each_launched_after_the_last_terminated(trtllm_run):
-    outcome, sim, _, cells, _, instances, reaped, quota = trtllm_run
-    assert outcome.status.value == "completed", outcome.reason
-    assert quota.refused == 0 and len(quota.launched) == 3
-    assert {i["InstanceId"] for i in instances} == set(quota.launched)
-    assert all(i["State"]["Name"] == "terminated" for i in instances) and reaped == []
-    # Each host serves one cell: its instance runs one engine start, in variant order.
-    starts = [(i, s) for i, k, s in sim.launched if k == "start_engine"]
-    assert [i for i, _ in starts] == quota.launched
-    assert [var(s, "SERVED_MODEL") for _, s in starts] == [c.spec.id for c in cells]
-    assert all(var(s, "WARM") == "0" for _, s in starts)
-    # The chat dataset is fetched once per host.
-    assert sorted(sim.dataset_fetches) == sorted(quota.launched)
-
-
-def test_each_trtllm_host_runs_the_wrapper_with_nvidias_ulimits(trtllm_run):
-    _, sim, _, cells, _, _, _, _ = trtllm_run
-    vllm_s, bf16_s, fp8_s = sim.scripts_of("start_engine")
-    vllm_cmd = array(vllm_s, "ENGINE_CMD")
-    assert vllm_cmd[vllm_cmd.index("--entrypoint") + 1] == "vllm" and "--ulimit" not in vllm_cmd
-    trt_image = cells[1].launch.image
-    for script, cell in ((bf16_s, cells[1]), (fp8_s, cells[2])):
-        cmd = array(script, "ENGINE_CMD")
-        at = cmd.index(trt_image)
-        assert cmd[at - 2 : at] == ["--entrypoint", "bash"]
-        assert cmd[at + 1 : at + 5] == list(ENTRYPOINTS["trtllm"][1:])  # launcher + wrapper
-        assert cmd[at + 5 :] == cell.launch.args
-        assert "memlock=-1" in cmd[:at] and "stack=67108864" in cmd[:at]
-        assert var(script, "IMAGE") == trt_image
-    rev = cells[1].spec.hf.revision
-    bf16_cmd, fp8_cmd = array(bf16_s, "ENGINE_CMD"), array(fp8_s, "ENGINE_CMD")
-    assert f"/root/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/{rev}" in bf16_cmd
-    assert pairs(fp8_s, "FETCH_WEIGHTS") == [FP8_MODELOPT]
-    assert json.loads(fp8_cmd[fp8_cmd.index(trt_image) + 5])["kv_cache_config"] == {"dtype": "fp8"}
-
-
-def test_trtllm_load_jobs_scrape_its_prometheus_path(trtllm_run):
-    _, sim, _, _, _, _, _, _ = trtllm_run
-    urls = {j.engine: j.metrics_url for j in sim.jobs if isinstance(j, LoadJob)}
-    assert urls["trtllm"] == "http://127.0.0.1:8000/prometheus/metrics"
-    assert urls["vllm"] == "http://127.0.0.1:8000/metrics"
-
-
-def test_both_trtllm_cells_are_gated_on_vllms_reference_across_hosts(trtllm_run):
-    outcome, sim, ctx, cells, _, _, _, _ = trtllm_run
-    events = _events(outcome, ctx)
-    assert {e["cell"] for e in events if e["kind"] == "quality"} == {c.key for c in cells}
-    assert not [e for e in events if e["kind"] in ("quality_failed", "divergence_failed")]
-    scored = [j for j in sim.jobs if isinstance(j, EvalJob) and j.divergence == "score"]
-    assert len(scored) == 2
-    assert {j.reference.config_hash for j in scored if j.reference} == {cells[0].config_hash}
-    gates = {g.cell: g.baseline for g in outcome.gates}
-    assert gates == {"trtllm-bf16": "vllm-bf16", "trtllm-fp8": "vllm-bf16"}
-    for e in (e for e in events if e["kind"] == "gate"):
-        assert "KL" in json.dumps(e)
-
-
 def test_a_quota_still_held_just_after_terminated_is_waited_out(tmp_path):
-    # d549221f: the third host's RunInstances went out 0.3 s after the second host was
+    # d549221f: a host's RunInstances went out 0.3 s after the previous host was
     # `terminated`, and AWS still counted it against the 4-vCPU quota. The provider now
     # waits that out on the backoff; every host launches only after the last terminated.
     # The lag clears by count, so the real clock serves; sleeps only record and yield.
@@ -669,20 +548,27 @@ def test_a_quota_still_held_just_after_terminated_is_waited_out(tmp_path):
         slept.append(s)
         await asyncio.sleep(0)
 
-    outcome, _, _, _, _, instances, reaped = run_on_host_sim(
-        RUNS["trtllm"][0],
+    outcome, sim, _, cells, _, instances, reaped = run_on_host_sim(
+        RUNS["profile"][0],
         tmp_path,
-        build=at_test_scale,
-        sim_cls=TrtllmHostSim,
+        build=two_host_groups,
         wrap_ec2=wrap,
         provider_kw={"sleep": sleep},
     )
     assert outcome.status.value == "completed", outcome.reason
+    assert len({c.host_key for c in cells}) == 2
     q = quota["ec2"]
-    assert len(q.launched) == 3 and q.refused == 4  # two refusals at each handover
+    assert len(q.launched) == 2 and q.refused == 2  # two refusals at the handover
+    assert {i["InstanceId"] for i in instances} == set(q.launched)
     assert all(i["State"]["Name"] == "terminated" for i in instances) and reaped == []
+    # Each host serves one cell, from a cold start, in variant order.
+    starts = [(i, s) for i, k, s in sim.launched if k == "start_engine"]
+    assert [i for i, _ in starts] == q.launched
+    assert [var(s, "SERVED_MODEL") for _, s in starts] == [c.spec.id for c in cells]
+    assert all(var(s, "WARM") == "0" for _, s in starts)
+    assert sorted(sim.dataset_fetches) == sorted(q.launched)  # each host fetches its dataset
     waits = [s for s in slept if s >= 30]
-    assert waits.count(30) == 2 and waits.count(60) == 2  # 30 s, then 60 s, per handover
+    assert waits.count(30) == 1 and waits.count(60) == 1  # 30 s, then 60 s
 
 
 def test_without_the_teardown_wait_a_held_quota_fails_clearly(tmp_path, monkeypatch):
@@ -706,10 +592,9 @@ def test_without_the_teardown_wait_a_held_quota_fails_clearly(tmp_path, monkeypa
         now[0] += timedelta(seconds=s)
 
     outcome, *_ = run_on_host_sim(
-        RUNS["trtllm"][0],
+        RUNS["profile"][0],
         tmp_path,
-        build=at_test_scale,
-        sim_cls=TrtllmHostSim,
+        build=two_host_groups,
         wrap_ec2=wrap,
         provider_kw={"sleep": sleep, "clock": lambda: now[0]},
     )
@@ -814,50 +699,3 @@ def test_the_smoke_gives_up_at_the_deadline_with_nothing_spent_and_no_host(tmp_p
     assert not events.exists() or '"provisioned"' not in events.read_text()
     spend, resources, (exp,) = _spend(ctx)
     assert spend == [] and resources == [] and exp.spent_micros == 0
-
-
-def test_trtllm_start_scripts_stay_well_inside_ssms_document_size():
-    # The launcher sends the wrapper's Python source in ENGINE_CMD (~21 KB rendered). SSM
-    # documents no limit on a command's parameters; its nearest one, a document's size, is
-    # 64 KB (docs.aws.amazon.com/general/latest/gr/ssm.html).
-    from loom_bench.providers.aws_ec2 import AwsEc2Provider, AwsSettings
-    from loom_bench.providers.aws_ssm import ssm_commands
-    from loom_bench.providers.weights import WeightsPlan
-
-    settings = AwsSettings(
-        bucket="bkt",
-        instance_profile_name="p",
-        security_group_id="sg-0123",
-        subnet_ids=["subnet-0123"],
-        hf_token_secret_name="loom/hf-token",
-        owner="arul",
-    )
-    provider = AwsEc2Provider(settings, prices=PRICES, ec2=object(), ssm=object(), s3=object())
-    for cell in expand(load_experiment(RUNS["trtllm"][1]), REGISTRY):
-        ckpt = ((cell.launch.model_repo, cell.launch.model_revision),)
-        script = provider.engine_script(
-            cell.launch, warm=False, weights=WeightsPlan(fetch=ckpt, cached=())
-        )
-        size = len(json.dumps(ssm_commands(script)).encode())
-        assert size < 32 * 1024, (cell.key, size)
-
-
-def test_the_fp8_only_smoke_is_exactly_aws_smoke_trtllms_missing_cell():
-    # d549221f ran vllm-bf16 and trtllm-bf16 and failed provisioning trtllm-fp8. The runner
-    # has no resume, so aws-smoke-trtllm-fp8 runs that cell alone, gated against the
-    # stored vllm-bf16 smoke evals at the same item limit.
-    full = load_experiment(RUNS["trtllm"][0])
-    fp8 = load_experiment(X / "aws-smoke-trtllm-fp8.yaml")
-    (cell,) = expand(fp8, REGISTRY)
-    cells = {c.variant: c for c in expand(full, REGISTRY)}
-    assert cell.config_hash == cells["trtllm-fp8"].config_hash
-    assert cell.host_key == cells["trtllm-fp8"].host_key
-    assert fp8.smoke and fp8.provider == full.provider
-    assert fp8.workloads == full.workloads and fp8.repetitions == full.repetitions
-    assert fp8.slo == full.slo and fp8.seed == full.seed
-    assert fp8.quality is not None and full.quality is not None
-    same = {"suite", "subset", "replicates", "limit", "allow_code_exec"}
-    assert fp8.quality.model_dump(include=same) == full.quality.model_dump(include=same)
-    assert fp8.quality.baseline is not None
-    assert str(fp8.quality.baseline.experiment) == "d549221f-285e-4820-8d51-a391e46ced4f"
-    assert fp8.quality.baseline.config_hash == cells["vllm-bf16"].config_hash

@@ -225,7 +225,7 @@ AWS g6e.xlarge capacity: launched i-0def… in us-west-2b (waited 30 s)
   and a sweep with only `Unsupported` AZs fails at once.
 - **The vCPU quota (`VcpuLimitExceeded`) is waited out for up to 10 min.** AWS keeps
   counting an instance against the quota for a short while after it reports
-  `terminated`: aws-smoke-trtllm (d549221f) launched its third host 0.3 s after the
+  `terminated`: a three-host smoke (d549221f) launched its third host 0.3 s after the
   second's teardown saw `terminated` and was refused. The quota is per account and
   region, so a sweep skips the rest of that region at the first refusal (with no other
   region configured, the sweep ends there), and the next sweep follows on the same
@@ -459,18 +459,19 @@ The provider waits out `InsufficientInstanceCapacity` itself, for up to `capacit
 - **SGLang's retraction counter** is absent until SGLang first retracts a request, so a
   run's server metrics list `preemptions` as missing; read it as zero.
 
-### 7b. The perf-track runs on AWS (proposed 2026-11-02, not approved, not run)
+### 7b. The perf-track runs on AWS (ran 2026-11-02 to 2026-11-04)
 
 RunPod Secure 1x L40S was out of stock all of 2026-11-02 (191 refused creates), so the
-three perf-track runs have AWS twins on g6e.xlarge on-demand (the same L40S, pinned, no
-fallback). Each twin is its RunPod spec with only the provider block, the budget and, for
-TensorRT-LLM, one host group changed (`bench/tests/aws/test_aws_perf_track.py`). The
-explainers have the design: [roofline-and-profiling.md](perf/roofline-and-profiling.md),
-[speculative-decoding.md](perf/speculative-decoding.md),
-[tensorrt-llm.md](perf/tensorrt-llm.md).
+perf-track runs (profiling and speculative decoding) have AWS twins on g6e.xlarge
+on-demand (the same L40S, pinned, no fallback). Each twin is its RunPod spec with only
+the provider block and the budget changed (`bench/tests/aws/test_aws_perf_track.py`).
+The explainers have the design and the results:
+[roofline-and-profiling.md](perf/roofline-and-profiling.md),
+[speculative-decoding.md](perf/speculative-decoding.md).
 
-Quotes (`bench plan` against a copy of the results DB, $96.57 already spent, $153.18 left
-under the overall cap; every real run is under the $50 per-experiment cap):
+Quotes made before the runs (`bench plan` against a copy of the results DB, $96.57
+already spent, $153.18 left under the overall cap; every real run is under the $50
+per-experiment cap):
 
 | Spec | Hosts | Estimate | Worst case (hosts to TTL) | Cap |
 |---|---|---|---|---|
@@ -478,24 +479,17 @@ under the overall cap; every real run is under the $50 per-experiment cap):
 | `qwen3-8b-profile-aws` | 1, 2.29 h of 2.75 | $4.32 | $5.18 | $5.25 |
 | `aws-smoke-specdec` | 1, 1.56 h of 1.92 | $2.94 | $3.61 | $3.75 |
 | `qwen3-8b-specdec-aws` | 1, 7.46 h of 8 | $14.04 | $15.06 | $15.25 |
-| `aws-smoke-trtllm` | 3 in a row, 65 min TTL each | $4.52 | $6.12 | $6.25 |
-| `qwen3-8b-trtllm-vs-vllm-aws` | 3 in a row, 4.75 h TTL each | $20.85 | $26.83 | $27 |
-| All six | | $48.01 | $58.53 | $59.25 |
+| All four | | $22.64 | $25.58 | $26.00 |
 
 New on this path, each covered offline first (moto and the host simulator):
 
 - **Profile traces:** a profiled vLLM container bind-mounts `/var/lib/loom/profiles` at the
   same host path; `collect_profile.sh` archives it as root over SSM and uploads it through
   a presigned PUT.
-- **Several hosts in one run** (TensorRT-LLM's three host groups): teardown now waits
-  until each instance is `terminated` (up to 10 min), so the next launch does not hit
-  `VcpuLimitExceeded`. Runs still go one at a time, and only after `aws ec2 wait
-  instance-terminated` on the previous run's host.
-- **TensorRT-LLM in Docker:** NVIDIA's `--ulimit memlock=-1 --ulimit stack=67108864`; a
-  17.3 GB image (~8 min to pull); `provider.engine_env` now exists on aws_ec2 for the
-  `TRTLLM_ENABLE_PDL: "0"` fallback.
-- **32 GiB host RAM** (the pod had 94): TensorRT-LLM's model load and evals on it are not
-  measured yet. The smoke shows it first.
+- **Several hosts in one run:** teardown now waits until each instance is `terminated`
+  (up to 10 min), so the next launch does not hit `VcpuLimitExceeded`. Runs still go one
+  at a time, and only after `aws ec2 wait instance-terminated` on the previous run's
+  host.
 - **Waiting for capacity:** on 2026-11-02 at 22:20, `aws-smoke-profile` failed at once
   with `InsufficientInstanceCapacity` in us-east-1a to 1d (1e and 1f do not offer
   g6e.xlarge). The provider now sweeps the AZs again for up to `capacity_wait_s`
@@ -510,8 +504,8 @@ Run each smoke before its real run, with the same pinned AMI as 95cde129 and fcc
 ```sh
 export LOOM_AWS_CONFIG=~/.config/loom/aws.yaml LOOM_AWS_AMI_ID=ami-028357be7d5b15c53
 export LOOM_DATABASE_URL=sqlite:///$PWD/results/loom.db     # the main checkout's DB
-uv run bench plan bench/experiments/aws-smoke-trtllm.yaml          # one spec at a time
-caffeinate -i uv run bench run bench/experiments/aws-smoke-trtllm.yaml --out results/
+uv run bench plan bench/experiments/aws-smoke-profile.yaml         # one spec at a time
+caffeinate -i uv run bench run bench/experiments/aws-smoke-profile.yaml --out results/
 aws ec2 wait instance-terminated --region us-east-1 --instance-ids <last host>
 ```
 
@@ -519,9 +513,8 @@ To wait longer than 30 min for a host, set `LOOM_AWS_CAPACITY_WAIT_S` (e.g. `720
 the `bench run`; if the wait gives up (exit 1, no host, $0), run again later. After
 each smoke, check its RunPod twin's list (in the RunPod smoke spec's header), plus on AWS:
 `engine_started` for every cell, a `profile` event per window and no `profile_failed`
-(profile), `spec_decode` absent from every run's `server.missing` (specdec), three
-`provisioned` events each after a `torn_down` (TensorRT-LLM), and no engine exit or
-out-of-memory on the 32 GiB host.
+(profile), `spec_decode` absent from every run's `server.missing` (specdec), and no
+engine exit or out-of-memory on the 32 GiB host.
 
 ## 8. Tearing down the whole stack
 

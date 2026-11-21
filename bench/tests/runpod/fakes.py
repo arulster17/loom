@@ -57,8 +57,8 @@ def script_var(script: str, name: str) -> str:
 
 def script_array(script: str, name: str) -> list[str]:
     """An array variable as rendered into a pod script (`NAME=('a' 'b')`). An element may
-    span lines inside its quotes (TensorRT-LLM's wrapper source): the array ends at the
-    first `)` closing a line outside any quote."""
+    span lines inside its quotes (a quoted argument with newlines in it): the array ends
+    at the first `)` closing a line outside any quote."""
     m = re.search(rf"^{name}=\(", script, re.MULTILINE)
     assert m, name
     for end in re.finditer(r"\)$", script[m.end() :], re.MULTILINE):

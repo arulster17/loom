@@ -436,7 +436,7 @@ the usage stream before the manager reads it); the gateway now stamps
 The branch review found no M2 blockers; its M3 prerequisites are P1-P4 below. Before M3
 started, the review follow-ups below due in M3 were fixed ([m3-review-fixes-spec.md](m3-review-fixes-spec.md); merged into `main`, PRs #12-#14).
 
-**M3 status (2026-11-19): Stage A built** on branch `phase1-m3` to
+**M3 status (2026-11-20): Stage A built and merged into `main`** on branch `phase1-m3` to
 [phase1-m3-spec.md](phase1-m3-spec.md), approved by the user on 2026-11-18 with the
 decisions of its §15. Stage A (free: code, tests, runbooks, Terraform up to `terraform
 plan`) was built in four areas and merged into `phase1-m3` on 2026-11-19: Terraform
@@ -445,8 +445,9 @@ plan`) was built in four areas and merged into `phase1-m3` on 2026-11-19: Terraf
 mode (webhooks, `resolve`, migration 0012); and the pod PKI (CA expiry gauge, gateway
 client-certificate rotation, `rekey`, `new-ca`). It is tested offline: Terraform under
 `mock_provider`, the production stack run locally (A15), no AWS or Stripe calls. Still
-open: A28 (`terraform plan` with the user's read-only credentials, spec §5.5 and §13), the
-final verification at the branch head, and CI on the PR. It is not yet merged into `main`. Stage B (`terraform apply`, DNS, deploy, the live acceptance
+open: A28 (`terraform plan` with the user's read-only credentials, spec §5.5 and §13).
+The final verification at the branch head passed (2a2c23e) and Stage A was merged into
+`main` on 2026-11-20 (PR #15, merge commit eabdc7e, every CI job passing). Stage B (`terraform apply`, DNS, deploy, the live acceptance
 B1-B26, teardown) needs the user's separate yes with its cap ($25 over a 14-day window; a
 $75 a month AWS budget). The spec's estimate of the running cost is about $63 a month (its
 §14). Results so far are in [phase1-m3-acceptance.md](phase1-m3-acceptance.md).
