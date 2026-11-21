@@ -33,7 +33,8 @@ writing code:
    `experiment.py` so the `local` provider accepts it. A new engine's tool parser is
    hashed only in its own cells (`serving_model_doc` keeps the parsers of the cell's
    engine plus `HASHED_PARSER_ENGINES`); do not add the engine to
-   `HASHED_PARSER_ENGINES` (`experiment.py`), or every vLLM and SGLang config hash moves.
+   `HASHED_PARSER_ENGINES` (`experiment.py`), or the vLLM and SGLang config hashes of
+   every model with a parser for the new engine move.
 2. **Launch renderer** (`bench/src/loom_bench/engines.py`):
    - `ENTRYPOINTS[name]`: the container entrypoint (`("vllm", "serve")` for vLLM).
    - `_RESERVED_FLAGS[name]`: every flag rendered from registry fields, so
