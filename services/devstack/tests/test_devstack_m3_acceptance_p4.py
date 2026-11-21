@@ -206,3 +206,6 @@ def test_m3_p_fails_on_a_bad_order(tmp_path: Path) -> None:
     lines = [rec("apply", "start"), *update("poolmgr"), *update("gateway")]
     with pytest.raises(AcceptanceError):
         m3.M3Acceptance.item_m3_p(acc_for(tmp_path, SHA, lines), ItemResult("m3-p", "P4"))
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

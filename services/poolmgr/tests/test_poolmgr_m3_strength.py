@@ -342,3 +342,6 @@ def test_item10_new_ca_refuses_to_overwrite_an_existing_ca(
     assert code not in (0, None), f"new-ca over an existing CA ({left}) exited {code}"
     after = {p.name: p.read_bytes() for p in out.iterdir() if p.is_file()}
     assert after == before, f"new-ca changed the files of an existing CA ({left})"
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

@@ -121,3 +121,6 @@ async def test_webhook_any_v1_matches_during_a_secret_roll(pool, redis_client, v
     assert r.status_code == 200, (r.status_code, error_code(r))
     assert r.json()["result"] == "credited"
     assert await purchases(pool, org) == [2000 * M]
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

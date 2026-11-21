@@ -443,3 +443,6 @@ def test_a15_tear_down_without_errors_raises_nothing(
     assert sh.ran("docker", "network", "rm", "n1")
     assert not sh.ran("docker", "run")
     assert not box.base.exists()
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

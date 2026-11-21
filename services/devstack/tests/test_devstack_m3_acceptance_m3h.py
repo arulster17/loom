@@ -159,3 +159,6 @@ def test_error_code_reads_the_openai_error_shape() -> None:
     assert m3.error_code(httpx.Response(401, text="nope")) is None
     assert m3.error_code(httpx.Response(401, json=["error"])) is None
     assert m3.error_code(httpx.Response(401, content=json.dumps({"error": "x"}))) is None
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

@@ -124,3 +124,6 @@ async def test_status_shows_the_issuer_of_each_ready_pods_certificate(
             + "\n--\n".join(sections)
             + f"\nthe whole output:\n{out}"
         )
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

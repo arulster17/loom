@@ -351,3 +351,6 @@ async def test_a33_retry_blocks_on_the_sessions_advisory_lock_for_lock_timeout(
     assert row is not None and row["processed_at"] is not None
     assert row["result"] == "already_credited"
     assert await purchases(scratch_pool, org) == [1000 * M]
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

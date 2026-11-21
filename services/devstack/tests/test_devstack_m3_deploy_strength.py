@@ -581,3 +581,6 @@ def test_a_rerender_removes_stale_entries_from_a_secret_directory(
     assert STALE_FILE not in names, f"a stale file survived the re-render: {sorted(names)}"
     assert STALE_DIR not in names, f"a stale directory survived the re-render: {sorted(names)}"
     assert {"redis-ca.crt", "pod-ca.crt"} <= names, sorted(names)
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

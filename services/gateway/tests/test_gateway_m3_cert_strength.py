@@ -319,3 +319,6 @@ async def test_item9_starts_without_the_client_cert_then_loads_it_when_it_appear
     assert await s.chat() == 200, "the file appeared, but the next check did not load it"
     got = cert_expiry_gauge(s.stack)
     assert got is not None and abs(got - expiry_left(client.cert)) < 120, got
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

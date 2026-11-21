@@ -354,3 +354,6 @@ async def test_a18_t7c_replay_of_a_stored_unapplied_event_reruns_it(pool, redis_
         r = await deliver(client, refund)
         assert r.status_code == 200 and r.json()["result"] == "duplicate"
     assert await refunds(pool, org) == [-300 * M]
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

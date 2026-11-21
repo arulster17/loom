@@ -123,3 +123,6 @@ def test_a_key_in_a_container_log_fails_m3_i(tools: Path) -> None:
     (tools / "logs.json").write_text(json.dumps({"gateway": f"auth {key}\n"}))
     with pytest.raises(AcceptanceError):
         acceptance(tools).item_m3_i(ItemResult("m3-i", "logs"))
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

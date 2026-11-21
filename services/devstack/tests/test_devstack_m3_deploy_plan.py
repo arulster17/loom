@@ -256,3 +256,6 @@ def test_only_keeps_the_order_and_updates_nothing_else(
     only: tuple[str, ...], want: list[str]
 ) -> None:
     assert ups(deploy().plan_steps(A, B, only)) == want
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

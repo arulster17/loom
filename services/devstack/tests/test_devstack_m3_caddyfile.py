@@ -356,3 +356,6 @@ def test_hooks_restricts_the_methods() -> None:
 
 def test_hooks_answers_404_otherwise() -> None:
     assert not_found(site("hooks.")), "hooks.{$LOOM_DOMAIN} has no 404 for other requests"
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

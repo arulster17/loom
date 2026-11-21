@@ -145,3 +145,6 @@ def test_the_scan_sees_jsx_text_and_skips_comments_and_headers() -> None:
     code = without_header_names(strip_ts_comments(src))
     found = [code.count("\n", 0, m.start()) + 1 for m in NAME.finditer(code)]
     assert found == [5, 6, 8], found
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

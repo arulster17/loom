@@ -246,3 +246,6 @@ async def test_a17_t4_concurrent_race_r_applies_the_clawback_at_its_next_run(
     assert row is not None and row["result"] == "refunded" and row["stale_reported_at"] is None
     await retry_unapplied(scratch_pool, settings=s, now=t0 + 20 * MINUTE)
     assert sample(STALE_TOTAL, type="charge.refunded") == stale  # never counted
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

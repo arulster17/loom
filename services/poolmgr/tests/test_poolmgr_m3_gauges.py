@@ -298,3 +298,6 @@ async def test_spend_cap_reason_gauge_is_set_and_cleared(
     assert pool.reason != "spend_cap", pool
     assert_follows(metrics, pool)
     assert value(metrics, "loom_poolmgr_pool_reason", model=model, reason="spend_cap") == 0.0
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

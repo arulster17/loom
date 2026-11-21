@@ -116,3 +116,6 @@ def test_issue_ca_stays_dev_only(poolmgr_run: PoolmgrRun) -> None:
     assert not out.exists() or not any(
         b"PRIVATE KEY" in p.read_bytes() for p in out.rglob("*") if p.is_file()
     )
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

@@ -143,3 +143,6 @@ async def test_a33_retry_waits_on_a_held_pending_clawback_then_records_the_purch
         row = await event_row(scratch_pool, ev["id"])
         assert row is not None and row["processed_at"] is not None, ev["type"]
     assert await refunds(scratch_pool, other_org) == [-400 * M]  # not applied again
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

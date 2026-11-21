@@ -33,3 +33,6 @@ def test_cert_check_interval_must_be_positive(monkeypatch: pytest.MonkeyPatch, v
     monkeypatch.setenv(VAR, value)
     with pytest.raises(pydantic.ValidationError):
         GatewaySettings()
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

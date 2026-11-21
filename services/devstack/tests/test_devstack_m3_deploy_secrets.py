@@ -473,3 +473,6 @@ def test_ses_smtp_password_refuses_input_without_a_key(tmp_path: Path) -> None:
     assert "No module named" not in proc.stderr and "invalid choice" not in proc.stderr, proc.stderr
     assert proc.returncode != 0
     assert fake.puts() == [], "stored SES credentials from input without an access key"
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

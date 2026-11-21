@@ -255,3 +255,6 @@ async def test_a_file_that_fails_to_load_keeps_the_old_context_and_logs_an_error
     assert await s.chat() == 200, f"the broken {which} file replaced the working context"
     got = cert_expiry_gauge(s.stack)
     assert got is not None and abs(got - expiry_left(s.client.cert)) < 120, got
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

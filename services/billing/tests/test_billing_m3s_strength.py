@@ -268,3 +268,6 @@ async def test_a31_resolve_on_a_row_held_for_update_exits_busy_and_changes_nothi
         assert audits == 0
     finally:
         await drop_event(pool, ev["id"])
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

@@ -75,3 +75,6 @@ def test_no_other_workflow_names_the_environment() -> None:
         assert not re.search(rf"(?<![\w-]){re.escape(ENV)}(?![\w-])", p.read_text()), (
             f"{p.name} names {ENV}"
         )
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

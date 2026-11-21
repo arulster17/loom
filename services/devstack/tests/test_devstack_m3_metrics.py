@@ -377,3 +377,6 @@ def test_the_owning_service_exports_it_with_its_labels(metric: str) -> None:
         )
     elif not labels:
         assert re.search(rf"^{re.escape(metric)} ", text, re.M), f"{metric} has no sample"
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

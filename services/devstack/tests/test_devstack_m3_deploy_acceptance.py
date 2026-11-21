@@ -354,3 +354,6 @@ def test_refused_when_run_loom_is_not_on_a_tmpfs(tmp_path: Path) -> None:
         assert not [r for r in b.timeline() if r["tool"] == "docker"], "docker ran"
     finally:
         b.close()
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

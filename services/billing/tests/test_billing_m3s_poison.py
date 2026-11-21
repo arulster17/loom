@@ -415,3 +415,6 @@ async def test_a32_statement_timeout_applies_inside_the_delivery(
     assert elapsed < 15, elapsed
     row = await event_row(faults_pool, ev["id"])
     assert row is not None and row["error_count"] == 1 and row["last_error"]
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

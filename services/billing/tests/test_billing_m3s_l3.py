@@ -91,3 +91,6 @@ async def test_a21_lookup_finds_another_orgs_purchase_of_the_session(pool):
     assert out.result == "already_credited"
     assert not getattr(out, "stored_after_error", False)
     assert await purchases(pool, b) == []
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

@@ -277,3 +277,6 @@ def test_the_scan_catches_managed_policy_arns_on_a_role() -> None:
         marker + '  managed_policy_arns = ["arn:aws:iam::aws:policy/AdministratorAccess"]\n',
     )
     assert violations(sources)
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

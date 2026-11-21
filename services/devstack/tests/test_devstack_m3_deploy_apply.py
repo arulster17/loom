@@ -726,3 +726,6 @@ def test_the_uid_table_matches_the_dockerfiles(svc: str) -> None:
     assert image_uid(DOCKERFILES[svc]) == UIDS[svc], (
         f"{svc}: its Dockerfile runs as {image_uid(DOCKERFILES[svc])}, §6.12 says {UIDS[svc]}"
     )
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

@@ -144,3 +144,6 @@ async def test_rekey_model_reissues_only_that_models_pods(
         assert await serial(env, b) == before[b]
     finally:
         await env.redis.delete(ADMIN_QUEUE)
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

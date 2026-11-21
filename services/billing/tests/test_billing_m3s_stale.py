@@ -267,3 +267,6 @@ async def test_a24_s5_gauge_moves_on_a_completed_run(scratch_pool):
     await retry_unapplied(scratch_pool, settings=s, now=t_next)
     after = gauge(RETRY_LAST_SUCCESS)
     assert after is not None and abs(after - t_next.timestamp()) < 1, after
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

@@ -237,3 +237,6 @@ def test_no_password_attribute_in_the_platform_configuration() -> None:
     assert re.search(r"manage_master_user_password\s*=\s*true", rds.read_text()), (
         "rds.tf does not set manage_master_user_password = true"
     )
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

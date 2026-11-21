@@ -353,3 +353,6 @@ def test_a21_runtime_role_reads_and_writes_the_new_columns(app_db) -> None:
             (uuid.uuid4(), evt, json.dumps({"reason": "test"})),
         )
         conn.commit()
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

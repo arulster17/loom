@@ -470,3 +470,6 @@ async def test_a20_t9c_commit_landed_and_no_connection_503_then_duplicate(
         assert r.status_code == 200 and r.json()["result"] == "duplicate"
     assert await ledger_count(pool, ev["id"]) == 1
     assert await purchases(pool, org) == [1800 * M]
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

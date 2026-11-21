@@ -766,3 +766,6 @@ def test_a13_no_generated_secret_on_a_command_line(stack: Stack) -> None:
         assert values, f"no secret value found in {name}"
         for v in values:
             assert v not in argv, f"a value of {name} is on a command line"
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

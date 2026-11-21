@@ -501,3 +501,6 @@ def test_a24_stale_and_handler_failure_labels_exist_at_zero_from_the_start():
     absent = [k for k, v in samples.items() if v is None]
     assert absent == [], f"series missing (absent, not 0): {absent}"
     assert {k: v for k, v in samples.items() if v != 0.0} == {}
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

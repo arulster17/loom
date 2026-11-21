@@ -246,3 +246,6 @@ def test_run_is_refused_outside_dev(
         assert mock_lines, f"production_problems names no mock-backend problem: {found}"
         for line in mock_lines:
             assert line in err, f"run's refusal does not carry {line!r}; stderr:\n{err}"
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

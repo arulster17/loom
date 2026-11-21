@@ -128,3 +128,6 @@ def test_an_unknown_item_is_a_usage_error(argv: list[str]) -> None:
 def test_an_earlier_bad_only_is_overridden_by_the_last() -> None:
     """The last `--only` wins outright: an earlier one is not read at all."""
     assert selection("--only", "m3-z", "--only", "m3-0") == {"m3-0"}
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

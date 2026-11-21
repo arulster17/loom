@@ -465,3 +465,6 @@ async def test_a31_race_resolve_waits_for_retry_holding_the_row(
     assert row["result"] == want
     n_audit = int(await scalar(scratch_pool, "SELECT count(*) FROM admin_audit_log"))
     assert n_audit == (0 if r_outcome == "applied" else 1)
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

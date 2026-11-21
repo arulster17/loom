@@ -330,3 +330,6 @@ def test_reissued_every_24_hours_and_renamed_into_place(
     h.scenario = scenario
     assert h.main("run") in (0, None)
     assert len(seen) == 3, seen
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

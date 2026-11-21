@@ -626,3 +626,6 @@ def test_no_secret_value_in_the_file() -> None:
         r"postgres(ql)?(\+\w+)?://[^/\s$]*:[^@\s$]+@",
     ):
         assert not re.search(pat, text), f"compose.prod.yml holds a secret ({pat})"
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).

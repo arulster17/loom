@@ -106,3 +106,6 @@ def test_the_console_script_is_installed(monkeypatch: pytest.MonkeyPatch) -> Non
     with contextlib.redirect_stdout(out), pytest.raises(SystemExit):
         found[0].load()()
     assert "--external" in out.getvalue()
+
+
+# fu-flake-proof: no-op line so flake-check runs this file (draft PR, never merged).
