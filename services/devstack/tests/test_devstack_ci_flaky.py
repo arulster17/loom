@@ -4,6 +4,7 @@ the weekly `flake-hunt` workflow, and the acceptance job's shorter idle stop."""
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -85,24 +86,74 @@ def test_across_runs_without_repeat(report: ModuleType, tmp_path: Path) -> None:
     assert report.main([str(a), str(tmp_path / "missing.xml")]) == 2
 
 
-def test_flake_check_repeats_only_changed_tests_on_prs() -> None:
-    jobs = load("ci.yml")["jobs"]
-    files, check = jobs["flake-files"], jobs["flake-check"]
+def uses_step(job: dict[str, Any], action: str) -> dict[str, Any]:
+    """The one step of `job` that uses `action` (e.g. `actions/upload-artifact`)."""
+    found = [s for s in job.get("steps") or [] if str(s.get("uses", "")).startswith(action + "@")]
+    assert len(found) == 1, f"expected one {action} step, found {len(found)}"
+    return found[0]
+
+
+def test_flake_files_lists_changed_tests_on_prs() -> None:
+    files = load("ci.yml")["jobs"]["flake-files"]
     assert files["if"] == "github.event_name == 'pull_request'"
     assert "git diff" in runs(files) and "HEAD^1 HEAD" in runs(files)
-    assert check["needs"] == "flake-files"
-    assert check["if"] == "needs.flake-files.outputs.files != ''"
-    assert {"postgres", "redis"} <= set(check["services"])
-    cmd = runs(check)
-    # 20 runs: 10 sessions (each re-runs module fixtures) x pytest-repeat's 2 copies
-    assert "for i in $(seq 10)" in cmd
+
+
+def test_flake_sessions_run_one_session_per_job() -> None:
+    """20 runs per test: 10 parallel jobs (each re-runs module fixtures on a fresh
+    Postgres and Redis) x pytest-repeat's 2 copies, one pytest session per job."""
+    jobs = load("ci.yml")["jobs"]
+    assert "flake-session" in jobs, "no `flake-session` job in ci.yml"
+    session = jobs["flake-session"]
+    assert session["needs"] == "flake-files"
+    assert session["if"] == "needs.flake-files.outputs.files != ''"
+    assert {"postgres", "redis"} <= set(session["services"])
+    assert session["strategy"]["matrix"]["session"] == list(range(1, 11))
+    assert session["strategy"]["fail-fast"] is False
+    assert session["env"]["SESSION"] == "${{ matrix.session }}"
+    assert session["timeout-minutes"] <= 12
+    cmd = runs(session)
+    assert "for i in" not in cmd, "a session job runs one pytest session, not a loop"
     assert '--count 2 --repeat-scope session"' in cmd
     assert "-n auto $repeat" in cmd and "$FLAKE_FILES" in cmd
-    assert "timeout -k" in cmd
+    assert '--junitxml="flake-$SESSION.xml"' in cmd
+    assert "timeout -k 60 -s INT 420 " in cmd
     assert "nproc" in cmd, "no deliberate CPU load"
-    assert 'args="--repeat-count 2 --expect-runs 20"' in cmd
-    assert "flaky_report.py $args" in cmd and "flake-*.xml" in cmd
-    assert check["timeout-minutes"] <= 15
+    upload = uses_step(session, "actions/upload-artifact")
+    assert upload["if"] == "${{ !cancelled() }}"
+    assert upload["with"]["name"] == "flake-session-${{ matrix.session }}"
+    assert upload["with"]["path"] == "flake-${{ matrix.session }}.xml"
+
+
+def test_flake_check_reports_over_all_sessions() -> None:
+    check = load("ci.yml")["jobs"]["flake-check"]
+    assert check["needs"] == ["flake-files", "flake-session"]
+    assert check["if"] == "${{ !cancelled() && needs.flake-files.outputs.files != '' }}"
+    assert "services" not in check, "the report job runs no tests: no Postgres or Redis"
+    assert check["timeout-minutes"] <= 5
+    download = uses_step(check, "actions/download-artifact")
+    assert download["with"]["pattern"] == "flake-session-*"
+    assert download["with"]["merge-multiple"] is True
+    assert download["with"]["path"] == "junit"
+    rep = runs(check)
+    assert 'args="--repeat-count 2 --expect-runs 20"' in rep
+    assert "flaky_report.py $args" in rep and "junit/flake-*.xml" in rep
+    assert '[ "$SESSIONS" != success ]' in rep
+    reporting = [s for s in check["steps"] if "flaky_report.py" in str(s.get("run") or "")]
+    assert len(reporting) == 1
+    assert (reporting[0].get("env") or {}).get("SESSIONS") == "${{ needs.flake-session.result }}"
+
+
+def test_flake_jobs_pin_actions_by_commit() -> None:
+    jobs = load("ci.yml")["jobs"]
+    assert "flake-session" in jobs, "no `flake-session` job in ci.yml"
+    for name in ("flake-session", "flake-check"):
+        used = [str(s["uses"]) for s in jobs[name]["steps"] if "uses" in s]
+        assert used, f"{name} uses no actions"
+        for action in used:
+            assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", action), (
+                f"{name}: {action} is not pinned by commit"
+            )
 
 
 def test_pytest_randomly_only_in_the_flake_hunt() -> None:
