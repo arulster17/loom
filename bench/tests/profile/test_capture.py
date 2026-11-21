@@ -187,6 +187,22 @@ def test_a_searched_workload_cannot_be_profiled() -> None:
         Experiment.model_validate(doc)
 
 
+def test_an_sglang_variant_cannot_be_profiled() -> None:
+    doc = {
+        **mock_profile_doc(),
+        "provider": {"kind": "aws_ec2", "instance_type": "g6e.xlarge", "market": "on_demand"},
+        "variants": [
+            {
+                "name": "t",
+                "engine": {"name": "sglang", "version": "0.5.6", "image": "lmsysorg/sglang:x"},
+            }
+        ],
+        "profile": {"windows": [{"workload": "fixed-128-128"}]},
+    }
+    with pytest.raises(ValidationError, match="engines only, not sglang"):
+        Experiment.model_validate(doc)
+
+
 def test_engine_root() -> None:
     assert engine_root("http://127.0.0.1:8000/v1") == "http://127.0.0.1:8000"
     assert engine_root("http://h:1/v1/") == "http://h:1"

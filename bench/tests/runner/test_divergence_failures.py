@@ -5,6 +5,7 @@ per-task deltas, and the experiment ends `completed` with a reason and exit 8.
 In 565b8d3f SGLang's divergence raised inside its eval job and took the job's task scores
 down with it."""
 
+import json
 from collections import Counter
 from pathlib import Path
 
@@ -151,8 +152,33 @@ async def test_every_divergence_measured_is_unchanged(ctx, suite):
     assert "KL" in gate.details["divergence"]["reason"]
 
 
+async def test_a_candidate_refusing_completions_logprobs_loses_only_its_divergence(ctx, suite):
+    """The mock's `completions_logprobs: false` answers `logprobs` on /v1/completions with
+    a 400 ("logprobs is not supported"): the candidate's divergence fails with that
+    refusal, its task scores are kept, and its gate is blocked as inconclusive."""
+    exp = mock_experiment(
+        variants=[{"name": "base"}, {"name": "cand", "mock": {"completions_logprobs": False}}],
+        quality={"suite": suite, "baseline_variant": "base"},
+    )
+    outcome = await run_experiment(exp, ctx)
+
+    assert (outcome.status, outcome.exit_code) == (ExperimentStatus.COMPLETED, EXIT_RUNS_FAILED)
+    assert outcome.reason == "divergence failed in 1 of 2 quality evals"
+    failed = [e for e in outcome.events if e["kind"] == "divergence_failed"]
+    assert len(failed) == 1 and failed[0]["mode"] == "score"
+    assert "logprobs is not supported" in json.dumps(failed[0])
+    assert not [e for e in outcome.events if e["kind"] == "quality_failed"]
+    assert sorted(_eval_rows(ctx.db_url, outcome.experiment_id).values()) == [2, 2]
+    gate = _gate(ctx.db_url, outcome.experiment_id)
+    assert gate.decision == "inconclusive" and gate.details["blocked"] is True
+    assert gate.details["divergence"]["reason"].startswith(
+        "not measured: candidate divergence failed"
+    )
+    assert {t["task"] for t in gate.details["tasks"]} == {"arithmetic", "json_schema"}
+
+
 async def test_the_divergence_runs_on_the_last_pass_so_losing_it_keeps_every_pass(ctx, suite):
-    """46938d1f: trtllm-bf16's engine died during pass 1's divergence (HTTP 500 "LLM is
+    """46938d1f: a candidate's engine died during pass 1's divergence (HTTP 500 "LLM is
     shutting down"); pass 2's gsm8k then failed against the dead engine (lm_eval:
     "Session is closed") and the whole suite was lost. With the divergence on the last
     pass, all three passes' task scores are in before it runs."""
