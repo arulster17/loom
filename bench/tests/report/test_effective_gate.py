@@ -22,8 +22,8 @@ def _gate(decision: str, day: int, tasks: dict[str, str]) -> BenchGateDecision:
 
 
 def test_a_later_narrower_gate_does_not_clear_an_earlier_failure() -> None:
-    # 55b35655 (TRT-LLM FP8): phase0-strict FAIL on tool_calling_strict on 11-04, then a
-    # GSM8K-only PASS on 11-05 (qwen3-8b-trtllm-fp8-cudagraph-aws). The FAIL stands.
+    # A candidate's phase0-strict FAIL on tool_calling_strict on 11-04, then a GSM8K-only
+    # PASS on 11-05 from a later spec that ran GSM8K alone. The FAIL stands.
     full_fail, gsm8k_pass = _gate("fail", 4, STRICT), _gate("pass", 5, {"gsm8k": "pass"})
     assert effective_gate([gsm8k_pass, full_fail]) is full_fail
     q = quality_for(CAND, [], [full_fail, gsm8k_pass])

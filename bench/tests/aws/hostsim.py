@@ -41,7 +41,6 @@ from urllib.parse import unquote, urlparse
 from loom_bench.jobexec import execute_load_job
 from loom_bench.jobs import EvalJob, LoadJob, TokenizerSpec
 from loom_bench.mock.config import MockConfig
-from loom_bench.profile.spec import TRTLLM_TRACE_DIR
 from loom_bench.providers.mock import _start_server, _stop_server
 from loom_bench.quality.runner import execute_eval_job
 from loom_bench.tokenize import hf_cache_folder
@@ -61,8 +60,8 @@ def var(script: str, name: str) -> str:
 
 def array(script: str, name: str) -> list[str]:
     """A bash array as rendered into a host script (`NAME=('a' 'b' ...)`). An element may
-    span lines (TensorRT-LLM's launcher passes its wrapper's Python source): the array
-    ends at the first `)` at a line end that is outside every quote, as bash reads it."""
+    span lines (a quoted argument with newlines in it): the array ends at the first `)` at
+    a line end that is outside every quote, as bash reads it."""
     start = re.search(rf"^{name}=\(", script, re.MULTILINE)
     assert start, name
     rest = script[start.end() :]
@@ -98,22 +97,10 @@ def is_sglang(script: str) -> bool:
     return "sglang.launch_server" in array(script, "ENGINE_CMD")
 
 
-def is_trtllm(script: str) -> bool:
-    """Whether the rendered ENGINE_CMD runs TensorRT-LLM's launcher (`bash -c ...`)."""
-    return "trtllm-launch" in array(script, "ENGINE_CMD")
-
-
-_SNAPSHOT_RE = re.compile(r"^/root/\.cache/huggingface/hub/models--(.+?)--(.+)/snapshots/(\w+)$")
-
-
 def engine_checkpoint(script: str) -> tuple[str, str]:
     """(repo, revision) the rendered ENGINE_CMD loads: vLLM `serve <repo>`, SGLang
-    `--model-path <repo>`, both `--revision <rev>`; TensorRT-LLM the snapshot directory of
-    the container's HF cache (`/root/.cache/huggingface/hub/models--<org>--<name>/...`)."""
+    `--model-path <repo>`, both `--revision <rev>`."""
     cmd = array(script, "ENGINE_CMD")
-    if is_trtllm(script):
-        (m,) = [m for a in cmd if (m := _SNAPSHOT_RE.match(a))]
-        return f"{m.group(1)}/{m.group(2)}", m.group(3)
     repo = cmd[cmd.index("--model-path") + 1] if is_sglang(script) else cmd[cmd.index("serve") + 1]
     return repo, cmd[cmd.index("--revision") + 1]
 
@@ -124,14 +111,9 @@ def mounted_trace_dir(script: str) -> str | None:
     directory stays inside the container, where the host's collection cannot see it."""
     cmd = array(script, "ENGINE_CMD")
     mounts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--volume"]
-    if is_trtllm(script):
-        # TensorRT-LLM profiles at run time into the output_dir its /start_profile names,
-        # which Loom always sets to TRTLLM_TRACE_DIR
-        path: str | None = TRTLLM_TRACE_DIR
-    elif "--profiler-config" in cmd:
-        path = json.loads(cmd[cmd.index("--profiler-config") + 1]).get("torch_profiler_dir")
-    else:
+    if "--profiler-config" not in cmd:
         return None
+    path = json.loads(cmd[cmd.index("--profiler-config") + 1]).get("torch_profiler_dir")
     return path if f"{path}:{path}" in mounts else None
 
 
@@ -246,8 +228,6 @@ class HostSim(FakeSsm):
             host_dir = self.root / instance / trace_dir.lstrip("/")
             host_dir.mkdir(parents=True, exist_ok=True)
             profile = {"profile_dir": str(host_dir)}
-            if is_trtllm(script):
-                profile["profile_api"] = "trtllm"
         cfg = MockConfig(
             **{
                 "time_scale": 0.01,
