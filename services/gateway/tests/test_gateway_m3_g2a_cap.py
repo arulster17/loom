@@ -17,6 +17,8 @@ from gateway_m3_g2a_kit import assert_unavailable, skipped, spy_release
 from gateway_m3_kit import MESSAGES, wait_until
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
+from loom_platform.apikeys import hash_api_key
+from loom_platform.auth import AuthRecord
 from loom_platform.limiter import Limiter
 
 pytestmark = [pytest.mark.postgres, pytest.mark.redis]
@@ -37,6 +39,25 @@ def _lose_every_reply(monkeypatch: pytest.MonkeyPatch, limiter: Limiter) -> list
 
     monkeypatch.setattr(limiter, "reserve", reserve)
     return rids
+
+
+async def _pin_key_record(monkeypatch: pytest.MonkeyPatch, stack: Any, key: str) -> AuthRecord:
+    """Look `key` up once through the gateway's real Authenticator (Redis, then
+    Postgres), then answer every later lookup of it with that record without Redis or
+    Postgres (any other key is unknown). `authenticate` still runs for every request:
+    bearer parsing, the revoked and org-status checks. Without this, an auth-side Redis
+    or Postgres timeout under load answers the same 503 before reserve runs, and that
+    request never reaches the cap under test (auth's own 503s have their own tests)."""
+    auth = stack.gateway.auth
+    key_hash = hash_api_key(key)
+    record = await auth.lookup(key_hash)
+    assert record is not None, "the tenant's key was not found (test setup)"
+
+    async def lookup(h: bytes) -> AuthRecord | None:
+        return record if h == key_hash else None
+
+    monkeypatch.setattr(auth, "lookup", lookup)
+    return record
 
 
 async def _post_many(stack: Any, key: str, n: int) -> list[httpx.Response]:
@@ -69,8 +90,11 @@ async def test_g2a_cap_of_1000_running_releases(stack, monkeypatch):
     "cap"; after the blocked releases finish, a later failure starts a release again.
     Checked by request id: the releases running are exactly those 1,000 requests', one
     each, never more than 1,000 at once; the request refused at the cap is never
-    released."""
+    released. Auth answers from the tenant's record, looked up once for real first, so
+    every request reaches reserve."""
     t = await stack.tenant()
+    record = await _pin_key_record(monkeypatch, stack, t.key)
+    assert record.org_id == t.org_id
     lim = stack.gateway.limiter
     rids = _lose_every_reply(monkeypatch, lim)
     gate = asyncio.Event()
@@ -84,7 +108,10 @@ async def test_g2a_cap_of_1000_running_releases(stack, monkeypatch):
             assert_unavailable(r)
         first = {_rid(r) for r in responses}
         assert len(first) == CAP, "the gateway reused a request id"
-        assert first == set(rids), "the 503s name other request ids than the reserves'"
+        assert first == set(rids), (
+            "the 503s name other request ids than the reserves' "
+            f"({len(first - set(rids))} never reached reserve)"
+        )
 
         async def all_started() -> bool:
             return len(spy["calls"]) == CAP
