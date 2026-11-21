@@ -566,6 +566,7 @@ def test_a_quota_still_held_just_after_terminated_is_waited_out(tmp_path):
     assert [i for i, _ in starts] == q.launched
     assert [var(s, "SERVED_MODEL") for _, s in starts] == [c.spec.id for c in cells]
     assert all(var(s, "WARM") == "0" for _, s in starts)
+    assert sorted(sim.dataset_fetches) == sorted(q.launched)  # each host fetches its dataset
     waits = [s for s in slept if s >= 30]
     assert waits.count(30) == 1 and waits.count(60) == 1  # 30 s, then 60 s
 
