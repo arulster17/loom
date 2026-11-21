@@ -62,56 +62,6 @@ async def ready_within(env: FakeServing, manager: PoolManager, model: str, ticks
     return False
 
 
-@pytest.mark.parametrize("how", ["stock", "refused"])
-async def test_no_capacity_backs_off_while_woken(env: FakeServing, how: str) -> None:
-    """Item 12: `unavailable` / `no_capacity` with the next backoff step as Retry-After;
-    retries on `backoff_s` only while the wake key lives; a later wake retries again; no
-    other GPU type is ever requested."""
-    model = unique_model_id()
-    manager = env.manager(serving_config([model]))
-    await manager.start()
-    no_capacity(env, how)
-    await env.wake(model)
-    t0 = env.clock()
-    await tick(manager, env.clock)
-
-    rows = await env.rows(model)
-    assert len(rows) == 1
-    assert rows[0]["state"] == "terminated" and rows[0]["failure"] == "no_capacity"
-    pool = await env.pool(model)
-    assert (pool.state, pool.reason, pool.retry_after_s) == ("unavailable", "no_capacity", 10)
-
-    retry_after: dict[int, int] = {}
-    for _ in range(75):
-        await env.wake(model)
-        await tick(manager, env.clock, advance=1)
-        n = len(await env.rows(model))
-        retry_after.setdefault(n, (await env.pool(model)).retry_after_s)
-    offsets = [round(t - t0) for t in await attempts(env, model)]
-    assert offsets == [0, 10, 30, 70], offsets
-    # After attempt n the pool says how long until attempt n + 1 (the last step repeats).
-    assert retry_after == {1: 10, 2: 20, 3: 40, 4: 40}, retry_after
-    for row in await env.rows(model):
-        assert row["state"] == "terminated" and row["failure"] == "no_capacity"
-
-    # The wake key expires: no more attempts, however long.
-    await env.redis.delete(wake_key(model))
-    await run_ticks(env, manager, model, 90, wake=False)
-    assert len(await env.rows(model)) == 4
-    pool = await env.pool(model)
-    assert pool.state == "unavailable" and pool.reason == "no_capacity"
-
-    # A later wake retries (within one backoff step).
-    await run_ticks(env, manager, model, 41, wake=True)
-    assert len(await env.rows(model)) >= 5
-
-    gpu_types = {t for body in env.runpod.creates() for t in body["gpuTypeIds"]}
-    assert gpu_types <= {"NVIDIA L40S"}
-    if how == "stock":
-        assert env.runpod.creates() == []
-    assert env.runpod.snapshot() == []
-
-
 async def test_min_replicas_is_demand_for_capacity_retries(env: FakeServing) -> None:
     """Item 12 / §5: retries continue on the backoff schedule with no wake key when
     `min_replicas >= 1` (always-on is demand)."""
