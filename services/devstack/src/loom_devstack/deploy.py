@@ -51,7 +51,8 @@ APP_USER = "loom_app"
 DEFAULT_REGION = "us-east-1"
 ACME_STAGING = "https://acme-staging-v02.api.letsencrypt.org/directory"
 
-# §6.6 step 4: the update order. `redis` only when its image changed.
+# §6.6 step 4: the update order. `redis` only when its image changed, or a full apply finds
+# the apply-in-progress marker.
 ORDER = ("redis", "billing", "gateway", "poolmgr", "web", "caddy", "prometheus", "grafana")
 # §6.12: the compose.env variable of each Loom image, by manifest key.
 IMAGE_VARS = {
@@ -124,6 +125,7 @@ class Paths:
         self.run_loom = self.root / "run" / "loom"
         self.var_lib = self.root / "var" / "lib" / "loom"
         self.release_json = self.var_lib / "release.json"
+        self.apply_marker = self.var_lib / "apply-in-progress.json"
         self.deploy_log = self.var_lib / "deploy.log"
         self.acceptance = self.var_lib / "acceptance"
         self.compose_env = self.run_loom / "compose.env"
@@ -682,6 +684,69 @@ def current_view(rec: dict[str, Any] | None) -> dict[str, Any] | None:
     return {**rec["manifest"], "sha": rec.get("release"), "running": rec.get("services") or {}}
 
 
+def read_marker(paths: Paths) -> dict[str, Any] | None:
+    """The apply-in-progress marker (§6.6, §6.12): None when nothing exists at its path, `{}`
+    when something does but it cannot be read as a marker (that still counts as set)."""
+    if not os.path.lexists(paths.apply_marker):
+        return None
+    try:
+        doc = json.loads(paths.apply_marker.read_text())
+    except (OSError, ValueError):  # UnicodeDecodeError is a ValueError
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    release, only = doc.get("release"), doc.get("only")
+    if not isinstance(release, str) or not SHA.fullmatch(release):
+        return {}
+    if only is not None and not (
+        isinstance(only, list) and all(isinstance(s, str) and s in ORDER for s in only)
+    ):
+        return {}
+    if not isinstance(doc.get("started_at"), str):
+        return {}
+    return doc
+
+
+def recorded(rec: dict[str, Any] | None) -> str | None:
+    """`release.json`'s release when it is a 40-hex sha."""
+    value = str((rec or {}).get("release"))
+    return value if SHA.fullmatch(value) else None
+
+
+def full_apply_hint(marker: dict[str, Any], rec: dict[str, Any] | None) -> str:
+    """The full apply to run; never reads the marker's `only` (it must not name the gateway)."""
+    shas: list[str] = []
+    for sha in (recorded(rec), marker.get("release")):
+        if isinstance(sha, str) and sha not in shas:
+            shas.append(sha)
+    if not shas:
+        return "run a full apply of the release you were applying"
+    commands = " or ".join(f"`loom-deploy apply --release {s}`" for s in shas)
+    return f"run a full apply first: {commands}"
+
+
+def marker_reason(
+    paths: Paths, marker: dict[str, Any], rec: dict[str, Any] | None, what: str
+) -> str:
+    unreadable = " and cannot be read" if not marker else ""
+    return (
+        f"{paths.apply_marker} exists{unreadable}: an apply did not finish, so which release "
+        f"each service runs is not known; {what} is refused until a full apply succeeds; "
+        + full_apply_hint(marker, rec)
+    )
+
+
+def write_marker(paths: Paths, sha: str, only: list[str] | None) -> None:
+    """§6.12: written before the first `up`, removed by the record step."""
+    doc = {"release": sha, "only": only, "started_at": now()}
+    try:
+        write_file(paths.apply_marker, json.dumps(doc) + "\n", 0o644)
+    except OSError as e:
+        with contextlib.suppress(OSError):
+            paths.apply_marker.with_name(".apply-in-progress.json.tmp").unlink()
+        raise DeployError(f"cannot write {paths.apply_marker}: {e}") from None
+
+
 # ---------------------------------------------------------------------------- rendering
 
 
@@ -1090,7 +1155,12 @@ def apply_release(sha: str, only: list[str] | None) -> int:
     try:
         check_tmpfs(paths)
         site = validate_site(read_site())
+        pending = read_marker(paths)
         if only is not None:
+            if pending is not None:
+                raise Refused(
+                    marker_reason(paths, pending, load_release(paths), "every apply --only")
+                )
             # P4 needs only the release's sha, not its manifest: refuse before any fetch,
             # extract or write (§6.12: a refused apply logs one record and changes nothing).
             plan_steps(current_view(load_release(paths)), {"sha": sha}, only)
@@ -1149,8 +1219,11 @@ def apply_release(sha: str, only: list[str] | None) -> int:
         ):
             names.insert(0, "redis")
             forced.add("redis")
+        elif only is None and "redis" not in names and pending is not None:
+            names.insert(0, "redis")  # an unfinished apply may have changed Redis's image
         timeout = health_timeout()
         step = "update"
+        write_marker(paths, sha, only)
         for svc in names:
             log.record("update", "start", service=svc)
             try:
@@ -1171,6 +1244,7 @@ def apply_release(sha: str, only: list[str] | None) -> int:
         step = "record"
         log.record("record", "start")
         write_release(paths, manifest, previous, names, full=only is None)
+        paths.apply_marker.unlink(missing_ok=True)
         log.record("record", "ok")
     except (DeployError, OSError) as e:  # OSError: render's mkdir/chmod/write, the record
         if step in ("manifest", "render", "pull", "migrate", "record"):
@@ -1199,6 +1273,18 @@ def cmd_rollback() -> int:
 def cmd_status() -> int:
     paths = Paths()
     rec = load_release(paths)
+    marker = read_marker(paths)
+    if marker is not None:
+        refused = "apply --only and acceptance are refused until a full apply succeeds"
+        if not marker:
+            print(f"{paths.apply_marker} cannot be read; {refused}")
+        else:
+            only = marker.get("only")
+            print(
+                f"{paths.apply_marker}: apply in progress or failed: release {marker['release']} "
+                f"(recorded: {recorded(rec) or 'none'}), started {marker['started_at']}, "
+                f"only {','.join(only) if only else 'all'}; {refused}"
+            )
     if not rec:
         print("no release recorded")
         return 0
@@ -1234,6 +1320,15 @@ def selected(extra: Sequence[str], item: str) -> bool:
     if value is None:
         return item != "m3-h"
     return item in [s.strip() for s in value.split(",")]
+
+
+def help_word(extra: Sequence[str]) -> str | None:
+    """The first word after `--` that `loom-m3-acceptance`'s argparse reads as help: `--help`,
+    or `-h...` (a group of short options starting with `h`)."""
+    for word in extra:
+        if word == "--help" or word.startswith("-h"):
+            return word
+    return None
 
 
 def check_p4_refusal(
@@ -1278,12 +1373,24 @@ def check_p4_refusal(
 
 def cmd_acceptance(p4_release: str, extra: list[str]) -> int:
     paths = Paths()
+    word = help_word(extra)
+    if word is not None:
+        say(
+            f"refused: {word!r} after -- would make loom-m3-acceptance print its help and run "
+            "nothing; its options are in `loom-m3-acceptance --help`, e.g. `uv run "
+            "loom-m3-acceptance --help` in a checkout of the release"
+        )
+        return 2
     try:
         check_tmpfs(paths)
     except Refused as e:
         say(f"refused: {e}")
         return 2
     rec = load_release(paths)
+    marker = read_marker(paths)
+    if marker is not None:
+        say(f"refused: {marker_reason(paths, marker, rec, 'acceptance')}")
+        return 2
     if not rec or not SHA.fullmatch(str(rec.get("release"))):
         say("failed: no current release recorded (release.json): apply one first")
         return 1

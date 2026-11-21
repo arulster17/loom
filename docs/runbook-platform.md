@@ -26,8 +26,9 @@ export INSTANCE=<the instance id, terraform output>
 operator --(aws ssm send-command / start-session)--> box: loom-deploy (host Python 3.12)
 box: Caddy 80/443 -> web, gateway, billing   | redis, prometheus, grafana, poolmgr
      /run/loom   tmpfs: rendered secrets and env files (lost at reboot, section 7)
-     /var/lib/loom   data volume: release.json, deploy.log, releases/<sha>/, redis AOF,
-                     settle spool, caddy certificates, poolmgr state, prometheus TSDB
+     /var/lib/loom   data volume: release.json, apply-in-progress.json, deploy.log,
+                     releases/<sha>/, redis AOF, settle spool, caddy certificates,
+                     poolmgr state, prometheus TSDB
 RDS PostgreSQL 16 (TLS verify-full), Secrets Manager, SSM parameter /loom/platform/site
 ```
 
@@ -259,15 +260,32 @@ production certificates (they are kept on the data volume, per CA).
 3. ECR login (once per registry the images name), `docker compose pull`;
 4. `migrate` as the RDS owner `loom_owner` (creates `loom_platform` on the first deploy,
    applies the migrations, creates or updates `loom_app`); exit 0 required;
-5. `up -d --no-deps <service>` then wait healthy, in the order **redis** (only if its
-   image changed), **billing**, **gateway**, **poolmgr**, web, caddy, prometheus,
-   grafana; a service is healthy when `docker inspect` says `healthy` (or `running` with
-   no healthcheck) within `LOOM_DEPLOY_HEALTH_TIMEOUT_S` (300);
-6. record the release in `/var/lib/loom/release.json`.
+5. write `/var/lib/loom/apply-in-progress.json` (the marker of an unfinished apply), then
+   `up -d --no-deps <service>` then wait healthy, in the order **redis** (only if its
+   image changed, or the marker was already there), **billing**, **gateway**, **poolmgr**,
+   web, caddy, prometheus, grafana; a service is healthy when `docker inspect` says
+   `healthy` (or `running` with no healthcheck) within `LOOM_DEPLOY_HEALTH_TIMEOUT_S` (300);
+6. record the release in `/var/lib/loom/release.json`, then remove the marker.
 
 Exit codes: 0 done, 2 refused (the reason on stderr, nothing changed: not on a tmpfs, the
-site parameter lacks a key, the P4 rule), 1 any other failure. Rendered files stay after a
-failed step; the next apply renders them again.
+site parameter lacks a key, the P4 rule, `--only` while the marker is set), 1 any other
+failure. Rendered files stay after a failed step; the next apply renders them again.
+
+**After a failed apply.** An apply that stops during step 5 (or is cut off during it: a
+dropped session, a reboot) leaves the marker, and `release.json` still names the release
+from before it, though some services may already run the new one. `loom_deploy status`
+shows the marker on its first line. Until a full apply succeeds, every `apply --only` and
+`loom_deploy acceptance` are refused (exit 2, naming the marker). Re-apply the current
+release, the `recorded:` one on `status`'s first line (also its `release` line):
+`loom_deploy apply --release <current>` (all services, no `--only`), or apply the new
+release again once its problem is fixed. If `status` says no release is recorded (the first
+apply failed), apply that release again. Do not use `rollback` for this: it goes to the
+release before the current one (`previous`), not back to the current one. Do not delete the
+marker by hand. Run these with a `loom-deploy.py` that knows the marker: the failed
+release's (or a later one's). Both helpers run the copy fetched for `$SHA`, and
+`loom_deploy_remote` fetches it again on every call, so keep `SHA` at the failed release,
+in the session and on your laptop, until the full apply succeeds. A copy from a release
+before this rule neither refuses `--only` nor removes the marker.
 
 **CloudWatch agent.** Install its config on the box once, after the first apply (both files
 are in the extracted release bundle), then start it; do it before the B6 check, because
@@ -305,12 +323,18 @@ and `poolmgr`'s `depends_on: gateway: service_healthy`). `loom-deploy` refuses a
 that would leave the poolmgr on another release than the gateway, `apply --only poolmgr`
 included (exit 2, naming the gateway). To move both: `apply --release <sha>` (all), or
 `apply --release <sha> --only gateway --only poolmgr`.
+While `/var/lib/loom/apply-in-progress.json` exists (an apply that did not finish), every
+`--only` apply is refused, whatever it names: run a full apply first (section 5, "After a
+failed apply").
 
 **Migrations are forward-only and must be backward compatible** with the running release
 (add, never drop or rename in the same release).
 
 **Rollback.** `loom_deploy rollback` applies the previous release recorded in
-`release.json` with the same order. A rollback across a migration relies on the
+`release.json` (`previous`) with the same order, as a full apply: the apply-in-progress
+marker does not stop it, and it clears the marker when it succeeds. It is not the way back
+from a failed apply: re-apply the current release instead (section 5, "After a failed
+apply"). A rollback across a migration relies on the
 backward-compatible rule. A rollback to a pre-M3 release is a last resort for billing: M1's
 `retry_unapplied` catches only `BadEvent`, so a stored poison event fails its job every
 minute and starves the rest, and M1 has no sweep that reopens a clawback an admin resolved
@@ -332,7 +356,8 @@ A reboot or an auto-recovery (alarm H2) empties `/run/loom`: the services come b
 without their secret files and H1 and H3 fire. The step is
 `loom_deploy apply --release <current sha>` (in a session, section 5) for the current release (the `release` in
 `/var/lib/loom/release.json`). A same-release apply re-renders everything, recreates a
-Redis that is not healthy and updates every other service. M3 has no boot unit (LM10).
+Redis that is not healthy and updates every other service. If the reboot cut off an apply, this same full apply also
+clears its marker. M3 has no boot unit (LM10).
 
 ## 8. Alarm test (m3-a)
 
@@ -384,6 +409,13 @@ B26 runs it by hand. Manual items (m3-g, m3-s) wait for the operator (Stripe tes
 4242 4242 4242 4242, resend, refund). m3-h runs from your machine:
 `uv run loom-m3-acceptance --external --domain <domain> --brand-name <name>`. Results go to
 `docs/phase1-m3-acceptance.md`.
+`loom_deploy acceptance` is refused (exit 2, nothing run, the old `report.json` and
+`host.json` left as they are) while `/var/lib/loom/apply-in-progress.json` exists (section
+5, "After a failed apply"), and when a word after `--` asks for help (`-h`, `--help`,
+`-hh`, ...): for `loom-m3-acceptance`'s options run `uv run loom-m3-acceptance --help` in a
+checkout of the release. Do not pass, after `--`, the options `loom-deploy acceptance` sets
+itself: `--domain`, `--release`, `--json`, `--deploy-log`, `--admin-email` and
+`--webhook-secret-file`.
 
 B26 runs m3-i's CloudWatch half (the only place it is checked) and repeats m3-p
 independently, by hand with your own credentials and plain `aws` commands, not through

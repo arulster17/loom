@@ -382,10 +382,12 @@ init`) may go through Run Command (`aws ssm send-command`, polled; the runbook w
 1. fetch and check the release manifest (sha256 of the compose file it names);
 2. render secrets (§6.3); `docker compose pull`;
 3. `migrate` (owner URL); wait for exit 0;
-4. update services in this order, each `up -d --no-deps <svc>` then wait healthy: `redis`
-   (only if its image changed), `billing`, **`gateway`**, **`poolmgr`**, `web`, `caddy`,
-   `prometheus`, `grafana`;
-5. record the release as current (`/var/lib/loom/release.json`).
+4. write the apply-in-progress marker (`/var/lib/loom/apply-in-progress.json`, below), then
+   update services in this order, each `up -d --no-deps <svc>` then wait healthy: `redis`
+   (only if its image changed; a full apply also when the marker was already there as it
+   started), `billing`, **`gateway`**, **`poolmgr`**, `web`, `caddy`, `prometheus`,
+   `grafana`;
+5. record the release as current (`/var/lib/loom/release.json`), then remove the marker.
 
 **P4 rule.** The gateway is updated before the pool manager in every release, and
 `loom-deploy` refuses any plan that would run a `poolmgr` image from a newer release than
@@ -393,8 +395,30 @@ the running `gateway` (`apply --only poolmgr` included). The step list is a pure
 (`plan_steps(current, target, only)`), unit-tested for every order. The rule is also in
 the runbook (B12) and in the compose `depends_on` edge (§6.2).
 
-Rollback: `loom-deploy rollback` applies the previous manifest with the same order;
-migrations are forward-only, so a rollback across a migration relies on the
+**An apply that did not finish (user, 2026-11-20).** `release.json` changes only at step
+5, so an apply that stops in step 4 (a failed health wait, a killed session, a reboot)
+can leave some services on the new release while `release.json` still names the old one
+for all of them, and P4 cannot trust it. The marker covers that window: step 4 writes it
+before the first `up` (an apply that stops in steps 1-3, or is refused, writes none), step
+5 removes it once `release.json` is written, and nothing else writes or removes it. Every
+apply writes it, `--only` and `rollback` included. While it exists, whatever it holds,
+every `apply --only` is refused (exit 2) and so is `loom-deploy acceptance`; a full
+`apply` of any release, and `rollback`, run as usual and remove it at step 5. A full apply
+or rollback that fails again leaves it (rewritten by its own step 4 if it got there), so
+`--only` stays refused until a full apply succeeds. A successful full apply updates every
+service (Redis too, by step 4's rule), so afterwards `release.json` is true again.
+`release.json`'s format is unchanged; the marker's content, messages and edge cases: §6.12.
+
+Rollback: `loom-deploy rollback` applies the previous manifest (`release.json`'s
+`previous`) with the same order, as a full apply: the marker does not refuse it, it
+rewrites the marker at its step 4 and removes it at its step 5. A rollback that fails in
+step 4 therefore leaves the marker set (naming the rollback's release), one that fails
+earlier leaves it as it was, and `release.json` is unchanged; one that succeeds records
+the rolled-back-to release as current and the one it left as `previous`. After a failed
+apply of N over the current release C (previous B), `release.json` still names C as
+current and B as previous, so `rollback` goes to B, not back to C: to return to C,
+re-apply it (`loom-deploy apply --release C`) (user, 2026-11-20). Migrations are
+forward-only, so a rollback across a migration relies on the
 backward-compatible rule of §6.4. A rollback to a pre-M3 release is a last resort for
 billing: M1's `retry_unapplied` catches only `BadEvent`, so a stored poison event fails its
 job every minute and starves the rest, and M1 has no sweep that reopens a clawback an
@@ -527,8 +551,9 @@ the bench site, the internal certificates.
 
 **Paths.** `loom-deploy` puts every box path under `LOOM_DEPLOY_ROOT` (unset on the box; a
 test sets a scratch directory): `<root>/run/loom/` (rendered secrets and env files) and
-`<root>/var/lib/loom/` (`release.json`, `deploy.log`, `releases/<sha>/`, `acceptance/`, the
-volumes of §6.2). `<root>/run/loom` must be on a tmpfs (read from `/proc/self/mountinfo`);
+`<root>/var/lib/loom/` (`release.json`, `apply-in-progress.json` (§6.6, below),
+`deploy.log`, `releases/<sha>/`, `acceptance/`, the volumes of §6.2). `<root>/run/loom` must
+be on a tmpfs (read from `/proc/self/mountinfo`);
 otherwise `apply` and `acceptance` refuse (tests use a directory under `/dev/shm`). The
 compose file writes its bind-mount sources `${LOOM_DEPLOY_ROOT:-}/run/loom/...` and
 `${LOOM_DEPLOY_ROOT:-}/var/lib/loom/...`; inside a container the path is the same without
@@ -568,7 +593,8 @@ gateway-cert 10001 (Docker would create a missing bind source as root).
   once per ECR registry the images name (none when no image is in ECR, as in A15).
 
 **Order and health.** manifest, render, ECR login, `docker compose pull`, migrate (`run --rm
-migrate`, exit 0), the updates of §6.6, record. Files already rendered stay when a later
+migrate`, exit 0), the apply-in-progress marker, the updates of §6.6, record (then the
+marker's removal). Files already rendered stay when a later
 step fails (the next apply re-renders them). A service is healthy when `docker inspect -f
 '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}'` on its
 container (`docker compose ps -q <svc>`) prints `healthy`, or `running` for a service
@@ -576,7 +602,65 @@ without a healthcheck; `loom-deploy` polls it for at most `LOOM_DEPLOY_HEALTH_TI
 (default 300), then logs the update `failed`. P4 (§6.6): an apply is refused when, after
 it, `poolmgr` would run an image of a release other than the gateway's (the manifest has
 no order, so "newer" means "another release"); `release.json` records the release each
-service runs. m3-p's `--p4-release` is therefore any release but the current one.
+service runs after every apply that finished; while the marker is set it may not, and
+every `--only` apply is refused instead (below). m3-p's `--p4-release` is therefore any
+release but the current one.
+
+**The apply-in-progress marker (§6.6; user, 2026-11-20).**
+- `<root>/var/lib/loom/apply-in-progress.json` (on the data volume, so it outlives a
+  reboot), `0644`, written like `release.json` (a temporary file, then a rename), JSON
+  `{"release": <the apply's sha>, "only": [<service>, ...] or null, "started_at": <UTC ISO
+  8601>}`. `only` is stored as given, like the deploy log's `only` in the apply's
+  `apply`/`start` record (null for a full apply and for `rollback`). It holds no secret and
+  no failing service (the deploy log has that). Its content is advice for the operator:
+  `loom-deploy` acts only on whether something exists at the path (a dangling symbolic link
+  included), so an empty, non-JSON or unreadable file is a set marker (the messages then
+  say it cannot be read). A marker that is not a JSON object, whose `release` is not a
+  40-hex sha, whose `only` is neither null nor a list of §6.6 service names, or whose
+  `started_at` is not a string, counts as one that cannot be read.
+- Written after migrate's exit 0, once the `update` step has begun and before its first
+  `update`/`start` record, by every apply (full, `--only`, rollback), replacing a marker
+  already there. If it cannot be written the apply fails (exit 1; the only failure record
+  is one `apply`/`failed` whose detail names the marker: no `migrate`/`failed`, no `update`
+  record) and no service is touched; a marker already there stays.
+- Removed in the `record` step: `record`/`start`, `release.json` written, the marker
+  removed (already gone is fine), `record`/`ok`. A removal that fails is a failed record
+  (`record`/`failed`, `apply`/`failed`, exit 1); `release.json` is then already written,
+  and the next full apply removes the marker.
+- While it is set, `apply --only` is refused (exit 2) after the tmpfs and site checks and
+  before P4's, so before any fetch or write: one `apply`/`refused` record, the same reason
+  on stderr. The reason names the marker's path, says that which release each service
+  runs is not known, and tells the operator to run a full apply first, with the command in
+  full: `loom-deploy apply --release <R>` (R: `release.json`'s release) or `--release <M>`
+  (M: the marker's release), once when they are the same; only the M command when no
+  release is recorded; only the R command when the marker cannot be read; when neither is
+  known, "a full apply of the release you were applying". It never names the gateway and
+  never prints the marker's `only`, so it cannot pass for m3-p's P4 refusal.
+- A full apply that starts with the marker set also runs `up -d --no-deps redis` (with
+  `--force-recreate` only when the rule for an unhealthy Redis or changed Redis secret
+  files asks for it), so compose moves Redis to this release's image if the unfinished
+  apply changed it, and leaves it running otherwise.
+- `loom-deploy acceptance` while it is set: exit 2 after the tmpfs check and before the
+  `release.json` check, `refused: ...` naming the marker and the full apply to run (the
+  commands above); no container, no host half, no deploy-log record, no `host.json`
+  written (older files stay). B26's independent m3-p re-run likewise needs a box without
+  the marker (with it, `apply --only poolmgr` exits 2 without naming the gateway).
+- `status` prints one more line, first, when it is set: `<path>: apply in progress or
+  failed: release <M> (recorded: <R or none>), started <started_at>, only <the list,
+  comma-separated, or all>; apply --only and acceptance are refused until a full apply
+  succeeds` (or `<path> cannot be read; apply --only and acceptance are refused until a
+  full apply succeeds`), exit 0, also when no release is recorded.
+- Stops between steps err towards refusing. Stopped after the marker is written and
+  before any `up`: nothing changed, `--only` refused until a full apply. Stopped after
+  `release.json` is written and before the removal: `release.json` is right, and the
+  marker stays until the next full apply (the same release again is enough). A full
+  apply or rollback that is refused, or stops in steps 1-3, leaves a marker already there
+  as it was.
+- The marker is not a lock: two `loom-deploy` runs at once on one box are not supported
+  (one operator, one session, runbook §5).
+- A `loom-deploy.py` from a release before the marker neither refuses `--only` because of
+  it nor removes it: the runbook's recovery runs the failed release's copy, which can apply
+  any `--release` (runbook §5).
 
 **What `apply` writes.**
 - `<root>/run/loom/compose.env` (`0400`, `--env-file`): `LOOM_DEPLOY_ROOT` and the image
@@ -606,8 +690,12 @@ record per step event: `{"ts": <UTC ISO 8601>, "release": <sha>, "step": ..., "s
 <text> (optional)}`. `step` is `apply`, `manifest`, `render`, `pull`, `migrate`, `update` or
 `record`; `status` is `start`, `ok` or `failed`, or `refused` (apply only). An `update` logs
 `start` before `up -d --no-deps <svc>` and `ok` once the service is healthy. A refused apply
-(P4, D10, the site parameter, not tmpfs) logs one `apply`/`refused` record whose `detail`
-gives the reason (naming the gateway for P4) and changes nothing. `rollback` logs as an
+(P4, D10, the site parameter, not tmpfs, the apply-in-progress marker for `--only`) logs
+one `apply`/`refused` record whose `detail` gives the reason (naming the gateway for P4,
+the marker's path for the marker) and changes nothing. Writing and removing the marker log
+no record of their own (`step` keeps its seven values); a marker that cannot be written
+logs only `apply`/`failed`, one that cannot be removed `record`/`failed` then
+`apply`/`failed`. `rollback` logs as an
 apply of the previous release. No record holds a secret. m3-p's order check: from the
 release's last `apply`/`start` record, `update`/`gateway`/`ok` comes before
 `update`/`poolmgr`/`start`.
@@ -635,6 +723,8 @@ docker CLI added, the compose network, `/var/run/docker.sock`, `deploy.log` read
 docker socket) with `loom-m3-acceptance --domain <site domain> --release <current sha>
 --json /var/lib/loom/acceptance/report.json --deploy-log /var/lib/loom/deploy.log
 --admin-email <ops_email> --webhook-secret-file /run/loom/secrets/acceptance/webhook_secret`.
+It is refused (exit 2, nothing run) while the apply-in-progress marker is set (above) and
+for a help option after `--` (below).
 `apply` renders its inputs like any service's: `env/acceptance.env` with
 `LOOM_ACCEPT_DATABASE_URL` (the app URL, `loom_app`) and `LOOM_ACCEPT_REDIS_URL` (the
 `rediss://` URL of §6.5), and `secrets/acceptance/` with `redis-ca.crt` and
@@ -661,6 +751,23 @@ checks a subset: B10-B19's evidence is the `report.json` and `host.json` of one 
 (no `--only`, §13). m3-i's CloudWatch half is **not** run here: it needs
 `logs:FilterLogEvents`, which no Loom role has (§5.6); B26 runs it with the operator's
 credentials (user, 2026-11-19). `loom-deploy acceptance` calls no `aws logs` command.
+
+**Help after `--` (user, 2026-11-20).** `loom-m3-acceptance` prints its help and exits 0
+without writing a `report.json` when its argparse reads a help option, so `loom-deploy
+acceptance -- --help` would exit 0 beside an older report. `loom-deploy acceptance`
+therefore refuses (exit 2) a run in which any word after the first `--` is `--help` or
+begins with `-h` (`-h`, `-hh`, `-hx`: argparse reads a group of short options that starts
+with `h` as help), wherever it stands (`-- --only m3-0 --help`, `-- --external -h`). This
+check comes first, right after `loom-deploy`'s own argument checks (`--p4-release`) and
+before the tmpfs and marker checks: nothing runs (no container, no host half), nothing is
+written (no `host.json`, no deploy-log record), and an older `report.json` and `host.json`
+stay where they are (they are not deleted). The message names the word and says where the
+options are: `loom-m3-acceptance --help`, e.g. `uv run loom-m3-acceptance --help` in a
+checkout of the release (the container's driver is that code). Spellings argparse does not
+read as help (`--help=x`, `--he`, `-xh`) are usage errors in the driver, and `--only=-h`
+names an unknown item (also a usage error, exit 2): they pass through, and the run exits
+1. `loom-deploy acceptance --help`, before `--`, stays `loom-deploy`'s own help (exit 0,
+nothing run).
 
 **A15's harness** (`test_devstack_m3_prodstack.py`). Builds the Loom images from the
 repository's Dockerfiles (the web image without `LOOM_BRAND_NAME`, Caddy from
@@ -1422,7 +1529,10 @@ Deploy
 
 - A12 [A] `loom-deploy` uses only the standard library (import scan); `plan_steps` gives
   §6.6's order for every combination of changed images, and refuses a poolmgr newer than
-  the gateway, `--only poolmgr` included (P4). *pytest.*
+  the gateway, `--only poolmgr` included (P4); while the apply-in-progress marker is set
+  (§6.6) every `--only` apply and `loom-deploy acceptance` are refused, and a full apply or
+  rollback clears it when it records; `loom-deploy acceptance` refuses `-h`/`--help` after
+  `--` (§6.12). *pytest.*
 - A13 [A] Secret rendering (§6.12): mounted files `0400` and their directories `0500`, owned
   by the service's uid (the recorded `chown`), env files `0400` and not chowned, all on tmpfs
   (refused elsewhere); `secrets init` never names `serving-runpod-key`; no secret
