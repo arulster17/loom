@@ -280,3 +280,17 @@ def test_cli_profile_analyze(tmp_path: Path) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text("{}")
     assert CliRunner().invoke(app, ["profile", "analyze", str(bad)]).exit_code == 2
+
+
+@pytest.mark.parametrize("name", ["xqa_kernel", "mmha_kernel", "multihead_x", "kernel_mha_0"])
+def test_removed_trtllm_attention_tokens_stay_out_of_attention(name):
+    """TensorRT-LLM was removed (PR #20): its decode-attention kernel names no longer count."""
+    assert categorize(name) != "attention"
+
+
+def test_removed_trtllm_step_labels_stay_unrecognised():
+    from loom_bench.profile import trace
+
+    assert not hasattr(trace, "TRTLLM_STEP")
+    assert trace.step_shape("step[DECODE bs=4]") is None
+    assert trace.step_shape("step[EXTEND bs=2 toks=64]") is None

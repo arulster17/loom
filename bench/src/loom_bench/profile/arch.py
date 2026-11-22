@@ -108,8 +108,6 @@ ARCHITECTURES: dict[str, Architecture] = {
 # Pre-quantized checkpoints -> the base model whose shapes they keep.
 BASE_REPO: dict[str, str] = {
     "RedHatAI/Qwen3-8B-FP8-dynamic": "Qwen/Qwen3-8B",
-    # ModelOpt FP8: config.json keeps Qwen3-8B's shapes.
-    "nvidia/Qwen3-8B-FP8": "Qwen/Qwen3-8B",
     "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic": "meta-llama/Llama-3.3-70B-Instruct",
 }
 
