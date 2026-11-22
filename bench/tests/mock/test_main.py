@@ -58,8 +58,8 @@ def test_cli_models_and_overrides(tmp_path):
 
 
 def test_default_config_hash_is_pinned():
-    """A mock config's hash is part of every mock cell's identity: adding or reshaping a
-    field must leave the default config's hash alone (or change this pin on purpose)."""
+    """A mock config's hash is part of every mock cell's identity: changing, adding or
+    removing any field changes this hash, so update the pin only on purpose."""
     from loom_bench.provenance import config_hash
 
     assert (
