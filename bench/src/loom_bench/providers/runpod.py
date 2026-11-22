@@ -705,9 +705,7 @@ class RunpodProvider:
             LOG_DIR=runpod_layout.LOG_DIR,
             STAGE_FILE=runpod_layout.STAGE_FILE,
             ENGINE_ENV=[f"{k}={v}" for k, v in sorted(launch.env.items())],
-            ENGINE_CMD=engine_process_argv(
-                launch, host=ENGINE_HOST, weights_dir=runpod_layout.WEIGHTS_DIR
-            ),
+            ENGINE_CMD=engine_process_argv(launch, host=ENGINE_HOST),
             ENGINE_PIDFILE=runpod_layout.ENGINE_PIDFILE,
             PROC1_ENVIRON=runpod_layout.PROC1_ENVIRON,
             JOB_UID=runpod_layout.JOB_UID,

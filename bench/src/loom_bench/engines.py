@@ -26,13 +26,10 @@ ENTRYPOINTS: dict[str, tuple[str, ...]] = {
 CONTAINER_HF_HOME = "/root/.cache/huggingface"
 ENGINE_PORT = 8000
 
-# Prometheus path per engine (default `/metrics`); both engines serve it there.
-METRICS_PATHS: dict[str, str] = {}
-
 
 def metrics_path(engine: str) -> str:
-    """The path of `engine`'s Prometheus text exposition."""
-    return METRICS_PATHS.get(engine, "/metrics")
+    """The path of `engine`'s Prometheus text exposition (both engines serve `/metrics`)."""
+    return "/metrics"
 
 
 _SGLANG_KV_CACHE_DTYPE = {"fp8": "fp8_e4m3", "fp8_e4m3": "fp8_e4m3", "fp8_e5m2": "fp8_e5m2"}
@@ -112,7 +109,7 @@ def _render_value(flag: str, value: Any) -> list[str]:
 
 
 def render_args(engine: str, args: dict[str, Any]) -> list[str]:
-    """Render registry `engine.args` as CLI flags (not for `OPTION_ENGINES`).
+    """Render registry `engine.args` as CLI flags.
 
     `{max_num_seqs: 256, enable_prefix_caching: true, disable_log_requests: false}`
     renders as `--max-num-seqs 256 --enable-prefix-caching`.
@@ -334,15 +331,13 @@ def render_launch(spec: ModelSpec) -> EngineLaunch:
     )
 
 
-def engine_process_argv(
-    launch: EngineLaunch, *, host: str, weights_dir: str = CONTAINER_HF_HOME
-) -> list[str]:
+def engine_process_argv(launch: EngineLaunch, *, host: str) -> list[str]:
     """The engine run as a plain process (no container runtime), listening on `host`.
 
     For providers whose host is itself the engine's container (RunPod): the
     entrypoint plus `launch.args` with the `--host` value replaced, so the config hash,
-    which covers `launch.args`, is unchanged. `weights_dir` is accepted for callers that
-    pass it and is not used: the engines find their weights through `HF_HOME`.
+    which covers `launch.args`, is unchanged. The engines find their weights through
+    `HF_HOME`.
     `launch.env` is validated (no secret names); the caller sets it in the process
     environment.
     """

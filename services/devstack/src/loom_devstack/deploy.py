@@ -1117,7 +1117,10 @@ def ecr_login(manifest: dict[str, Any]) -> None:
 def parse_only(values: Sequence[str] | None) -> list[str] | None:
     if not values:
         return None
-    return [s.strip() for v in values for s in v.split(",") if s.strip()]
+    names = [s.strip() for v in values for s in v.split(",") if s.strip()]
+    if not names:  # `--only ""` is not "all" and not "nothing": like m3-acceptance, refuse it
+        raise Refused("--only names no service")
+    return names
 
 
 def write_release(

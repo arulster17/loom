@@ -55,3 +55,14 @@ def test_cli_models_and_overrides(tmp_path):
     assert build_config(None, None, []).models == ["mock-model"]
     with pytest.raises(ValueError):
         build_config(None, None, [_override("no_such_field=1")])
+
+
+def test_default_config_hash_is_pinned():
+    """A mock config's hash is part of every mock cell's identity: changing, adding or
+    removing any field changes this hash, so update the pin only on purpose."""
+    from loom_bench.provenance import config_hash
+
+    assert (
+        config_hash(MockConfig())
+        == "69e17f3f31e1313e24824b5ab9f075190438673f4d2999c85aa45efeba2c886b"
+    )

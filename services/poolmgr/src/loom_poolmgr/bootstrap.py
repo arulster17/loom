@@ -267,7 +267,7 @@ def engine_script(model: Deployment, *, stall_s: int, ready_timeout_s: int) -> s
     """The rendered serve_engine for `model` (no secrets): the bench's launch, bound to
     loopback, plus `--enable-prompt-tokens-details` for vLLM (plan §9)."""
     launch = engine_launch(model)
-    argv = engine_process_argv(launch, host="127.0.0.1", weights_dir=runpod_layout.WEIGHTS_DIR)
+    argv = engine_process_argv(launch, host="127.0.0.1")
     if launch.engine == "vllm" and PROMPT_TOKENS_DETAILS not in argv:
         argv.append(PROMPT_TOKENS_DETAILS)
     return scripts.render(
